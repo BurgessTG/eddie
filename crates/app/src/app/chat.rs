@@ -1471,14 +1471,14 @@ mod tests {
                 ChatRole::User,
                 format!(
                     "turn {turn}: please adjust the edit in considerable detail {}",
-                    " padding to make this turn estimate like a real long request".repeat(400)
+                    " padding to make this turn estimate like a real long request".repeat(1600)
                 ),
             );
             session.push(
                 ChatRole::Assistant,
                 format!(
                     "turn {turn}: done, here is what changed in reasonable detail {}",
-                    " with extra detail so the history grows past the budget".repeat(400)
+                    " with extra detail so the history grows past the budget".repeat(1600)
                 ),
             );
         }
