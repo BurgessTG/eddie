@@ -1,0 +1,20 @@
+[package]
+name = "openreel-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OpenReel desktop video editor (egui + wgpu)"
+
+[[bin]]
+name = "openreel"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.32", features = ["wgpu"] }
+openreel-engine = { path = "../engine" }
+openreel-media = { path = "../media" }
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+rquickjs = "0.14"
+serde_json = "1"
+ureq = { version = "3", features = ["multipart"] }

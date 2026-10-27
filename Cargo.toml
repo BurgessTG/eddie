@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "crates/media", "crates/app"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+# Small-disk dev profile: no debuginfo, no incremental artifacts.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
