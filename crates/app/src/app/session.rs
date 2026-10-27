@@ -23,9 +23,11 @@ use std::path::PathBuf;
 /// Whole-request token budget (estimated). The model window is
 /// 1,048,576 tokens, so this is a cost budget, not a capacity limit:
 /// past it, older turns are compacted instead of resent raw.
-/// Raised 16k to 256k at Jacob's direction (2026-10-26): 16k compacted
-/// far too early; prompt caching keeps the longer verbatim history cheap.
-pub(crate) const TOKEN_BUDGET: usize = 256_000;
+/// Set to the full API window at Jacob's direction (2026-10-26):
+/// it started at 16k, which compacted far too early, and users will
+/// expect the app to use the context the API advertises. Compaction
+/// is now purely a safety valve at the edge of the window.
+pub(crate) const TOKEN_BUDGET: usize = 1_048_576;
 /// Messages always kept verbatim at the tail (roughly five exchanges,
 /// plus the in-flight request). Compaction never touches these.
 pub(crate) const RECENT_MESSAGES_KEPT_VERBATIM: usize = 10;
