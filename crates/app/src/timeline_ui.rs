@@ -29,9 +29,70 @@ pub type VisualMap<'a> = HashMap<&'a str, ClipVisual<'a>>;
 
 #[derive(Clone, Copy)]
 enum DragMode {
-    Move { grab_offset: f64, orig_start: f64 },
-    TrimLeft { orig_start: f64, press_time: f64 },
-    TrimRight { orig_end: f64, press_time: f64 },
+    Move {
+        grab_offset: f64,
+        home_start: f64,
+        home_track: usize,
+    },
+    TrimLeft {
+        orig_start: f64,
+        press_time: f64,
+    },
+    TrimRight {
+        orig_end: f64,
+        press_time: f64,
+    },
+}
+
+/// One filmstrip fragment: destination offset/width inside the clip
+/// rect, the horizontal UV span of its thumbnail, and the source
+/// time at its center.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FilmstripTile {
+    x: f32,
+    w: f32,
+    uv: (f32, f32),
+    center_source: f64,
+}
+
+/// Lay out filmstrip fragments on a grid anchored to source time
+/// zero, not to the clip's left edge. Tile width in seconds comes
+/// from the zoom (`tile_w / px_per_sec`), so zooming changes frame
+/// density, while trimming slides the clip border across fragments
+/// that stay put: an edge tile is UV-cropped, never re-phased.
+fn filmstrip_tiles(
+    source_in: f64,
+    duration: f64,
+    px_per_sec: f32,
+    tile_w: f32,
+) -> Vec<FilmstripTile> {
+    if px_per_sec <= 0.0 || tile_w <= 0.0 || duration <= 0.0 {
+        return Vec::new();
+    }
+    let tile_sec = (tile_w / px_per_sec) as f64;
+    let clip_w = (duration * px_per_sec as f64) as f32;
+    let first_k = (source_in / tile_sec).floor() as i64;
+    let mut tiles = Vec::new();
+    let mut k = first_k;
+    loop {
+        let tile_source_start = k as f64 * tile_sec;
+        let x = ((tile_source_start - source_in) * px_per_sec as f64) as f32;
+        if x >= clip_w {
+            break;
+        }
+        let visible_left = x.max(0.0);
+        let visible_right = (x + tile_w).min(clip_w);
+        if visible_right > visible_left {
+            tiles.push(FilmstripTile {
+                x: visible_left,
+                w: visible_right - visible_left,
+                uv: ((visible_left - x) / tile_w, (visible_right - x) / tile_w),
+                center_source: tile_source_start + tile_sec / 2.0,
+            });
+        }
+        k += 1;
+    }
+    tiles
 }
 
 /// Snap `time` to the nearest candidate within `threshold` seconds.
@@ -256,7 +317,7 @@ impl TimelineView {
                 // right of it grabs the right clip's left edge. First
                 // match in the clip vec made one side ungrabbable.
                 let mut best_edge: Option<(f32, u8, ClipId, DragMode)> = None;
-                let mut containing: Option<(ClipId, f64)> = None;
+                let mut containing: Option<(ClipId, f64, usize)> = None;
                 for c in timeline.clips.iter().filter(|c| c.track == track) {
                     let left_x = self.x_at(content_left, c.start);
                     let right_x = self.x_at(content_left, c.end());
@@ -294,19 +355,20 @@ impl TimelineView {
                         }
                     }
                     if press_pos.x >= left_x && press_pos.x <= right_x {
-                        containing = Some((c.id, c.start));
+                        containing = Some((c.id, c.start, c.track));
                     }
                 }
                 if let Some((_, _, id, mode)) = best_edge {
                     *selected = Some(id);
                     self.drag = Some((id, mode));
-                } else if let Some((id, start)) = containing {
+                } else if let Some((id, start, track)) = containing {
                     *selected = Some(id);
                     self.drag = Some((
                         id,
                         DragMode::Move {
                             grab_offset: press_time - start,
-                            orig_start: start,
+                            home_start: start,
+                            home_track: track,
                         },
                     ));
                 } else if response.clicked() {
@@ -332,34 +394,19 @@ impl TimelineView {
                 }
                 let clip_snapshot = timeline.clip(id).cloned();
                 match (mode, clip_snapshot) {
-                    (
-                        DragMode::Move {
-                            grab_offset,
-                            orig_start,
-                        },
-                        Some(mut clip),
-                    ) => {
+                    (DragMode::Move { grab_offset, .. }, Some(mut clip)) => {
                         // Vertical lane change within existing lanes;
                         // growth past the top or bottom lane resolves
-                        // on drop (finish_drag). Changing lanes resets
-                        // the neighbor baseline to the new lane.
-                        let mut base_start = orig_start;
+                        // on drop (finish_drag). Horizontal overlap is
+                        // allowed mid-drag so the clip can be carried
+                        // over a neighbor; finish_drag swaps or
+                        // returns it home, never leaving an overlap.
                         if let Some(target) = self
                             .track_at(rect, pos.y)
                             .filter(|t| *t < timeline.track_labels.len())
                         {
                             if target != clip.track {
                                 timeline.set_clip_track(id, target);
-                                base_start = clip.start;
-                                if let Some((
-                                    _,
-                                    DragMode::Move {
-                                        orig_start: base, ..
-                                    },
-                                )) = &mut self.drag
-                                {
-                                    *base = base_start;
-                                }
                                 if let Some(fresh) = timeline.clip(id).cloned() {
                                     clip = fresh;
                                 }
@@ -374,14 +421,7 @@ impl TimelineView {
                         } else {
                             by_end
                         };
-                        let prev_end = Self::prev_end(timeline, &clip, base_start);
-                        let next_start =
-                            Self::next_start(timeline, &clip, base_start + clip.duration);
-                        let mut clamped = snapped.max(prev_end);
-                        if let Some(next) = next_start {
-                            clamped = clamped.min((next - clip.duration).max(prev_end));
-                        }
-                        timeline.move_clip(id, clamped);
+                        timeline.move_clip(id, snapped);
                     }
                     (
                         DragMode::TrimLeft {
@@ -433,9 +473,23 @@ impl TimelineView {
 
     /// End a drag. The magnet only snaps while dragging; gaps are
     /// never closed here. A Move dropped above the first lane or
-    /// below the last grows a new lane there for the clip.
+    /// below the last grows a new lane there for the clip. A Move
+    /// dropped onto one neighbor on its home lane swaps positions
+    /// with it; any other overlap returns the clip home, so clips
+    /// never overlap on a lane.
     fn finish_drag(&mut self, timeline: &mut Timeline, rect: Rect, drop_pos: Option<Pos2>) {
-        if let (Some((id, DragMode::Move { .. })), Some(pos)) = (self.drag, drop_pos) {
+        if let (
+            Some((
+                id,
+                DragMode::Move {
+                    home_start,
+                    home_track,
+                    ..
+                },
+            )),
+            Some(pos),
+        ) = (self.drag, drop_pos)
+        {
             let lanes_top = rect.top() + RULER_H;
             let lanes_bottom =
                 lanes_top + timeline.track_labels.len() as f32 * (TRACK_H + TRACK_GAP) - TRACK_GAP;
@@ -450,11 +504,60 @@ impl TimelineView {
             } else if pos.y > lanes_bottom + TRACK_H * 0.5 {
                 let track = timeline.append_track();
                 timeline.set_clip_track(id, track);
+            } else {
+                Self::resolve_move_drop(timeline, id, home_start, home_track);
             }
         }
         self.drag = None;
         self.last_drag_pos = None;
         self.seeking = false;
+    }
+
+    fn lane_overlaps(timeline: &Timeline, clip: &Clip) -> Vec<Clip> {
+        timeline
+            .clips
+            .iter()
+            .filter(|c| {
+                c.id != clip.id
+                    && c.track == clip.track
+                    && c.start < clip.end()
+                    && clip.start < c.end()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn resolve_move_drop(timeline: &mut Timeline, id: ClipId, home_start: f64, home_track: usize) {
+        let Some(clip) = timeline.clip(id).cloned() else {
+            return;
+        };
+        let overlaps = Self::lane_overlaps(timeline, &clip);
+        if overlaps.is_empty() {
+            return;
+        }
+        let mut swapped = false;
+        if overlaps.len() == 1 && clip.track == home_track {
+            let partner = &overlaps[0];
+            timeline.move_clip(id, partner.start);
+            timeline.move_clip(partner.id, home_start);
+            let clean = timeline
+                .clip(id)
+                .map(|c| Self::lane_overlaps(timeline, c).is_empty())
+                .unwrap_or(false)
+                && timeline
+                    .clip(partner.id)
+                    .map(|c| Self::lane_overlaps(timeline, c).is_empty())
+                    .unwrap_or(false);
+            if clean {
+                swapped = true;
+            } else {
+                timeline.move_clip(partner.id, partner.start);
+            }
+        }
+        if !swapped {
+            timeline.set_clip_track(id, home_track);
+            timeline.move_clip(id, home_start);
+        }
     }
 
     fn paint(
@@ -730,22 +833,27 @@ impl TimelineView {
         };
         let tile_w = (rect.height() * aspect).max(12.0);
         let tint = Color32::from_white_alpha((clip.opacity.clamp(0.0, 1.0) * 230.0) as u8);
-        let mut x = rect.left();
-        while x < rect.right() {
-            let visible_w = tile_w.min(rect.right() - x);
-            let tile = Rect::from_min_size(
-                Pos2::new(x, rect.top()),
-                Vec2::new(visible_w, rect.height()),
+        for tile in filmstrip_tiles(clip.source_in, clip.duration, self.px_per_sec, tile_w) {
+            let dest = Rect::from_min_size(
+                Pos2::new(rect.left() + tile.x, rect.top()),
+                Vec2::new(tile.w, rect.height()),
             );
-            let center_source =
-                clip.source_in + ((x + tile_w / 2.0 - rect.left()) / self.px_per_sec) as f64;
             let idx = visual
                 .thumbs
-                .partition_point(|(t, _)| *t <= center_source)
+                .partition_point(|(t, _)| *t <= tile.center_source)
                 .saturating_sub(1);
-            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(visible_w / tile_w, 1.0));
-            painter.image(visual.thumbs[idx].1.id(), tile, uv, tint);
-            x += tile_w;
+            let uv = Rect::from_min_max(Pos2::new(tile.uv.0, 0.0), Pos2::new(tile.uv.1, 1.0));
+            painter.image(visual.thumbs[idx].1.id(), dest, uv, tint);
+            // Fragment separators so frames read as discrete frames.
+            if tile.x > 0.5 {
+                painter.line_segment(
+                    [
+                        Pos2::new(dest.left(), dest.top()),
+                        Pos2::new(dest.left(), dest.bottom()),
+                    ],
+                    Stroke::new(1.0_f32, Color32::from_black_alpha(110)),
+                );
+            }
         }
     }
 }
@@ -759,6 +867,41 @@ mod tests {
         let candidates = [0.0, 2.0, 5.0];
         assert_eq!(snap_to(1.9, &candidates, 0.25), 2.0);
         assert_eq!(snap_to(5.2, &candidates, 0.25), 5.0);
+    }
+
+    #[test]
+    fn filmstrip_tiles_anchor_to_source_time_not_clip_edge() {
+        // 48px/s, 72px tiles -> one fragment per 1.5s of source.
+        let tiles = filmstrip_tiles(3.5, 6.0, 48.0, 72.0);
+        // First fragment covers source 3.0..4.5: only its right part
+        // is inside the clip, UV-cropped instead of re-phased.
+        let first = tiles[0];
+        assert_eq!(first.x, 0.0);
+        assert!((first.w - 48.0).abs() < 0.01, "w {}", first.w);
+        assert!((first.uv.0 - 1.0 / 3.0).abs() < 0.01, "uv0 {}", first.uv.0);
+        assert!((first.uv.1 - 1.0).abs() < 0.01);
+        assert!((first.center_source - 3.75).abs() < 1e-9);
+        // Fragments are equally spaced and cover the clip width.
+        for pair in tiles.windows(2) {
+            assert!((pair[1].x - (pair[0].x + pair[0].w)).abs() < 0.01);
+        }
+        let last = tiles[tiles.len() - 1];
+        assert!((last.x + last.w - 288.0).abs() < 0.01);
+
+        // Trimming the head by 0.5s must not re-phase later
+        // fragments: the fragment covering source 6.75 keeps its
+        // center and UV span, only its clip-local x shifts.
+        let trimmed = filmstrip_tiles(4.0, 5.5, 48.0, 72.0);
+        let before = tiles
+            .iter()
+            .find(|t| (t.center_source - 6.75).abs() < 1e-9)
+            .expect("fragment at 6.75 before trim");
+        let after = trimmed
+            .iter()
+            .find(|t| (t.center_source - 6.75).abs() < 1e-9)
+            .expect("fragment at 6.75 after trim");
+        assert_eq!(before.uv, after.uv);
+        assert!((before.x - after.x - 24.0).abs() < 0.01);
     }
 
     #[test]
@@ -1185,6 +1328,127 @@ mod tests {
             b.start,
             b.end()
         );
+    }
+
+    /// Dropping a clip onto another clip on the same lane swaps
+    /// their positions instead of overlapping or refusing to move.
+    #[test]
+    fn move_drop_onto_neighbor_swaps_positions() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let a_id = timeline.add_media_clip(
+            "a.mp4",
+            ClipKind::Video,
+            0,
+            2.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let b_id = timeline.add_media_clip(
+            "b.mp4",
+            ClipKind::Video,
+            0,
+            10.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        // Grab A mid-clip (t=5, x=384) and drop it on B (pointer t=13, x=768).
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 49.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(768.0, 49.0))],
+            vec![pointer_button(768.0, 49.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        let a = timeline.clip(a_id).unwrap();
+        let b = timeline.clip(b_id).unwrap();
+        assert!(
+            (a.start - 10.0).abs() < 0.02,
+            "dragged clip takes the drop spot, got {}",
+            a.start
+        );
+        assert!(
+            (b.start - 2.0).abs() < 0.02,
+            "displaced clip takes the dragged home spot, got {}",
+            b.start
+        );
+    }
+
+    /// A drop overlapping more than one clip cannot swap cleanly,
+    /// so the dragged clip returns home and nobody overlaps.
+    #[test]
+    fn move_drop_overlapping_two_clips_returns_home() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let a_id = timeline.add_media_clip(
+            "a.mp4",
+            ClipKind::Video,
+            0,
+            2.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let b_id = timeline.add_media_clip(
+            "b.mp4",
+            ClipKind::Video,
+            0,
+            10.0,
+            2.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let c_id = timeline.add_media_clip(
+            "c.mp4",
+            ClipKind::Video,
+            0,
+            12.0,
+            2.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        // Drop A so it spans both B and C (pointer t=12, x=720 -> start 9).
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 49.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(720.0, 49.0))],
+            vec![pointer_button(720.0, 49.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        let a = timeline.clip(a_id).unwrap();
+        assert!(
+            (a.start - 2.0).abs() < 0.02,
+            "ambiguous drop returns home, got {}",
+            a.start
+        );
+        assert_eq!(timeline.clip(b_id).unwrap().start, 10.0);
+        assert_eq!(timeline.clip(c_id).unwrap().start, 12.0);
     }
 
     #[test]
