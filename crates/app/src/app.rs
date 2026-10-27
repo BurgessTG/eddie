@@ -15,7 +15,7 @@ use crate::preview;
 use crate::scripting::{ScriptCommand, ScriptEngine};
 use crate::theme;
 
-mod chat;
+pub(crate) mod chat;
 mod media;
 mod sweep;
 use crate::timeline_ui::{ClipVisual, TimelineTool, TimelineView, VisualMap};

@@ -152,7 +152,7 @@ impl ChatSettings {
     }
 }
 
-const SYSTEM_PROMPT: &str = "\
+pub(crate) const SYSTEM_PROMPT: &str = "\
 You edit a video timeline inside OpenReel by writing JavaScript. \
 Reply with ONLY executable JavaScript. No markdown fences. No explanation outside the code. \
 End with exactly one console.log(\"Done — ...\") line containing a short plain-language summary for the user. \
@@ -170,13 +170,14 @@ Refer to clips by the ids in state(). Do not invent ids or asset names. \
 Keep edits minimal and preserve source limits. If the request is impossible with the given state, \
 throw new Error('short reason').";
 
-pub(super) fn build_request_body(
-    settings: &ChatSettings,
+/// User-message text shared by the API path and the dev harness, so both
+/// drivers see the identical prompt contract.
+pub(crate) fn chat_user_content(
     request: &str,
     state_json: &str,
     recent: &[(bool, String)],
     correction: Option<(&str, &str)>,
-) -> serde_json::Value {
+) -> String {
     let mut user = format!("Timeline state JSON:\n{state_json}\n\nRequest:\n{request}");
     if !recent.is_empty() {
         let history: Vec<String> = recent
@@ -194,6 +195,17 @@ pub(super) fn build_request_body(
              Reply with corrected JavaScript only.\n\n{user}"
         );
     }
+    user
+}
+
+pub(super) fn build_request_body(
+    settings: &ChatSettings,
+    request: &str,
+    state_json: &str,
+    recent: &[(bool, String)],
+    correction: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let user = chat_user_content(request, state_json, recent, correction);
     serde_json::json!({
         "model": settings.model,
         "temperature": 0.2,
@@ -205,7 +217,7 @@ pub(super) fn build_request_body(
     })
 }
 
-pub(super) fn extract_code(raw: &str) -> String {
+pub(crate) fn extract_code(raw: &str) -> String {
     let raw = raw.trim();
     if let Some(start) = raw.find("```") {
         let after = &raw[start + 3..];
