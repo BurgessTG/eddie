@@ -5,8 +5,8 @@
 //! `dev-harness` feature. The feature only enables the extra tests that
 //! shell out to `muse exec`; the offline tests below always run.
 //!
-//! What this validates: the prompt contract (`SYSTEM_PROMPT` +
-//! `chat_user_content`), JavaScript validity in the real QuickJS console
+//! What this validates: the prompt contract (developer contract +
+//! cache-ordered `build_context_messages`), JavaScript validity in the real QuickJS console
 //! (`scripting::ScriptEngine`), headless application of the resulting
 //! `ScriptCommand`s to a real `Timeline`, and the one self-correction
 //! retry on console rejection.
@@ -52,7 +52,10 @@
 
 use openreel_engine::{ClipKind, Timeline};
 
-use crate::app::chat::{chat_user_content, extract_code, SYSTEM_PROMPT};
+use crate::app::chat::{
+    build_context_messages, parse_generated_text, render_messages_as_prompt, SYSTEM_PROMPT,
+};
+use crate::app::session::ChatSession;
 use crate::scripting::{ScriptCommand, ScriptEngine};
 
 const TRACK_TITLES: usize = 0;
@@ -85,12 +88,27 @@ struct FakeCandidate {
     duration: f64,
     score: f32,
     has_video: bool,
+    audio_peak: f32,
+    is_reaction: bool,
+    reaction_score: f32,
+}
+
+#[derive(Clone)]
+struct FakeTranscript {
+    id: String,
+    asset_path: String,
+    asset_name: String,
+    start: f64,
+    end: f64,
+    speaker: Option<String>,
+    text: String,
 }
 
 struct Fixture {
     timeline: Timeline,
     assets: Vec<FakeAsset>,
     sweep: Vec<FakeCandidate>,
+    transcripts: Vec<FakeTranscript>,
     playhead: f64,
     selected: Option<u64>,
 }
@@ -153,8 +171,26 @@ impl Fixture {
                     "reason": "Steady, clean section.",
                     "stability": 0.9,
                     "audioEnergy": 0.5,
+                    "audioPeak": c.audio_peak,
+                    "isReaction": c.is_reaction,
+                    "reactionScore": c.reaction_score,
                     "hasVideo": c.has_video,
                     "transcript": "",
+                })
+            })
+            .collect();
+        let transcript_segments: Vec<serde_json::Value> = self
+            .transcripts
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "asset": t.asset_path,
+                    "assetName": t.asset_name,
+                    "start": t.start,
+                    "end": t.end,
+                    "speaker": t.speaker,
+                    "text": t.text,
                 })
             })
             .collect();
@@ -169,6 +205,7 @@ impl Fixture {
             "clips": clips,
             "assets": assets,
             "sweepCandidates": sweep_candidates,
+            "transcriptSegments": transcript_segments,
         })
         .to_string()
     }
@@ -236,6 +273,7 @@ fn sample_project_fixture() -> Fixture {
             audio_asset(MUSIC_NAME, MUSIC_PATH, 14.4),
         ],
         sweep: Vec::new(),
+        transcripts: Vec::new(),
         playhead: 0.0,
         selected: Some(video),
     }
@@ -281,6 +319,7 @@ fn scenarios() -> Vec<Scenario> {
                         audio_asset("Music_Bed.wav", "media/Music_Bed.wav", 64.0),
                     ],
                     sweep: Vec::new(),
+                    transcripts: Vec::new(),
                     playhead: 0.0,
                     selected: Some(video),
                 }
@@ -339,6 +378,9 @@ console.log("Done — music now ends with the video.");
                     duration,
                     score,
                     has_video: true,
+                    audio_peak: 0.3,
+                    is_reaction: false,
+                    reaction_score: 0.2,
                 };
                 Fixture {
                     timeline,
@@ -351,6 +393,7 @@ console.log("Done — music now ends with the video.");
                         cand(1, 12.0, 4.0, 91.0),
                         cand(3, 70.0, 3.0, 77.0),
                     ],
+                    transcripts: Vec::new(),
                     playhead: 0.0,
                     selected: None,
                 }
@@ -361,6 +404,92 @@ clips().forEach(c => deleteClip(c.id));
 let cursor = 0;
 cands.forEach(c => { addAssetRange(c.asset, cursor, c.sourceIn, c.duration); cursor += c.duration; });
 console.log("Done — built the montage from the sweep.");
+"#],
+        },
+        Scenario {
+            name: "reaction_shots",
+            prompt: "Build it from the reaction shots.",
+            fixture: || {
+                let timeline = Timeline::empty_project();
+                let cand = |n: usize,
+                            source_in: f64,
+                            duration: f64,
+                            score: f32,
+                            reaction: bool|
+                 -> FakeCandidate {
+                    FakeCandidate {
+                        id: format!("media/Rushes.mp4#{n}"),
+                        asset_path: "media/Rushes.mp4".to_owned(),
+                        asset_name: "Rushes.mp4".to_owned(),
+                        title: format!("Rushes.mp4 · pick {n}"),
+                        source_in,
+                        duration,
+                        score,
+                        has_video: true,
+                        audio_peak: if reaction { 0.92 } else { 0.25 },
+                        is_reaction: reaction,
+                        reaction_score: if reaction { 0.85 } else { 0.18 },
+                    }
+                };
+                Fixture {
+                    timeline,
+                    assets: vec![video_asset("Rushes.mp4", "media/Rushes.mp4", 120.0)],
+                    sweep: vec![
+                        cand(1, 12.0, 4.0, 91.0, false),
+                        cand(2, 40.0, 5.0, 84.0, true),
+                        cand(3, 70.0, 3.0, 77.0, true),
+                    ],
+                    transcripts: Vec::new(),
+                    playhead: 0.0,
+                    selected: None,
+                }
+            },
+            canned: &[r#"
+var shots = sweepCandidates().filter(function (c) { return c.isReaction; });
+clips().forEach(function (c) { deleteClip(c.id); });
+var cursor = 0;
+shots.forEach(function (c) { addAssetRange(c.asset, cursor, c.sourceIn, c.duration); cursor += c.duration; });
+console.log("Done — built the cut from the reaction shots.");
+"#],
+        },
+        Scenario {
+            name: "pricing_transcript",
+            prompt: "Use the part where he talks about pricing.",
+            fixture: || {
+                let timeline = Timeline::empty_project();
+                Fixture {
+                    timeline,
+                    assets: vec![video_asset("Talk.mp4", "media/Talk.mp4", 180.0)],
+                    sweep: Vec::new(),
+                    transcripts: vec![
+                        FakeTranscript {
+                            id: "tx:media/Talk.mp4#0".to_owned(),
+                            asset_path: "media/Talk.mp4".to_owned(),
+                            asset_name: "Talk.mp4".to_owned(),
+                            start: 5.0,
+                            end: 14.0,
+                            speaker: Some("A".to_owned()),
+                            text: "Welcome, let me introduce the team.".to_owned(),
+                        },
+                        FakeTranscript {
+                            id: "tx:media/Talk.mp4#1".to_owned(),
+                            asset_path: "media/Talk.mp4".to_owned(),
+                            asset_name: "Talk.mp4".to_owned(),
+                            start: 42.0,
+                            end: 51.0,
+                            speaker: Some("A".to_owned()),
+                            text: "Our pricing is simple: one flat monthly fee.".to_owned(),
+                        },
+                    ],
+                    playhead: 0.0,
+                    selected: None,
+                }
+            },
+            canned: &[r#"
+var seg = transcriptSegments().find(function (t) { return t.text.toLowerCase().indexOf('pricing') !== -1; });
+if (!seg) throw new Error('no pricing segment');
+addAssetRange(seg.asset, 0, seg.start, seg.end - seg.start);
+console.log("Done — used the pricing section.");
 "#],
         },
         Scenario {
@@ -408,13 +537,13 @@ fn scenario(name: &str) -> Scenario {
         .unwrap_or_else(|| panic!("unknown scenario {name}"))
 }
 
-/// The exact prompt text both drivers receive: the API path's system
-/// prompt plus its user content, verbatim.
+/// The exact prompt text both drivers receive: the API path's
+/// cache-ordered messages (developer contract first, timeline
+/// last), flattened for the single-prompt stand-in driver.
 fn full_prompt(request: &str, state_json: &str, correction: Option<(&str, &str)>) -> String {
-    format!(
-        "{SYSTEM_PROMPT}\n\n{}",
-        chat_user_content(request, state_json, &[], correction)
-    )
+    let session = ChatSession::new("dev-harness");
+    let messages = build_context_messages(&session, &[], request, state_json, correction);
+    render_messages_as_prompt(&messages)
 }
 
 trait JsSource {
@@ -456,12 +585,9 @@ impl JsSource for CannedSource {
             .push(full_prompt(request, state_json, correction));
         let index = self.next.min(self.replies.len() - 1);
         self.next += 1;
-        let code = extract_code(&self.replies[index]);
-        if code.trim().is_empty() {
-            Err("The model returned an empty response.".to_owned())
-        } else {
-            Ok(code)
-        }
+        // Same parsing as the API path: structured envelope first,
+        // tolerant free-text (what canned replies use) as fallback.
+        parse_generated_text(&self.replies[index]).map(|edit| edit.code)
     }
 }
 
@@ -814,12 +940,7 @@ fn extract_final_text(jsonl: &str) -> Result<String, String> {
 }
 
 fn extract_js_from_jsonl(jsonl: &str) -> Result<String, String> {
-    let code = extract_code(&extract_final_text(jsonl)?);
-    if code.trim().is_empty() {
-        Err("The model returned an empty response.".to_owned())
-    } else {
-        Ok(code)
-    }
+    parse_generated_text(&extract_final_text(jsonl)?).map(|edit| edit.code)
 }
 
 /// Stable timeline fingerprint for "unchanged" assertions.
@@ -968,6 +1089,45 @@ fn check_scenario(
                 tl.clips.iter().all(|c| c.name != "Old.mp4"),
                 "previous timeline clips must be replaced".to_owned(),
             );
+        }
+        "reaction_shots" => {
+            let Ok(editor) = result else {
+                return vec!["reaction-shots run failed".to_owned()];
+            };
+            let video = clips_of_kind(&editor.timeline, ClipKind::Video);
+            let source_ins: Vec<f64> = video.iter().map(|c| c.source_in).collect();
+            expect(
+                source_ins == vec![40.0, 70.0],
+                format!("only reaction candidates, in ranked order (got {source_ins:?})"),
+            );
+            expect(
+                video.iter().map(|c| c.start).collect::<Vec<_>>() == vec![0.0, 5.0],
+                "reaction clips must be sequential from 0".to_owned(),
+            );
+        }
+        "pricing_transcript" => {
+            let Ok(editor) = result else {
+                return vec!["pricing-transcript run failed".to_owned()];
+            };
+            let video = clips_of_kind(&editor.timeline, ClipKind::Video);
+            expect(
+                video.len() == 1,
+                format!("expected 1 clip, got {}", video.len()),
+            );
+            if let Some(clip) = video.first() {
+                expect(
+                    (clip.source_in - 42.0).abs() < 1e-9
+                        && (clip.duration - 9.0).abs() <= frame_tol(&editor.timeline),
+                    format!(
+                        "clip must cover the pricing turn 42–51 (got in {} dur {})",
+                        clip.source_in, clip.duration
+                    ),
+                );
+                expect(
+                    clip.source.as_deref() == Some("media/Talk.mp4"),
+                    "clip must come from the transcript segment's asset".to_owned(),
+                );
+            }
         }
         "self_correction_retry" => {
             let Ok(editor) = result else {
@@ -1144,6 +1304,54 @@ fn offline_sweep_assembly() {
 }
 
 #[test]
+fn offline_reaction_shots_use_sweep_ids() {
+    assert_canned("reaction_shots");
+}
+
+#[test]
+fn offline_pricing_resolves_against_transcript_segments() {
+    assert_canned("pricing_transcript");
+}
+
+#[test]
+fn local_intent_builds_timeline_offline_through_script_commands() {
+    // The "Reactions first" button with the network unplugged: no
+    // JsSource, no model — ordered candidates become a
+    // ScriptCommand batch applied like any chat edit.
+    use crate::app::intents::{local_commands, ordered_candidates, CandidateView, LocalSort};
+    let fixture = scenario("reaction_shots").fixture;
+    let fixture = fixture();
+    let views: Vec<CandidateView> = fixture
+        .sweep
+        .iter()
+        .map(|c| CandidateView {
+            id: c.id.clone(),
+            asset_path: c.asset_path.clone(),
+            title: c.title.clone(),
+            source_in: c.source_in,
+            duration: c.duration,
+            score: c.score,
+            stability: 0.5,
+            reaction_score: c.reaction_score,
+            is_reaction: c.is_reaction,
+            has_video: c.has_video,
+        })
+        .collect();
+    let ordered = ordered_candidates(&views, LocalSort::ReactionsFirst);
+    assert_eq!(ordered[0].source_in, 40.0, "reaction lands first");
+    let mut editor = HeadlessEditor::from_fixture(&fixture);
+    let notes = editor.apply(local_commands(&[], &ordered));
+    assert!(notes.iter().all(|n| !n.starts_with("error:")), "{notes:?}");
+    let video = clips_of_kind(&editor.timeline, ClipKind::Video);
+    let source_ins: Vec<f64> = video.iter().map(|c| c.source_in).collect();
+    assert_eq!(source_ins, vec![40.0, 70.0, 12.0]);
+    assert_eq!(
+        video.iter().map(|c| c.start).collect::<Vec<_>>(),
+        vec![0.0, 5.0, 8.0]
+    );
+}
+
+#[test]
 fn offline_impossible_request_fails_without_corruption() {
     assert_canned("impossible_request");
 }
@@ -1158,7 +1366,8 @@ fn offline_self_correction_retry() {
     assert_eq!(source.prompts.len(), 2);
     assert!(source.prompts[1].contains("setVolum(musicId(), 0.3)"));
     assert!(source.prompts[1].contains("ReferenceError"));
-    assert!(source.prompts[1].contains("Reply with corrected JavaScript only."));
+    assert!(source.prompts[1]
+        .contains("Reply with corrected JavaScript only, in the same JSON envelope."));
 }
 
 #[test]
@@ -1201,15 +1410,31 @@ fn prompt_contract_matches_api_path() {
     let fixture = sample_project_fixture();
     let state = fixture.state_json();
     let prompt = full_prompt("tighten it", &state, None);
-    assert!(prompt.starts_with(SYSTEM_PROMPT));
-    assert!(prompt.contains("Reply with ONLY executable JavaScript"));
+    assert!(
+        prompt.starts_with(&format!("developer: {SYSTEM_PROMPT}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"Reply with a single JSON object {"code":"#),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Build it from the reaction shots."),
+        "few-shot present"
+    );
     assert!(prompt.contains(&format!("Timeline state JSON:\n{state}")));
     assert!(prompt.contains("Request:\ntighten it"));
+    let request_at = prompt.rfind("Request:\ntighten it").unwrap();
+    let timeline_at = prompt.rfind("Timeline state JSON:").unwrap();
+    assert!(
+        request_at < timeline_at,
+        "timeline JSON is the volatile tail"
+    );
 
     let retry = full_prompt("tighten it", &state, Some(("bad()", "ReferenceError: bad")));
     assert!(retry.contains("Your previous JavaScript failed in the sandbox"));
     assert!(retry.contains("Previous JavaScript:\nbad()"));
-    assert!(retry.contains("Reply with corrected JavaScript only."));
+    assert!(retry.contains("Reply with corrected JavaScript only, in the same JSON envelope."));
 }
 
 #[test]
@@ -1229,6 +1454,7 @@ fn fixture_state_matches_console_shape() {
         "clips",
         "assets",
         "sweepCandidates",
+        "transcriptSegments",
     ] {
         assert!(value.get(key).is_some(), "missing state key {key}");
     }

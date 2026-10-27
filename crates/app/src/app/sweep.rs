@@ -18,6 +18,10 @@ use super::{ChatSettings, EditorApp};
 
 const TRANSCRIBE_MODEL: &str = "muse-voice-transcribe-1.0";
 const MAX_CANDIDATES_PER_ASSET: usize = 8;
+// Voice Transcribe accepts WAV mono 16-bit PCM at 16/24 kHz, at most
+// 10 minutes / 32 MB per request (see `openreel_media::write_wav_24k`),
+// and returns turn-level timestamps only — one speaker label per
+// turn, no word timing. Reaction/speech logic is built on turns.
 const ASR_CHUNK_SECONDS: f64 = 540.0;
 const ASR_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -41,6 +45,7 @@ pub(super) struct SweepCandidate {
     pub(super) reason: String,
     pub(super) stability: f32,
     pub(super) audio_energy: f32,
+    pub(super) audio_peak: f32,
     pub(super) has_video: bool,
     pub(super) transcript: Vec<TranscriptSegment>,
     pub(super) dismissed: bool,
@@ -49,6 +54,19 @@ pub(super) struct SweepCandidate {
 impl SweepCandidate {
     pub(super) fn end(&self) -> f64 {
         self.source_in + self.duration
+    }
+
+    /// Reaction heuristic over data the sweep already computed: a
+    /// loud peak on a short, energetic segment. Used by the local
+    /// "Reactions first" intent and exposed to the model so chat
+    /// requests like "build it from the reaction shots" resolve
+    /// against the same definition.
+    pub(super) fn reaction_score(&self) -> f32 {
+        (0.6 * self.audio_peak + 0.4 * (self.audio_energy * 1.5).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+    }
+
+    pub(super) fn is_reaction(&self) -> bool {
+        self.reaction_score() >= 0.45 || self.reason.to_lowercase().contains("reaction")
     }
 
     pub(super) fn transcript_text(&self) -> String {
@@ -186,6 +204,9 @@ impl EditorApp {
                 }
             }
         }
+        // The sweep changed: this is a pinned-summary refresh point
+        // (the only other one is chat submit, as a safety net).
+        self.refresh_pinned_summary();
         self.start_next_sweep(ctx);
     }
 
@@ -406,6 +427,7 @@ fn candidate_from_segment(
         reason,
         stability: segment.stability,
         audio_energy: segment.audio_energy,
+        audio_peak: segment.audio_peak,
         has_video: info.has_video,
         transcript,
         dismissed: false,
@@ -463,7 +485,7 @@ fn rank_with_model(
         "stream": false,
         "messages": [
             {
-                "role": "system",
+                "role": "developer",
                 "content": "You rank video segments for a human editor. Prefer stable footage, a clear subject or speech, reaction/energy peaks, and clean in/out points. Return ONLY a JSON array, no markdown: [{\"segment\":0,\"score\":87,\"reason\":\"one short plain-language reason\"}]. Use each segment at most once.",
             },
             {

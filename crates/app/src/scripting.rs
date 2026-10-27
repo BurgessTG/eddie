@@ -87,9 +87,10 @@ function state() { return JSON.parse(__state_json); }
 function clips() { return state().clips; }
 function assets() { return state().assets; }
 function sweepCandidates() { return state().sweepCandidates || []; }
+function transcriptSegments() { return state().transcriptSegments || []; }
 function help() {
   return [
-    "state() clips() assets() sweepCandidates()",
+    "state() clips() assets() sweepCandidates() transcriptSegments()",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) trimClip(id, left, right)  // -1 keeps an edge",
@@ -370,6 +371,25 @@ mod tests {
                 at: 12.0,
                 source_in: 3.5,
                 duration: 4.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn transcript_segments_reads_state() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        let (out, commands) = engine.eval(
+            "addAssetRange('a.mp4', 0, transcriptSegments()[0].start, transcriptSegments()[0].end - transcriptSegments()[0].start); transcriptSegments().length",
+            r#"{"transcriptSegments": [{"id": "tx:a.mp4#0", "asset": "a.mp4", "start": 4, "end": 7.5, "text": "pricing"}]}"#,
+        );
+        assert_eq!(out, "1");
+        assert_eq!(
+            commands,
+            vec![ScriptCommand::AddAssetRange {
+                asset: "a.mp4".to_owned(),
+                at: 0.0,
+                source_in: 4.0,
+                duration: 3.5,
             }]
         );
     }
