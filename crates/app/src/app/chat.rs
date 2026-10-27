@@ -241,7 +241,7 @@ selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, star
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
 setVolume(id, v), addTitle(text, at?, dur?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
-setTool('select'|'split'), setMagnet(bool), setZoom(pxPerSec), closeGaps(). \
+setMagnet(bool), setZoom(pxPerSec), closeGaps(). \
 state() returns {playhead, playing, selected, duration, fps, tool, magnet, clips, assets, sweepCandidates, transcriptSegments}. \
 Sweep candidate fields: id, asset, assetName, title, sourceIn, duration, score, reason, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript. \
 Transcript segment fields: id, asset, assetName, start, end, speaker, text. Transcript timestamps are turn-level only. \

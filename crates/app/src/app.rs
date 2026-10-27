@@ -22,15 +22,12 @@ mod media;
 mod screenshot;
 pub(crate) mod session;
 mod sweep;
-use crate::timeline_ui::{ClipVisual, TimelineTool, TimelineView, VisualMap};
+use crate::timeline_ui::{ClipVisual, TimelineView, VisualMap};
 use chat::{ChatSettings, ChatWorkerResult, PendingChat, TimelineSnapshot};
 use media::{AssetState, BinAsset, ImportMsg};
 use session::ChatSession;
 use sweep::SweepMsg;
 
-const TRACK_TITLES: usize = 0;
-const TRACK_VIDEO: usize = 1;
-const TRACK_AUDIO: usize = 2;
 const PREVIEW_W: u32 = 960;
 const SCRUB_W: u32 = 480;
 const STILL_CACHE_CAP: usize = 24;
@@ -46,7 +43,6 @@ enum ExportMsg {
 #[derive(Clone, Copy)]
 enum UiAction {
     Import,
-    SampleProject,
     Export,
     ClearTimeline,
     SplitSelected,
@@ -72,7 +68,7 @@ pub struct EditorApp {
     status: String,
 
     import_rx: Option<Receiver<ImportMsg>>,
-    pending_sample_project: bool,
+    import_queue: Vec<PathBuf>,
     sweep_rx: Option<Receiver<SweepMsg>>,
     sweep_queue: Vec<String>,
     initial_imports: Vec<PathBuf>,
@@ -143,7 +139,7 @@ impl EditorApp {
             search: String::new(),
             status: "Ready.".to_owned(),
             import_rx: None,
-            pending_sample_project: false,
+            import_queue: Vec::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
             initial_imports,
@@ -210,7 +206,7 @@ impl EditorApp {
             search: String::new(),
             status: "Ready.".to_owned(),
             import_rx: None,
-            pending_sample_project: false,
+            import_queue: Vec::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
             initial_imports: Vec::new(),
@@ -254,17 +250,51 @@ impl EditorApp {
         }
     }
 
+    /// Split at the playhead: the selected clip when the playhead is
+    /// inside it, otherwise the topmost clip under the playhead.
+    /// Clicking the timeline parks the playhead first, so the flow
+    /// is click, then split (button, S, or B).
+    fn split_at_playhead(&mut self) {
+        let playhead = self.playhead;
+        let target = self
+            .selected
+            .filter(|id| {
+                self.timeline
+                    .clip(*id)
+                    .map(|c| c.contains(playhead))
+                    .unwrap_or(false)
+            })
+            .or_else(|| {
+                self.timeline
+                    .clips
+                    .iter()
+                    .filter(|c| c.contains(playhead))
+                    .min_by_key(|c| c.track)
+                    .map(|c| c.id)
+            });
+        let Some(id) = target else {
+            self.status = "No clip under the playhead.".to_owned();
+            return;
+        };
+        match self.timeline.split_at(id, playhead) {
+            Some(new_id) => {
+                self.selected = Some(new_id);
+                self.status = "Clip split at playhead.".to_owned();
+            }
+            None => {
+                self.status = "Playhead is too close to a clip edge.".to_owned();
+            }
+        }
+    }
+
     /// Delete a clip from a user action (menu, key, toolbar,
-    /// inspector). With the magnet on, the main track ripples
-    /// closed. Script deletes do not come through here; scripts
-    /// close gaps only via the explicit CloseGaps command.
+    /// inspector). The gap stays; the magnet only snaps while
+    /// dragging and never moves clips on its own. Scripts close
+    /// gaps only via the explicit CloseGaps command.
     fn delete_clip(&mut self, id: ClipId) {
         self.timeline.remove_clip(id);
         if self.selected == Some(id) {
             self.selected = None;
-        }
-        if self.timeline_view.magnet {
-            self.timeline.close_gaps(TRACK_VIDEO);
         }
     }
 
@@ -585,14 +615,7 @@ impl EditorApp {
                     .set_title("Import media")
                     .pick_files()
                 {
-                    self.spawn_import(ctx, paths, false);
-                }
-            }
-            UiAction::SampleProject => {
-                self.pending_sample_project = true;
-                self.spawn_import(ctx, Vec::new(), true);
-                if self.import_rx.is_none() {
-                    self.pending_sample_project = false;
+                    self.spawn_import(ctx, paths);
                 }
             }
             UiAction::Export => {
@@ -614,19 +637,7 @@ impl EditorApp {
                 self.still_cache.clear();
                 self.status = "Timeline cleared. Media bin kept.".to_owned();
             }
-            UiAction::SplitSelected => {
-                if let Some(id) = self.selected {
-                    match self.timeline.split_at(id, self.playhead) {
-                        Some(new_id) => {
-                            self.selected = Some(new_id);
-                            self.status = "Clip split at playhead.".to_owned();
-                        }
-                        None => {
-                            self.status = "Playhead is not inside the selected clip.".to_owned();
-                        }
-                    }
-                }
-            }
+            UiAction::SplitSelected => self.split_at_playhead(),
             UiAction::DeleteSelected => {
                 if let Some(id) = self.selected.take() {
                     self.delete_clip(id);
@@ -634,10 +645,11 @@ impl EditorApp {
                 }
             }
             UiAction::AddTitle => {
+                let track = self.first_free_track(self.playhead, 4.0);
                 let id = self.timeline.add_clip(
                     "New title",
                     ClipKind::Title,
-                    TRACK_TITLES,
+                    track,
                     self.playhead,
                     4.0,
                     0.0,
@@ -762,10 +774,7 @@ impl EditorApp {
             "selected": self.selected,
             "duration": self.timeline.end(),
             "fps": self.timeline.fps,
-            "tool": match self.timeline_view.tool {
-                TimelineTool::Select => "select",
-                TimelineTool::Split => "split",
-            },
+            "tool": "select",
             "magnet": self.timeline_view.magnet,
             "clips": clips,
             "assets": assets,
@@ -843,14 +852,10 @@ impl EditorApp {
                     }
                 }
                 ScriptCommand::AddTitle { text, at, duration } => {
-                    let id = self.timeline.add_clip(
-                        &text,
-                        ClipKind::Title,
-                        TRACK_TITLES,
-                        at,
-                        duration,
-                        0.0,
-                    );
+                    let track = self.first_free_track(at, duration);
+                    let id =
+                        self.timeline
+                            .add_clip(&text, ClipKind::Title, track, at, duration, 0.0);
                     self.selected = Some(id);
                 }
                 ScriptCommand::AddAsset { asset, at } => {
@@ -860,7 +865,7 @@ impl EditorApp {
                         .find(|a| a.info.path == asset || a.info.name == asset)
                         .map(|a| a.info.path.clone());
                     match path {
-                        Some(path) => self.add_asset_to_timeline(&path, at),
+                        Some(path) => self.add_asset_to_timeline(&path, None, at),
                         None => notes.push(format!("error: no asset '{asset}'")),
                     }
                 }
@@ -876,21 +881,14 @@ impl EditorApp {
                         .find(|a| a.info.path == asset || a.info.name == asset)
                         .map(|a| (a.info.path.clone(), a.info.name.clone()));
                     match found {
-                        Some((path, name)) => {
-                            self.add_asset_range_to_timeline(&path, &name, at, source_in, duration)
-                        }
+                        Some((path, name)) => self.add_asset_range_to_timeline(
+                            &path, &name, None, at, source_in, duration,
+                        ),
                         None => notes.push(format!("error: no asset '{asset}'")),
                     }
                 }
                 ScriptCommand::Import(path) => {
-                    self.spawn_import(ctx, vec![PathBuf::from(path)], false);
-                }
-                ScriptCommand::LoadSample => {
-                    self.pending_sample_project = true;
-                    self.spawn_import(ctx, Vec::new(), true);
-                    if self.import_rx.is_none() {
-                        self.pending_sample_project = false;
-                    }
+                    self.spawn_import(ctx, vec![PathBuf::from(path)]);
                 }
                 ScriptCommand::Export(path) => self.start_export(ctx, PathBuf::from(path)),
                 ScriptCommand::ClearTimeline => {
@@ -902,15 +900,20 @@ impl EditorApp {
                     self.still_cache.clear();
                 }
                 ScriptCommand::SetTool(tool) => match tool.as_str() {
-                    "select" => self.timeline_view.tool = TimelineTool::Select,
-                    "split" => self.timeline_view.tool = TimelineTool::Split,
+                    // One pointer mode remains; split is an action at
+                    // the playhead, not a tool.
+                    "select" => {}
                     other => notes.push(format!("error: unknown tool '{other}'")),
                 },
                 ScriptCommand::SetMagnet(on) => self.timeline_view.magnet = on,
                 ScriptCommand::SetZoom(px) => {
                     self.timeline_view.px_per_sec = px.clamp(4.0, 600.0);
                 }
-                ScriptCommand::CloseGaps => self.timeline.close_gaps(TRACK_VIDEO),
+                ScriptCommand::CloseGaps => {
+                    for track in 0..self.timeline.track_labels.len() {
+                        self.timeline.close_gaps(track);
+                    }
+                }
             }
         }
         notes
@@ -1075,19 +1078,8 @@ impl EditorApp {
             if ctx.input(|i| i.key_pressed(egui::Key::End)) {
                 self.seek(self.timeline.end());
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::S)) {
-                if let Some(id) = self.selected {
-                    if let Some(new_id) = self.timeline.split_at(id, self.playhead) {
-                        self.selected = Some(new_id);
-                        self.status = "Clip split at playhead.".to_owned();
-                    }
-                }
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::V)) {
-                self.timeline_view.tool = TimelineTool::Select;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::B)) {
-                self.timeline_view.tool = TimelineTool::Split;
+            if ctx.input(|i| i.key_pressed(egui::Key::S) || i.key_pressed(egui::Key::B)) {
+                self.split_at_playhead();
             }
             if ctx.input(|i| i.key_pressed(egui::Key::M)) {
                 self.timeline_view.magnet = !self.timeline_view.magnet;
@@ -1110,10 +1102,6 @@ impl EditorApp {
                     ui.menu_button("File", |ui| {
                         if ui.button("Import media…").clicked() {
                             action = Some(UiAction::Import);
-                            ui.close();
-                        }
-                        if ui.button("Load sample project").clicked() {
-                            action = Some(UiAction::SampleProject);
                             ui.close();
                         }
                         ui.separator();
@@ -1240,39 +1228,13 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     theme::panel_title(ui, "TIMELINE");
-                    let select_active = self.timeline_view.tool == TimelineTool::Select;
-                    let select_response = if select_active {
-                        theme::outline_button(ui, "Select")
-                    } else {
-                        theme::ghost_button(ui, "Select")
-                    };
-                    if select_response
-                        .on_hover_text("Select and move clips (V)")
-                        .clicked()
-                    {
-                        self.timeline_view.tool = TimelineTool::Select;
-                    }
-                    let split_active = self.timeline_view.tool == TimelineTool::Split;
-                    let split_response = if split_active {
-                        theme::outline_button(ui, "Split tool")
-                    } else {
-                        theme::ghost_button(ui, "Split tool")
-                    };
-                    if split_response
-                        .on_hover_text("Click a clip to cut it at that point (B)")
-                        .clicked()
-                    {
-                        self.timeline_view.tool = TimelineTool::Split;
-                    }
                     let magnet_response = if self.timeline_view.magnet {
                         theme::outline_button(ui, "Magnet")
                     } else {
                         theme::ghost_button(ui, "Magnet")
                     };
                     if magnet_response
-                        .on_hover_text(
-                            "Magnet: snap to edges and close gaps on the main video track (M)",
-                        )
+                        .on_hover_text("Magnet: snap clip edges while dragging (M)")
                         .clicked()
                     {
                         self.timeline_view.magnet = !self.timeline_view.magnet;
@@ -1281,10 +1243,11 @@ impl EditorApp {
                         .on_hover_text("Add a title clip at the playhead")
                         .clicked()
                     {
+                        let track = self.first_free_track(self.playhead, 4.0);
                         let id = self.timeline.add_clip(
                             "New title",
                             ClipKind::Title,
-                            TRACK_TITLES,
+                            track,
                             self.playhead,
                             4.0,
                             0.0,
@@ -1293,18 +1256,10 @@ impl EditorApp {
                         self.status = "Title added.".to_owned();
                     }
                     if theme::ghost_button(ui, "Split")
-                        .on_hover_text("Split the selected clip at the playhead (S)")
+                        .on_hover_text("Split the clip under the playhead (S)")
                         .clicked()
                     {
-                        if let Some(id) = self.selected {
-                            match self.timeline.split_at(id, self.playhead) {
-                                Some(new_id) => self.selected = Some(new_id),
-                                None => {
-                                    self.status =
-                                        "Playhead is not inside the selected clip.".to_owned()
-                                }
-                            }
-                        }
+                        self.split_at_playhead();
                     }
                     if theme::ghost_button(ui, "Delete")
                         .on_hover_text("Delete the selected clip (Del)")
@@ -1569,7 +1524,7 @@ impl eframe::App for EditorApp {
         self.poll_sweeps(ctx);
         if !self.initial_imports.is_empty() && self.import_rx.is_none() {
             let paths = std::mem::take(&mut self.initial_imports);
-            self.spawn_import(ctx, paths, false);
+            self.spawn_import(ctx, paths);
         }
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -1580,7 +1535,7 @@ impl eframe::App for EditorApp {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.spawn_import(ctx, dropped, false);
+            self.spawn_import(ctx, dropped);
         }
 
         let mut action = self.menu_bar(ctx);
@@ -1771,7 +1726,7 @@ mod tests {
         let a_id = app.timeline.add_media_clip(
             "a.mp4",
             ClipKind::Video,
-            TRACK_VIDEO,
+            1,
             0.0,
             10.0,
             0.0,
@@ -1780,7 +1735,7 @@ mod tests {
         let b_id = app.timeline.add_media_clip(
             "b.mp4",
             ClipKind::Video,
-            TRACK_VIDEO,
+            1,
             12.0,
             10.0,
             0.0,
@@ -1822,31 +1777,72 @@ mod tests {
         assert!((b.source_in - 3.0).abs() < 0.02);
     }
 
-    /// The magnet contract for deletes: with the magnet on, deleting
-    /// a main-track clip ripples the following clips closed. This
-    /// moved from a per-frame close in update() to the delete sites.
+    /// Free-form timeline: deleting a clip leaves its gap, magnet
+    /// on included. The magnet only snaps edges while dragging.
     #[test]
-    fn delete_with_magnet_closes_gap() {
+    fn delete_with_magnet_keeps_gap() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::headless_for_test(&ctx);
         assert!(app.timeline_view.magnet);
         app.timeline
-            .add_clip("a.mp4", ClipKind::Video, TRACK_VIDEO, 0.0, 10.0, 0.0);
+            .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 0.0);
         let b_id = app
             .timeline
-            .add_clip("b.mp4", ClipKind::Video, TRACK_VIDEO, 10.0, 10.0, 0.0);
+            .add_clip("b.mp4", ClipKind::Video, 0, 10.0, 10.0, 0.0);
         let c_id = app
             .timeline
-            .add_clip("c.mp4", ClipKind::Video, TRACK_VIDEO, 20.0, 10.0, 0.0);
+            .add_clip("c.mp4", ClipKind::Video, 0, 20.0, 10.0, 0.0);
         app.selected = Some(b_id);
         app.handle_action(&ctx, UiAction::DeleteSelected);
         assert!(app.timeline.clip(b_id).is_none());
         let c = app.timeline.clip(c_id).unwrap();
         assert!(
-            (c.start - 10.0).abs() < 1e-6,
-            "magnet delete should ripple C to 10, got {}",
+            (c.start - 20.0).abs() < 1e-6,
+            "magnet delete should leave the gap, got {}",
             c.start
         );
+    }
+
+    /// Split acts on the playhead, not on a click point: with no
+    /// selection it cuts the clip under the playhead.
+    #[test]
+    fn split_at_playhead_cuts_clip_under_playhead_without_selection() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let clip_id = app
+            .timeline
+            .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 2.0);
+        app.selected = None;
+        app.playhead = 4.0;
+        app.handle_action(&ctx, UiAction::SplitSelected);
+        assert_eq!(app.timeline.clips.len(), 2);
+        let left = app.timeline.clip(clip_id).unwrap();
+        assert!((left.end() - 4.0).abs() < 0.02, "left end {}", left.end());
+        let right_id = app.selected.expect("right half selected");
+        let right = app.timeline.clip(right_id).unwrap();
+        assert!((right.start - 4.0).abs() < 0.02);
+        assert!((right.source_in - 6.0).abs() < 0.02);
+    }
+
+    /// A second import requested while one is running must queue
+    /// (with placeholders visible right away), not be dropped.
+    #[test]
+    fn import_while_busy_queues_instead_of_dropping() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let first = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/sample_video.mp4"
+        ));
+        let second = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/sample_music.mp3"
+        ));
+        app.spawn_import(&ctx, vec![first]);
+        assert!(app.import_rx.is_some());
+        app.spawn_import(&ctx, vec![second.clone()]);
+        assert_eq!(app.import_queue, vec![second]);
+        assert_eq!(app.assets.len(), 2, "both files show as placeholders");
     }
 
     #[test]
@@ -1855,13 +1851,13 @@ mod tests {
         let mut app = EditorApp::headless_for_test(&ctx);
         app.timeline_view.magnet = false;
         app.timeline
-            .add_clip("a.mp4", ClipKind::Video, TRACK_VIDEO, 0.0, 10.0, 0.0);
+            .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 0.0);
         let b_id = app
             .timeline
-            .add_clip("b.mp4", ClipKind::Video, TRACK_VIDEO, 10.0, 10.0, 0.0);
+            .add_clip("b.mp4", ClipKind::Video, 0, 10.0, 10.0, 0.0);
         let c_id = app
             .timeline
-            .add_clip("c.mp4", ClipKind::Video, TRACK_VIDEO, 20.0, 10.0, 0.0);
+            .add_clip("c.mp4", ClipKind::Video, 0, 20.0, 10.0, 0.0);
         app.selected = Some(b_id);
         app.handle_action(&ctx, UiAction::DeleteSelected);
         let c = app.timeline.clip(c_id).unwrap();

@@ -27,20 +27,12 @@ pub struct ClipVisual<'a> {
 
 pub type VisualMap<'a> = HashMap<&'a str, ClipVisual<'a>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TimelineTool {
-    Select,
-    Split,
-}
-
 #[derive(Clone, Copy)]
 enum DragMode {
     Move { grab_offset: f64, orig_start: f64 },
     TrimLeft { orig_start: f64, press_time: f64 },
     TrimRight { orig_end: f64, press_time: f64 },
 }
-
-const MAIN_TRACK: usize = 1;
 
 /// Snap `time` to the nearest candidate within `threshold` seconds.
 fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
@@ -55,9 +47,9 @@ fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
 pub struct TimelineView {
     pub px_per_sec: f32,
     pub scroll_x: f32,
-    pub tool: TimelineTool,
     pub magnet: bool,
     drag: Option<(ClipId, DragMode)>,
+    last_drag_pos: Option<Pos2>,
     seeking: bool,
     last_rect: Option<Rect>,
 }
@@ -67,9 +59,9 @@ impl Default for TimelineView {
         Self {
             px_per_sec: 48.0,
             scroll_x: 0.0,
-            tool: TimelineTool::Select,
             magnet: true,
             drag: None,
+            last_drag_pos: None,
             seeking: false,
             last_rect: None,
         }
@@ -120,7 +112,7 @@ impl TimelineView {
         );
         self.paint(ui, timeline, *playhead, *selected, visuals, rect, content);
         response.on_hover_text(
-            "Click the ruler to seek. Drag clips to move, drag edges to trim. Ctrl+scroll zooms.",
+            "Click to move the playhead. Drag clips to move, drag edges to trim. S splits at the playhead. Ctrl+scroll zooms.",
         );
     }
 
@@ -134,6 +126,18 @@ impl TimelineView {
         let track = self.track_at(rect, pos.y)?;
         let time = self.time_at(rect.left() + HEADER_W, pos.x).max(0.0);
         Some((track, time))
+    }
+
+    /// Content rect of a lane from the most recent frame's geometry,
+    /// for highlighting a pending drop lane. Works one past the last
+    /// lane too (the append zone).
+    pub fn lane_rect(&self, track: usize) -> Option<Rect> {
+        let rect = self.last_rect?;
+        let y = rect.top() + RULER_H + track as f32 * (TRACK_H + TRACK_GAP);
+        Some(Rect::from_min_size(
+            Pos2::new(rect.left() + HEADER_W, y),
+            Vec2::new((rect.right() - rect.left() - HEADER_W).max(0.0), TRACK_H),
+        ))
     }
 
     fn handle_scroll(&mut self, ui: &mut Ui, response: &egui::Response, content_left: f32) {
@@ -199,11 +203,14 @@ impl TimelineView {
     ) {
         let Some(pos) = response.interact_pointer_pos() else {
             if response.drag_stopped() {
-                self.drag = None;
-                self.seeking = false;
+                let last = self.last_drag_pos;
+                self.finish_drag(timeline, rect, last);
             }
             return;
         };
+        if self.seeking || self.drag.is_some() {
+            self.last_drag_pos = Some(pos);
+        }
         // Classify from where the press began, not where the pointer is
         // when egui crosses its drag threshold (~6px later). Using the
         // current position misclassifies most edge grabs as moves.
@@ -239,59 +246,71 @@ impl TimelineView {
             if press_pos.y < rect.top() + RULER_H {
                 self.seeking = true;
                 *playhead = timeline.snap(time);
-            } else if self.tool == TimelineTool::Split && response.clicked() {
-                if let Some(track) = self.track_at(rect, press_pos.y) {
-                    if let Some(id) = timeline
-                        .clips
-                        .iter()
-                        .find(|c| c.track == track && c.contains(press_time))
-                        .map(|c| c.id)
-                    {
-                        if let Some(right) = timeline.split_at(id, press_time) {
-                            *selected = Some(right);
-                            if self.magnet {
-                                timeline.close_gaps(MAIN_TRACK);
-                            }
-                        } else {
-                            *selected = Some(id);
-                        }
-                    }
-                }
             } else if let Some(track) = self.track_at(rect, press_pos.y) {
-                // Hit-test in pixels so edges can be grabbed from just
-                // outside the clip, not only from inside it.
-                let hit = timeline.clips.iter().find_map(|c| {
-                    if c.track != track {
-                        return None;
-                    }
+                // Clicking anywhere in a lane parks the playhead there;
+                // split and transport act on the playhead from there.
+                *playhead = timeline.snap(press_time);
+                // Nearest edge wins, so the shared edge between two
+                // touching clips can trim either side: a press left of
+                // the edge grabs the left clip's right edge, a press
+                // right of it grabs the right clip's left edge. First
+                // match in the clip vec made one side ungrabbable.
+                let mut best_edge: Option<(f32, u8, ClipId, DragMode)> = None;
+                let mut containing: Option<(ClipId, f64)> = None;
+                for c in timeline.clips.iter().filter(|c| c.track == track) {
                     let left_x = self.x_at(content_left, c.start);
                     let right_x = self.x_at(content_left, c.end());
-                    (press_pos.x >= left_x - EDGE_PX && press_pos.x <= right_x + EDGE_PX)
-                        .then_some((c.id, c.start, c.end(), left_x, right_x))
-                });
-                match hit {
-                    Some((id, start, end, left_x, right_x)) => {
-                        *selected = Some(id);
-                        let mode = if press_pos.x <= left_x + EDGE_PX {
+                    let edges = [
+                        (
+                            left_x,
                             DragMode::TrimLeft {
-                                orig_start: start,
+                                orig_start: c.start,
                                 press_time,
-                            }
-                        } else if press_pos.x >= right_x - EDGE_PX {
+                            },
+                            press_pos.x >= left_x,
+                        ),
+                        (
+                            right_x,
                             DragMode::TrimRight {
-                                orig_end: end,
+                                orig_end: c.end(),
                                 press_time,
+                            },
+                            press_pos.x <= right_x,
+                        ),
+                    ];
+                    for (x, mode, on_owning_side) in edges {
+                        let dist = (press_pos.x - x).abs();
+                        if dist <= EDGE_PX {
+                            // At equal distance (a shared edge), prefer
+                            // the edge whose clip the press is on.
+                            let penalty = u8::from(!on_owning_side);
+                            let replace = match best_edge {
+                                None => true,
+                                Some((d, p, _, _)) => dist < d || (dist == d && penalty < p),
+                            };
+                            if replace {
+                                best_edge = Some((dist, penalty, c.id, mode));
                             }
-                        } else {
-                            DragMode::Move {
-                                grab_offset: press_time - start,
-                                orig_start: start,
-                            }
-                        };
-                        self.drag = Some((id, mode));
+                        }
                     }
-                    None if response.clicked() => *selected = None,
-                    None => {}
+                    if press_pos.x >= left_x && press_pos.x <= right_x {
+                        containing = Some((c.id, c.start));
+                    }
+                }
+                if let Some((_, _, id, mode)) = best_edge {
+                    *selected = Some(id);
+                    self.drag = Some((id, mode));
+                } else if let Some((id, start)) = containing {
+                    *selected = Some(id);
+                    self.drag = Some((
+                        id,
+                        DragMode::Move {
+                            grab_offset: press_time - start,
+                            orig_start: start,
+                        },
+                    ));
+                } else if response.clicked() {
+                    *selected = None;
                 }
             }
         }
@@ -318,8 +337,34 @@ impl TimelineView {
                             grab_offset,
                             orig_start,
                         },
-                        Some(clip),
+                        Some(mut clip),
                     ) => {
+                        // Vertical lane change within existing lanes;
+                        // growth past the top or bottom lane resolves
+                        // on drop (finish_drag). Changing lanes resets
+                        // the neighbor baseline to the new lane.
+                        let mut base_start = orig_start;
+                        if let Some(target) = self
+                            .track_at(rect, pos.y)
+                            .filter(|t| *t < timeline.track_labels.len())
+                        {
+                            if target != clip.track {
+                                timeline.set_clip_track(id, target);
+                                base_start = clip.start;
+                                if let Some((
+                                    _,
+                                    DragMode::Move {
+                                        orig_start: base, ..
+                                    },
+                                )) = &mut self.drag
+                                {
+                                    *base = base_start;
+                                }
+                                if let Some(fresh) = timeline.clip(id).cloned() {
+                                    clip = fresh;
+                                }
+                            }
+                        }
                         let raw = time - grab_offset;
                         let by_start = snap_to(raw, &candidates, threshold);
                         let by_end =
@@ -329,9 +374,9 @@ impl TimelineView {
                         } else {
                             by_end
                         };
-                        let prev_end = Self::prev_end(timeline, &clip, orig_start);
+                        let prev_end = Self::prev_end(timeline, &clip, base_start);
                         let next_start =
-                            Self::next_start(timeline, &clip, orig_start + clip.duration);
+                            Self::next_start(timeline, &clip, base_start + clip.duration);
                         let mut clamped = snapped.max(prev_end);
                         if let Some(next) = next_start {
                             clamped = clamped.min((next - clip.duration).max(prev_end));
@@ -382,21 +427,34 @@ impl TimelineView {
         }
 
         if response.drag_stopped() {
-            if self.magnet {
-                if let Some((id, mode)) = self.drag {
-                    // A left trim deliberately opens a gap, and the engine
-                    // contract keeps the clip's end fixed; rippling the
-                    // track closed here would shift that end left by the
-                    // trimmed amount. Other drags keep the magnetic close.
-                    let keep_gap = matches!(mode, DragMode::TrimLeft { .. });
-                    if !keep_gap && timeline.clip(id).map(|c| c.track) == Some(MAIN_TRACK) {
-                        timeline.close_gaps(MAIN_TRACK);
-                    }
-                }
-            }
-            self.drag = None;
-            self.seeking = false;
+            self.finish_drag(timeline, rect, Some(pos));
         }
+    }
+
+    /// End a drag. The magnet only snaps while dragging; gaps are
+    /// never closed here. A Move dropped above the first lane or
+    /// below the last grows a new lane there for the clip.
+    fn finish_drag(&mut self, timeline: &mut Timeline, rect: Rect, drop_pos: Option<Pos2>) {
+        if let (Some((id, DragMode::Move { .. })), Some(pos)) = (self.drag, drop_pos) {
+            let lanes_top = rect.top() + RULER_H;
+            let lanes_bottom =
+                lanes_top + timeline.track_labels.len() as f32 * (TRACK_H + TRACK_GAP) - TRACK_GAP;
+            // Well past the edge counts as aiming for a new lane, so
+            // slight pointer drift on a sideways drag of an edge-lane
+            // clip does not grow one by accident. The ruler strip is
+            // the only room above the first lane, hence the smaller
+            // top threshold.
+            if pos.y < lanes_top - RULER_H * 0.5 {
+                timeline.insert_track_at(0);
+                timeline.set_clip_track(id, 0);
+            } else if pos.y > lanes_bottom + TRACK_H * 0.5 {
+                let track = timeline.append_track();
+                timeline.set_clip_track(id, track);
+            }
+        }
+        self.drag = None;
+        self.last_drag_pos = None;
+        self.seeking = false;
     }
 
     fn paint(
@@ -457,26 +515,15 @@ impl TimelineView {
                     .map(|c| c.id)
             });
         if let (Some(id), Some(pos)) = (hovered_clip, ui.input(|i| i.pointer.hover_pos())) {
-            if self.tool == TimelineTool::Split {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                if let Some(clip) = timeline.clip(id) {
-                    let y = lanes_top + clip.track as f32 * (TRACK_H + TRACK_GAP);
-                    clipped.line_segment(
-                        [Pos2::new(pos.x, y), Pos2::new(pos.x, y + TRACK_H)],
-                        Stroke::new(1.5_f32, theme::FOREGROUND),
-                    );
-                }
+            let near_edge = timeline.clip(id).map(|c| {
+                (pos.x - self.x_at(content_left, c.start)).abs() <= EDGE_PX
+                    || (pos.x - self.x_at(content_left, c.end())).abs() <= EDGE_PX
+            }) == Some(true);
+            ui.ctx().set_cursor_icon(if near_edge {
+                egui::CursorIcon::ResizeHorizontal
             } else {
-                let near_edge = timeline.clip(id).map(|c| {
-                    (pos.x - self.x_at(content_left, c.start)).abs() <= EDGE_PX
-                        || (pos.x - self.x_at(content_left, c.end())).abs() <= EDGE_PX
-                }) == Some(true);
-                ui.ctx().set_cursor_icon(if near_edge {
-                    egui::CursorIcon::ResizeHorizontal
-                } else {
-                    egui::CursorIcon::Grab
-                });
-            }
+                egui::CursorIcon::Grab
+            });
         }
 
         // Clips.
@@ -1025,17 +1072,251 @@ mod tests {
         );
     }
 
+    fn touching_fixture() -> (Timeline, ClipId, ClipId) {
+        let mut timeline = Timeline::empty_project();
+        let a = timeline.add_media_clip(
+            "a.mp4",
+            ClipKind::Video,
+            1,
+            2.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let b = timeline.add_media_clip(
+            "b.mp4",
+            ClipKind::Video,
+            1,
+            8.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        (timeline, a, b)
+    }
+
+    /// Regression: two clips touching at t=8 share an edge at x=528.
+    /// Pressing just right of the edge must trim the right clip's
+    /// left edge. The old first-match hit test always grabbed the
+    /// left clip, so the right clip could not be trimmed at all.
     #[test]
-    fn split_tool_cuts_clip_at_clicked_time() {
+    fn touching_clips_right_clip_left_edge_trims() {
+        let ctx = egui::Context::default();
+        let (mut timeline, a_id, b_id) = touching_fixture();
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        view.magnet = false; // isolate hit-testing from ripple-on-release
+        let mut playhead = 0.0;
+        let mut selected = None;
+        let y = 99.0;
+        // Press 5px right of the shared edge, drag +48px (+1s).
+        let frames = vec![
+            vec![],
+            vec![pointer_button(533.0, y, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(581.0, y))],
+            vec![pointer_button(581.0, y, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(selected, Some(b_id));
+        let a = timeline.clip(a_id).unwrap();
+        assert!(
+            (a.start - 2.0).abs() < 1e-6 && (a.end() - 8.0).abs() < 1e-6,
+            "left clip must not change, got {}..{}",
+            a.start,
+            a.end()
+        );
+        let b = timeline.clip(b_id).unwrap();
+        assert!(
+            (b.start - 9.0).abs() < 0.02,
+            "right clip left edge should trim to 9, got {}",
+            b.start
+        );
+        assert!((b.end() - 14.0).abs() < 1e-6, "end fixed, got {}", b.end());
+        assert!((b.source_in - 1.0).abs() < 0.02);
+    }
+
+    /// Pressing just left of a shared edge trims the left clip's
+    /// right edge and leaves the right clip alone.
+    #[test]
+    fn touching_clips_left_clip_right_edge_trims() {
+        let ctx = egui::Context::default();
+        let (mut timeline, a_id, b_id) = touching_fixture();
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        view.magnet = false; // isolate hit-testing from ripple-on-release
+        let mut playhead = 0.0;
+        let mut selected = None;
+        let y = 99.0;
+        // Press 5px left of the shared edge, drag -48px (-1s).
+        let frames = vec![
+            vec![],
+            vec![pointer_button(523.0, y, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(475.0, y))],
+            vec![pointer_button(475.0, y, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(selected, Some(a_id));
+        let a = timeline.clip(a_id).unwrap();
+        assert!(
+            (a.end() - 7.0).abs() < 0.02,
+            "left clip right edge should trim to 7, got {}",
+            a.end()
+        );
+        let b = timeline.clip(b_id).unwrap();
+        assert!(
+            (b.start - 8.0).abs() < 1e-6 && (b.end() - 14.0).abs() < 1e-6,
+            "right clip must not change, got {}..{}",
+            b.start,
+            b.end()
+        );
+    }
+
+    #[test]
+    fn move_drag_changes_lane() {
         let ctx = egui::Context::default();
         let (mut timeline, clip_id) = clip_fixture();
         let visuals = full_visuals();
         let mut view = TimelineView::default();
-        view.tool = TimelineTool::Split;
+        let mut playhead = 0.0;
+        let mut selected = None;
+        // Clip sits on track 1 (row center y=99). Drag up to track 0 (y=49).
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 99.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(384.0, 49.0))],
+            vec![pointer_button(384.0, 49.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        let clip = timeline.clip(clip_id).unwrap();
+        assert_eq!(clip.track, 0, "clip should move up a lane");
+        assert!(
+            (clip.start - 2.0).abs() < 0.02,
+            "start should not drift, got {}",
+            clip.start
+        );
+    }
+
+    #[test]
+    fn move_drag_below_last_lane_appends_track() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let clip_id = timeline.add_media_clip(
+            "clip.mp4",
+            ClipKind::Video,
+            0,
+            2.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        assert_eq!(timeline.track_labels.len(), 1);
+        // Drag from the only lane (y=49) to below it (y=120) and drop.
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 49.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(384.0, 120.0))],
+            vec![pointer_button(384.0, 120.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(timeline.track_labels.len(), 2);
+        assert_eq!(timeline.clip(clip_id).unwrap().track, 1);
+    }
+
+    #[test]
+    fn move_drag_above_first_lane_inserts_track_on_top() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let clip_id = timeline.add_media_clip(
+            "clip.mp4",
+            ClipKind::Video,
+            0,
+            2.0,
+            6.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let other_id = timeline.add_media_clip(
+            "other.mp4",
+            ClipKind::Video,
+            0,
+            10.0,
+            2.0,
+            0.0,
+            "/media/full.mp4",
+        );
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        // Drag from the only lane (y=49) up into the ruler (y=10) and drop.
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 49.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(384.0, 10.0))],
+            vec![pointer_button(384.0, 10.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(timeline.track_labels.len(), 2);
+        assert_eq!(timeline.clip(clip_id).unwrap().track, 0);
+        assert_eq!(timeline.clip(other_id).unwrap().track, 1);
+    }
+
+    /// Clicking in a lane moves the playhead to the click (split and
+    /// transport act on the playhead from there) as well as selecting.
+    #[test]
+    fn lane_click_moves_playhead() {
+        let ctx = egui::Context::default();
+        let (mut timeline, clip_id) = clip_fixture();
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
         let mut playhead = 0.0;
         let mut selected = None;
         let y = 99.0;
-        // Click at t=5s: x = 144 + 5*48 = 384.
+        // Click inside the clip at t=5 (x=384).
         let frames = vec![
             vec![],
             vec![pointer_button(384.0, y, true)],
@@ -1050,12 +1331,29 @@ mod tests {
             &visuals,
             &frames,
         );
-        assert_eq!(timeline.clips.len(), 2);
-        let left = timeline.clip(clip_id).unwrap();
-        assert!((left.end() - 5.0).abs() < 0.02, "left end {}", left.end());
-        let right_id = selected.expect("right half selected");
-        let right = timeline.clip(right_id).unwrap();
-        assert!((right.start - 5.0).abs() < 0.02);
-        assert!((right.source_in - 6.0).abs() < 0.02);
+        assert_eq!(selected, Some(clip_id));
+        assert!(
+            (playhead - 5.0).abs() < 0.02,
+            "playhead should jump to click, got {playhead}"
+        );
+        // Click empty lane at t=10 (x=624): playhead follows, selection clears.
+        let frames = vec![
+            vec![pointer_button(624.0, y, true)],
+            vec![pointer_button(624.0, y, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(selected, None);
+        assert!(
+            (playhead - 10.0).abs() < 0.02,
+            "playhead should jump to empty click, got {playhead}"
+        );
     }
 }

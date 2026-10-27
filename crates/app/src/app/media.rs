@@ -9,11 +9,11 @@ use eframe::egui::{
     self, ColorImage, CornerRadius, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions,
     Vec2,
 };
-use openreel_engine::{format_timecode, ClipKind, Timeline};
+use openreel_engine::{format_timecode, ClipKind};
 use openreel_media::{MediaInfo, RawFrame};
 
 use super::sweep::{minute_second, SweepData, SweepStatus};
-use super::{EditorApp, UiAction, TRACK_AUDIO, TRACK_TITLES, TRACK_VIDEO};
+use super::{EditorApp, UiAction};
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,46 +82,30 @@ impl EditorApp {
         });
     }
 
-    pub(super) fn spawn_import(
-        &mut self,
-        ctx: &egui::Context,
-        paths: Vec<PathBuf>,
-        generate_first: bool,
-    ) {
-        if self.import_rx.is_some() {
-            self.status = "An import is already running.".to_owned();
+    /// Import files into the bin. Batches queue: asking for more
+    /// files while a batch runs adds placeholders now and processes
+    /// them when the current batch finishes, instead of dropping
+    /// the request.
+    pub(super) fn spawn_import(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
             return;
         }
-        if generate_first {
-            let dir = std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("samples");
-            self.insert_placeholder(&dir.join("sample_video.mp4"));
-            self.insert_placeholder(&dir.join("sample_music.mp3"));
-        } else {
-            for path in &paths {
-                self.insert_placeholder(path);
-            }
+        for path in &paths {
+            self.insert_placeholder(path);
         }
+        if self.import_rx.is_some() {
+            self.status = format!("Queued {} file(s) to import.", paths.len());
+            self.import_queue.extend(paths);
+            return;
+        }
+        self.start_import_batch(ctx, paths);
+    }
+
+    fn start_import_batch(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         let (tx, rx) = channel::<ImportMsg>();
         self.import_rx = Some(rx);
         let ctx = ctx.clone();
         thread::spawn(move || {
-            let mut paths = paths;
-            if generate_first {
-                let dir = std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("samples");
-                match openreel_media::generate_samples(&dir) {
-                    Ok(generated) => paths = generated,
-                    Err(e) => {
-                        let _ = tx.send(ImportMsg::Failed("sample media".to_owned(), e));
-                        let _ = tx.send(ImportMsg::Finished);
-                        ctx.request_repaint();
-                        return;
-                    }
-                }
-            }
             for path in &paths {
                 let path_str = path.to_string_lossy().into_owned();
                 let msg = match openreel_media::probe(&path_str) {
@@ -258,83 +242,43 @@ impl EditorApp {
         if finished {
             self.assets.retain(|a| a.state != AssetState::Probing);
             self.import_rx = None;
-            if self.pending_sample_project {
-                self.pending_sample_project = false;
-                self.arrange_sample_project();
+            if !self.import_queue.is_empty() {
+                let next = std::mem::take(&mut self.import_queue);
+                self.start_import_batch(ctx, next);
             }
         }
     }
 
-    fn arrange_sample_project(&mut self) {
-        let video = self
-            .assets
-            .iter()
-            .find(|a| a.info.name == "sample_video.mp4" && a.state == AssetState::Ready)
-            .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration));
-        let music = self
-            .assets
-            .iter()
-            .find(|a| a.info.name == "sample_music.mp3" && a.state == AssetState::Ready)
-            .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration));
-        if video.is_none() && music.is_none() {
-            self.status = "Sample media was not generated.".to_owned();
-            return;
-        }
-        self.stop_sources();
-        self.playing = false;
-        self.timeline = Timeline::empty_project();
-        self.playhead = 0.0;
-        if let Some((path, name, duration)) = video {
-            let id = self.timeline.add_media_clip(
-                &name,
-                ClipKind::Video,
-                TRACK_VIDEO,
-                0.0,
-                duration,
-                0.0,
-                &path,
-            );
-            self.selected = Some(id);
-        }
-        if let Some((path, name, duration)) = music {
-            let id = self.timeline.add_media_clip(
-                &name,
-                ClipKind::Audio,
-                TRACK_AUDIO,
-                0.0,
-                duration,
-                0.0,
-                &path,
-            );
-            if let Some(clip) = self.timeline.clip_mut(id) {
-                clip.volume = 0.8;
+    /// First lane with no clip overlapping [at, at+duration), or a
+    /// freshly appended lane. Lanes are kind-agnostic.
+    pub(super) fn first_free_track(&mut self, at: f64, duration: f64) -> usize {
+        let end = at + duration;
+        for track in 0..self.timeline.track_labels.len() {
+            let blocked = self
+                .timeline
+                .clips
+                .iter()
+                .any(|c| c.track == track && c.start < end && at < c.end());
+            if !blocked {
+                return track;
             }
         }
-        self.timeline.add_clip(
-            "Sample project — chop me",
-            ClipKind::Title,
-            TRACK_TITLES,
-            1.0,
-            4.0,
-            0.0,
-        );
-        self.still_key = None;
-        self.still_cache.clear();
-        self.status = "Sample project ready.".to_owned();
+        self.timeline.append_track()
     }
 
-    pub(super) fn add_asset_to_timeline(&mut self, path: &str, at: f64) {
+    pub(super) fn add_asset_to_timeline(&mut self, path: &str, track: Option<usize>, at: f64) {
         let Some(asset) = self.asset(path) else {
             return;
         };
         let (name, duration) = (asset.info.name.clone(), asset.info.duration);
-        self.add_asset_range_to_timeline(path, &name, at, 0.0, duration);
+        self.add_asset_range_to_timeline(path, &name, track, at, 0.0, duration);
     }
 
     pub(super) fn add_asset_range_to_timeline(
         &mut self,
         path: &str,
         title: &str,
+        track: Option<usize>,
         at: f64,
         source_in: f64,
         duration: f64,
@@ -361,10 +305,20 @@ impl EditorApp {
         } else {
             title.to_owned()
         };
-        let (kind, track) = if has_video {
-            (ClipKind::Video, TRACK_VIDEO)
+        let kind = if has_video {
+            ClipKind::Video
         } else {
-            (ClipKind::Audio, TRACK_AUDIO)
+            ClipKind::Audio
+        };
+        // An explicit drop lane wins (one past the end appends a
+        // lane); otherwise the first lane free at that span.
+        let track = match track {
+            Some(requested) => {
+                let track = requested.min(self.timeline.track_labels.len());
+                self.timeline.ensure_track(track);
+                track
+            }
+            None => self.first_free_track(at.max(0.0), duration),
         };
         let id = self.timeline.add_media_clip(
             &name,
@@ -386,7 +340,7 @@ impl EditorApp {
             return None;
         }
         let mut action: Option<UiAction> = None;
-        let mut add_request: Option<(String, f64)> = None;
+        let mut add_request: Option<(String, Option<usize>, f64)> = None;
         let mut sweep_add: Option<String> = None;
         let mut sweep_dismiss: Option<String> = None;
         let mut sweep_add_all = false;
@@ -417,15 +371,6 @@ impl EditorApp {
                         .clicked()
                     {
                         action = Some(UiAction::Import);
-                    }
-                    ui.add_space(6.0);
-                    if theme::outline_button(ui, "Load sample project")
-                        .on_hover_text(
-                            "Generate a sample MP4 and MP3 and arrange them on the timeline",
-                        )
-                        .clicked()
-                    {
-                        action = Some(UiAction::SampleProject);
                     }
                     return;
                 }
@@ -556,15 +501,71 @@ impl EditorApp {
                                     self.selected_asset = Some(asset.info.path.clone());
                                 }
                                 if response.double_clicked() {
-                                    add_request = Some((asset.info.path.clone(), self.playhead));
+                                    add_request =
+                                        Some((asset.info.path.clone(), None, self.playhead));
+                                }
+                                if response.dragged() {
+                                    // Carry a grid-size preview at the
+                                    // cursor so the drop reads clearly,
+                                    // plus the lane it would land on.
+                                    if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos())
+                                    {
+                                        let layer = egui::LayerId::new(
+                                            egui::Order::Foreground,
+                                            egui::Id::new("bin_drag_ghost"),
+                                        );
+                                        let ghost_painter = ui.ctx().layer_painter(layer);
+                                        if let Some((track, _)) =
+                                            self.timeline_view.drop_target(pos)
+                                        {
+                                            let lane_track =
+                                                track.min(self.timeline.track_labels.len());
+                                            if let Some(lane) =
+                                                self.timeline_view.lane_rect(lane_track)
+                                            {
+                                                ghost_painter.rect(
+                                                    lane,
+                                                    CornerRadius::same(theme::R_MD),
+                                                    egui::Color32::from_white_alpha(18),
+                                                    Stroke::new(1.5_f32, theme::RING),
+                                                    egui::StrokeKind::Inside,
+                                                );
+                                            }
+                                        }
+                                        let ghost = egui::Rect::from_min_size(
+                                            pos + Vec2::new(12.0, 12.0),
+                                            Vec2::new(TILE_W, TILE_H),
+                                        );
+                                        ghost_painter.rect_filled(
+                                            ghost,
+                                            CornerRadius::same(theme::R_MD),
+                                            theme::CARD,
+                                        );
+                                        if let Some((_, thumb)) = asset.thumb_textures.first() {
+                                            ghost_painter.image(
+                                                thumb.id(),
+                                                ghost,
+                                                cover_uv(thumb.size_vec2(), ghost.size()),
+                                                egui::Color32::from_white_alpha(220),
+                                            );
+                                        }
+                                        ghost_painter.rect(
+                                            ghost,
+                                            CornerRadius::same(theme::R_MD),
+                                            egui::Color32::TRANSPARENT,
+                                            Stroke::new(2.0_f32, theme::RING),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
                                 }
                                 if response.drag_stopped() {
                                     if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos())
                                     {
-                                        if let Some((_track, time)) =
+                                        if let Some((track, time)) =
                                             self.timeline_view.drop_target(pos)
                                         {
-                                            add_request = Some((asset.info.path.clone(), time));
+                                            add_request =
+                                                Some((asset.info.path.clone(), Some(track), time));
                                         }
                                     }
                                 }
@@ -752,8 +753,8 @@ impl EditorApp {
                     }
                 });
             });
-        if let Some((path, at)) = add_request {
-            self.add_asset_to_timeline(&path, at);
+        if let Some((path, track, at)) = add_request {
+            self.add_asset_to_timeline(&path, track, at);
         }
         if let Some(candidate_id) = sweep_add {
             self.add_sweep_candidate(&candidate_id);

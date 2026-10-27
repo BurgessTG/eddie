@@ -6,8 +6,7 @@ for the UI, FFmpeg tools for media.
 > **Status: slice 2 — real media.** Import real video/audio (file dialog or
 > drag & drop), chop it on the timeline (move, trim edges, split at the
 > playhead), watch and hear it in the program monitor, burn in titles, and
-> export an H.264/AAC MP4. A generated sample project (real MP4 + MP3 in
-> `samples/`) gives you something to chop immediately.
+> export an H.264/AAC MP4.
 
 Requires `ffmpeg`, `ffprobe`, and `ffplay` on `PATH` at runtime.
 
@@ -47,8 +46,8 @@ mise exec -- cargo run -p openreel-media --example generate_samples -- samples
 If your shell has `mise activate` loaded, plain `cargo run` works in this
 directory.
 
-First run: click **Load sample project** — it arranges the sample MP4, MP3,
-and a title on the timeline ready to chop.
+First run: import media (File menu, drag & drop, or pass file paths as
+arguments), then double-click a bin tile or drag it onto the timeline.
 
 ## Roadmap
 
