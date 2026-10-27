@@ -85,6 +85,17 @@ model-ranks segments through chat completions, and falls back to local
 ranking when the model is unavailable. Candidates are suggestions only;
 the source asset stays whole. SAM 3.1 subject presence is not wired yet.
 Media paths passed as command-line arguments are imported on launch.
+Timeline lanes are free-form and kind-agnostic. Projects start with one
+lane; dragging or dropping above or below grows new lanes, gaps are
+allowed anywhere, and adds land on the first lane free at that span
+(or the dropped lane). The magnet only snaps edges while dragging; it
+never ripples clips closed (`close_gaps` runs only from the explicit
+script `CloseGaps`, all lanes). Split is playhead-based (toolbar
+Split, S or B); clicking a lane parks the playhead there. There is no
+split tool mode and no in-app sample project (`loadSample` is gone);
+`samples/` exists for tests. Import batches queue instead of being
+refused while one runs. Dragging from the bin carries a grid-size
+thumbnail ghost at the cursor plus a drop-lane highlight.
 
 ## UI rules
 

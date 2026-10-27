@@ -64,7 +64,6 @@ pub enum ScriptCommand {
         duration: f64,
     },
     Import(String),
-    LoadSample,
     Export(String),
     ClearTimeline,
     SetTool(String),
@@ -96,8 +95,8 @@ function help() {
     "moveClip(id, start) trimClip(id, left, right)  // -1 keeps an edge",
     "renameClip(id, name) setOpacity(id, v) setVolume(id, v)",
     "addTitle(text, at?, dur?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
-    "importMedia(path) loadSample() exportTo(path) clearTimeline()",
-    "setTool('select'|'split') setMagnet(bool) setZoom(pxPerSec) closeGaps()",
+    "importMedia(path) exportTo(path) clearTimeline()",
+    "setMagnet(bool) setZoom(pxPerSec) closeGaps()",
     "console.log(...) works. Variables persist between lines."
   ].join("\n");
 }
@@ -233,10 +232,6 @@ impl ScriptEngine {
                 reg!("importMedia", move |path: String| q
                     .borrow_mut()
                     .push(ScriptCommand::Import(path)));
-                let q = Rc::clone(&queue);
-                reg!("loadSample", move || q
-                    .borrow_mut()
-                    .push(ScriptCommand::LoadSample));
                 let q = Rc::clone(&queue);
                 reg!("exportTo", move |path: String| q
                     .borrow_mut()

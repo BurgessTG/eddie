@@ -628,17 +628,34 @@ impl HeadlessEditor {
             .snap(time.clamp(0.0, self.timeline.end().max(0.0)));
     }
 
+    /// Mirror of the app's first-free-lane placement.
+    fn first_free_track(&mut self, at: f64, duration: f64) -> usize {
+        let end = at + duration;
+        for track in 0..self.timeline.track_labels.len() {
+            let blocked = self
+                .timeline
+                .clips
+                .iter()
+                .any(|c| c.track == track && c.start < end && at < c.end());
+            if !blocked {
+                return track;
+            }
+        }
+        self.timeline.append_track()
+    }
+
     fn add_asset_range(&mut self, asset: &FakeAsset, at: f64, source_in: f64, duration: f64) {
         let source_in = source_in.clamp(0.0, asset.duration.max(0.0));
         let duration = duration.min((asset.duration - source_in).max(0.0));
         if duration <= 0.0 {
             return;
         }
-        let (kind, track) = if asset.has_video {
-            (ClipKind::Video, TRACK_VIDEO)
+        let kind = if asset.has_video {
+            ClipKind::Video
         } else {
-            (ClipKind::Audio, TRACK_AUDIO)
+            ClipKind::Audio
         };
+        let track = self.first_free_track(at.max(0.0), duration);
         let id = self.timeline.add_media_clip(
             &asset.name,
             kind,
@@ -714,14 +731,10 @@ impl HeadlessEditor {
                     }
                 }
                 ScriptCommand::AddTitle { text, at, duration } => {
-                    let id = self.timeline.add_clip(
-                        &text,
-                        ClipKind::Title,
-                        TRACK_TITLES,
-                        at,
-                        duration,
-                        0.0,
-                    );
+                    let track = self.first_free_track(at, duration);
+                    let id =
+                        self.timeline
+                            .add_clip(&text, ClipKind::Title, track, at, duration, 0.0);
                     self.selected = Some(id);
                 }
                 ScriptCommand::AddAsset { asset, at } => {
@@ -745,9 +758,6 @@ impl HeadlessEditor {
                 ScriptCommand::Import(path) => notes.push(format!(
                     "error: import is not available in the harness ({path})"
                 )),
-                ScriptCommand::LoadSample => {
-                    notes.push("error: loadSample is not available in the harness".to_owned())
-                }
                 ScriptCommand::Export(path) => notes.push(format!(
                     "error: export is not available in the harness ({path})"
                 )),
@@ -758,11 +768,15 @@ impl HeadlessEditor {
                     self.playhead = 0.0;
                 }
                 ScriptCommand::SetTool(tool) => match tool.as_str() {
-                    "select" | "split" => {}
+                    "select" => {}
                     other => notes.push(format!("error: unknown tool '{other}'")),
                 },
                 ScriptCommand::SetMagnet(_) | ScriptCommand::SetZoom(_) => {}
-                ScriptCommand::CloseGaps => self.timeline.close_gaps(TRACK_VIDEO),
+                ScriptCommand::CloseGaps => {
+                    for track in 0..self.timeline.track_labels.len() {
+                        self.timeline.close_gaps(track);
+                    }
+                }
             }
         }
         notes

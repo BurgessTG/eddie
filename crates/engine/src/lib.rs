@@ -69,6 +69,53 @@ impl Timeline {
         self.track_labels.len() - 1
     }
 
+    fn relabel_tracks(&mut self) {
+        for (i, label) in self.track_labels.iter_mut().enumerate() {
+            *label = format!("Track {}", i + 1);
+        }
+    }
+
+    /// Grow the lane list until `track` exists. Lanes are
+    /// kind-agnostic and appear on demand (drops, drags, adds).
+    pub fn ensure_track(&mut self, track: usize) {
+        if self.track_labels.len() > track {
+            return;
+        }
+        while self.track_labels.len() <= track {
+            self.track_labels.push(String::new());
+        }
+        self.relabel_tracks();
+    }
+
+    /// Append one lane at the bottom. Returns its index.
+    pub fn append_track(&mut self) -> usize {
+        let index = self.track_labels.len();
+        self.ensure_track(index);
+        index
+    }
+
+    /// Insert a lane at `index`, shifting clips at or below it down
+    /// one lane. Returns the inserted index.
+    pub fn insert_track_at(&mut self, index: usize) -> usize {
+        let index = index.min(self.track_labels.len());
+        self.track_labels.insert(index, String::new());
+        for clip in &mut self.clips {
+            if clip.track >= index {
+                clip.track += 1;
+            }
+        }
+        self.relabel_tracks();
+        index
+    }
+
+    /// Move a clip to another lane, growing the lane list if needed.
+    pub fn set_clip_track(&mut self, id: ClipId, track: usize) {
+        self.ensure_track(track);
+        if let Some(clip) = self.clip_mut(id) {
+            clip.track = track;
+        }
+    }
+
     /// Add a generated clip with no media file (e.g. a title).
     pub fn add_clip(
         &mut self,
@@ -116,6 +163,7 @@ impl Timeline {
         source_in: f64,
         source: Option<&str>,
     ) -> ClipId {
+        self.ensure_track(track);
         let id = self.next_id;
         self.next_id += 1;
         self.clips.push(Clip {
@@ -246,12 +294,11 @@ impl Timeline {
             .min_by_key(|c| c.track)
     }
 
-    /// Standard empty project: titles over video over audio.
+    /// Standard empty project: one lane. Lanes grow on demand as
+    /// clips are dropped or dragged above or below existing ones.
     pub fn empty_project() -> Self {
         let mut tl = Self::new(30.0);
-        tl.add_track("V2 · Titles");
-        tl.add_track("V1 · Video");
-        tl.add_track("A1 · Audio");
+        tl.add_track("Track 1");
         tl
     }
 
@@ -395,6 +442,50 @@ mod tests {
         assert_eq!(tl.clip(b).unwrap().start, 2.0);
         assert_eq!(tl.clip(c).unwrap().start, 4.0);
         assert_eq!(tl.clip(keep).unwrap().start, 7.0);
+    }
+
+    #[test]
+    fn empty_project_starts_with_one_track() {
+        let tl = Timeline::empty_project();
+        assert_eq!(tl.track_labels.len(), 1);
+        assert!(tl.clips.is_empty());
+    }
+
+    #[test]
+    fn add_clip_grows_tracks_to_cover_its_index() {
+        let mut tl = Timeline::empty_project();
+        tl.add_clip("a.mp4", ClipKind::Video, 2, 0.0, 2.0, 0.0);
+        assert_eq!(tl.track_labels.len(), 3);
+    }
+
+    #[test]
+    fn insert_track_at_shifts_existing_clips_down() {
+        let mut tl = Timeline::empty_project();
+        let a = tl.add_clip("a.mp4", ClipKind::Video, 0, 0.0, 2.0, 0.0);
+        let b = tl.add_clip("b.mp4", ClipKind::Audio, 0, 3.0, 2.0, 0.0);
+        let inserted = tl.insert_track_at(0);
+        assert_eq!(inserted, 0);
+        assert_eq!(tl.track_labels.len(), 2);
+        assert_eq!(tl.clip(a).unwrap().track, 1);
+        assert_eq!(tl.clip(b).unwrap().track, 1);
+        // The new top lane is free for the clip that asked for it.
+        tl.set_clip_track(a, 0);
+        assert_eq!(tl.clip(a).unwrap().track, 0);
+        assert_eq!(tl.clip(b).unwrap().track, 1);
+    }
+
+    #[test]
+    fn append_track_and_set_clip_track_grows() {
+        let mut tl = Timeline::empty_project();
+        let a = tl.add_clip("a.mp4", ClipKind::Video, 0, 0.0, 2.0, 0.0);
+        let new_track = tl.append_track();
+        assert_eq!(new_track, 1);
+        tl.set_clip_track(a, new_track);
+        assert_eq!(tl.clip(a).unwrap().track, 1);
+        // Setting beyond the end grows instead of losing the clip.
+        tl.set_clip_track(a, 4);
+        assert_eq!(tl.clip(a).unwrap().track, 4);
+        assert_eq!(tl.track_labels.len(), 5);
     }
 
     #[test]

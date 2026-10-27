@@ -288,6 +288,7 @@ impl EditorApp {
         self.add_asset_range_to_timeline(
             &candidate.asset_path,
             &candidate.title,
+            None,
             at,
             candidate.source_in,
             candidate.duration,
