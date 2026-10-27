@@ -1,4 +1,5 @@
-# OpenReel
+# Eddie
+
 
 A fast, cross-platform desktop video editor. Rust end to end: `egui` + `wgpu`
 for the UI, FFmpeg tools for media.

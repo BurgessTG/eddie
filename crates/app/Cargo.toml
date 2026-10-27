@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "OpenReel desktop video editor (egui + wgpu)"
 
 [[bin]]
-name = "openreel"
+name = "eddie"
 path = "src/main.rs"
 
 # Dev-only test harness (src/dev_harness.rs). The feature only enables

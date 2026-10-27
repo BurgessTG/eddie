@@ -225,12 +225,12 @@ fn run_frames_n(
             app.status_bar(ctx);
             app.console_panel(ctx);
             app.timeline_panel(ctx);
-            app.chat_panel(ctx);
+            // Chat now lives in the right dock (Chat tab default).
             app.chat_settings_window(ctx);
             if let Some(a) = app.media_bin(ctx) {
                 action = Some(a);
             }
-            app.inspector(ctx);
+            app.right_dock(ctx);
             app.central(ctx);
             let _ = action;
         });
@@ -299,25 +299,7 @@ fn render_slice6_screenshots() {
 
     let mut textures = HashMap::new();
     let mut clock = 0.0_f64;
-    // Drag the chat panel's resize edge up, exactly as a user
-    // would, so the long session is visible in one shot. The chat
-    // panel's top edge sits just above the timeline panel.
-    let seed_tall_chat = |ctx: &egui::Context| {
-        // Seed the panel height egui would hold after a user drags
-        // the chat panel taller (PanelState is what the resize drag
-        // stores). Applied just before the captured frames because
-        // stored height otherwise decays toward content size.
-        ctx.data_mut(|data| {
-            data.insert_persisted(
-                egui::Id::new("chat"),
-                egui::containers::panel::PanelState {
-                    rect: Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(W as f32, 420.0)),
-                },
-            );
-        });
-    };
     run_frames(&ctx, &mut app, &mut textures, &mut clock);
-    seed_tall_chat(&ctx);
     let primitives = run_frames_n(&ctx, &mut app, &mut textures, &mut clock, Vec::new(), 2);
     let fb = rasterize(&primitives, &textures);
     write_ppm(Path::new("/tmp/openreel_slice6_long_session.ppm"), &fb);
@@ -325,7 +307,6 @@ fn render_slice6_screenshots() {
     // Second scene: an in-flight model call (progress + Cancel).
     app.chat_pending = Some(PendingChat::for_test("Build the montage", "Ranking clips…"));
     app.chat_generation = 1;
-    seed_tall_chat(&ctx);
     let primitives = run_frames_n(&ctx, &mut app, &mut textures, &mut clock, Vec::new(), 2);
     let fb = rasterize(&primitives, &textures);
     write_ppm(Path::new("/tmp/openreel_slice6_inflight.ppm"), &fb);

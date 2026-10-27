@@ -16,14 +16,14 @@ fn main() -> eframe::Result<()> {
         .collect();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("OpenReel")
+            .with_title("Eddie")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([1024.0, 640.0]),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
-        "OpenReel",
+        "Eddie",
         options,
         Box::new(move |cc| Ok(Box::new(EditorApp::new(cc, initial_imports)))),
     )

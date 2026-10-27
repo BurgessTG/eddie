@@ -1,4 +1,4 @@
-# OpenReel build guidance
+# Eddie build guidance
 
 Read this before changing code. It records decisions the user has made.
 Update it when a decision changes.
