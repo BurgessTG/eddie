@@ -695,11 +695,18 @@ impl EditorApp {
                                 }
                                 let transcript = candidate.transcript_text();
                                 thumb_response.on_hover_text(format!(
-                                    "{}\nScore {:.0} · Stability {:.0}% · Energy {:.0}%\n{}",
+                                    "{}\n{} · Score {:.0} · Stability {:.0}% · Audio {:.0}% · Motion {:.0}%{}\n{}",
                                     candidate.title,
+                                    candidate.category,
                                     candidate.score,
                                     candidate.stability * 100.0,
-                                    candidate.audio_energy * 100.0,
+                                    candidate.audio_score * 100.0,
+                                    candidate.motion_score * 100.0,
+                                    if candidate.tags.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" · {}", candidate.tags.join(", "))
+                                    },
                                     if transcript.is_empty() {
                                         "No speech in this clip.".to_owned()
                                     } else {
@@ -710,11 +717,12 @@ impl EditorApp {
                                 ui.vertical(|ui| {
                                     ui.label(
                                         RichText::new(format!(
-                                            "{}. {} · {}–{}",
+                                            "{}. {} · {}–{} · {}",
                                             rank + 1,
                                             candidate.asset_name,
                                             minute_second(candidate.source_in),
-                                            minute_second(candidate.end())
+                                            minute_second(candidate.end()),
+                                            candidate.category
                                         ))
                                         .size(12.0)
                                         .strong(),
