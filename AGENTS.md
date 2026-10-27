@@ -105,6 +105,11 @@ Media paths passed as command-line arguments are imported on launch.
 
 ## Testing rules
 
+- The chat-edit dev harness lives in `crates/app/src/dev_harness.rs`
+  (test-only; `dev-harness` feature enables the `muse exec` driver).
+  `cargo test` runs the canned scenarios offline. Live stand-in runs
+  need `OPENREEL_LIVE_HARNESS=1`. It never validates Spark/Wonder;
+  the live-API checklist is at the top of that file.
 - Bug fixes start with a failing test when a local test path exists.
 - Media changes need the end-to-end test in `crates/media` to pass. It
   generates samples, decodes, streams, exports, and re-probes the output.

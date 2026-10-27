@@ -1,4 +1,6 @@
 mod app;
+#[cfg(test)]
+mod dev_harness;
 mod preview;
 mod scripting;
 mod theme;
