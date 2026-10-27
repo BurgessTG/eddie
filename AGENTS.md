@@ -78,12 +78,20 @@ intents arrange sweep candidates offline through the same
 `ScriptCommand` batch path; model intents are fixed prompts through
 the chat loop. AI edits snapshot the timeline first for one-click
 undo, and in-flight calls can be cancelled.
-The import QC sweep lives in `crates/app/src/app/sweep.rs`, with motion
-sampling and segmentation in `crates/media/src/sweep.rs`. It transcribes
-with `muse-voice-transcribe-1.0` when a Meta API key is configured,
-model-ranks segments through chat completions, and falls back to local
-ranking when the model is unavailable. Candidates are suggestions only;
-the source asset stays whole. SAM 3.1 subject presence is not wired yet.
+The import QC sweep is the curator. It lives in
+`crates/app/src/app/sweep.rs`, with motion sampling and segmentation in
+`crates/media/src/sweep.rs`. Import only imports; curation runs after,
+per asset. Every candidate carries one category (`prime`, `reaction`,
+`talking`, `action`, `broll`, `establishing`), tags from the
+`CURATOR_TAGS` vocabulary, and quality subscores (stability, audio,
+motion). Prime is scarce: top 20% of shown candidates per asset at
+score 75+, assigned by the app after ranking, never by the model.
+Local classification derives category and tags from measured signals.
+With a Meta API key it transcribes with `muse-voice-transcribe-1.0`
+and model-ranks plus classifies through chat completions; model
+categories and tags are validated against the vocabularies with local
+fallback. Candidates are suggestions only; the source asset stays
+whole. SAM 3.1 subject presence is not wired yet.
 Media paths passed as command-line arguments are imported on launch.
 Timeline lanes are free-form and kind-agnostic. Projects start with one
 lane; dragging or dropping above or below grows new lanes, gaps are

@@ -18,6 +18,39 @@ use super::{ChatSettings, EditorApp};
 
 const TRANSCRIBE_MODEL: &str = "muse-voice-transcribe-1.0";
 const MAX_CANDIDATES_PER_ASSET: usize = 8;
+
+/// Curator categories. Every candidate gets exactly one. `prime`
+/// is scarce by construction (see `apply_prime`); the model never
+/// assigns it directly.
+pub(super) const CURATOR_CATEGORIES: [&str; 6] = [
+    "prime",
+    "reaction",
+    "talking",
+    "action",
+    "broll",
+    "establishing",
+];
+
+/// Controlled tag vocabulary. Local classification derives these
+/// from measured signals; model tags are validated against the
+/// same list so chat prompts can filter on stable words.
+pub(super) const CURATOR_TAGS: [&str; 10] = [
+    "speech",
+    "quiet",
+    "loud-peak",
+    "steady",
+    "shaky",
+    "fast-motion",
+    "slow",
+    "scene-open",
+    "long-take",
+    "short",
+];
+
+/// Prime quota: at most this share of one asset's candidates, and
+/// only at or above `PRIME_MIN_SCORE`.
+const PRIME_SHARE: f32 = 0.2;
+const PRIME_MIN_SCORE: f32 = 75.0;
 // Voice Transcribe accepts WAV mono 16-bit PCM at 16/24 kHz, at most
 // 10 minutes / 32 MB per request (see `openreel_media::write_wav_24k`),
 // and returns turn-level timestamps only — one speaker label per
@@ -46,6 +79,14 @@ pub(super) struct SweepCandidate {
     pub(super) stability: f32,
     pub(super) audio_energy: f32,
     pub(super) audio_peak: f32,
+    /// One of `CURATOR_CATEGORIES`.
+    pub(super) category: String,
+    /// Subset of `CURATOR_TAGS`.
+    pub(super) tags: Vec<String>,
+    /// Quality subscores, 0..1 per asset: normalized mean motion
+    /// and a blended audio score (energy + peak).
+    pub(super) motion_score: f32,
+    pub(super) audio_score: f32,
     pub(super) has_video: bool,
     pub(super) transcript: Vec<TranscriptSegment>,
     pub(super) dismissed: bool,
@@ -330,7 +371,100 @@ fn run_sweep(
     }
     candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     candidates.truncate(MAX_CANDIDATES_PER_ASSET);
+    // Prime share is of the clips the editor actually sees.
+    apply_prime(&mut candidates);
     Ok((transcript, candidates, note))
+}
+
+struct SegmentNorms {
+    max_energy: f32,
+    max_peak: f32,
+    max_motion: f32,
+}
+
+fn segment_norms(segments: &[SweepSegment]) -> SegmentNorms {
+    SegmentNorms {
+        max_energy: segments
+            .iter()
+            .map(|segment| segment.audio_energy)
+            .fold(0.0_f32, f32::max)
+            .max(0.001),
+        max_peak: segments
+            .iter()
+            .map(|segment| segment.audio_peak)
+            .fold(0.0_f32, f32::max)
+            .max(0.001),
+        max_motion: segments
+            .iter()
+            .map(|segment| segment.mean_motion)
+            .fold(0.0_f32, f32::max)
+            .max(0.001),
+    }
+}
+
+/// Local category + tags from measured signals only. Rule order
+/// matters: reactions and speech are the strongest editorial
+/// signals, then motion, then scene-openers, else b-roll. `prime`
+/// is never returned here; `apply_prime` promotes after ranking.
+fn classify_local(
+    segment: &SweepSegment,
+    has_speech: bool,
+    motion_score: f32,
+    audio_score: f32,
+) -> (String, Vec<String>) {
+    let mut tags: Vec<String> = Vec::new();
+    let mut tag = |name: &str| tags.push(name.to_owned());
+    if has_speech {
+        tag("speech");
+    }
+    if segment.audio_peak >= 0.75 {
+        tag("loud-peak");
+    }
+    if audio_score < 0.15 {
+        tag("quiet");
+    }
+    if segment.stability >= 0.7 {
+        tag("steady");
+    } else if segment.stability < 0.4 {
+        tag("shaky");
+    }
+    if motion_score >= 0.65 {
+        tag("fast-motion");
+    } else if motion_score < 0.2 {
+        tag("slow");
+    }
+    if segment.scene_change >= 0.18 {
+        tag("scene-open");
+    }
+    if segment.duration() >= 8.0 {
+        tag("long-take");
+    } else if segment.duration() <= 3.0 {
+        tag("short");
+    }
+    let reactionish = segment.audio_peak >= 0.75 && audio_score >= 0.4 && segment.duration() <= 7.0;
+    let category = if reactionish {
+        "reaction"
+    } else if has_speech {
+        "talking"
+    } else if motion_score >= 0.65 {
+        "action"
+    } else if segment.scene_change >= 0.18 && segment.stability >= 0.6 {
+        "establishing"
+    } else {
+        "broll"
+    };
+    (category.to_owned(), tags)
+}
+
+/// Promote the scarce top slice to `prime`: at most `PRIME_SHARE`
+/// of the (score-sorted) candidates and only at `PRIME_MIN_SCORE`.
+fn apply_prime(candidates: &mut [SweepCandidate]) {
+    let quota = (candidates.len() as f32 * PRIME_SHARE).ceil() as usize;
+    for candidate in candidates.iter_mut().take(quota) {
+        if candidate.score >= PRIME_MIN_SCORE {
+            candidate.category = "prime".to_owned();
+        }
+    }
 }
 
 fn local_candidates(
@@ -338,16 +472,9 @@ fn local_candidates(
     segments: &[SweepSegment],
     transcript: &[TranscriptSegment],
 ) -> Vec<SweepCandidate> {
-    let max_energy = segments
-        .iter()
-        .map(|segment| segment.audio_energy)
-        .fold(0.0_f32, f32::max)
-        .max(0.001);
-    let max_peak = segments
-        .iter()
-        .map(|segment| segment.audio_peak)
-        .fold(0.0_f32, f32::max)
-        .max(0.001);
+    let norms = segment_norms(segments);
+    let max_energy = norms.max_energy;
+    let max_peak = norms.max_peak;
     segments
         .iter()
         .enumerate()
@@ -374,7 +501,7 @@ fn local_candidates(
                 score = (score + 8.0).min(100.0);
             }
             let reason = local_reason(info, segment, &overlaps);
-            candidate_from_segment(info, index, segment, score, reason, overlaps)
+            candidate_from_segment(info, index, segment, &norms, score, reason, overlaps, None)
         })
         .collect()
 }
@@ -413,10 +540,34 @@ fn candidate_from_segment(
     info: &MediaInfo,
     index: usize,
     segment: &SweepSegment,
+    norms: &SegmentNorms,
     score: f32,
     reason: String,
     transcript: Vec<TranscriptSegment>,
+    model_call: Option<(String, Vec<String>)>,
 ) -> SweepCandidate {
+    let motion_score = (segment.mean_motion / norms.max_motion).clamp(0.0, 1.0);
+    let audio_score = (0.6 * (segment.audio_energy / norms.max_energy)
+        + 0.4 * (segment.audio_peak / norms.max_peak))
+        .clamp(0.0, 1.0);
+    let (local_category, local_tags) =
+        classify_local(segment, !transcript.is_empty(), motion_score, audio_score);
+    let (category, tags) = match model_call {
+        Some((category, tags))
+            if CURATOR_CATEGORIES.contains(&category.as_str()) && category != "prime" =>
+        {
+            let tags: Vec<String> = tags
+                .into_iter()
+                .filter(|tag| CURATOR_TAGS.contains(&tag.as_str()))
+                .collect();
+            if tags.is_empty() {
+                (category, local_tags)
+            } else {
+                (category, tags)
+            }
+        }
+        _ => (local_category, local_tags),
+    };
     SweepCandidate {
         id: format!("{}#{index}", info.path),
         asset_path: info.path.clone(),
@@ -429,6 +580,10 @@ fn candidate_from_segment(
         stability: segment.stability,
         audio_energy: segment.audio_energy,
         audio_peak: segment.audio_peak,
+        category,
+        tags,
+        motion_score,
+        audio_score,
         has_video: info.has_video,
         transcript,
         dismissed: false,
@@ -487,7 +642,7 @@ fn rank_with_model(
         "messages": [
             {
                 "role": "developer",
-                "content": "You rank video segments for a human editor. Prefer stable footage, a clear subject or speech, reaction/energy peaks, and clean in/out points. Return ONLY a JSON array, no markdown: [{\"segment\":0,\"score\":87,\"reason\":\"one short plain-language reason\"}]. Use each segment at most once.",
+                "content": "You are the curator for a human video editor. Rank and classify segments so the editor can prompt cuts later (for example reactions first, or prime shots only). Prefer stable footage, a clear subject or speech, reaction/energy peaks, and clean in/out points. Category is exactly one of reaction, talking, action, broll, establishing (never prime; the app promotes its own top picks). Tags come only from: speech, quiet, loud-peak, steady, shaky, fast-motion, slow, scene-open, long-take, short. Return ONLY a JSON array, no markdown: [{\"segment\":0,\"score\":87,\"reason\":\"one short plain-language reason\",\"category\":\"talking\",\"tags\":[\"speech\",\"steady\"]}]. Use each segment at most once.",
             },
             {
                 "role": "user",
@@ -517,6 +672,7 @@ fn parse_ranking_response(
         .or_else(|| value["candidates"].as_array())
         .or_else(|| value["rankings"].as_array())
         .ok_or_else(|| "Couldn't read the sweep ranking.".to_owned())?;
+    let norms = segment_norms(segments);
     let mut seen = Vec::new();
     let mut candidates = Vec::new();
     for row in rows {
@@ -536,13 +692,26 @@ fn parse_ranking_response(
             continue;
         };
         seen.push(index);
+        let model_call = row["category"].as_str().map(|category| {
+            let tags = row["tags"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|tag| tag.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (category.trim().to_lowercase(), tags)
+        });
         candidates.push(candidate_from_segment(
             info,
             index,
             segment,
+            &norms,
             row["score"].as_f64().unwrap_or(50.0) as f32,
             reason.trim().to_owned(),
             overlapping_transcript(segment, transcript),
+            model_call,
         ));
     }
     if candidates.is_empty() {
@@ -715,6 +884,100 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].start, 10.5);
         assert_eq!(turns[1].speaker.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn local_classifier_categories_and_tags() {
+        let base = SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.5,
+            audio_peak: 0.8,
+            scene_change: 0.0,
+        };
+        let (category, tags) = classify_local(&base, true, 0.1, 0.3);
+        assert_eq!(category, "talking");
+        assert!(tags.iter().any(|t| t == "speech"));
+        assert!(tags.iter().any(|t| t == "steady"));
+        let (category, _) = classify_local(&base, false, 0.1, 0.6);
+        assert_eq!(category, "reaction", "loud short peak reads as reaction");
+        let (category, _) = classify_local(&base, false, 0.9, 0.2);
+        assert_eq!(category, "action");
+        let opener = SweepSegment {
+            scene_change: 0.3,
+            audio_peak: 0.2,
+            ..base
+        };
+        let (category, _) = classify_local(&opener, false, 0.1, 0.2);
+        assert_eq!(category, "establishing");
+    }
+
+    #[test]
+    fn prime_is_scarce_and_score_gated() {
+        let info = test_info();
+        let segment = SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.5,
+            audio_peak: 0.8,
+            scene_change: 0.0,
+        };
+        let norms = segment_norms(std::slice::from_ref(&segment));
+        let mut candidates: Vec<SweepCandidate> =
+            [95.0, 90.0, 85.0, 80.0, 60.0, 55.0, 50.0, 45.0, 40.0, 35.0]
+                .iter()
+                .enumerate()
+                .map(|(i, score)| {
+                    candidate_from_segment(
+                        &info,
+                        i,
+                        &segment,
+                        &norms,
+                        *score,
+                        "r".into(),
+                        Vec::new(),
+                        None,
+                    )
+                })
+                .collect();
+        candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        apply_prime(&mut candidates);
+        let primes: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.category == "prime")
+            .collect();
+        assert_eq!(primes.len(), 2, "top 20 percent of 10 at or over 75");
+        assert!(primes.iter().all(|c| c.score >= 90.0));
+    }
+
+    #[test]
+    fn model_prime_and_unknown_tags_fall_back_locally() {
+        let info = test_info();
+        let segments = vec![SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.5,
+            audio_peak: 0.8,
+            scene_change: 0.0,
+        }];
+        let response = serde_json::json!({
+            "choices": [{"message": {"content": "[{\"segment\":0,\"score\":91,\"reason\":\"Great.\",\"category\":\"prime\",\"tags\":[\"steady\",\"bogus\"]}]"}}]
+        });
+        let ranked = parse_ranking_response(&response, &info, &segments, &[]).unwrap();
+        assert_ne!(ranked[0].category, "prime", "model may not assign prime");
+        assert!(ranked[0]
+            .tags
+            .iter()
+            .all(|t| CURATOR_TAGS.contains(&t.as_str())));
     }
 
     #[test]

@@ -91,6 +91,8 @@ struct FakeCandidate {
     audio_peak: f32,
     is_reaction: bool,
     reaction_score: f32,
+    category: String,
+    tags: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -174,6 +176,9 @@ impl Fixture {
                     "audioPeak": c.audio_peak,
                     "isReaction": c.is_reaction,
                     "reactionScore": c.reaction_score,
+                    "category": c.category,
+                    "tags": c.tags,
+                    "quality": {"stability": 0.9, "audio": 0.5, "motion": 0.4},
                     "hasVideo": c.has_video,
                     "transcript": "",
                 })
@@ -381,6 +386,8 @@ console.log("Done — music now ends with the video.");
                     audio_peak: 0.3,
                     is_reaction: false,
                     reaction_score: 0.2,
+                    category: "broll".to_owned(),
+                    tags: vec!["steady".to_owned()],
                 };
                 Fixture {
                     timeline,
@@ -429,6 +436,16 @@ console.log("Done — built the montage from the sweep.");
                         audio_peak: if reaction { 0.92 } else { 0.25 },
                         is_reaction: reaction,
                         reaction_score: if reaction { 0.85 } else { 0.18 },
+                        category: if reaction {
+                            "reaction".to_owned()
+                        } else {
+                            "talking".to_owned()
+                        },
+                        tags: if reaction {
+                            vec!["loud-peak".to_owned()]
+                        } else {
+                            vec!["speech".to_owned(), "steady".to_owned()]
+                        },
                     }
                 };
                 Fixture {

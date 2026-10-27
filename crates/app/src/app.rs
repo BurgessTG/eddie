@@ -730,6 +730,13 @@ impl EditorApp {
                     "audioPeak": candidate.audio_peak,
                     "isReaction": candidate.is_reaction(),
                     "reactionScore": candidate.reaction_score(),
+                    "category": candidate.category,
+                    "tags": candidate.tags,
+                    "quality": {
+                        "stability": candidate.stability,
+                        "audio": candidate.audio_score,
+                        "motion": candidate.motion_score,
+                    },
                     "hasVideo": candidate.has_video,
                     "transcript": candidate.transcript_text(),
                 })
@@ -1843,6 +1850,183 @@ mod tests {
         app.spawn_import(&ctx, vec![second.clone()]);
         assert_eq!(app.import_queue, vec![second]);
         assert_eq!(app.assets.len(), 2, "both files show as placeholders");
+    }
+
+    /// Full JS surface end to end, offline: queued imports of real
+    /// downloads, local curator sweep, console JS building fast
+    /// cuts (the same eval + ScriptCommand path chat output uses),
+    /// then export. Ignored by default; needs /tmp/clips and
+    /// /tmp/rockets populated.
+    #[test]
+    #[ignore = "needs downloaded clips in /tmp/clips and /tmp/rockets"]
+    fn js_console_fast_cuts_export_e2e() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let batch1 = vec![
+            PathBuf::from("/tmp/clips/ocean02.webm"),
+            PathBuf::from("/tmp/clips/interview60.mp4"),
+        ];
+        let batch2 = vec![
+            PathBuf::from("/tmp/clips/cairo.webm"),
+            PathBuf::from("/tmp/rockets/crew12.webm"),
+        ];
+        for path in batch1.iter().chain(&batch2) {
+            assert!(path.exists(), "missing test asset {}", path.display());
+        }
+        app.spawn_import(&ctx, batch1);
+        app.spawn_import(&ctx, batch2);
+        assert_eq!(app.import_queue.len(), 2, "second batch queues");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            app.poll_imports(&ctx);
+            app.poll_sweeps(&ctx);
+            let imports_done = app.import_rx.is_none() && app.import_queue.is_empty();
+            let sweeps_done = app.sweep_rx.is_none()
+                && app.sweep_queue.is_empty()
+                && app
+                    .assets
+                    .iter()
+                    .all(|a| a.sweep.status != sweep::SweepStatus::Running);
+            if imports_done && sweeps_done && app.assets.len() == 4 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "import/sweep timed out: assets={} queue={}",
+                app.assets.len(),
+                app.import_queue.len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            app.assets
+                .iter()
+                .all(|a| a.state == media::AssetState::Ready),
+            "all assets ready"
+        );
+
+        // Curator output is classified and inside the vocabularies.
+        let mut total_candidates = 0;
+        for asset in &app.assets {
+            let candidates = &asset.sweep.candidates;
+            total_candidates += candidates.len();
+            let primes = candidates.iter().filter(|c| c.category == "prime").count();
+            let quota = (candidates.len() as f32 * 0.2).ceil() as usize;
+            assert!(primes <= quota, "prime quota per asset");
+            for c in candidates {
+                assert!(
+                    sweep::CURATOR_CATEGORIES.contains(&c.category.as_str()),
+                    "bad category {}",
+                    c.category
+                );
+                assert!(
+                    c.tags
+                        .iter()
+                        .all(|t| sweep::CURATOR_TAGS.contains(&t.as_str())),
+                    "bad tags {:?}",
+                    c.tags
+                );
+                if c.category == "prime" {
+                    assert!(c.score >= 75.0, "prime below score floor");
+                }
+            }
+        }
+        assert!(total_candidates > 0, "curator produced candidates");
+
+        // The console path chat uses: eval JS, apply ScriptCommands.
+        app.run_console(
+            &ctx,
+            "var primes = sweepCandidates().filter(c => c.category === 'prime');\n\
+             console.log('prime-count:' + primes.length);"
+                .to_owned(),
+        );
+        app.run_console(
+            &ctx,
+            "addAssetRange('ocean02.webm', 0, 2, 4);\n\
+             addAssetRange('cairo.webm', 4, 1, 3);\n\
+             addAssetRange('interview60.mp4', 7, 5, 5);\n\
+             addAssetRange('crew12.webm', 12, 20, 6);\n\
+             addTitle('FAST CUTS', 0, 2);"
+                .to_owned(),
+        );
+        app.run_console(
+            &ctx,
+            "var cs = clips().filter(c => c.kind === 'video').sort((a, b) => a.start - b.start);\n\
+             trimClip(cs[0].id, 0.5, -1);\n\
+             trimClip(cs[3].id, -1, 17);\n\
+             splitClip(cs[2].id, cs[2].start + 2);\n\
+             moveClip(cs[1].id, 40);\n\
+             closeGaps();\n\
+             seek(3);"
+                .to_owned(),
+        );
+        let errors: Vec<&String> = app
+            .console_output
+            .iter()
+            .filter(|line| line.starts_with("error"))
+            .collect();
+        assert!(errors.is_empty(), "console errors: {errors:?}");
+        assert!(
+            app.console_output
+                .iter()
+                .any(|line| line.contains("prime-count:")),
+            "curator categories visible to JS: {:?}",
+            app.console_output
+        );
+        assert!((app.playhead - 3.0).abs() < 0.02, "seek via JS");
+        let videos = app
+            .timeline
+            .clips
+            .iter()
+            .filter(|c| c.kind == ClipKind::Video)
+            .count();
+        assert_eq!(videos, 5, "4 adds + 1 split");
+        // No same-lane overlaps survive a JS edit session.
+        for a in &app.timeline.clips {
+            for b in &app.timeline.clips {
+                if a.id < b.id && a.track == b.track {
+                    assert!(
+                        a.end() <= b.start + 1e-6 || b.end() <= a.start + 1e-6,
+                        "overlap on lane {}: {} vs {}",
+                        a.track,
+                        a.name,
+                        b.name
+                    );
+                }
+            }
+        }
+        let expected_end = app.timeline.end();
+        assert!(expected_end > 10.0, "timeline built, end {expected_end}");
+
+        let output = "/tmp/js_fastcuts.mp4";
+        let _ = std::fs::remove_file(output);
+        app.run_console(&ctx, format!("exportTo('{output}')"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            app.poll_export();
+            if app.export_rx.is_none() && PathBuf::from(output).exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "export timed out, status: {}",
+                app.status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let info = openreel_media::probe(output).expect("probe JS export");
+        println!(
+            "JS export: {:.2}s {}x{} status={}",
+            info.duration, info.width, info.height, app.status
+        );
+        assert!(info.has_video);
+        assert!(
+            (info.duration - expected_end).abs() < 0.6,
+            "export duration {} vs timeline {expected_end}",
+            info.duration
+        );
     }
 
     #[test]
