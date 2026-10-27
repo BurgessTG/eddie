@@ -254,6 +254,20 @@ impl EditorApp {
         }
     }
 
+    /// Delete a clip from a user action (menu, key, toolbar,
+    /// inspector). With the magnet on, the main track ripples
+    /// closed. Script deletes do not come through here; scripts
+    /// close gaps only via the explicit CloseGaps command.
+    fn delete_clip(&mut self, id: ClipId) {
+        self.timeline.remove_clip(id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        if self.timeline_view.magnet {
+            self.timeline.close_gaps(TRACK_VIDEO);
+        }
+    }
+
     fn stop_sources(&mut self) {
         if let Some(stream) = self.stream.take() {
             stream.stop();
@@ -615,7 +629,7 @@ impl EditorApp {
             }
             UiAction::DeleteSelected => {
                 if let Some(id) = self.selected.take() {
-                    self.timeline.remove_clip(id);
+                    self.delete_clip(id);
                     self.status = "Clip deleted.".to_owned();
                 }
             }
@@ -1043,7 +1057,7 @@ impl EditorApp {
         }
         if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
             if let Some(id) = self.selected.take() {
-                self.timeline.remove_clip(id);
+                self.delete_clip(id);
                 self.status = "Clip deleted.".to_owned();
             }
         }
@@ -1297,7 +1311,7 @@ impl EditorApp {
                         .clicked()
                     {
                         if let Some(id) = self.selected.take() {
-                            self.timeline.remove_clip(id);
+                            self.delete_clip(id);
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1449,7 +1463,7 @@ impl EditorApp {
                     }
                 }
                 if do_delete {
-                    self.timeline.remove_clip(id);
+                    self.delete_clip(id);
                     self.selected = None;
                     self.status = "Clip deleted.".to_owned();
                 }
@@ -1529,6 +1543,21 @@ impl EditorApp {
     }
 }
 
+impl EditorApp {
+    /// Post-panel work for one frame: playback sync, then the
+    /// deferred UI action. Split out of `eframe::App::update` so
+    /// tests can drive the real seam. Gap closing lives at the edit
+    /// sites (drag release, delete, script CloseGaps) where the
+    /// intent is known; a per-frame close here cannot tell a gap a
+    /// left trim opened on purpose from one a delete left behind.
+    fn finish_frame(&mut self, ctx: &egui::Context, action: Option<UiAction>) {
+        self.sync_playback(ctx);
+        if let Some(action) = action {
+            self.handle_action(ctx, action);
+        }
+    }
+}
+
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let update_start = Instant::now();
@@ -1565,14 +1594,7 @@ impl eframe::App for EditorApp {
         }
         self.inspector(ctx);
         self.central(ctx);
-
-        if self.timeline_view.magnet && !self.timeline_view.is_interacting() {
-            self.timeline.close_gaps(TRACK_VIDEO);
-        }
-        self.sync_playback(ctx);
-        if let Some(action) = action {
-            self.handle_action(ctx, action);
-        }
+        self.finish_frame(ctx, action);
         if self.import_rx.is_some() || self.export_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -1673,4 +1695,180 @@ fn transport_button(ui: &mut Ui, icon: TransportIcon, tooltip: &str) -> egui::Re
         }
     }
     response.on_hover_text(tooltip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pointer_button(x: f32, y: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::Pos2::new(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn run_view_frames(app: &mut EditorApp, ctx: &egui::Context, frames: &[Vec<egui::Event>]) {
+        let visuals: VisualMap<'_> = [
+            (
+                "/media/a.mp4",
+                ClipVisual {
+                    duration: 30.0,
+                    peaks: &[],
+                    thumbs: &[],
+                },
+            ),
+            (
+                "/media/b.mp4",
+                ClipVisual {
+                    duration: 30.0,
+                    peaks: &[],
+                    thumbs: &[],
+                },
+            ),
+        ]
+        .into();
+        let EditorApp {
+            timeline,
+            timeline_view,
+            playhead,
+            selected,
+            ..
+        } = app;
+        for (i, events) in frames.iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200.0, 400.0),
+                )),
+                time: Some(i as f64 * 0.016),
+                events: events.clone(),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        timeline_view.show(ui, timeline, playhead, selected, &visuals);
+                    });
+            });
+        }
+    }
+
+    /// Regression: left-trimming clip B (which follows clip A) with the
+    /// magnet on must keep B's end fixed after a full app frame, not
+    /// just inside the timeline view. `EditorApp::update` used to run
+    /// its own per-frame `close_gaps` after the panels, rippling B
+    /// back to A's end in the same frame the drag ended and defeating
+    /// the view-level TrimLeft carve-out.
+    #[test]
+    fn left_trim_survives_app_frame_with_magnet_on() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        assert!(app.timeline_view.magnet);
+        let a_id = app.timeline.add_media_clip(
+            "a.mp4",
+            ClipKind::Video,
+            TRACK_VIDEO,
+            0.0,
+            10.0,
+            0.0,
+            "/media/a.mp4",
+        );
+        let b_id = app.timeline.add_media_clip(
+            "b.mp4",
+            ClipKind::Video,
+            TRACK_VIDEO,
+            12.0,
+            10.0,
+            0.0,
+            "/media/b.mp4",
+        );
+        // B spans t=12..22, so its left edge is x=720 (144 + 12*48) at
+        // track row y=99. Drag the edge 144px right (+3s) and release.
+        let frames = vec![
+            vec![],
+            vec![pointer_button(720.0, 99.0, true)],
+            vec![egui::Event::PointerMoved(egui::Pos2::new(864.0, 99.0))],
+            vec![pointer_button(864.0, 99.0, false)],
+        ];
+        run_view_frames(&mut app, &ctx, &frames);
+        let b = app.timeline.clip(b_id).unwrap();
+        assert!(
+            (b.start - 15.0).abs() < 0.02 && (b.end() - 22.0).abs() < 1e-6,
+            "drag alone should land B at 15..22, got {}..{}",
+            b.start,
+            b.end()
+        );
+
+        // One full app frame tail, exactly as update() runs it.
+        app.finish_frame(&ctx, None);
+        let a = app.timeline.clip(a_id).unwrap();
+        assert_eq!(a.start, 0.0);
+        assert!((a.end() - 10.0).abs() < 1e-6);
+        let b = app.timeline.clip(b_id).unwrap();
+        assert!(
+            (b.start - 15.0).abs() < 0.02,
+            "left trim gap must survive the app frame, got start {}",
+            b.start
+        );
+        assert!(
+            (b.end() - 22.0).abs() < 1e-6,
+            "left trim must keep the end fixed across app frames, got {}",
+            b.end()
+        );
+        assert!((b.source_in - 3.0).abs() < 0.02);
+    }
+
+    /// The magnet contract for deletes: with the magnet on, deleting
+    /// a main-track clip ripples the following clips closed. This
+    /// moved from a per-frame close in update() to the delete sites.
+    #[test]
+    fn delete_with_magnet_closes_gap() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        assert!(app.timeline_view.magnet);
+        app.timeline
+            .add_clip("a.mp4", ClipKind::Video, TRACK_VIDEO, 0.0, 10.0, 0.0);
+        let b_id = app
+            .timeline
+            .add_clip("b.mp4", ClipKind::Video, TRACK_VIDEO, 10.0, 10.0, 0.0);
+        let c_id = app
+            .timeline
+            .add_clip("c.mp4", ClipKind::Video, TRACK_VIDEO, 20.0, 10.0, 0.0);
+        app.selected = Some(b_id);
+        app.handle_action(&ctx, UiAction::DeleteSelected);
+        assert!(app.timeline.clip(b_id).is_none());
+        let c = app.timeline.clip(c_id).unwrap();
+        assert!(
+            (c.start - 10.0).abs() < 1e-6,
+            "magnet delete should ripple C to 10, got {}",
+            c.start
+        );
+    }
+
+    #[test]
+    fn delete_without_magnet_keeps_gap() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.timeline_view.magnet = false;
+        app.timeline
+            .add_clip("a.mp4", ClipKind::Video, TRACK_VIDEO, 0.0, 10.0, 0.0);
+        let b_id = app
+            .timeline
+            .add_clip("b.mp4", ClipKind::Video, TRACK_VIDEO, 10.0, 10.0, 0.0);
+        let c_id = app
+            .timeline
+            .add_clip("c.mp4", ClipKind::Video, TRACK_VIDEO, 20.0, 10.0, 0.0);
+        app.selected = Some(b_id);
+        app.handle_action(&ctx, UiAction::DeleteSelected);
+        let c = app.timeline.clip(c_id).unwrap();
+        assert!(
+            (c.start - 20.0).abs() < 1e-6,
+            "magnet off should leave the gap, got {}",
+            c.start
+        );
+    }
 }
