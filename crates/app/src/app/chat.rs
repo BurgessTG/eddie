@@ -232,7 +232,7 @@ impl ChatSettings {
 /// The developer-role contract. Sent first in every request and
 /// never rewritten per turn, so it anchors the cached prefix.
 pub(crate) const DEVELOPER_CONTRACT: &str = "\
-You edit a video timeline inside OpenReel by writing JavaScript. \
+You edit a video timeline inside Eddie by writing JavaScript. \
 Reply with a single JSON object {\"code\": \"...\", \"explanation\": \"...\"} and nothing else. \
 \"code\" is executable JavaScript only, with no markdown fences inside it, ending with exactly one console.log(\"Done — ...\") line. \
 \"explanation\" is one short plain-language summary for the user. \
@@ -1075,139 +1075,130 @@ impl EditorApp {
 }
 
 impl EditorApp {
-    pub(super) fn chat_panel(&mut self, ctx: &egui::Context) {
-        if !self.show_chat {
-            return;
-        }
+    /// Chat tab body for the right dock. Panel ownership moved to
+    /// `EditorApp::right_dock`; this only paints into the given Ui.
+    pub(super) fn chat_content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let ui = &mut *ui;
         let focus_requested = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K));
         let mut submitted: Option<String> = None;
         let mut clicked_intent: Option<&'static str> = None;
         let mut cancel_clicked = false;
         let mut undo_clicked = false;
-        egui::TopBottomPanel::bottom("chat")
-            .resizable(true)
-            .default_height(208.0)
-            .height_range(150.0..=420.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BACKGROUND)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    theme::panel_title(ui, "CHAT");
-                    if let Some(pending) = &self.chat_pending {
-                        ui.add(egui::Spinner::new().size(14.0));
-                        ui.label(RichText::new(pending.progress_label()).color(theme::MUTED_FG));
-                        if theme::ghost_button(ui, "Cancel")
-                            .on_hover_text("Cancel the in-flight model call")
-                            .clicked()
-                        {
-                            cancel_clicked = true;
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::ghost_button(ui, "Settings")
-                            .on_hover_text("Meta Model API settings")
-                            .clicked()
-                        {
-                            self.show_chat_settings = !self.show_chat_settings;
-                        }
-                        let debug = if self.show_chat_debug {
-                            theme::outline_button(ui, "Debug")
-                        } else {
-                            theme::ghost_button(ui, "Debug")
-                        };
-                        if debug
-                            .on_hover_text("Show the last generated JavaScript")
-                            .clicked()
-                        {
-                            self.show_chat_debug = !self.show_chat_debug;
-                        }
-                        if self.chat_undo.is_some()
-                            && theme::ghost_button(ui, "Undo edit")
-                                .on_hover_text("Restore the timeline from before the last AI edit")
-                                .clicked()
-                        {
-                            undo_clicked = true;
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-
-                // Button intents: one registry, local first. New
-                // buttons are declared in `intents.rs`.
-                ui.horizontal_wrapped(|ui| {
-                    for intent in INTENTS {
-                        let response = match intent.kind {
-                            IntentKind::Local(_) => theme::outline_button(ui, intent.label),
-                            IntentKind::Model => theme::ghost_button(ui, intent.label),
-                        };
-                        if response.on_hover_text(intent.tooltip).clicked() {
-                            clicked_intent = Some(intent.id);
-                        }
-                    }
-                });
-                ui.add_space(4.0);
-
-                let debug_height = if self.show_chat_debug { 58.0 } else { 0.0 };
-                let messages_height = (ui.available_height() - 74.0 - debug_height).max(28.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_messages")
-                    .max_height(messages_height)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        if self.chat_session.messages.is_empty() {
-                            ui.label(
-                                RichText::new("Ask for an edit in plain words.")
-                                    .color(theme::MUTED_FG),
-                            );
-                        }
-                        for message in &self.chat_session.messages {
-                            let (who, color) = match message.role {
-                                ChatRole::User => ("You", theme::FOREGROUND),
-                                ChatRole::Assistant => ("OpenReel", theme::MUTED_FG),
-                            };
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(who).strong().color(color));
-                                ui.label(&message.text);
-                            });
-                        }
-                    });
-
-                if self.show_chat_debug && !self.last_generated_js.is_empty() {
-                    egui::ScrollArea::vertical()
-                        .id_salt("chat_debug_js")
-                        .max_height(54.0)
-                        .show(ui, |ui| {
-                            ui.monospace(&self.last_generated_js);
-                        });
-                }
-
-                ui.horizontal(|ui| {
-                    let input_width = (ui.available_width() - 76.0).max(80.0);
-                    let response = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.chat_input)
-                                .hint_text("Describe the edit…")
-                                .desired_width(input_width),
-                        )
-                        .on_hover_text("Describe an edit. Enter sends it. Ctrl+K focuses chat.");
-                    if focus_requested {
-                        response.request_focus();
-                    }
-                    let send_clicked = theme::primary_button(ui, "Send")
-                        .on_hover_text("Send this edit request")
-                        .clicked();
-                    if send_clicked
-                        || ((response.has_focus() || response.lost_focus())
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+        {
+            ui.horizontal(|ui| {
+                if let Some(pending) = &self.chat_pending {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(RichText::new(pending.progress_label()).color(theme::MUTED_FG));
+                    if theme::ghost_button(ui, "Cancel")
+                        .on_hover_text("Cancel the in-flight model call")
+                        .clicked()
                     {
-                        submitted = Some(std::mem::take(&mut self.chat_input));
-                        response.request_focus();
+                        cancel_clicked = true;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::ghost_button(ui, "Settings")
+                        .on_hover_text("Meta Model API settings")
+                        .clicked()
+                    {
+                        self.show_chat_settings = !self.show_chat_settings;
+                    }
+                    let debug = if self.show_chat_debug {
+                        theme::outline_button(ui, "Debug")
+                    } else {
+                        theme::ghost_button(ui, "Debug")
+                    };
+                    if debug
+                        .on_hover_text("Show the last generated JavaScript")
+                        .clicked()
+                    {
+                        self.show_chat_debug = !self.show_chat_debug;
+                    }
+                    if self.chat_undo.is_some()
+                        && theme::ghost_button(ui, "Undo edit")
+                            .on_hover_text("Restore the timeline from before the last AI edit")
+                            .clicked()
+                    {
+                        undo_clicked = true;
                     }
                 });
             });
+            ui.add_space(4.0);
+
+            // Button intents: one registry, local first. New
+            // buttons are declared in `intents.rs`.
+            ui.horizontal_wrapped(|ui| {
+                for intent in INTENTS {
+                    let response = match intent.kind {
+                        IntentKind::Local(_) => theme::outline_button(ui, intent.label),
+                        IntentKind::Model => theme::ghost_button(ui, intent.label),
+                    };
+                    if response.on_hover_text(intent.tooltip).clicked() {
+                        clicked_intent = Some(intent.id);
+                    }
+                }
+            });
+            ui.add_space(4.0);
+
+            let debug_height = if self.show_chat_debug { 58.0 } else { 0.0 };
+            let messages_height = (ui.available_height() - 74.0 - debug_height).max(28.0);
+            egui::ScrollArea::vertical()
+                .id_salt("chat_messages")
+                .max_height(messages_height)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if self.chat_session.messages.is_empty() {
+                        ui.label(
+                            RichText::new("Ask for an edit in plain words.").color(theme::MUTED_FG),
+                        );
+                    }
+                    for message in &self.chat_session.messages {
+                        let (who, color) = match message.role {
+                            ChatRole::User => ("You", theme::FOREGROUND),
+                            ChatRole::Assistant => ("Eddie", theme::MUTED_FG),
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(who).strong().color(color));
+                            ui.label(&message.text);
+                        });
+                    }
+                });
+
+            if self.show_chat_debug && !self.last_generated_js.is_empty() {
+                egui::ScrollArea::vertical()
+                    .id_salt("chat_debug_js")
+                    .max_height(54.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&self.last_generated_js);
+                    });
+            }
+
+            // Pin the composer to the bottom of the dock.
+            ui.add_space((ui.available_height() - 34.0).max(0.0));
+            ui.horizontal(|ui| {
+                let input_width = (ui.available_width() - 76.0).max(80.0);
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.chat_input)
+                            .hint_text("Describe the edit…")
+                            .desired_width(input_width),
+                    )
+                    .on_hover_text("Describe an edit. Enter sends it. Ctrl+K focuses chat.");
+                if focus_requested {
+                    response.request_focus();
+                }
+                let send_clicked = theme::primary_button(ui, "Send")
+                    .on_hover_text("Send this edit request")
+                    .clicked();
+                if send_clicked
+                    || ((response.has_focus() || response.lost_focus())
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    submitted = Some(std::mem::take(&mut self.chat_input));
+                    response.request_focus();
+                }
+            });
+        }
         if cancel_clicked {
             self.cancel_chat();
         }

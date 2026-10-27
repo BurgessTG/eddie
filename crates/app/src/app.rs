@@ -54,6 +54,12 @@ enum UiAction {
     GoEnd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RightTab {
+    Chat,
+    Details,
+}
+
 pub struct EditorApp {
     timeline: Timeline,
     timeline_view: TimelineView,
@@ -109,6 +115,8 @@ pub struct EditorApp {
     chat_generation: u64,
     chat_undo: Option<TimelineSnapshot>,
     show_chat: bool,
+    right_tab: RightTab,
+    prev_selected: Option<ClipId>,
     show_chat_settings: bool,
     show_chat_debug: bool,
     last_generated_js: String,
@@ -124,7 +132,7 @@ impl EditorApp {
         let wake_ctx = cc.egui_ctx.clone();
         let (still_decoder, still_rx) = StillDecoder::spawn(move || wake_ctx.request_repaint());
         let (script_engine, console_output) = match ScriptEngine::new() {
-            Ok(engine) => (Some(engine), vec!["OpenReel JS. help()".to_owned()]),
+            Ok(engine) => (Some(engine), vec!["Eddie JS. help()".to_owned()]),
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
         Self {
@@ -174,6 +182,8 @@ impl EditorApp {
             chat_generation: 0,
             chat_undo: None,
             show_chat: true,
+            right_tab: RightTab::Chat,
+            prev_selected: None,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -191,7 +201,7 @@ impl EditorApp {
         let wake_ctx = ctx.clone();
         let (still_decoder, still_rx) = StillDecoder::spawn(move || wake_ctx.request_repaint());
         let (script_engine, console_output) = match ScriptEngine::new() {
-            Ok(engine) => (Some(engine), vec!["OpenReel JS. help()".to_owned()]),
+            Ok(engine) => (Some(engine), vec!["Eddie JS. help()".to_owned()]),
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
         Self {
@@ -241,6 +251,8 @@ impl EditorApp {
             chat_generation: 0,
             chat_undo: None,
             show_chat: true,
+            right_tab: RightTab::Chat,
+            prev_selected: None,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -1104,7 +1116,7 @@ impl EditorApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("OpenReel").strong().size(15.0));
+                    ui.label(RichText::new("Eddie").strong().size(15.0));
                     ui.separator();
                     ui.menu_button("File", |ui| {
                         if ui.button("Import media…").clicked() {
@@ -1235,20 +1247,23 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     theme::panel_title(ui, "TIMELINE");
-                    let magnet_response = if self.timeline_view.magnet {
-                        theme::outline_button(ui, "Magnet")
-                    } else {
-                        theme::ghost_button(ui, "Magnet")
-                    };
-                    if magnet_response
-                        .on_hover_text("Magnet: snap clip edges while dragging (M)")
-                        .clicked()
+                    if tool_icon_button(
+                        ui,
+                        ToolIcon::Magnet,
+                        self.timeline_view.magnet,
+                        "Magnet: snap clip edges while dragging (M)",
+                    )
+                    .clicked()
                     {
                         self.timeline_view.magnet = !self.timeline_view.magnet;
                     }
-                    if theme::ghost_button(ui, "Add title")
-                        .on_hover_text("Add a title clip at the playhead")
-                        .clicked()
+                    if tool_icon_button(
+                        ui,
+                        ToolIcon::Title,
+                        false,
+                        "Add a title clip at the playhead",
+                    )
+                    .clicked()
                     {
                         let track = self.first_free_track(self.playhead, 4.0);
                         let id = self.timeline.add_clip(
@@ -1262,15 +1277,23 @@ impl EditorApp {
                         self.selected = Some(id);
                         self.status = "Title added.".to_owned();
                     }
-                    if theme::ghost_button(ui, "Split")
-                        .on_hover_text("Split the clip under the playhead (S)")
-                        .clicked()
+                    if tool_icon_button(
+                        ui,
+                        ToolIcon::Split,
+                        false,
+                        "Split the clip under the playhead (S)",
+                    )
+                    .clicked()
                     {
                         self.split_at_playhead();
                     }
-                    if theme::ghost_button(ui, "Delete")
-                        .on_hover_text("Delete the selected clip (Del)")
-                        .clicked()
+                    if tool_icon_button(
+                        ui,
+                        ToolIcon::Delete,
+                        false,
+                        "Delete the selected clip (Del)",
+                    )
+                    .clicked()
                     {
                         if let Some(id) = self.selected.take() {
                             self.delete_clip(id);
@@ -1311,125 +1334,177 @@ impl EditorApp {
             });
     }
 
-    fn inspector(&mut self, ctx: &egui::Context) {
-        if !self.show_inspector {
+    /// Right dock: Chat and Details (inspector) share one panel
+    /// with tabs, so the timeline keeps its full height. Selecting
+    /// a clip switches to Details; Cmd+K switches back to Chat.
+    fn right_dock(&mut self, ctx: &egui::Context) {
+        if !self.show_chat && !self.show_inspector {
             return;
         }
-        egui::SidePanel::right("inspector")
+        if self.selected != self.prev_selected {
+            self.prev_selected = self.selected;
+            if self.selected.is_some() && self.show_inspector {
+                self.right_tab = RightTab::Details;
+            }
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) && self.show_chat {
+            self.right_tab = RightTab::Chat;
+        }
+        // Fall back when the active tab is hidden from the View menu.
+        match self.right_tab {
+            RightTab::Chat if !self.show_chat => self.right_tab = RightTab::Details,
+            RightTab::Details if !self.show_inspector => self.right_tab = RightTab::Chat,
+            _ => {}
+        }
+        egui::SidePanel::right("right_dock")
             .resizable(true)
-            .default_width(272.0)
-            .width_range(220.0..=420.0)
+            .default_width(320.0)
+            .width_range(240.0..=460.0)
             .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(12))
             .show(ctx, |ui| {
-                theme::panel_title(ui, "INSPECTOR");
-                ui.add_space(10.0);
-                let Some(id) = self.selected else {
-                    ui.label(RichText::new("No clip selected.").color(theme::MUTED_FG));
-                    return;
-                };
-
-                let mut do_split = false;
-                let mut do_delete = false;
-                if let Some(clip) = self.timeline.clip_mut(id) {
-                    ui.add(egui::TextEdit::singleline(&mut clip.name).desired_width(f32::INFINITY));
-                    ui.add_space(6.0);
-                    let source_label = match &clip.source {
-                        Some(path) => path.clone(),
-                        None => "Generated clip".to_owned(),
-                    };
-                    ui.label(
-                        RichText::new(source_label)
-                            .size(11.0)
-                            .color(theme::MUTED_FG),
-                    );
-                    ui.add_space(10.0);
-                    let is_audio = clip.kind == ClipKind::Audio;
-                    egui::Grid::new("clip_props")
-                        .num_columns(2)
-                        .spacing([12.0, 8.0])
-                        .show(ui, |ui| {
-                            ui.label("Start (s)");
-                            ui.add(
-                                egui::DragValue::new(&mut clip.start)
-                                    .speed(0.05)
-                                    .range(0.0..=86400.0),
-                            );
-                            ui.end_row();
-                            ui.label("Duration (s)");
-                            ui.add(
-                                egui::DragValue::new(&mut clip.duration)
-                                    .speed(0.05)
-                                    .range(0.1..=86400.0),
-                            );
-                            ui.end_row();
-                            if clip.source.is_some() {
-                                ui.label("Source in (s)");
-                                ui.add(
-                                    egui::DragValue::new(&mut clip.source_in)
-                                        .speed(0.05)
-                                        .range(0.0..=86400.0),
-                                );
-                                ui.end_row();
-                            }
-                            if !is_audio {
-                                ui.label("Opacity");
-                                ui.add(egui::Slider::new(&mut clip.opacity, 0.0..=1.0));
-                                ui.end_row();
-                            }
-                            if clip.source.is_some() {
-                                ui.label("Volume");
-                                ui.add(egui::Slider::new(&mut clip.volume, 0.0..=1.5));
-                                ui.end_row();
-                            }
-                        });
-                    ui.add_space(14.0);
-                    if theme::outline_button(ui, "Split at playhead")
-                        .on_hover_text("Split this clip at the playhead (S)")
-                        .clicked()
-                    {
-                        do_split = true;
-                    }
-                    ui.add_space(6.0);
-                    if theme::destructive_button(ui, "Delete clip")
-                        .on_hover_text("Delete this clip (Del)")
-                        .clicked()
-                    {
-                        do_delete = true;
-                    }
-                }
-
-                // Snap and clamp against the real source duration.
-                if let Some(start) = self.timeline.clip(id).map(|c| c.start) {
-                    self.timeline.move_clip(id, start);
-                }
-                let source_duration = self
-                    .timeline
-                    .clip(id)
-                    .and_then(|c| c.source.as_ref())
-                    .and_then(|s| self.asset(s))
-                    .map(|a| a.info.duration);
-                if let (Some(max_dur), Some(clip)) = (source_duration, self.timeline.clip_mut(id)) {
-                    clip.source_in = clip.source_in.clamp(0.0, max_dur);
-                    clip.duration = clip.duration.min((max_dur - clip.source_in).max(0.1));
-                }
-
-                if do_split {
-                    match self.timeline.split_at(id, self.playhead) {
-                        Some(new_id) => {
-                            self.selected = Some(new_id);
-                            self.status = "Clip split at playhead.".to_owned();
-                        }
-                        None => {
-                            self.status = "Playhead is not inside the selected clip.".to_owned();
+                ui.horizontal(|ui| {
+                    if self.show_chat {
+                        let chat_tab = if self.right_tab == RightTab::Chat {
+                            theme::outline_button(ui, "Chat")
+                        } else {
+                            theme::ghost_button(ui, "Chat")
+                        };
+                        if chat_tab
+                            .on_hover_text("Chat editing. Cmd+K jumps here.")
+                            .clicked()
+                        {
+                            self.right_tab = RightTab::Chat;
                         }
                     }
-                }
-                if do_delete {
-                    self.delete_clip(id);
-                    self.selected = None;
-                    self.status = "Clip deleted.".to_owned();
+                    if self.show_inspector {
+                        let details_tab = if self.right_tab == RightTab::Details {
+                            theme::outline_button(ui, "Details")
+                        } else {
+                            theme::ghost_button(ui, "Details")
+                        };
+                        if details_tab
+                            .on_hover_text("Fine-grained numbers for the selected clip")
+                            .clicked()
+                        {
+                            self.right_tab = RightTab::Details;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                match self.right_tab {
+                    RightTab::Chat => self.chat_content(ui, ctx),
+                    RightTab::Details => self.inspector_content(ui),
                 }
             });
+    }
+
+    fn inspector_content(&mut self, ui: &mut Ui) {
+        let Some(id) = self.selected else {
+            ui.label(RichText::new("No clip selected.").color(theme::MUTED_FG));
+            return;
+        };
+
+        let mut do_split = false;
+        let mut do_delete = false;
+        if let Some(clip) = self.timeline.clip_mut(id) {
+            ui.add(egui::TextEdit::singleline(&mut clip.name).desired_width(f32::INFINITY));
+            ui.add_space(6.0);
+            let source_label = match &clip.source {
+                Some(path) => path.clone(),
+                None => "Generated clip".to_owned(),
+            };
+            ui.label(
+                RichText::new(source_label)
+                    .size(11.0)
+                    .color(theme::MUTED_FG),
+            );
+            ui.add_space(10.0);
+            let is_audio = clip.kind == ClipKind::Audio;
+            egui::Grid::new("clip_props")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Start (s)");
+                    ui.add(
+                        egui::DragValue::new(&mut clip.start)
+                            .speed(0.05)
+                            .range(0.0..=86400.0),
+                    );
+                    ui.end_row();
+                    ui.label("Duration (s)");
+                    ui.add(
+                        egui::DragValue::new(&mut clip.duration)
+                            .speed(0.05)
+                            .range(0.1..=86400.0),
+                    );
+                    ui.end_row();
+                    if clip.source.is_some() {
+                        ui.label("Source in (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut clip.source_in)
+                                .speed(0.05)
+                                .range(0.0..=86400.0),
+                        );
+                        ui.end_row();
+                    }
+                    if !is_audio {
+                        ui.label("Opacity");
+                        ui.add(egui::Slider::new(&mut clip.opacity, 0.0..=1.0));
+                        ui.end_row();
+                    }
+                    if clip.source.is_some() {
+                        ui.label("Volume");
+                        ui.add(egui::Slider::new(&mut clip.volume, 0.0..=1.5));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(14.0);
+            if theme::outline_button(ui, "Split at playhead")
+                .on_hover_text("Split this clip at the playhead (S)")
+                .clicked()
+            {
+                do_split = true;
+            }
+            ui.add_space(6.0);
+            if theme::destructive_button(ui, "Delete clip")
+                .on_hover_text("Delete this clip (Del)")
+                .clicked()
+            {
+                do_delete = true;
+            }
+        }
+
+        // Snap and clamp against the real source duration.
+        if let Some(start) = self.timeline.clip(id).map(|c| c.start) {
+            self.timeline.move_clip(id, start);
+        }
+        let source_duration = self
+            .timeline
+            .clip(id)
+            .and_then(|c| c.source.as_ref())
+            .and_then(|s| self.asset(s))
+            .map(|a| a.info.duration);
+        if let (Some(max_dur), Some(clip)) = (source_duration, self.timeline.clip_mut(id)) {
+            clip.source_in = clip.source_in.clamp(0.0, max_dur);
+            clip.duration = clip.duration.min((max_dur - clip.source_in).max(0.1));
+        }
+
+        if do_split {
+            match self.timeline.split_at(id, self.playhead) {
+                Some(new_id) => {
+                    self.selected = Some(new_id);
+                    self.status = "Clip split at playhead.".to_owned();
+                }
+                None => {
+                    self.status = "Playhead is not inside the selected clip.".to_owned();
+                }
+            }
+        }
+        if do_delete {
+            self.delete_clip(id);
+            self.selected = None;
+            self.status = "Clip deleted.".to_owned();
+        }
     }
 
     fn central(&mut self, ctx: &egui::Context) {
@@ -1549,12 +1624,11 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.console_panel(ctx);
         self.timeline_panel(ctx);
-        self.chat_panel(ctx);
         self.chat_settings_window(ctx);
         if let Some(a) = self.media_bin(ctx) {
             action = Some(a);
         }
-        self.inspector(ctx);
+        self.right_dock(ctx);
         self.central(ctx);
         self.finish_frame(ctx, action);
         if self.import_rx.is_some() || self.export_rx.is_some() {
@@ -1586,6 +1660,117 @@ fn read_rss_mb() -> u64 {
         .and_then(|kb| kb.parse::<u64>().ok())
         .map(|kb| kb / 1024)
         .unwrap_or(0)
+}
+
+enum ToolIcon {
+    Magnet,
+    Title,
+    Split,
+    Delete,
+}
+
+/// Timeline tool glyphs drawn as shapes, like the transport icons.
+/// Borderless at rest; hover and the active toggle carry the fill.
+fn tool_icon_button(ui: &mut Ui, icon: ToolIcon, active: bool, tooltip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(32.0, 32.0), Sense::click());
+    let painter = ui.painter();
+    if active {
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::R_MD),
+            theme::SECONDARY,
+            Stroke::new(1.0_f32, theme::BORDER_STRONG),
+            egui::StrokeKind::Outside,
+        );
+    } else if response.is_pointer_button_down_on() {
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::R_MD),
+            egui::Color32::from_rgb(0x40, 0x40, 0x49),
+            Stroke::NONE,
+            egui::StrokeKind::Outside,
+        );
+    } else if response.hovered() {
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::R_MD),
+            theme::ACCENT,
+            Stroke::NONE,
+            egui::StrokeKind::Outside,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = rect.center();
+    let fg = theme::FOREGROUND;
+    let line = Stroke::new(1.8_f32, fg);
+    match icon {
+        ToolIcon::Magnet => {
+            // Horseshoe: two poles and a U arc.
+            let left = egui::Rect::from_min_size(c + Vec2::new(-7.0, -8.0), Vec2::new(4.0, 7.0));
+            let right = egui::Rect::from_min_size(c + Vec2::new(3.0, -8.0), Vec2::new(4.0, 7.0));
+            painter.rect_filled(left, CornerRadius::same(1), fg);
+            painter.rect_filled(right, CornerRadius::same(1), fg);
+            let arc: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let angle = std::f32::consts::PI * (i as f32 / 12.0);
+                    c + Vec2::new(-5.0 * angle.cos(), -1.0 + 6.0 * angle.sin())
+                })
+                .collect();
+            painter.add(Shape::line(arc, Stroke::new(3.6_f32, fg)));
+        }
+        ToolIcon::Title => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "T",
+                egui::FontId::proportional(16.0),
+                fg,
+            );
+        }
+        ToolIcon::Split => {
+            // One bar cut in two, slightly separated.
+            let left = egui::Rect::from_min_size(c + Vec2::new(-9.0, -5.0), Vec2::new(7.0, 10.0));
+            let right = egui::Rect::from_min_size(c + Vec2::new(2.0, -5.0), Vec2::new(7.0, 10.0));
+            painter.rect(
+                left,
+                CornerRadius::same(2),
+                egui::Color32::TRANSPARENT,
+                line,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect(
+                right,
+                CornerRadius::same(2),
+                egui::Color32::TRANSPARENT,
+                line,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [c + Vec2::new(0.0, -8.0), c + Vec2::new(0.0, 8.0)],
+                Stroke::new(1.4_f32, theme::PLAYHEAD),
+            );
+        }
+        ToolIcon::Delete => {
+            // Trash can: lid, body, ribs.
+            painter.line_segment([c + Vec2::new(-7.0, -5.0), c + Vec2::new(7.0, -5.0)], line);
+            painter.line_segment([c + Vec2::new(-3.0, -8.0), c + Vec2::new(3.0, -8.0)], line);
+            let body = egui::Rect::from_min_size(c + Vec2::new(-5.5, -5.0), Vec2::new(11.0, 13.0));
+            painter.rect(
+                body,
+                CornerRadius::same(2),
+                egui::Color32::TRANSPARENT,
+                line,
+                egui::StrokeKind::Inside,
+            );
+            for dx in [-2.5_f32, 0.0, 2.5] {
+                painter.line_segment(
+                    [c + Vec2::new(dx, -1.5), c + Vec2::new(dx, 5.0)],
+                    Stroke::new(1.2_f32, fg),
+                );
+            }
+        }
+    }
+    response.on_hover_text(tooltip)
 }
 
 enum TransportIcon {
@@ -2027,6 +2212,35 @@ mod tests {
             "export duration {} vs timeline {expected_end}",
             info.duration
         );
+    }
+
+    #[test]
+    fn right_dock_switches_to_details_on_selection() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let id = app
+            .timeline
+            .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 5.0, 0.0);
+        let run_dock = |app: &mut EditorApp| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1200.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.right_dock(ctx);
+                    egui::CentralPanel::default().show(ctx, |_| {});
+                },
+            );
+        };
+        run_dock(&mut app);
+        assert_eq!(app.right_tab, RightTab::Chat);
+        app.selected = Some(id);
+        run_dock(&mut app);
+        assert_eq!(app.right_tab, RightTab::Details);
     }
 
     #[test]
