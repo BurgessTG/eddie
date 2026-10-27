@@ -383,8 +383,13 @@ impl TimelineView {
 
         if response.drag_stopped() {
             if self.magnet {
-                if let Some((id, _)) = self.drag {
-                    if timeline.clip(id).map(|c| c.track) == Some(MAIN_TRACK) {
+                if let Some((id, mode)) = self.drag {
+                    // A left trim deliberately opens a gap, and the engine
+                    // contract keeps the clip's end fixed; rippling the
+                    // track closed here would shift that end left by the
+                    // trimmed amount. Other drags keep the magnetic close.
+                    let keep_gap = matches!(mode, DragMode::TrimLeft { .. });
+                    if !keep_gap && timeline.clip(id).map(|c| c.track) == Some(MAIN_TRACK) {
                         timeline.close_gaps(MAIN_TRACK);
                     }
                 }
@@ -914,6 +919,76 @@ mod tests {
         );
         assert!((clip.end() - 8.0).abs() < 1e-6);
         assert!((clip.source_in - 3.5).abs() < 0.02);
+    }
+
+    /// Left-trimming a clip that follows another clip must keep the
+    /// trimmed clip's end fixed (the engine trim contract). Regression:
+    /// on drag release, the magnet's close_gaps rippled the trimmed
+    /// clip back to the previous clip's end, so the trimmed amount
+    /// came off the end as well.
+    #[test]
+    fn trim_left_after_another_clip_keeps_end_fixed() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let a_id =
+            timeline.add_media_clip("a.mp4", ClipKind::Video, 1, 0.0, 10.0, 0.0, "/media/a.mp4");
+        let b_id =
+            timeline.add_media_clip("b.mp4", ClipKind::Video, 1, 12.0, 10.0, 0.0, "/media/b.mp4");
+        let visuals: VisualMap<'_> = [
+            (
+                "/media/a.mp4",
+                ClipVisual {
+                    duration: 30.0,
+                    peaks: &[],
+                    thumbs: &[],
+                },
+            ),
+            (
+                "/media/b.mp4",
+                ClipVisual {
+                    duration: 30.0,
+                    peaks: &[],
+                    thumbs: &[],
+                },
+            ),
+        ]
+        .into();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        let y = 99.0;
+        // B spans t=12..22, so its left edge is x=720 (144 + 12*48).
+        // Drag the edge 144px right (+3s) and release.
+        let frames = vec![
+            vec![],
+            vec![pointer_button(720.0, y, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(864.0, y))],
+            vec![pointer_button(864.0, y, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        let a = timeline.clip(a_id).unwrap();
+        assert_eq!(a.start, 0.0);
+        assert!((a.end() - 10.0).abs() < 1e-6);
+        let b = timeline.clip(b_id).unwrap();
+        assert!(
+            (b.start - 15.0).abs() < 0.02,
+            "expected start 15 after +3s left trim, got {}",
+            b.start
+        );
+        assert!(
+            (b.end() - 22.0).abs() < 1e-6,
+            "left trim must keep the end fixed, got {}",
+            b.end()
+        );
+        assert!((b.source_in - 3.0).abs() < 0.02);
     }
 
     #[test]
