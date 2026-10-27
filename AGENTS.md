@@ -63,6 +63,21 @@ The media bin and import pipeline live in `crates/app/src/app/media.rs`.
 Chat editing lives in `crates/app/src/app/chat.rs`. Its HTTP call runs on
 a worker thread in app code. Generated JavaScript still goes through
 `scripting.rs` and mutates state only as `ScriptCommand`s.
+Chat session state (persisted history, pinned project summary, token
+budget `TOKEN_BUDGET`, and compaction of older turns into one summary
+message) lives in `crates/app/src/app/session.rs`, adapted from
+Mitsuro's `mitsuro-client-state`/`mitsuro-core` and its compaction
+research — state store and budget discipline only, not its
+coding-agent loop. Requests are assembled developer contract →
+few-shot → pinned summary → recent history → timeline JSON last, with
+a per-project `prompt_cache_key`, so the cached prefix stays stable.
+The model replies with a structured `{code, explanation}` envelope
+(free-text parsing is a fallback). Only 429/500/503 are retried.
+Button intents are declared in `crates/app/src/app/intents.rs`: local
+intents arrange sweep candidates offline through the same
+`ScriptCommand` batch path; model intents are fixed prompts through
+the chat loop. AI edits snapshot the timeline first for one-click
+undo, and in-flight calls can be cancelled.
 The import QC sweep lives in `crates/app/src/app/sweep.rs`, with motion
 sampling and segmentation in `crates/media/src/sweep.rs`. It transcribes
 with `muse-voice-transcribe-1.0` when a Meta API key is configured,

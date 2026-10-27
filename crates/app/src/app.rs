@@ -16,11 +16,16 @@ use crate::scripting::{ScriptCommand, ScriptEngine};
 use crate::theme;
 
 pub(crate) mod chat;
+pub(crate) mod intents;
 mod media;
+#[cfg(test)]
+mod screenshot;
+pub(crate) mod session;
 mod sweep;
 use crate::timeline_ui::{ClipVisual, TimelineTool, TimelineView, VisualMap};
-use chat::{ChatMessage, ChatSettings, ChatWorkerResult, PendingChat};
+use chat::{ChatSettings, ChatWorkerResult, PendingChat, TimelineSnapshot};
 use media::{AssetState, BinAsset, ImportMsg};
+use session::ChatSession;
 use sweep::SweepMsg;
 
 const TRACK_TITLES: usize = 0;
@@ -101,10 +106,12 @@ pub struct EditorApp {
     console_history_idx: Option<usize>,
 
     chat_settings: ChatSettings,
-    chat_messages: Vec<ChatMessage>,
+    chat_session: ChatSession,
     chat_input: String,
-    chat_rx: Option<Receiver<ChatWorkerResult>>,
+    chat_rx: Option<Receiver<(u64, ChatWorkerResult)>>,
     chat_pending: Option<PendingChat>,
+    chat_generation: u64,
+    chat_undo: Option<TimelineSnapshot>,
     show_chat: bool,
     show_chat_settings: bool,
     show_chat_debug: bool,
@@ -164,10 +171,79 @@ impl EditorApp {
             console_history: Vec::new(),
             console_history_idx: None,
             chat_settings: ChatSettings::load(),
-            chat_messages: Vec::new(),
+            chat_session: ChatSession::load(),
             chat_input: String::new(),
             chat_rx: None,
             chat_pending: None,
+            chat_generation: 0,
+            chat_undo: None,
+            show_chat: true,
+            show_chat_settings: false,
+            show_chat_debug: false,
+            last_generated_js: String::new(),
+            frame_ms_ema: 0.0,
+            rss_mb: read_rss_mb(),
+            frame_count: 0,
+        }
+    }
+
+    /// Headless constructor for the screenshot test: same defaults
+    /// as `new`, but without a window or persisted user config.
+    #[cfg(test)]
+    fn headless_for_test(ctx: &egui::Context) -> Self {
+        theme::apply(ctx);
+        let wake_ctx = ctx.clone();
+        let (still_decoder, still_rx) = StillDecoder::spawn(move || wake_ctx.request_repaint());
+        let (script_engine, console_output) = match ScriptEngine::new() {
+            Ok(engine) => (Some(engine), vec!["OpenReel JS. help()".to_owned()]),
+            Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
+        };
+        Self {
+            timeline: Timeline::empty_project(),
+            timeline_view: TimelineView::default(),
+            playhead: 0.0,
+            playing: false,
+            last_now: None,
+            selected: None,
+            assets: Vec::new(),
+            selected_asset: None,
+            search: String::new(),
+            status: "Ready.".to_owned(),
+            import_rx: None,
+            pending_sample_project: false,
+            sweep_rx: None,
+            sweep_queue: Vec::new(),
+            initial_imports: Vec::new(),
+            still_decoder,
+            still_rx,
+            preview_texture: None,
+            still_gen: 0,
+            still_pending: false,
+            still_key: None,
+            still_cache: HashMap::new(),
+            stream: None,
+            stream_clip: None,
+            audio_players: HashMap::new(),
+            audio_failed: false,
+            last_sync_playhead: 0.0,
+            last_sync_time: 0.0,
+            export_rx: None,
+            export_progress: None,
+            show_media: true,
+            show_inspector: true,
+            show_console: false,
+            script_engine,
+            console_input: String::new(),
+            console_output,
+            console_history: Vec::new(),
+            console_history_idx: None,
+            chat_settings: ChatSettings::default(),
+            chat_session: ChatSession::new("screenshot"),
+            chat_input: String::new(),
+            chat_rx: None,
+            chat_pending: None,
+            chat_generation: 0,
+            chat_undo: None,
             show_chat: true,
             show_chat_settings: false,
             show_chat_debug: false,
@@ -625,6 +701,9 @@ impl EditorApp {
                     "reason": candidate.reason,
                     "stability": candidate.stability,
                     "audioEnergy": candidate.audio_energy,
+                    "audioPeak": candidate.audio_peak,
+                    "isReaction": candidate.is_reaction(),
+                    "reactionScore": candidate.reaction_score(),
                     "hasVideo": candidate.has_video,
                     "transcript": candidate.transcript_text(),
                 })
@@ -636,6 +715,33 @@ impl EditorApp {
                 .unwrap_or(0.0)
                 .total_cmp(&a["score"].as_f64().unwrap_or(0.0))
         });
+        // Turn-level transcript segments (Voice Transcribe has no
+        // word-level timing), id-matched with the pinned digest so
+        // requests like "the part where he talks about pricing"
+        // resolve against real ranges.
+        let transcript_segments: Vec<serde_json::Value> = self
+            .assets
+            .iter()
+            .flat_map(|asset| {
+                asset
+                    .sweep
+                    .transcript
+                    .iter()
+                    .enumerate()
+                    .map(|(index, segment)| {
+                        serde_json::json!({
+                            "id": session::transcript_segment_id(&asset.info.path, index),
+                            "asset": asset.info.path,
+                            "assetName": asset.info.name,
+                            "start": segment.start,
+                            "end": segment.end,
+                            "speaker": segment.speaker,
+                            "text": segment.text,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         serde_json::json!({
             "playhead": self.playhead,
             "playing": self.playing,
@@ -650,6 +756,7 @@ impl EditorApp {
             "clips": clips,
             "assets": assets,
             "sweepCandidates": sweep_candidates,
+            "transcriptSegments": transcript_segments,
         })
         .to_string()
     }
