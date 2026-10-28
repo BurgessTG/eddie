@@ -174,6 +174,7 @@ impl Fixture {
                     "stability": 0.9,
                     "audioEnergy": 0.5,
                     "audioPeak": c.audio_peak,
+                    "musicBed": false,
                     "isReaction": c.is_reaction,
                     "reactionScore": c.reaction_score,
                     "category": c.category,

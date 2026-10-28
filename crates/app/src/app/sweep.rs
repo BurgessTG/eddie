@@ -34,7 +34,7 @@ pub(super) const CURATOR_CATEGORIES: [&str; 6] = [
 /// Controlled tag vocabulary. Local classification derives these
 /// from measured signals; model tags are validated against the
 /// same list so chat prompts can filter on stable words.
-pub(super) const CURATOR_TAGS: [&str; 10] = [
+pub(super) const CURATOR_TAGS: [&str; 11] = [
     "speech",
     "quiet",
     "loud-peak",
@@ -45,7 +45,16 @@ pub(super) const CURATOR_TAGS: [&str; 10] = [
     "scene-open",
     "long-take",
     "short",
+    "music-bed",
 ];
+
+/// A mixed music bed (finished montages, scored footage) keeps
+/// nearly every audio bucket audible. Speech breathes between
+/// phrases. Above this coverage the audio is bed, not signal:
+/// peaks stop meaning reactions and energy stops meaning quality.
+fn is_music_bed(segment: &SweepSegment) -> bool {
+    segment.audio_coverage >= 0.75 && segment.audio_energy >= 0.2
+}
 
 /// Prime quota: at most this share of one asset's candidates, and
 /// only at or above `PRIME_MIN_SCORE`.
@@ -87,6 +96,9 @@ pub(super) struct SweepCandidate {
     /// and a blended audio score (energy + peak).
     pub(super) motion_score: f32,
     pub(super) audio_score: f32,
+    /// Baked-in music bed suspected: audio signals were discounted
+    /// for this candidate and JS can filter on it.
+    pub(super) music_bed: bool,
     pub(super) has_video: bool,
     pub(super) transcript: Vec<TranscriptSegment>,
     pub(super) dismissed: bool,
@@ -352,9 +364,23 @@ fn run_sweep(
         return Err(format!("Sweep found no usable segments in {}.", info.name));
     }
 
-    let (transcript, transcript_note) = match transcribe_asset(settings, info) {
-        Ok(transcript) => (transcript, None),
-        Err(note) => (Vec::new(), Some(note)),
+    let music_dominant = !segments.is_empty()
+        && segments
+            .iter()
+            .filter(|segment| is_music_bed(segment))
+            .count() as f32
+            >= segments.len() as f32 * 0.8;
+    let (transcript, transcript_note) = if music_dominant {
+        // Lyrics would pollute speech logic and burn credits.
+        (
+            Vec::new(),
+            Some("Music bed throughout; skipped transcription and discounted audio.".to_owned()),
+        )
+    } else {
+        match transcribe_asset(settings, info) {
+            Ok(transcript) => (transcript, None),
+            Err(note) => (Vec::new(), Some(note)),
+        }
     };
 
     let local = local_candidates(info, &segments, &transcript);
@@ -417,7 +443,10 @@ fn classify_local(
     if has_speech {
         tag("speech");
     }
-    if segment.audio_peak >= 0.75 {
+    let music_bed = is_music_bed(segment);
+    if music_bed {
+        tag("music-bed");
+    } else if segment.audio_peak >= 0.75 {
         tag("loud-peak");
     }
     if audio_score < 0.15 {
@@ -441,7 +470,8 @@ fn classify_local(
     } else if segment.duration() <= 3.0 {
         tag("short");
     }
-    let reactionish = segment.audio_peak >= 0.75 && audio_score >= 0.4 && segment.duration() <= 7.0;
+    let reactionish =
+        !music_bed && segment.audio_peak >= 0.75 && audio_score >= 0.4 && segment.duration() <= 7.0;
     let category = if reactionish {
         "reaction"
     } else if has_speech {
@@ -495,8 +525,11 @@ fn local_candidates(
                 0.75
             };
             let overlaps = overlapping_transcript(segment, transcript);
-            let mut score =
-                100.0 * (0.42 * stability + 0.28 * energy + 0.15 * peak + 0.15 * duration_score);
+            let mut score = if is_music_bed(segment) {
+                100.0 * (0.65 * stability + 0.35 * duration_score)
+            } else {
+                100.0 * (0.42 * stability + 0.28 * energy + 0.15 * peak + 0.15 * duration_score)
+            };
             if !overlaps.is_empty() {
                 score = (score + 8.0).min(100.0);
             }
@@ -584,6 +617,7 @@ fn candidate_from_segment(
         tags,
         motion_score,
         audio_score,
+        music_bed: is_music_bed(segment),
         has_video: info.has_video,
         transcript,
         dismissed: false,
@@ -631,6 +665,8 @@ fn rank_with_model(
                 "audioEnergy": segment.audio_energy,
                 "audioPeak": segment.audio_peak,
                 "sceneChange": segment.scene_change,
+                "audioCoverage": segment.audio_coverage,
+                "musicBed": is_music_bed(segment),
                 "transcript": speech,
             })
         })
@@ -642,7 +678,7 @@ fn rank_with_model(
         "messages": [
             {
                 "role": "developer",
-                "content": "You are the curator for a human video editor. Rank and classify segments so the editor can prompt cuts later (for example reactions first, or prime shots only). Prefer stable footage, a clear subject or speech, reaction/energy peaks, and clean in/out points. Category is exactly one of reaction, talking, action, broll, establishing (never prime; the app promotes its own top picks). Tags come only from: speech, quiet, loud-peak, steady, shaky, fast-motion, slow, scene-open, long-take, short. Return ONLY a JSON array, no markdown: [{\"segment\":0,\"score\":87,\"reason\":\"one short plain-language reason\",\"category\":\"talking\",\"tags\":[\"speech\",\"steady\"]}]. Use each segment at most once.",
+                "content": "You are the curator for a human video editor. Rank and classify segments so the editor can prompt cuts later (for example reactions first, or prime shots only). Prefer stable footage, a clear subject or speech, reaction/energy peaks, and clean in/out points. Category is exactly one of reaction, talking, action, broll, establishing (never prime; the app promotes its own top picks). Tags come only from: speech, quiet, loud-peak, steady, shaky, fast-motion, slow, scene-open, long-take, short, music-bed. When musicBed is true the audio is baked-in music, not scene sound: never call it a reaction from audio and judge it on visuals. Return ONLY a JSON array, no markdown: [{\"segment\":0,\"score\":87,\"reason\":\"one short plain-language reason\",\"category\":\"talking\",\"tags\":[\"speech\",\"steady\"]}]. Use each segment at most once.",
             },
             {
                 "role": "user",
@@ -896,6 +932,7 @@ mod tests {
             stability: 0.9,
             audio_energy: 0.5,
             audio_peak: 0.8,
+            audio_coverage: 0.5,
             scene_change: 0.0,
         };
         let (category, tags) = classify_local(&base, true, 0.1, 0.3);
@@ -926,6 +963,7 @@ mod tests {
             stability: 0.9,
             audio_energy: 0.5,
             audio_peak: 0.8,
+            audio_coverage: 0.5,
             scene_change: 0.0,
         };
         let norms = segment_norms(std::slice::from_ref(&segment));
@@ -967,6 +1005,7 @@ mod tests {
             stability: 0.9,
             audio_energy: 0.5,
             audio_peak: 0.8,
+            audio_coverage: 0.5,
             scene_change: 0.0,
         }];
         let response = serde_json::json!({
@@ -981,6 +1020,26 @@ mod tests {
     }
 
     #[test]
+    fn music_bed_blocks_audio_reaction_and_tags() {
+        let bed = SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.55,
+            audio_peak: 0.95,
+            audio_coverage: 0.97,
+            scene_change: 0.0,
+        };
+        assert!(is_music_bed(&bed));
+        let (category, tags) = classify_local(&bed, false, 0.1, 0.9);
+        assert_ne!(category, "reaction");
+        assert!(tags.iter().any(|t| t == "music-bed"));
+        assert!(!tags.iter().any(|t| t == "loud-peak"));
+    }
+
+    #[test]
     fn parses_model_ranking_and_ignores_bad_rows() {
         let info = test_info();
         let segments = vec![SweepSegment {
@@ -991,6 +1050,7 @@ mod tests {
             stability: 0.9,
             audio_energy: 0.5,
             audio_peak: 0.8,
+            audio_coverage: 0.5,
             scene_change: 0.0,
         }];
         let response = serde_json::json!({

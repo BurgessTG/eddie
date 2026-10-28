@@ -28,6 +28,9 @@ pub struct SweepSegment {
     pub stability: f32,
     pub audio_energy: f32,
     pub audio_peak: f32,
+    /// Share of audio buckets at audible level, 0..1. Speech
+    /// pauses between phrases; a mixed music bed stays near 1.
+    pub audio_coverage: f32,
     pub scene_change: f32,
 }
 
@@ -184,15 +187,23 @@ fn segment_metrics(
     let pps = peaks_per_sec.max(1) as f64;
     let first = (start * pps).floor().max(0.0) as usize;
     let last = ((end * pps).ceil() as usize).min(peaks.len());
-    let (mut energy_sum, mut audio_peak) = (0.0_f32, 0.0_f32);
+    let (mut energy_sum, mut audio_peak, mut audible) = (0.0_f32, 0.0_f32, 0_usize);
     if first < last {
         for peak in &peaks[first..last] {
             energy_sum += peak * peak;
             audio_peak = audio_peak.max(*peak);
+            if *peak >= 0.12 {
+                audible += 1;
+            }
         }
     }
     let audio_energy = if first < last {
         (energy_sum / (last - first) as f32).sqrt()
+    } else {
+        0.0
+    };
+    let audio_coverage = if first < last {
+        audible as f32 / (last - first) as f32
     } else {
         0.0
     };
@@ -205,6 +216,7 @@ fn segment_metrics(
         stability,
         audio_energy,
         audio_peak,
+        audio_coverage,
         scene_change,
     }
 }
@@ -268,6 +280,23 @@ mod tests {
         assert!(segments.iter().all(|s| s.duration() <= 8.01));
         assert!(segments[0].stability > 0.5);
         assert!(segments[0].audio_peak > 0.4);
+    }
+
+    #[test]
+    fn audio_coverage_separates_beds_from_pauses() {
+        // Constant loud peaks: every bucket audible (music bed shape).
+        let bed = build_segments(4.0, &[], &[0.6; 80], 20);
+        assert!(bed[0].audio_coverage > 0.95, "{}", bed[0].audio_coverage);
+        // Sparse peaks: mostly silence between hits (speech shape).
+        let mut sparse = vec![0.0_f32; 80];
+        sparse[10] = 0.9;
+        sparse[40] = 0.8;
+        let speech = build_segments(4.0, &[], &sparse, 20);
+        assert!(
+            speech[0].audio_coverage < 0.1,
+            "{}",
+            speech[0].audio_coverage
+        );
     }
 
     #[test]

@@ -740,6 +740,7 @@ impl EditorApp {
                     "stability": candidate.stability,
                     "audioEnergy": candidate.audio_energy,
                     "audioPeak": candidate.audio_peak,
+                    "musicBed": candidate.music_bed,
                     "isReaction": candidate.is_reaction(),
                     "reactionScore": candidate.reaction_score(),
                     "category": candidate.category,
