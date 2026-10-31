@@ -1,59 +1,128 @@
 # Eddie
 
+A fast desktop video editor with an AI clip curator. Rust end to end:
+`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for decoding,
+and the FFmpeg CLI tools for probing, export, and audio.
 
-A fast, cross-platform desktop video editor. Rust end to end: `egui` + `wgpu`
-for the UI, FFmpeg tools for media.
+Import footage, let the curator break it into every shot and the moments
+worth using, then cut those ranges together on a free-form timeline and
+export an H.264/AAC MP4. You can also edit by chat or from a sandboxed
+JavaScript console.
 
-> **Status: slice 2 — real media.** Import real video/audio (file dialog or
-> drag & drop), chop it on the timeline (move, trim edges, split at the
-> playhead), watch and hear it in the program monitor, burn in titles, and
-> export an H.264/AAC MP4.
+## Features
 
-Requires `ffmpeg`, `ffprobe`, and `ffplay` on `PATH` at runtime.
+**Editor**
 
-## Design system
+- Media bin: an image grid of thumbnails and waveforms. Imports queue and
+  show a placeholder immediately. Drag & drop, File menu, or file paths
+  on the command line.
+- Free-form timeline: lanes of any kind, gaps allowed, dragging above or
+  below the lanes creates new ones. Move, trim, swap adjacent clips
+  (including unequal lengths), and move clips across lanes. Magnet snaps
+  edges while dragging and never ripples clips closed.
+- Linked audio: detach a video's sound into a linked audio clip that moves,
+  trims and splits with it, or unlink it for J/L cuts.
+- Program monitor with frame stepping. The preview prefetches the next
+  cut's first picture so short clips play through with fewer stalls.
+- Titles and generated captions in four styles, the same in preview and
+  export. Remove silence tightens pauses out of speech.
+- Export to H.264/AAC MP4, converted to limited-range BT.709 colour.
 
-shadcn/ui tokens translated to egui (shadcn itself is React-only):
-zinc dark palette, 6/8/10px radius scale, borderless-at-rest buttons with
-hover/pressed fills, Inter when installed, and `primary` / `outline` /
-`ghost` / `destructive` variants plus `Badge`. See `crates/app/src/theme.rs`.
+**Curator**
+
+Select a video and press **Curate**. Curation never runs on import.
+
+- **Local analysis, always:** every frame is checked for visual scene
+  boundaries. Flashes, foreground objects passing the lens, and lighting
+  changes are rejected as cuts. The result is a complete, source-ordered
+  list of every shot, plus ranked suggestions scored from motion, audio,
+  and stability.
+- **With a Meta Model API key:** the selected model reviews timestamped
+  frame sequences and the transcript in 24-second windows. It picks useful
+  ranges inside each shot, and SAM 3.1 can track a specific subject on
+  request. Edges are then checked against the actual source pictures at
+  frame level. Speech ranges keep complete thoughts instead of cutting
+  mid-sentence.
+- Every range gets a category (`reaction`, `talking`, `action`, `broll`,
+  `establishing`), production tags (`detail`, `wide-shot`, `reveal`,
+  `camera-move`, ...), quality subscores, and a review status. Anything the
+  model could not validate stays available as **Needs review**; nothing is
+  silently dropped.
+- **Gallery:** search across names, tags, review notes, and transcripts;
+  filter by type, quality, and duration; sort by score, source order, or
+  length. **Add shown** appends exactly what is displayed. **All scenes**
+  shows every shot, rejected material included.
+
+**Chat and scripting**
+
+- Chat (right dock) turns plain-language requests into edits. One-click
+  intents such as *Reactions first* or *Tighten the intro* run locally or
+  through the model. Every AI edit can be undone in one click, and a
+  failed batch rolls back completely.
+- The JS console (View → JS console) runs QuickJS with memory and time
+  limits and no filesystem or OS access. Scripts enqueue editor commands;
+  they never mutate state directly. Run `help()` for the API:
+  `clips()`, `sweepCandidates()`, `sceneClips()`, `addAssetRange(...)`,
+  `split()`, `tightenSilence(id)`, `exportTo(path)`, and more.
+
+## Requirements
+
+- Rust, pinned in `mise.toml` (use [mise](https://mise.jdx.dev)).
+- Build: FFmpeg 9 development libraries, `pkg-config`, and `clang` (for
+  bindgen).
+- Runtime: `ffmpeg`, `ffprobe`, and `ffplay` on `PATH`.
+- Optional: a Meta Model API key for model review, transcription, and SAM.
+  Without one, curation runs locally and chat needs a keyless
+  localhost endpoint.
+
+## Run
+
+```sh
+git clone https://github.com/BurgessTG/eddie.git
+cd eddie
+mise exec -- cargo run --release            # judge performance in release
+mise exec -- cargo run --release -- a.mp4 b.mov   # import files on launch
+mise exec -- cargo test                     # engine, media end-to-end, timeline UI
+mise exec -- cargo run -p openreel-media --example generate_samples -- samples
+```
+
+Settings (Chat → Settings) take the API key, base URL
+(`https://api.meta.ai/v1` by default), and model (`muse-spark-1.3` or
+`muse-wonder-1.0`). The key is stored only in the local config file.
+**Check connection** validates the key and model without running inference.
+
+## Shortcuts
+
+| Key | Action |
+| --- | --- |
+| Space | Play / pause |
+| ← / → | Step one frame |
+| Home / End | Go to start / end |
+| S or B | Split at the playhead |
+| M | Toggle magnet |
+| Delete | Delete the selected clip |
+| Cmd/Ctrl+K | Focus chat |
 
 ## Layout
 
 | Crate | Role |
 | --- | --- |
-| `crates/engine` (`openreel-engine`) | UI-independent timeline model: clips with media sources, frame snapping, move/trim/split, timecode. Unit-tested. |
-| `crates/media` (`openreel-media`) | FFmpeg-backed probe, frame decode/streaming, waveforms, thumbnails, sample generation, timeline export, audio playback. End-to-end tested. |
-| `crates/app` (`openreel`) | egui desktop app: media bin, custom timeline with filmstrips/waveforms, program monitor, inspector, export UI. |
+| `crates/engine` (`openreel-engine`) | UI-independent timeline model: lanes, linked clips, move/trim/split/swap, titles, timecode. |
+| `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview worker, evidence sampling, scene detection, waveforms, thumbnails, export. |
+| `crates/app` (`openreel-app`, binary `eddie`) | egui app: media bin, timeline, program monitor, gallery, curator pipeline, chat, QuickJS console. |
 
-Media architecture note: video decode for scrubbing and playback runs
-in-process through libavcodec (`ffmpeg-next`), with a persistent scrub
-decoder, frame threading, two-tier scrub resolution, and pooled frame
-buffers. Probe/export/audio still use the FFmpeg CLI tools, and frame
-grabs fall back to the CLI if the in-process path rejects a file. Next:
-hardware decode with zero-copy GPU textures.
+The UI follows shadcn/ui conventions translated to egui (zinc palette,
+Inter, borderless buttons, segmented tabs, cards); tokens and variants live
+in `crates/app/src/theme.rs`. `AGENTS.md` records design decisions and the
+detailed curator contract.
 
-## Run
+## Limitations
 
-Rust is pinned per-project with [mise](https://mise.jdx.dev) (`mise.toml`).
-
-```sh
-cd ~/Projects/openreel
-mise exec -- cargo run          # debug build
-mise exec -- cargo test         # engine + media end-to-end tests
-mise exec -- cargo run -p openreel-media --example generate_samples -- samples
-```
-
-If your shell has `mise activate` loaded, plain `cargo run` works in this
-directory.
-
-First run: import media (File menu, drag & drop, or pass file paths as
-arguments), then double-click a bin tile or drag it onto the timeline.
-
-## Roadmap
-
-1. **UI shell + timeline model** (done)
-2. **Real media: import, chop, preview + audio, export** (done)
-3. Hardware decode + zero-copy GPU preview (`ffmpeg-next` or wgpu textures)
-4. Project save/load, undo/redo
-5. Proxies for 4K–8K/RAW, transitions and effects, docking panels
+- Audio playback still shells out to `ffplay`; there is no real A/V sync
+  clock yet.
+- The ASR returns speaker turns, not word timings, so speech edges are
+  turn-level.
+- SAM mask payloads are not decoded; subject evidence uses boxes only.
+- Model scores and sparse frame sampling are suggestions, not proof that
+  every good moment was found.
+- No project save/load or general undo yet (AI edits have one-step undo).
