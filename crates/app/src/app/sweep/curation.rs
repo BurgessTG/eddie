@@ -427,7 +427,10 @@ fn request_body(settings: &ChatSettings, batch: &[&PreparedWindow]) -> Value {
     });
     json!({
         "model":settings.model, "stream":false,
-        "max_completion_tokens":8192,
+        // Includes hidden reasoning. Single-window reviews have used 7,374
+        // tokens and a three-window batch ran out at 8,192, so the allowance
+        // grows with the batch. Unused allowance is not billed.
+        "max_completion_tokens":(8192 * (batch.len() + 1)).min(32768),
         "prompt_cache_key":"eddie-visual-curator-v4",
         "response_format":{"type":"json_schema", "json_schema":{
             "name":"curation", "strict":true,
