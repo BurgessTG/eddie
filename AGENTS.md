@@ -262,7 +262,10 @@ so conversation does not chain into one long utterance. Another
 speaker's short backchannel (at most three words and 1.2 s, such as
 "Uh-huh.") neither ends nor completes an unfinished thought. Turn-level
 ASR edges are not frame-accurate: a picture edge within 50 ms of a turn
-boundary is on it. Adjacent selected beats without a source-picture
+boundary is on it. A turn of 2 s or more with under 1.5 letters per second
+(crowd ambience such as "LT" across 16 s, "[Music]", sparse lyrics) is not
+an utterance: it neither blocks edges nor counts as missing timing, so a
+talking range over it is cut on the picture. Adjacent selected beats without a source-picture
 edge between their turns join rather than inventing word cuts; explicitly
 omitted gaps do not join. Missing transcription is uncertainty, not silence.
 Waveform peaks are imported at
