@@ -157,7 +157,7 @@ impl TimelineSnapshot {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
+pub(super) fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("APPDATA")

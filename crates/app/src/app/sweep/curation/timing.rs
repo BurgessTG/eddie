@@ -7,7 +7,7 @@ use openreel_media::EvidenceSampler;
 use serde_json::{json, Value};
 
 use crate::app::chat::{MODEL_SPARK, MODEL_WONDER};
-use crate::app::sweep::SPEECH_HANDLE_SECONDS;
+use crate::app::sweep::{ends_sentence, SPEECH_HANDLE_SECONDS};
 
 use super::{
     base64_encode, candidate_from_segment, overlapping_transcript, parse_window, request_json,
@@ -98,14 +98,76 @@ const CONTINUATION_SECONDS: f64 = 0.8;
 
 /// A short acknowledgement from another speaker ("Uh-huh.", "Really?") does
 /// not finish the main speaker's thought.
-fn backchannel(turn: &TranscriptSegment, main: Option<&str>) -> bool {
-    turn.end - turn.start <= 1.2
-        && turn.text.split_whitespace().count() <= 3
-        && turn
-            .speaker
-            .as_deref()
-            .zip(main)
-            .is_some_and(|(a, b)| a != b)
+fn backchannel(piece: &Piece<'_>, main: Option<&str>) -> bool {
+    piece.end - piece.start <= 1.2
+        && piece.text.split_whitespace().count() <= 3
+        && piece.speaker.zip(main).is_some_and(|(a, b)| a != b)
+}
+
+/// A turn, or one sentence of a turn with heard word timing.
+struct Piece<'a> {
+    start: f64,
+    end: f64,
+    text: String,
+    speaker: Option<&'a str>,
+    /// Starts at a heard sentence end inside its turn.
+    sentence_break: bool,
+}
+
+/// Split a turn at sentence ends whose last word and the next word were both
+/// heard by alignment. Estimated word times never become cut points, and the
+/// pieces keep the turn's outer extent.
+fn pieces(turn: &TranscriptSegment) -> Vec<Piece<'_>> {
+    let speaker = turn.speaker.as_deref();
+    let words = &turn.words;
+    let mut out = Vec::new();
+    let mut first = 0;
+    for k in 0..words.len().saturating_sub(1) {
+        let (word, next) = (&words[k], &words[k + 1]);
+        if ends_sentence(&word.text)
+            && !word.estimated
+            && !next.estimated
+            && next.start >= word.end - 1e-9
+        {
+            out.push(Piece {
+                start: if first == 0 {
+                    turn.start
+                } else {
+                    words[first].start
+                },
+                end: word.end,
+                text: words[first..=k]
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                speaker,
+                sentence_break: first > 0,
+            });
+            first = k + 1;
+        }
+    }
+    if first == 0 {
+        return vec![Piece {
+            start: turn.start,
+            end: turn.end,
+            text: turn.text.clone(),
+            speaker,
+            sentence_break: false,
+        }];
+    }
+    out.push(Piece {
+        start: words[first].start,
+        end: turn.end,
+        text: words[first..]
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        speaker,
+        sentence_break: true,
+    });
+    out
 }
 
 /// Turn-level ASR edges are not frame-accurate. A picture edge this close to
@@ -138,14 +200,14 @@ const DANGLING_WORDS: &[&str] = &[
 /// mark is unfinished, but ASR sometimes stops punctuating altogether, and
 /// then only a dangling word is evidence that the thought continues.
 fn turn_complete(text: &str) -> bool {
+    if ends_sentence(text) {
+        return true;
+    }
     let text = text
         .trim_end()
         .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}']);
     if text.ends_with("...") || text.ends_with('\u{2026}') {
         return false;
-    }
-    if text.ends_with(['.', '?', '!', '\u{3002}', '\u{ff1f}', '\u{ff01}']) {
-        return true;
     }
     let last = text
         .rsplit(char::is_whitespace)
@@ -161,33 +223,36 @@ fn turn_complete(text: &str) -> bool {
 /// `CONTINUATION_SECONDS`, even across a speaker change, and another speaker's
 /// backchannel neither ends nor completes it. A finished thought ends at a
 /// speaker change, so a handover without a pause is a cut point and
-/// unpunctuated conversation does not chain into one long utterance.
+/// unpunctuated conversation does not chain into one long utterance. A heard
+/// sentence end inside a turn is a cut point too.
 pub(super) fn speech_groups(source: &Source<'_>) -> Vec<(f64, f64)> {
     let mut turns: Vec<_> = source
         .transcript
         .iter()
         .filter(|turn| turn.end > turn.start && !ambient(turn))
+        .flat_map(pieces)
         .collect();
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     // (start, end, complete, main speaker)
     let mut groups: Vec<(f64, f64, bool, Option<&str>)> = Vec::new();
     for turn in turns {
         let complete = turn_complete(&turn.text);
-        let speaker = turn.speaker.as_deref();
+        let speaker = turn.speaker;
         match groups.last_mut() {
             Some(last)
                 if turn.start < last.1 - 1e-9
                     || (turn.start <= last.1 + 1e-9
+                        && !turn.sentence_break
                         && (speaker.is_none() || speaker == last.3))
                     || (!last.2 && turn.start < last.1 + CONTINUATION_SECONDS) =>
             {
                 last.1 = last.1.max(turn.end);
-                if !backchannel(turn, last.3) {
+                if !backchannel(&turn, last.3) {
                     last.2 = complete;
                     last.3 = speaker;
                 }
             }
-            _ => groups.push((turn.start, turn.end, complete, turn.speaker.as_deref())),
+            _ => groups.push((turn.start, turn.end, complete, turn.speaker)),
         }
     }
     groups

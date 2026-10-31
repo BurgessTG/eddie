@@ -838,6 +838,56 @@ fn transcribed_crowd_ambience_does_not_block_picture_cuts() {
     );
 }
 
+#[test]
+fn a_heard_sentence_end_inside_a_turn_is_a_cut_point() {
+    // Expo live run: one 8.5 s turn held several sentences, and the model
+    // started a talking range at the end of one ("...that money.") inside it.
+    // With turn timing alone the edge sat inside an utterance and the range
+    // fell to Needs review; heard word timing makes the sentence end a cut.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => {
+            let words: Vec<_> = [
+                ("You", 500, 900),
+                ("got", 900, 1300),
+                ("that", 1300, 1800),
+                ("money.", 1800, 2950),
+                ("And", 3050, 3500),
+                ("you", 3500, 4000),
+                ("can", 4000, 4600),
+                ("learn", 4600, 5400),
+                ("it.", 5400, 7000),
+            ]
+            .iter()
+            .map(|(word, start, end)| json!({"word":word, "startMs":start, "endMs":end}))
+            .collect();
+            (
+                200,
+                json!({"turns":[{"startMs":500,"endMs":7000,"speaker":"A",
+                "transcript":"You got that money. And you can learn it.", "words":words}]})
+                .to_string(),
+            )
+        }
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Play, then talk.",
+            "ranges":[range(0.25, 3.0, "action"), range(3.0, 8.0, "talking")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    assert_eq!(
+        reviewed_ranges(&data),
+        [
+            (0.25, 3.0, "action".to_owned()),
+            (3.0, 8.0, "talking".to_owned())
+        ],
+        "{}",
+        data.note
+    );
+}
+
 /// Reviewed (start, end, category) ranges, in source order.
 fn reviewed_ranges(data: &SweepData) -> Vec<(f64, f64, String)> {
     let mut clips: Vec<_> = data

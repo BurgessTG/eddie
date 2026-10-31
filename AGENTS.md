@@ -8,7 +8,8 @@ Update it when a decision changes.
 - Rust only. `crates/engine` owns the timeline model. `crates/media` owns
   FFmpeg. `crates/app` owns egui UI.
 - FFmpeg 9 is the target. In-process decode uses `ffmpeg-next` 9.
-- Builds need FFmpeg dev libraries, `pkg-config`, and `clang` for bindgen.
+- Builds need FFmpeg dev libraries, `pkg-config`, and `clang` for bindgen,
+  plus `cmake` and a C++ compiler for whisper.cpp (`whisper-rs`).
 - Runtime needs `ffmpeg`, `ffprobe`, and `ffplay` on `PATH` until probe,
   export, and audio also move in-process.
 
@@ -242,11 +243,22 @@ Missing or invalid reviews preserve Needs review ranges. A provider failure
 stops later requests while retaining completed reviews. Sparse image
 sampling and model scores are not proof of every meaningful moment.
 Candidates are suggestions only; the source asset stays whole.
-The current Voice Transcribe contract returns speaker turns, not
-word timings. Transcript parsing/state now preserve word timings if
-a provider returns them, and expose `timingPrecision` as `turn` or
-`word`; exact filler-word boundaries still need word timing or a
-separate forced-alignment layer. ASR session identity and source intervals
+Voice Transcribe returns speaker turns, never word timings (Meta's docs
+say so for every mode). Meta stays the transcript: text, speakers, turns.
+`sweep/align.rs` adds word timing locally with whisper.cpp and the
+multilingual base model (`ggml-base.bin`, MIT): `EDDIE_WHISPER_MODEL`, or
+`whisper/ggml-base.bin` beside the settings file (here a symlink to
+`/mnt/data/models/whisper`). It runs only on turns of 2 s or more with a
+sentence end before their last word, without a prompt (prompting with
+Meta's text made the base model hallucinate). Heard words are matched to
+Meta's words by longest common subsequence; Meta's words and punctuation
+stay authoritative, unmatched words are interpolated and `estimated`, and
+a turn under half matched keeps turn timing. Each sentence break between
+two heard words snaps to the quietest 20 ms within 0.25 s. Speech grouping
+splits a turn at those breaks only, never at estimated words. Without the
+model, curation keeps turn-level timing. Tests ignore the installed model
+unless `EDDIE_WHISPER_MODEL` is set. `timingPrecision` is `turn` or
+`word`. ASR session identity and source intervals
 scope speaker labels; a turn touching an internal ASR chunk edge is not
 evidence of a whole utterance. Speech selections retain available complete
 turns with silence handles. Only the `talking` category owns its turns;

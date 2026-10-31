@@ -68,10 +68,14 @@ Select a video and press **Curate**. Curation never runs on import.
 ## Requirements
 
 - Rust, pinned in `mise.toml` (use [mise](https://mise.jdx.dev)).
-- Build: FFmpeg 9 development libraries, `pkg-config`, and `clang` (for
-  bindgen).
+- Build: FFmpeg 9 development libraries, `pkg-config`, `clang` (for
+  bindgen), `cmake` and a C++ compiler (for whisper.cpp).
 - Runtime: `ffmpeg`, `ffprobe`, and `ffplay` on `PATH`.
 - Optional: a Meta Model API key for model review, transcription, and SAM.
+- Optional: whisper.cpp's multilingual base model (`ggml-base.bin`) at
+  `~/.config/openreel/whisper/ggml-base.bin` or `EDDIE_WHISPER_MODEL`. It
+  adds word timing to Meta's turn-level transcripts so speech can be cut
+  between sentences.
   Without one, curation runs locally and chat needs a keyless
   localhost endpoint.
 
@@ -120,8 +124,9 @@ detailed curator contract.
 
 - Audio playback still shells out to `ffplay`; there is no real A/V sync
   clock yet.
-- The ASR returns speaker turns, not word timings, so speech edges are
-  turn-level.
+- Meta's ASR returns speaker turns only. Word timing comes from a local
+  whisper model when installed; without it, speech edges are turn-level,
+  and noisy audio can still fail to align.
 - SAM mask payloads are not decoded; subject evidence uses boxes only.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.

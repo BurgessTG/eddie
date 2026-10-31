@@ -20,7 +20,7 @@ pub use playback::{AudioPlayer, FrameStream};
 pub use samples::generate_samples;
 pub use sweep::{
     analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,
-    frame_visual_evidence, motion_samples, sam_unavailable_reason, write_wav_24k,
+    frame_visual_evidence, motion_samples, pcm_mono_16k, sam_unavailable_reason, write_wav_24k,
     FrameVisualEvidence, MotionSample, SegmentVisualEvidence, SubjectMaskEvidence,
     SubjectSegmentationProvider, SubjectSegmentationStatus, SweepSegment,
     UnavailableSubjectSegmentation, VisualEvidenceSource,
