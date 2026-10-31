@@ -15,10 +15,10 @@ Update it when a decision changes.
 ## Commands
 
 ```sh
-cd ~/Projects/openreel
+cd /mnt/data/Work/eddie
 mise exec -- cargo run            # debug
 mise exec -- cargo run --release  # use this to judge performance
-mise exec -- cargo test           # engine, media end-to-end, timeline UI
+SDL_AUDIODRIVER=dummy mise exec -- cargo test   # headless; media end-to-end needs it without an audio device
 mise exec -- cargo fmt
 ```
 
