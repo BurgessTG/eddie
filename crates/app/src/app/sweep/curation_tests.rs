@@ -801,6 +801,43 @@ fn edge_a_frame_before_a_touching_handover_is_on_the_turn_boundary() {
     );
 }
 
+#[test]
+fn transcribed_crowd_ambience_does_not_block_picture_cuts() {
+    // Expo live run: ASR returned crowd noise as one 16 s turn reading "LT",
+    // ending off the frame grid. The talking range starting inside it could
+    // neither pull back nor move past it and fell to Needs review.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| {
+        match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (
+            200,
+            json!({"turns":[
+            {"startMs":500,"endMs":6010,"speaker":"A","transcript":"LT"},
+            {"startMs":6010,"endMs":7210,"speaker":"B","transcript":"Oh, you guys got a lot of merch."}
+        ]})
+            .to_string(),
+        ),
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Demo, then a remark.",
+            "ranges":[range(0.25, 5.0, "action"), range(5.0, 8.0, "talking")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    }
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    assert_eq!(
+        reviewed_ranges(&data),
+        [
+            (0.25, 5.0, "action".to_owned()),
+            (5.0, 8.0, "talking".to_owned())
+        ],
+        "{}",
+        data.note
+    );
+}
+
 /// Reviewed (start, end, category) ranges, in source order.
 fn reviewed_ranges(data: &SweepData) -> Vec<(f64, f64, String)> {
     let mut clips: Vec<_> = data
