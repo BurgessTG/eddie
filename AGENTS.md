@@ -364,6 +364,9 @@ The finite raw-frame stream bounds video; audio is trimmed separately
 to the timeline end. An off-grid end retains its final active video
 sample, whose full CFR interval can extend past the timeline by less
 than one frame. Do not add a final encoder `-t` that rounds away that sample.
+Display rotation (phone portrait footage) is honored everywhere: `probe`
+reports displayed width/height, and the native decoder rotates quarter and
+half turns while copying out, matching the FFmpeg CLI's autorotate.
 Native seeks select presentation intervals `[PTS, next PTS)`, normalize
 source time to the container origin, and drain delayed frames at EOF.
 Playback discards seek preroll and paces from the requested source-in.
