@@ -33,6 +33,8 @@ pub struct VideoDecoder {
     source_origin: i64,
     target_w: u32,
     target_h: u32,
+    /// Clockwise quarter turns from the stream's display matrix.
+    turns: u8,
     decoded: ffmpeg::frame::Video,
     lookahead: ffmpeg::frame::Video,
     lookahead_pts: Option<f64>,
@@ -45,16 +47,31 @@ impl VideoDecoder {
     pub fn open(path: &str, target_w: u32, fast: bool) -> MediaResult<Self> {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
-        let (stream_index, time_base, stream_start, parameters) = {
+        let (stream_index, time_base, stream_start, parameters, turns) = {
             let stream = input
                 .streams()
                 .best(ffmpeg::media::Type::Video)
                 .ok_or_else(|| "no video stream".to_owned())?;
+            let turns = stream
+                .side_data()
+                .find(|data| {
+                    data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix
+                        && data.data().len() >= 36
+                })
+                .map_or(0, |data| {
+                    // SAFETY: a display matrix is nine i32 values in an
+                    // av_malloc-aligned side-data buffer owned by the stream.
+                    let degrees = unsafe {
+                        ffmpeg::ffi::av_display_rotation_get(data.data().as_ptr().cast())
+                    };
+                    clockwise_turns(degrees)
+                });
             (
                 stream.index(),
                 stream.time_base(),
                 stream.start_time(),
                 stream.parameters(),
+                turns,
             )
         };
         // Match input-relative source times, retaining any video offset from
@@ -79,7 +96,19 @@ impl VideoDecoder {
             .video()
             .map_err(|e| err("open video decoder", e))?;
 
-        let target_h = scaled_height(decoder.width(), decoder.height(), target_w);
+        // target_w/target_h are display dimensions. A quarter-turn scales to
+        // the transposed size, then rotates while copying out.
+        let quarter = turns % 2 == 1;
+        let target_h = if quarter {
+            scaled_height(decoder.height(), decoder.width(), target_w)
+        } else {
+            scaled_height(decoder.width(), decoder.height(), target_w)
+        };
+        let (scaled_w, scaled_h) = if quarter {
+            (target_h, target_w)
+        } else {
+            (target_w, target_h)
+        };
         let flags = if fast {
             ffmpeg::software::scaling::Flags::FAST_BILINEAR
         } else {
@@ -90,8 +119,8 @@ impl VideoDecoder {
             decoder.width(),
             decoder.height(),
             ffmpeg::format::Pixel::RGBA,
-            target_w,
-            target_h,
+            scaled_w,
+            scaled_h,
             flags,
         )
         .map_err(|e| err("create scaler", e))?;
@@ -105,6 +134,7 @@ impl VideoDecoder {
             source_origin,
             target_w,
             target_h,
+            turns,
             decoded: ffmpeg::frame::Video::empty(),
             lookahead: ffmpeg::frame::Video::empty(),
             lookahead_pts: None,
@@ -253,10 +283,29 @@ impl VideoDecoder {
         let height = self.target_h as usize;
         buffer.resize(width * height * 4, 0);
         let data = self.scaled.data(0);
-        for row in 0..height {
-            let src = row * stride;
-            let dst = row * width * 4;
-            buffer[dst..dst + width * 4].copy_from_slice(&data[src..src + width * 4]);
+        // Output pixel (x, y) reads this scaled pixel. The scaled picture is
+        // width×height, or height×width (transposed) for a quarter turn.
+        let source = |x: usize, y: usize| match self.turns {
+            1 => (y, width - 1 - x),
+            2 => (width - 1 - x, height - 1 - y),
+            3 => (height - 1 - y, x),
+            _ => (x, y),
+        };
+        if self.turns == 0 {
+            for row in 0..height {
+                let src = row * stride;
+                let dst = row * width * 4;
+                buffer[dst..dst + width * 4].copy_from_slice(&data[src..src + width * 4]);
+            }
+        } else {
+            for y in 0..height {
+                for x in 0..width {
+                    let (sx, sy) = source(x, y);
+                    let src = sy * stride + sx * 4;
+                    let dst = (y * width + x) * 4;
+                    buffer[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                }
+            }
         }
         Ok(RawFrame {
             width: self.target_w,
@@ -297,6 +346,17 @@ impl VideoDecoder {
             .next_decoded()?
             .ok_or_else(|| "no frame decoded at requested time".to_owned())?;
         self.scale_decoded_into(buffer).map(|frame| (pts, frame))
+    }
+}
+
+/// Clockwise quarter turns that display a stream, from a display-matrix
+/// rotation in degrees (counterclockwise, as `av_display_rotation_get` and
+/// ffprobe report it). Matches the FFmpeg CLI's autorotate.
+pub(crate) fn clockwise_turns(degrees: f64) -> u8 {
+    if degrees.is_finite() {
+        (-degrees / 90.0).round().rem_euclid(4.0) as u8
+    } else {
+        0
     }
 }
 

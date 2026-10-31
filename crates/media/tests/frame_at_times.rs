@@ -665,3 +665,92 @@ fn preview_coalesces_requests_while_native_open_is_blocked() {
         "latest generation after obsolete requests and error",
     );
 }
+
+/// Nearest of COLORS for the inner half of each quadrant of an RGBA picture,
+/// in reading order.
+fn quadrant_colors(width: u32, height: u32, rgba: &[u8]) -> Vec<&'static str> {
+    let (w, h) = (width as usize, height as usize);
+    let mut names = Vec::new();
+    for (qx, qy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        let mut pixels = Vec::new();
+        for y in qy * h / 2 + h / 8..qy * h / 2 + 3 * h / 8 {
+            for x in qx * w / 2 + w / 8..qx * w / 2 + 3 * w / 8 {
+                pixels.extend_from_slice(&rgba[(y * w + x) * 4..(y * w + x) * 4 + 4]);
+            }
+        }
+        let mean = mean_rgb(&pixels);
+        let (name, expected) = *COLORS
+            .iter()
+            .min_by(|a, b| color_distance(mean, a.1).total_cmp(&color_distance(mean, b.1)))
+            .unwrap();
+        assert!(color_distance(mean, expected) < 48.0, "{mean:?}");
+        names.push(name);
+    }
+    names
+}
+
+#[test]
+fn native_decoder_and_probe_honor_display_rotation() {
+    // Phone footage stores a landscape picture plus a display rotation. The
+    // FFmpeg CLI applies it; preview, analysis and model frames must agree.
+    let dir = std::env::temp_dir().join(format!(
+        "openreel_rotation_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = Fixture {
+        path: dir.join("quadrants.mp4"),
+        dir,
+    };
+    run_ffmpeg(
+        Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-filter_complex"])
+            .arg(
+                "color=red:s=64x32:d=0.5[a];color=lime:s=64x32:d=0.5[b];\
+                 color=blue:s=64x32:d=0.5[c];color=white:s=64x32:d=0.5[d];\
+                 [a][b][c][d]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0",
+            )
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv444p", "-qp", "0"])
+            .arg(&fixture.path),
+    );
+    for rotation in ["90", "-90", "180"] {
+        let path = fixture.dir.join(format!("rotated{rotation}.mp4"));
+        run_ffmpeg(
+            Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-display_rotation", rotation, "-i"])
+                .arg(&fixture.path)
+                .args(["-c", "copy"])
+                .arg(&path),
+        );
+        // Independent oracle: the CLI's autorotated picture.
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output()
+            .unwrap();
+        let (width, height) = if rotation == "180" {
+            (128, 64)
+        } else {
+            (64, 128)
+        };
+        assert_eq!(out.stdout.len(), width * height * 4, "rotation {rotation}");
+        let expected = quadrant_colors(width as u32, height as u32, &out.stdout);
+        assert_ne!(expected, ["red", "lime", "blue", "white"], "oracle rotated");
+
+        let info = openreel_media::probe(path.to_str().unwrap()).unwrap();
+        assert_eq!((info.width, info.height), (width as u32, height as u32));
+        let mut decoder = native::VideoDecoder::open(path.to_str().unwrap(), 32, false).unwrap();
+        let frame = decoder.frame_at(0.1).unwrap();
+        assert_eq!(
+            (frame.width, frame.height),
+            (32, scaled_height(width as u32, height as u32, 32))
+        );
+        assert_eq!(
+            quadrant_colors(frame.width, frame.height, &frame.rgba),
+            expected,
+            "rotation {rotation}"
+        );
+    }
+}

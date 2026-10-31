@@ -91,6 +91,8 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         "-show_entries",
         "stream=codec_type,width,height,avg_frame_rate,r_frame_rate,duration",
         "-show_entries",
+        "stream_side_data=rotation",
+        "-show_entries",
         "format=duration",
         "-of",
         "json",
@@ -123,6 +125,15 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
                     info.has_video = true;
                     info.width = stream["width"].as_u64().unwrap_or(0) as u32;
                     info.height = stream["height"].as_u64().unwrap_or(0) as u32;
+                    // Report displayed dimensions, as every decode path rotates.
+                    let rotation = stream["side_data_list"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find_map(|data| data["rotation"].as_f64());
+                    if rotation.is_some_and(|degrees| decode::clockwise_turns(degrees) % 2 == 1) {
+                        std::mem::swap(&mut info.width, &mut info.height);
+                    }
                     info.fps = parse_rate(stream["avg_frame_rate"].as_str().unwrap_or("0/1"));
                     if info.fps <= 0.0 {
                         info.fps = parse_rate(stream["r_frame_rate"].as_str().unwrap_or("0/1"));
