@@ -236,6 +236,8 @@ boundary counts and per-stage usage. Built-in Meta models use low reasoning effo
 8,192-token completion allowance for this constrained choice pass; the
 allowance includes hidden reasoning, not just the visible JSON.
 Physical shots remain available even when the model rejects their content.
+The editorial review allows 8,192 completion tokens per batched window plus
+one more allowance, capped at 32,768; hidden reasoning counts against it.
 Missing or invalid reviews preserve Needs review ranges. A provider failure
 stops later requests while retaining completed reviews. Sparse image
 sampling and model scores are not proof of every meaningful moment.

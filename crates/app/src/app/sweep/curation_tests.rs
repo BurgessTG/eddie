@@ -1928,14 +1928,25 @@ fn fractional_rate_review_windows_do_not_accumulate_source_grid_drift() {
     let data = source.curate(&api.settings);
     let requests = api.finish();
     assert_inventory(&data, 1, source.info.duration);
-    let reviewed: Vec<_> = requests
+    let reviews: Vec<_> = requests
         .iter()
         .filter(|request| {
             request.path == "/v1/chat/completions"
                 && request.json()["response_format"]["json_schema"]["name"] == "curation"
         })
-        .flat_map(|request| input_windows(&request.json()))
+        .map(|request| request.json())
         .collect();
+    for review in &reviews {
+        // A live three-window review spent 7,781 of 8,192 tokens reasoning
+        // and was truncated. The allowance must grow with the batch.
+        let windows = input_windows(review).len() as u64;
+        assert!(
+            review["max_completion_tokens"].as_u64().unwrap() >= (8192 * (windows + 1)).min(32768),
+            "{windows} windows: {}",
+            review["max_completion_tokens"]
+        );
+    }
+    let reviewed: Vec<_> = reviews.iter().flat_map(input_windows).collect();
     assert_eq!(
         reviewed.len(),
         3,
