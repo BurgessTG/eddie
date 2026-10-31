@@ -176,57 +176,30 @@ impl Api {
                 stream
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut headers = String::new();
-                let mut reader = std::io::BufReader::new(&mut stream);
-                while !headers.ends_with("\r\n\r\n") {
-                    assert!(reader.read_line(&mut headers).unwrap() > 0);
-                    assert!(headers.len() < 64 * 1024);
-                }
-                let header = |name: &str| {
-                    headers
-                        .lines()
-                        .filter_map(|line| line.split_once(':'))
-                        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                        .map(|(_, value)| value.trim())
-                };
-                let mut body = Vec::new();
-                if header("transfer-encoding") == Some("chunked") {
-                    loop {
-                        let mut line = String::new();
-                        reader.read_line(&mut line).unwrap();
-                        let size =
-                            usize::from_str_radix(line.trim().split(';').next().unwrap(), 16)
-                                .unwrap();
-                        if size == 0 {
-                            break;
-                        }
-                        assert!(body.len() + size < 16 * 1024 * 1024);
-                        let offset = body.len();
-                        body.resize(offset + size, 0);
-                        reader.read_exact(&mut body[offset..]).unwrap();
-                        let mut crlf = [0; 2];
-                        reader.read_exact(&mut crlf).unwrap();
-                        assert_eq!(crlf, *b"\r\n");
+                // The port is reachable by any local process. Only the app under
+                // test sends the fixture key; anything else (a browser or dev
+                // tool probing localhost) is answered 404 and never reaches the
+                // test's handler or its recorded requests.
+                let request = match read_fixture_request(&mut stream) {
+                    Some(request)
+                        if request.headers.lines().any(|line| {
+                            line.split_once(':').is_some_and(|(key, value)| {
+                                key.eq_ignore_ascii_case("authorization")
+                                    && value.trim() == "Bearer curation-fixture-key"
+                            })
+                        }) =>
+                    {
+                        request
                     }
-                } else {
-                    let length = header("content-length")
-                        .map(|n| n.parse().unwrap())
-                        .unwrap_or(0);
-                    assert!(length < 16 * 1024 * 1024);
-                    body.resize(length, 0);
-                    reader.read_exact(&mut body).unwrap();
-                }
-                let request = Request {
-                    path: headers
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap()
-                        .to_owned(),
-                    headers,
-                    body,
+                    other => {
+                        eprintln!(
+                            "fixture ignored a foreign request: {:?}",
+                            other.as_ref().and_then(|r| r.headers.lines().next())
+                        );
+                        let _ = write!(stream,
+                            "HTTP/1.1 404 Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        continue;
+                    }
                 };
                 let response = if request.path == "/v1/chat/completions"
                     && request.json()["response_format"]["json_schema"]["name"] == "curation_timing"
@@ -268,6 +241,67 @@ impl Drop for Api {
             let _ = worker.join();
         }
     }
+}
+
+/// One HTTP/1.1 request, or None for anything malformed or truncated.
+fn read_fixture_request(stream: &mut std::net::TcpStream) -> Option<Request> {
+    let mut headers = String::new();
+    let mut reader = std::io::BufReader::new(stream);
+    while !headers.ends_with("\r\n\r\n") {
+        if reader.read_line(&mut headers).ok()? == 0 || headers.len() >= 64 * 1024 {
+            return None;
+        }
+    }
+    let header = |name: &str| {
+        headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+    };
+    let mut body = Vec::new();
+    if header("transfer-encoding") == Some("chunked") {
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).ok()?;
+            let size = usize::from_str_radix(line.trim().split(';').next()?, 16).ok()?;
+            if size == 0 {
+                break;
+            }
+            if body.len() + size >= 16 * 1024 * 1024 {
+                return None;
+            }
+            let offset = body.len();
+            body.resize(offset + size, 0);
+            reader.read_exact(&mut body[offset..]).ok()?;
+            let mut crlf = [0; 2];
+            reader.read_exact(&mut crlf).ok()?;
+            if crlf != *b"\r\n" {
+                return None;
+            }
+        }
+    } else {
+        let length: usize = match header("content-length") {
+            Some(n) => n.parse().ok()?,
+            None => 0,
+        };
+        if length >= 16 * 1024 * 1024 {
+            return None;
+        }
+        body.resize(length, 0);
+        reader.read_exact(&mut body).ok()?;
+    }
+    let path = headers
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .to_owned();
+    Some(Request {
+        path,
+        headers,
+        body,
+    })
 }
 
 fn catalog() -> (u16, String) {
@@ -886,6 +920,43 @@ fn a_heard_sentence_end_inside_a_turn_is_a_cut_point() {
         "{}",
         data.note
     );
+}
+
+#[test]
+fn fixture_server_ignores_foreign_local_clients() {
+    // Some local process probes localhost ports. A stray GET / or an empty
+    // connection used to panic the fixture and fail an unrelated test.
+    let source = Footage::new(4.0, 24, false, false, "mp4");
+    let api = Api::new(|request| match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/chat/completions" => completion(
+            input_windows(&request.json())
+                .iter()
+                .map(whole_window)
+                .collect(),
+        ),
+        other => panic!("unexpected request {other}"),
+    });
+    let address = api
+        .settings
+        .base_url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    drop(std::net::TcpStream::connect(&address).unwrap());
+    let mut probe = std::net::TcpStream::connect(&address).unwrap();
+    write!(probe, "GET / HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+    let mut reply = String::new();
+    std::io::Read::read_to_string(&mut probe, &mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    let data = source.curate(&api.settings);
+    let requests = api.finish();
+    assert_inventory(&data, 1, 4.0);
+    assert!(requests
+        .iter()
+        .all(|request| request.path.starts_with("/v1/")));
 }
 
 /// Reviewed (start, end, category) ranges, in source order.
