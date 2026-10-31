@@ -724,6 +724,64 @@ fn mixed_color_matrices_and_ranges_preserve_rgb_through_export() {
 }
 
 #[test]
+fn textured_bt601_sources_keep_their_average_color_through_export() {
+    // Phone footage is often BT.601 (limited or full range). Converting its
+    // subsampled chroma straight to BT.709 used to darken green by ~1.5
+    // levels on textured pictures; flat color fields hide the bias.
+    let fixture = Fixture::new();
+    for range in ["tv", "pc"] {
+        let source = fixture.video(
+            &format!("bt601-{range}.mp4"),
+            "gradients=s=320x180:r=10:d=0.3:seed=7",
+            &format!(
+                "scale=out_color_matrix=bt601:out_range={range},format=yuv420p,\
+                 setparams=colorspace=smpte170m:range={range}"
+            ),
+            None,
+        );
+        let mut timeline = Timeline::new(10.0);
+        video(&mut timeline, &source, 0, 0.0, 0.3, 0.0);
+        // Decode both with exact chroma interpolation so the reference
+        // conversion does not add a matrix-dependent bias of its own.
+        let accurate = |path: &Path| {
+            let out = run(Command::new("ffmpeg").args([
+                "-v",
+                "error",
+                "-i",
+                path.to_str().unwrap(),
+                "-vf",
+                "scale=flags=accurate_rnd+full_chroma_int+full_chroma_inp,format=rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ]));
+            out.stdout
+                .chunks_exact(320 * 180 * 3)
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>()
+        };
+        let exported = accurate(&fixture.export(&format!("bt601-{range}-out.mp4"), &timeline));
+        let original = accurate(Path::new(&source));
+        assert_eq!(exported.len(), original.len());
+        for (index, (actual, expected)) in exported.iter().zip(&original).enumerate() {
+            let mut bias = [0.0_f64; 3];
+            for (pixel, reference) in actual.chunks_exact(3).zip(expected.chunks_exact(3)) {
+                for channel in 0..3 {
+                    bias[channel] += pixel[channel] as f64 - reference[channel] as f64;
+                }
+            }
+            let pixels = (actual.len() / 3) as f64;
+            let bias = bias.map(|sum| sum / pixels);
+            eprintln!("BT.601 {range} frame {index}: mean RGB bias {bias:?}");
+            assert!(
+                bias.iter().all(|value| value.abs() < 0.5),
+                "BT.601 {range} frame {index}: mean RGB bias {bias:?} (limit 0.5)"
+            );
+        }
+    }
+}
+
+#[test]
 fn lower_track_wins_even_when_a_higher_track_starts_later() {
     let fixture = Fixture::new();
     let red = fixture.color("red.mp4", "red", None);
