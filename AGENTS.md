@@ -221,10 +221,13 @@ boundary's proposed edge. A failed seam keeps both window ranges
 unreconciled; a failed timing pass keeps the validated pre-timing ranges.
 Either way `review.edgeIssue` says the edges were not reconciled or
 frame-verified, the note reports it, and coverage, ordering and
-non-overlap still hold. Talking/speech edges on that path still move out
-of any available utterance (to its end, or back to the silence before it,
-only into Needs review or non-speech neighbors); a range that cannot
-becomes Needs review with its metadata. Only an invalid or missing
+non-overlap still hold. Talking edges are repaired the same way before
+the timing pass and on that fallback: they move out of any available
+utterance, to its end plus a silence handle or back to the silence before
+it. They may take frames from a Needs review neighbor, or from a touching
+non-talking cutaway that keeps at least min(1 s, half its length); a pull
+back must keep half the talking range. A range that cannot becomes Needs
+review with its metadata. Only an invalid or missing
 editorial review preserves the whole window as Needs review.
 More
 than eight boundaries create more bounded requests, not fewer clips.
@@ -244,9 +247,20 @@ a provider returns them, and expose `timingPrecision` as `turn` or
 separate forced-alignment layer. ASR session identity and source intervals
 scope speaker labels; a turn touching an internal ASR chunk edge is not
 evidence of a whole utterance. Speech selections retain available complete
-turns with silence handles. Contiguous turns, and a turn without terminal
-punctuation followed within 120 ms, form one utterance: a speaker change
-without a pause is not a cut point. Adjacent selected beats without a source-picture
+turns with silence handles. Only the `talking` category owns its turns;
+narration tagged `speech` under b-roll, action or establishing pictures is
+cut on the picture. Overlapping turns and one speaker's touching turns
+form one utterance. An unfinished turn (trailing comma or ellipsis,
+punctuated text without a terminal mark, or a dangling word such as
+"but"/"and") also joins a turn that follows within 0.8 s, even across a
+speaker change. A finished turn ends at a speaker change, so a handover
+without a pause is a cut point. ASR sometimes stops punctuating; fully
+unpunctuated text counts as finished unless it ends on a dangling word,
+so conversation does not chain into one long utterance. Another
+speaker's short backchannel (at most three words and 1.2 s, such as
+"Uh-huh.") neither ends nor completes an unfinished thought. Turn-level
+ASR edges are not frame-accurate: a picture edge within 50 ms of a turn
+boundary is on it. Adjacent selected beats without a source-picture
 edge between their turns join rather than inventing word cuts; explicitly
 omitted gaps do not join. Missing transcription is uncertainty, not silence.
 Waveform peaks are imported at

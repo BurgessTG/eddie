@@ -634,22 +634,23 @@ fn adjacent_speech_keeps_complete_turns_without_overlapping_handles() {
         clips.sort_by(|a, b| a.source_in.total_cmp(&b.source_in));
         if rejected_gap {
             // Rejected speech cannot be silently joined, and its edges sit inside
-            // one utterance. Those two ranges need review; the others survive.
+            // one utterance. Those two ranges need review; the others keep
+            // silence handles and stay on the normal (verified) timing path.
             assert_eq!(
                 clips
                     .iter()
                     .map(|c| (c.source_in, c.end(), c.review.status))
                     .collect::<Vec<_>>(),
                 [
-                    (0.5, 1.5, ReviewStatus::NeedsReview),
-                    (1.7, 3.3, ReviewStatus::NeedsReview),
-                    (3.9, 4.8, ReviewStatus::Reviewed),
-                    (4.8, 6.1, ReviewStatus::Reviewed),
+                    (0.3, 1.5, ReviewStatus::NeedsReview),
+                    (1.7, 3.4, ReviewStatus::NeedsReview),
+                    (3.8, 4.8, ReviewStatus::Reviewed),
+                    (4.8, 6.2, ReviewStatus::Reviewed),
                 ],
                 "{}",
                 data.note
             );
-            assert!(clips[2].review_json()["edgeIssue"].is_string());
+            assert!(clips[2].review_json()["edgeIssue"].is_null());
             continue;
         }
         assert_eq!(clips.len(), 3, "{}", data.note);
@@ -718,6 +719,200 @@ fn speech_split_without_a_pause_keeps_the_trailing_thought_with_its_continuation
         [(0.25, 6.0)],
         "an 80 ms speaker change is not a pause; do not cut the trailing thought: {}",
         data.note
+    );
+}
+
+#[test]
+fn unpunctuated_handover_after_a_finished_thought_is_a_cut_point() {
+    // Host live run: ASR stopped punctuating mid-file, and every touching
+    // speaker handover chained 19 s to 63 s into one utterance and one clip.
+    // The last answer's dangling "and" still keeps its continuation.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| {
+        match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (
+            200,
+            json!({"turns":[
+            {"startMs":500,"endMs":2500,"speaker":"B","transcript":"just look at how big that is"},
+            {"startMs":2500,"endMs":4000,"speaker":"A","transcript":"what do you see there"},
+            {"startMs":4000,"endMs":5000,"speaker":"B","transcript":"the depth of it and"},
+            {"startMs":5000,"endMs":6000,"speaker":"A","transcript":"yeah all of that"}
+        ]})
+            .to_string(),
+        ),
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Exchange.",
+            "ranges":[range(0.25, 2.5, "talking"), range(2.5, 4.5, "talking"),
+                range(4.5, 7.0, "talking")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    }
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    let ranges: Vec<_> = reviewed_ranges(&data)
+        .into_iter()
+        .map(|(start, end, _)| (start, end))
+        .collect();
+    assert_eq!(ranges.len(), 2, "{ranges:?} {}", data.note);
+    assert_eq!(ranges[0], (0.25, 2.5), "{}", data.note);
+    assert_eq!(ranges[1].0, 2.5);
+    assert!(
+        ranges[1].1 >= 6.0,
+        "the dangling \"and\" continues: {ranges:?}"
+    );
+}
+
+#[test]
+fn edge_a_frame_before_a_touching_handover_is_on_the_turn_boundary() {
+    // Host replay: the talking range ended 10 ms before the next speaker's
+    // turn, no picture edge sits exactly on that boundary, and the range fell
+    // to Needs review. Turn-level ASR times are not that precise.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| {
+        match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (
+            200,
+            json!({"turns":[
+            {"startMs":500,"endMs":3020,"speaker":"A","transcript":"Look at the size of this place."},
+            {"startMs":3020,"endMs":5000,"speaker":"B","transcript":"It is the biggest one yet."}
+        ]})
+            .to_string(),
+        ),
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Talk, then pan.",
+            "ranges":[range(0.25, 3.0, "talking"), range(3.0, 7.0, "establishing")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    }
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    assert_eq!(
+        reviewed_ranges(&data),
+        [
+            (0.25, 3.0, "talking".to_owned()),
+            (3.0, 7.0, "establishing".to_owned())
+        ],
+        "{}",
+        data.note
+    );
+}
+
+/// Reviewed (start, end, category) ranges, in source order.
+fn reviewed_ranges(data: &SweepData) -> Vec<(f64, f64, String)> {
+    let mut clips: Vec<_> = data
+        .candidates
+        .iter()
+        .filter(|clip| clip.review.status == ReviewStatus::Reviewed)
+        .map(|clip| (clip.source_in, clip.end(), clip.category.clone()))
+        .collect();
+    clips.sort_by(|a, b| a.0.total_cmp(&b.0));
+    clips
+}
+
+#[test]
+fn backchannel_does_not_finish_the_speakers_thought() {
+    // Interviews live run: "So we had all these nobles with swords" then the
+    // interviewer's "Uh-huh." made the thought look finished, and the clip
+    // ended mid-story. The story resumes after a 0.5 s pause.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| {
+        match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (200, json!({"turns":[
+            {"startMs":500,"endMs":3000,"speaker":"A","transcript":"That is what the nobles did. So we had all these nobles with swords"},
+            {"startMs":3000,"endMs":3400,"speaker":"B","transcript":"Uh-huh."},
+            {"startMs":3900,"endMs":5500,"speaker":"A","transcript":"and they lined up for the guard."}
+        ]}).to_string()),
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Story.",
+            "ranges":[range(0.25, 3.5, "talking"), range(3.5, 6.0, "talking")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    }
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    assert_eq!(
+        reviewed_ranges(&data),
+        [(0.25, 6.0, "talking".to_owned())],
+        "{}",
+        data.note
+    );
+}
+
+#[test]
+fn narration_under_cutaways_keeps_their_picture_cuts() {
+    // Mfs2 live run: one 28 s voiceover runs under several b-roll beats. The
+    // model tags them `speech`, but only on-camera talking owns its turns.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| {
+        match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (200, json!({"turns":[{"startMs":300,"endMs":7700,"speaker":"A",
+            "transcript":"The program has grown every year and students now compete across the state."}
+        ]}).to_string()),
+        "/v1/chat/completions" => {
+            let mut first = range(0.25, 3.0, "broll");
+            first["tags"] = json!(["speech"]);
+            let mut second = range(3.0, 6.0, "broll");
+            second["tags"] = json!(["speech"]);
+            completion(vec![json!({"window":0, "reason":"Two cutaways.",
+                "ranges":[first, second], "subjectChecks":[]})])
+        }
+        other => panic!("unexpected request {other}"),
+    }
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    assert_eq!(
+        reviewed_ranges(&data),
+        [
+            (0.25, 3.0, "broll".to_owned()),
+            (3.0, 6.0, "broll".to_owned())
+        ],
+        "{}",
+        data.note
+    );
+}
+
+#[test]
+fn talking_sentence_finishes_over_a_touching_cutaway() {
+    // Host live run: the speaker keeps talking as the camera pans away, and
+    // the model starts an establishing range mid-sentence. The talking range
+    // finishes the sentence; the cutaway gives up its first frames.
+    let source = Footage::new(8.0, 24, false, true, "mp4");
+    let api = Api::new(|request| match request.path.as_str() {
+        "/v1/models" => catalog(),
+        "/v1/asr/transcribe" => (
+            200,
+            json!({"turns":[{"startMs":500,"endMs":4200,"speaker":"A",
+            "transcript":"Just look at how big that whole place is."}]})
+            .to_string(),
+        ),
+        "/v1/chat/completions" => completion(vec![json!({"window":0, "reason":"Talk, then pan.",
+            "ranges":[range(0.25, 3.0, "talking"), range(3.0, 7.0, "establishing")],
+            "subjectChecks":[]})]),
+        other => panic!("unexpected request {other}"),
+    });
+    let data = source.curate(&api.settings);
+    api.finish();
+    assert_inventory(&data, 1, 8.0);
+    let ranges = reviewed_ranges(&data);
+    assert_eq!(ranges.len(), 2, "{}", data.note);
+    let (talk, pan) = (&ranges[0], &ranges[1]);
+    assert_eq!((talk.0, talk.2.as_str()), (0.25, "talking"));
+    assert!(
+        (4.2..4.5).contains(&talk.1),
+        "talking must end after the sentence, with a short handle: {ranges:?}"
+    );
+    assert_eq!(
+        (pan.0, pan.1, pan.2.as_str()),
+        (talk.1, 7.0, "establishing")
     );
 }
 

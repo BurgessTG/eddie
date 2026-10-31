@@ -11,8 +11,8 @@ use crate::app::sweep::SPEECH_HANDLE_SECONDS;
 
 use super::{
     base64_encode, candidate_from_segment, overlapping_transcript, parse_window, request_json,
-    ChatSettings, PreparedWindow, ReviewStatus, ReviewUsage, Selection, Source, MAX_BATCH_IMAGES,
-    TIME_TOLERANCE,
+    ChatSettings, PreparedWindow, ReviewStatus, ReviewUsage, Selection, Source, TranscriptSegment,
+    MAX_BATCH_IMAGES, TIME_TOLERANCE,
 };
 
 const RADIUS_SECONDS: f64 = 0.75;
@@ -93,9 +93,60 @@ impl Phase {
     }
 }
 
-/// Contiguous turns, and turns whose text gives no sentence end and are
-/// followed within one silence handle, are one utterance. A speaker change
-/// without a pause is not evidence that the trailing thought ended.
+/// Pause across which a sentence without a terminal mark still continues.
+const CONTINUATION_SECONDS: f64 = 0.8;
+
+/// A short acknowledgement from another speaker ("Uh-huh.", "Really?") does
+/// not finish the main speaker's thought.
+fn backchannel(turn: &TranscriptSegment, main: Option<&str>) -> bool {
+    turn.end - turn.start <= 1.2
+        && turn.text.split_whitespace().count() <= 3
+        && turn
+            .speaker
+            .as_deref()
+            .zip(main)
+            .is_some_and(|(a, b)| a != b)
+}
+
+/// Turn-level ASR edges are not frame-accurate. A picture edge this close to
+/// a turn boundary is on that boundary, not inside the neighboring turn.
+const TURN_SLOP_SECONDS: f64 = 0.05;
+
+/// Words that leave a sentence hanging when a turn ends on them.
+const DANGLING_WORDS: &[&str] = &[
+    "a", "an", "and", "because", "but", "from", "if", "into", "of", "or", "than", "the", "to",
+    "uh", "um", "while", "with",
+];
+
+/// Whether a turn ends its thought. A terminal mark ends it; a trailing comma,
+/// ellipsis or dangling word does not. Punctuated text without a terminal
+/// mark is unfinished, but ASR sometimes stops punctuating altogether, and
+/// then only a dangling word is evidence that the thought continues.
+fn turn_complete(text: &str) -> bool {
+    let text = text
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}']);
+    if text.ends_with("...") || text.ends_with('\u{2026}') {
+        return false;
+    }
+    if text.ends_with(['.', '?', '!', '\u{3002}', '\u{ff1f}', '\u{ff01}']) {
+        return true;
+    }
+    let last = text
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    !text.contains(['.', ',', '?', '!', ';', ':', '\u{3002}', '\u{ff0c}'])
+        && !DANGLING_WORDS.contains(&last.as_str())
+}
+
+/// Overlapping turns and one speaker's touching turns are one utterance. An
+/// unfinished thought also joins a turn that follows within
+/// `CONTINUATION_SECONDS`, even across a speaker change, and another speaker's
+/// backchannel neither ends nor completes it. A finished thought ends at a
+/// speaker change, so a handover without a pause is a cut point and
+/// unpunctuated conversation does not chain into one long utterance.
 pub(super) fn speech_groups(source: &Source<'_>) -> Vec<(f64, f64)> {
     let mut turns: Vec<_> = source
         .transcript
@@ -103,28 +154,30 @@ pub(super) fn speech_groups(source: &Source<'_>) -> Vec<(f64, f64)> {
         .filter(|turn| turn.end > turn.start)
         .collect();
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut groups: Vec<(f64, f64, bool)> = Vec::new();
+    // (start, end, complete, main speaker)
+    let mut groups: Vec<(f64, f64, bool, Option<&str>)> = Vec::new();
     for turn in turns {
-        let text = turn
-            .text
-            .trim_end()
-            .trim_end_matches(['"', '\'', ')', ']', '”', '’']);
-        let complete = !text.ends_with("...") && text.ends_with(['.', '?', '!', '。', '？', '！']);
+        let complete = turn_complete(&turn.text);
+        let speaker = turn.speaker.as_deref();
         match groups.last_mut() {
             Some(last)
-                if turn.start <= last.1
-                    || (!last.2 && turn.start < last.1 + SPEECH_HANDLE_SECONDS) =>
+                if turn.start < last.1 - 1e-9
+                    || (turn.start <= last.1 + 1e-9
+                        && (speaker.is_none() || speaker == last.3))
+                    || (!last.2 && turn.start < last.1 + CONTINUATION_SECONDS) =>
             {
-                if turn.end >= last.1 {
-                    *last = (last.0, turn.end, complete);
+                last.1 = last.1.max(turn.end);
+                if !backchannel(turn, last.3) {
+                    last.2 = complete;
+                    last.3 = speaker;
                 }
             }
-            _ => groups.push((turn.start, turn.end, complete)),
+            _ => groups.push((turn.start, turn.end, complete, turn.speaker.as_deref())),
         }
     }
     groups
         .into_iter()
-        .map(|(start, end, _)| (start, end))
+        .map(|(start, end, _, _)| (start, end))
         .collect()
 }
 
@@ -134,7 +187,9 @@ pub(super) fn speech_turns(
 ) -> Result<Option<(f64, f64)>, String> {
     let clip = &selection.candidate;
     if clip.review.status != ReviewStatus::Reviewed
-        || (clip.category != "talking" && !clip.tags.iter().any(|tag| tag == "speech"))
+        // Only on-camera talking owns its turns. Narration under b-roll,
+        // action or establishing pictures is cut on the picture.
+        || clip.category != "talking"
     {
         return Ok(None);
     }
@@ -147,7 +202,9 @@ pub(super) fn speech_turns(
     }
     let Some((start, end)) = speech_groups(source)
         .into_iter()
-        .filter(|(start, end)| *start < clip.end() && *end > clip.source_in)
+        .filter(|(start, end)| {
+            *start < clip.end() - TURN_SLOP_SECONDS && *end > clip.source_in + TURN_SLOP_SECONDS
+        })
         .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     else {
         return if source.info.has_audio {
@@ -172,11 +229,9 @@ fn join_inseparable_speech(
                 if let (Ok(Some((_, end))), Ok(Some((start, _)))) =
                     (speech_turns(source, previous), speech_turns(source, &next))
                 {
-                    if !prepared
-                        .edges
-                        .iter()
-                        .any(|edge| *edge >= end && *edge <= start)
-                    {
+                    if !prepared.edges.iter().any(|edge| {
+                        *edge >= end - TURN_SLOP_SECONDS && *edge <= start + TURN_SLOP_SECONDS
+                    }) {
                         // These selected neighbors share a turn, or have no
                         // source-picture edge between their turns. Do not invent
                         // a word cut. Never bridge explicitly omitted footage.
@@ -262,6 +317,24 @@ pub(super) fn keep_proposed(
     selections: Vec<Selection>,
     issue: &str,
 ) -> Vec<Selection> {
+    let mut selections = repair_speech_edges(source, prepared, selections);
+    for selection in &mut selections {
+        if selection.candidate.review.status == ReviewStatus::Reviewed {
+            selection.candidate.review.edge_issue = Some(issue.to_owned());
+        }
+    }
+    selections
+}
+
+/// Move talking edges out of available utterances without overlapping or
+/// shrinking a selected neighbor. Shared by frame-level timing (before it
+/// runs) and by the unverified fallback. A range that cannot do either
+/// becomes Needs review with its editorial metadata intact.
+fn repair_speech_edges(
+    source: &Source<'_>,
+    prepared: &PreparedWindow,
+    selections: Vec<Selection>,
+) -> Vec<Selection> {
     let mut selections = join_inseparable_speech(source, prepared, selections);
     let uncertain: Vec<_> = selections
         .iter()
@@ -269,9 +342,6 @@ pub(super) fn keep_proposed(
         .collect();
     let mut speech = Vec::new();
     for selection in &mut selections {
-        if selection.candidate.review.status == ReviewStatus::Reviewed {
-            selection.candidate.review.edge_issue = Some(issue.to_owned());
-        }
         speech.push(match speech_turns(source, selection) {
             Ok(span) => span.is_some(),
             Err(error) => {
@@ -283,11 +353,20 @@ pub(super) fn keep_proposed(
     let edges = &prepared.edges;
     let (lower, upper) = (prepared.window.start, prepared.window.end);
     let groups = speech_groups(source);
-    let inside = |time: f64| {
+    // An in-point inside an utterance or its lead-in handle, and an out-point
+    // inside one or its tail handle. Handle-only edges only ever move outward.
+    let h = SPEECH_HANDLE_SECONDS;
+    let inside_in = |time: f64| {
         groups
             .iter()
             .copied()
-            .find(|(start, end)| *start + 1e-9 < time && time < *end - 1e-9)
+            .find(|(start, end)| *start - h + 1e-9 < time && time < *end - TURN_SLOP_SECONDS)
+    };
+    let inside_out = |time: f64| {
+        groups
+            .iter()
+            .copied()
+            .find(|(start, end)| *start + TURN_SLOP_SECONDS < time && time < *end + h - 1e-9)
     };
     let previous_end = |time: f64| {
         groups
@@ -316,7 +395,8 @@ pub(super) fn keep_proposed(
         let (start, _) = bounds[index];
         let previous = (0..index).rev().find(|i| !removed[*i]);
         let touching = previous.filter(|i| (bounds[*i].1 - start).abs() < 1e-9);
-        if let Some(group) = inside(start).filter(|_| start > lower + 1e-9) {
+        if let Some(group) = inside_in(start).filter(|_| start > lower + 1e-9) {
+            let strict = start > group.0 + TURN_SLOP_SECONDS;
             // Only uncertain material may give up frames, and only within the
             // context the reviewer saw. Selected neighbors never shrink.
             let limit = match (previous, touching) {
@@ -327,29 +407,48 @@ pub(super) fn keep_proposed(
             let low = limit.max(previous_end(group.0));
             if let Some(edge) = last_edge(edges, low, group.0 - SPEECH_HANDLE_SECONDS)
                 .or_else(|| last_edge(edges, low, group.0))
+                .filter(|edge| strict || *edge < start - 1e-9)
             {
                 bounds[index].0 = edge;
                 if let Some(i) = touching.filter(|i| uncertain[*i]) {
                     bounds[i].1 = edge;
                     removed[i] = bounds[i].1 - bounds[i].0 < 1e-9;
                 }
-            } else if let Some((i, edge)) = touching.filter(|i| !speech[*i]).and_then(|i| {
-                let high = (bounds[index].1).min(next_start(group.1));
-                first_edge(edges, group.1 + SPEECH_HANDLE_SECONDS, high)
-                    .or_else(|| first_edge(edges, group.1, high))
-                    .filter(|edge| *edge < bounds[index].1 - 1e-9)
-                    .map(|edge| (i, edge))
-            }) {
+            } else if let Some((i, edge)) =
+                touching.filter(|i| strict && !speech[*i]).and_then(|i| {
+                    // Narration continuing under a cutaway: the talking range
+                    // takes the lead-in, the cutaway keeps at least a second.
+                    let keep = ((bounds[i].1 - bounds[i].0) / 2.0).min(1.0);
+                    let low = (bounds[i].0 + keep).max(previous_end(group.0));
+                    last_edge(edges, low, group.0 - SPEECH_HANDLE_SECONDS)
+                        .or_else(|| last_edge(edges, low, group.0))
+                        .map(|edge| (i, edge))
+                })
+            {
                 bounds[i].1 = edge;
                 bounds[index].0 = edge;
-            } else {
+            } else if let Some((i, edge)) =
+                touching.filter(|i| strict && !speech[*i]).and_then(|i| {
+                    let (start, end) = bounds[index];
+                    let high = end.min(next_start(group.1));
+                    // Starting after the utterance must keep most of the moment.
+                    first_edge(edges, group.1 + SPEECH_HANDLE_SECONDS, high)
+                        .or_else(|| first_edge(edges, group.1, high))
+                        .filter(|edge| end - *edge >= (end - start) / 2.0)
+                        .map(|edge| (i, edge))
+                })
+            {
+                bounds[i].1 = edge;
+                bounds[index].0 = edge;
+            } else if strict {
                 blocked[index] = true;
             }
         }
         let (start, end) = bounds[index];
         let next = (index + 1..selections.len()).find(|i| !removed[*i]);
         let touching = next.filter(|i| (bounds[*i].0 - end).abs() < 1e-9);
-        if let Some(group) = inside(end).filter(|_| end < upper - 1e-9) {
+        if let Some(group) = inside_out(end).filter(|_| end < upper - 1e-9) {
+            let strict = end < group.1 - TURN_SLOP_SECONDS;
             let limit = match (next, touching) {
                 (_, Some(i)) if uncertain[i] => bounds[i].1.min(end + super::CONTEXT_SECONDS),
                 (Some(i), _) => bounds[i].0,
@@ -358,22 +457,39 @@ pub(super) fn keep_proposed(
             let high = limit.min(next_start(group.1));
             if let Some(edge) = first_edge(edges, group.1 + SPEECH_HANDLE_SECONDS, high)
                 .or_else(|| first_edge(edges, group.1, high))
+                .filter(|edge| strict || *edge > end + 1e-9)
             {
                 bounds[index].1 = edge;
                 if let Some(i) = touching.filter(|i| uncertain[*i]) {
                     bounds[i].0 = edge;
                     removed[i] = bounds[i].1 - bounds[i].0 < 1e-9;
                 }
-            } else if let Some((i, edge)) = touching.filter(|i| !speech[*i]).and_then(|i| {
-                let low = (start + 1e-6).max(previous_end(group.0));
-                last_edge(edges, low, group.0 - SPEECH_HANDLE_SECONDS)
-                    .or_else(|| last_edge(edges, low, group.0))
-                    .filter(|edge| *edge > start + 1e-9)
-                    .map(|edge| (i, edge))
-            }) {
+            } else if let Some((i, edge)) =
+                touching.filter(|i| strict && !speech[*i]).and_then(|i| {
+                    // Narration continuing under a cutaway: finish the sentence,
+                    // the cutaway keeps at least a second.
+                    let keep = ((bounds[i].1 - bounds[i].0) / 2.0).min(1.0);
+                    let high = (bounds[i].1 - keep).min(next_start(group.1));
+                    first_edge(edges, group.1 + SPEECH_HANDLE_SECONDS, high)
+                        .or_else(|| first_edge(edges, group.1, high))
+                        .map(|edge| (i, edge))
+                })
+            {
                 bounds[i].0 = edge;
                 bounds[index].1 = edge;
-            } else {
+            } else if let Some((i, edge)) =
+                touching.filter(|i| strict && !speech[*i]).and_then(|i| {
+                    let low = (start + 1e-6).max(previous_end(group.0));
+                    // Ending before the utterance must keep most of the moment.
+                    last_edge(edges, low, group.0 - SPEECH_HANDLE_SECONDS)
+                        .or_else(|| last_edge(edges, low, group.0))
+                        .filter(|edge| *edge - start >= (end - start) / 2.0)
+                        .map(|edge| (i, edge))
+                })
+            {
+                bounds[i].0 = edge;
+                bounds[index].1 = edge;
+            } else if strict {
                 blocked[index] = true;
             }
         }
@@ -393,124 +509,6 @@ pub(super) fn keep_proposed(
             selection
         })
         .collect()
-}
-
-fn speech_span(
-    source: &Source<'_>,
-    prepared: &PreparedWindow,
-    selection: &Selection,
-) -> Result<Option<(f64, f64)>, String> {
-    let Some((start, end)) = speech_turns(source, selection)? else {
-        return Ok(None);
-    };
-    let groups = speech_groups(source);
-    let previous = groups
-        .iter()
-        .map(|group| group.1)
-        .filter(|group_end| *group_end <= start)
-        .fold(0.0_f64, f64::max);
-    let next = groups
-        .iter()
-        .map(|group| group.0)
-        .filter(|group_start| *group_start >= end)
-        .fold(source.info.duration, f64::min);
-    // Aim for 120 ms of silence, never the beginning/end of another turn.
-    // If the source frame grid cannot separate the turns, retain uncertainty.
-    let first = prepared
-        .edges
-        .partition_point(|edge| *edge <= (start - SPEECH_HANDLE_SECONDS).max(previous))
-        .saturating_sub(1);
-    let last = prepared
-        .edges
-        .partition_point(|edge| *edge < (end + SPEECH_HANDLE_SECONDS).min(next))
-        .min(prepared.edges.len() - 1);
-    let mut first = prepared.edges[first];
-    let mut last = prepared.edges[last];
-    if first < previous {
-        first = prepared
-            .edges
-            .iter()
-            .copied()
-            .find(|edge| *edge >= previous)
-            .ok_or("No source edge separates the preceding speech turn")?;
-    }
-    if last > next {
-        last = prepared
-            .edges
-            .iter()
-            .rev()
-            .copied()
-            .find(|edge| *edge <= next)
-            .ok_or("No source edge separates the following speech turn")?;
-    }
-    if first > start.max(prepared.window.start) || last < end.min(prepared.window.end) {
-        return Err("Speech turns cannot be separated on the source frame grid".to_owned());
-    }
-    Ok(Some((first, last)))
-}
-
-fn protect_speech(
-    source: &Source<'_>,
-    settings: &ChatSettings,
-    prepared: &PreparedWindow,
-    selections: &[Selection],
-    speech: &[Option<(f64, f64)>],
-    row: &mut Value,
-) -> Result<Vec<Selection>, String> {
-    for (index, selection) in selections.iter().enumerate() {
-        let Some((start, end)) = speech[index] else {
-            continue;
-        };
-        // Turn timing is deliberately conservative. It cannot justify cutting
-        // a turn into words; physical shots and source ends remain immutable.
-        row["ranges"][index]["start"] = json!(selection.candidate.source_in.min(start));
-        row["ranges"][index]["end"] = json!(selection.candidate.end().max(end));
-        if start == prepared.window.start
-            && selection
-                .candidate
-                .transcript
-                .iter()
-                .any(|turn| turn.start < start)
-        {
-            row["ranges"][index]["continuesBefore"] = json!(true);
-        }
-        if end == prepared.window.end
-            && selection
-                .candidate
-                .transcript
-                .iter()
-                .any(|turn| turn.end > end)
-        {
-            row["ranges"][index]["continuesAfter"] = json!(true);
-        }
-    }
-    for index in 0..selections.len().saturating_sub(1) {
-        let left = row["ranges"][index]["end"].as_f64().unwrap();
-        let right = row["ranges"][index + 1]["start"].as_f64().unwrap();
-        if left <= right {
-            continue;
-        }
-        if let (Some((_, end)), Some((start, _))) = (
-            speech_turns(source, &selections[index])?,
-            speech_turns(source, &selections[index + 1])?,
-        ) {
-            // Neighboring silence handles share the available gap instead of
-            // overlapping. Both complete turns must fit on opposite sides.
-            let middle = (left + right) / 2.0;
-            let cut = prepared
-                .edges
-                .iter()
-                .copied()
-                .filter(|edge| *edge >= end && *edge <= start)
-                .min_by(|a, b| (a - middle).abs().total_cmp(&(b - middle).abs()))
-                .ok_or("Speech ranges cannot be separated without cutting a turn")?;
-            row["ranges"][index]["end"] = json!(cut);
-            row["ranges"][index + 1]["start"] = json!(cut);
-        }
-    }
-    // Other conflicts remain reviewable, never silently overwrite a neighbor
-    // or discard its speech to make the arithmetic fit.
-    parse_timed(source, settings, prepared, row, selections)
 }
 
 fn parse_timed(
@@ -779,7 +777,9 @@ pub(super) fn refine(
     halted: &mut bool,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Vec<Selection>, String), String> {
-    let selections = join_inseparable_speech(source, prepared, selections);
+    // Talking edges leave their utterances before any visual choice; audio,
+    // not a visual model, owns a turn boundary.
+    let selections = repair_speech_edges(source, prepared, selections);
     let mut row = json!({"ranges":selections.iter().map(|selection| {
         let clip = &selection.candidate;
         json!({"start":clip.source_in, "end":clip.end(), "category":clip.category,
@@ -788,18 +788,11 @@ pub(super) fn refine(
             "continuesAfter":selection.continues_after && clip.end() == prepared.window.end,
             "subjectCheck":clip.review.subject_check})
     }).collect::<Vec<_>>()});
-    // Compute from the original proposal once: silence handles must not pull
-    // another turn into the protected span on a second pass.
-    let speech = selections
+    let speech: Vec<_> = selections
         .iter()
-        .map(|selection| speech_span(source, prepared, selection))
-        .collect::<Result<Vec<_>, _>>()?;
-    let selections = protect_speech(source, settings, prepared, &selections, &speech, &mut row)?;
-    let speech: Vec<_> = speech
-        .iter()
-        .zip(&selections)
-        .map(|(span, selection)| {
-            span.map(|_| (selection.candidate.source_in, selection.candidate.end()))
+        .map(|selection| {
+            matches!(speech_turns(source, selection), Ok(Some(_)))
+                .then(|| (selection.candidate.source_in, selection.candidate.end()))
         })
         .collect();
     if !source.info.has_video {
