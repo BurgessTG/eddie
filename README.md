@@ -126,3 +126,12 @@ detailed curator contract.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.
 - No project save/load or general undo yet (AI edits have one-step undo).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
