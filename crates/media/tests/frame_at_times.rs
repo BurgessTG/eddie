@@ -1,12 +1,21 @@
-//! Pins that `StillDecoder`/`frame_at(t)` returns the frame actually
-//! at time `t`, not just a correctly-sized frame. The other media
-//! tests assert sizes and counts only. A synthetic source with one
-//! solid color per second makes the correct frame unambiguous from
-//! its mean color, independent of scaler and colorspace details.
+//! Content and timing regressions against real libavcodec decoding.
+//! Frames cover [PTS, next PTS); stills clamp to the last frame at EOF.
+//! The long-GOP source has red/lime/blue/white one-second sections.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
+
+use openreel_media::{frame_at, scaled_height, MediaResult, RawFrame};
+
+// Compile the actual private native implementation, rather than the public
+// frame_at wrapper (which can hide native failures with a CLI fallback).
+// This keeps VideoDecoder out of the production public API.
+#[allow(dead_code)]
+#[path = "../src/decode.rs"]
+mod native;
 
 const COLORS: [(&str, (f64, f64, f64)); 4] = [
     ("red", (255.0, 0.0, 0.0)),
@@ -15,10 +24,121 @@ const COLORS: [(&str, (f64, f64, f64)); 4] = [
     ("white", (255.0, 255.0, 255.0)),
 ];
 
-fn make_color_segments_video() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("openreel_frame_at_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("segments.mp4");
+static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct Fixture {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Fixture {
+    fn vfr(&self) -> PathBuf {
+        let path = self.dir.join("vfr.mp4");
+        run_ffmpeg(
+            Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-i"])
+                .arg(&self.path)
+                .args([
+                    "-vf",
+                    "select='eq(n,0)+gte(n,20)'",
+                    "-fps_mode",
+                    "vfr",
+                    "-c:v",
+                    "libx264",
+                    "-g",
+                    "100",
+                    "-sc_threshold",
+                    "0",
+                    "-bf",
+                    "3",
+                    "-threads:v",
+                    "1",
+                ])
+                .arg(&path),
+        );
+        let pts = presentation_times(&path);
+        assert_eq!(pts.len(), 21);
+        assert_eq!(&pts[..3], &[0.0, 2.0, 2.1]);
+        assert_eq!(pts.last(), Some(&3.9));
+        path
+    }
+
+    fn nonzero_origin(&self) -> PathBuf {
+        let path = self.dir.join("offset.mp4");
+        run_ffmpeg(
+            Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-i"])
+                .arg(&self.path)
+                .args(["-c", "copy", "-output_ts_offset", "3.25"])
+                .arg(&path),
+        );
+        let pts = presentation_times(&path);
+        assert_eq!(pts.len(), 40);
+        assert_eq!(pts[0], 3.25);
+        assert_eq!(pts[10], 4.25);
+        path
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn run_ffmpeg(cmd: &mut Command) {
+    let out = cmd.output().expect("run ffmpeg");
+    assert!(
+        out.status.success(),
+        "ffmpeg failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn presentation_times(path: &Path) -> Vec<f64> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .expect("ffprobe frame timestamps");
+    assert!(out.status.success(), "{:?}", out.stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("frame JSON");
+    let pts: Vec<f64> = json["frames"]
+        .as_array()
+        .expect("frames")
+        .iter()
+        .map(|frame| {
+            frame["best_effort_timestamp_time"]
+                .as_str()
+                .expect("frame PTS")
+                .parse()
+                .expect("numeric PTS")
+        })
+        .collect();
+    eprintln!("{}: source PTS={pts:?}", path.display());
+    pts
+}
+
+fn make_color_segments_video() -> Fixture {
+    let dir = std::env::temp_dir().join(format!(
+        "openreel_frame_at_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).expect("temp dir");
+    let fixture = Fixture {
+        path: dir.join("segments.mp4"),
+        dir,
+    };
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-y", "-v", "error"]);
     for (name, _) in COLORS {
@@ -39,17 +159,20 @@ fn make_color_segments_video() -> PathBuf {
         "libx264",
         "-preset",
         "veryfast",
+        "-g",
+        "100",
+        "-sc_threshold",
+        "0",
+        "-bf",
+        "3",
+        "-threads:v",
+        "1",
         "-pix_fmt",
         "yuv420p",
     ])
-    .arg(&path);
-    let out = cmd.output().expect("run ffmpeg");
-    assert!(
-        out.status.success(),
-        "ffmpeg failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    path
+    .arg(&fixture.path);
+    run_ffmpeg(&mut cmd);
+    fixture
 }
 
 fn mean_rgb(rgba: &[u8]) -> (f64, f64, f64) {
@@ -67,34 +190,478 @@ fn color_distance(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     (a.0 - b.0).abs() + (a.1 - b.1).abs() + (a.2 - b.2).abs()
 }
 
+fn assert_color(mean: (f64, f64, f64), color: usize, context: &str) {
+    let (name, expected) = COLORS[color];
+    eprintln!("{context}: RGB={mean:?}, expected {name}");
+    assert!(
+        color_distance(mean, expected) < 24.0,
+        "{context}: expected {name} near {expected:?}, got {mean:?}"
+    );
+}
+
+fn frame_mean(frame: &RawFrame) -> (f64, f64, f64) {
+    assert_eq!((frame.width, frame.height), (320, 180));
+    assert_eq!(frame.rgba.len(), 320 * 180 * 4);
+    mean_rgb(&frame.rgba)
+}
+
+#[test]
+fn color_oracle_rejects_black_ties() {
+    for (_, expected) in COLORS {
+        assert!(color_distance((0.0, 0.0, 0.0), expected) >= 24.0);
+    }
+}
+
+#[test]
+fn visual_model_evidence_is_valid_jpeg_with_actual_source_pts() {
+    let fixture = make_color_segments_video();
+    for (path, vfr) in [
+        (fixture.path.clone(), false),
+        (fixture.nonzero_origin(), false),
+        (fixture.vfr(), true),
+    ] {
+        let mut sampler = openreel_media::EvidenceSampler::open(path.to_str().unwrap(), 320)
+            .expect("native evidence sampler");
+        for (requested, pts, color) in [
+            (0.99, if vfr { 0.0 } else { 0.9 }, 0),
+            (1.0, if vfr { 0.0 } else { 1.0 }, if vfr { 0 } else { 1 }),
+            (2.0, 2.0, 2),
+            (3.9, 3.9, 3),
+            (8.0, 3.9, 3),
+            (0.0, 0.0, 0),
+        ] {
+            let evidence = sampler.frame_at(requested).expect("JPEG evidence");
+            assert!(
+                (evidence.time - pts).abs() < 1e-9,
+                "requested {requested}, actual {}",
+                evidence.time
+            );
+            let jpeg_path = fixture.dir.join("evidence.jpg");
+            std::fs::write(&jpeg_path, evidence.jpeg).expect("write evidence");
+            let decoded = Command::new("ffmpeg")
+                .args(["-v", "error", "-threads", "1", "-i"])
+                .arg(&jpeg_path)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+                .output()
+                .expect("independently decode JPEG");
+            assert!(decoded.status.success(), "{:?}", decoded.stderr);
+            assert_eq!(decoded.stdout.len(), 320 * 180 * 4);
+            assert_color(mean_rgb(&decoded.stdout), color, "model evidence");
+        }
+        assert!(sampler.frame_at(f64::NAN).is_err());
+        assert!(sampler.frame_at(f64::INFINITY).is_err());
+        assert_eq!(sampler.frame_at(0.0).unwrap().time, 0.0);
+    }
+}
+
+#[test]
+fn native_video_decoder_selects_half_open_boundaries() {
+    let fixture = make_color_segments_video();
+    let mut decoder =
+        native::VideoDecoder::open(fixture.path.to_str().unwrap(), 320, false).unwrap();
+    for (time, color) in [
+        (0.0, 0),
+        (0.5, 0),
+        (0.999999, 0),
+        (1.0, 1),
+        (1.000001, 1),
+        (1.999999, 1),
+        (2.0, 2),
+        (2.999999, 2),
+        (3.0, 3),
+        (0.5, 0),
+    ] {
+        let frame = decoder.frame_at(time).expect("native frame");
+        assert_color(frame_mean(&frame), color, &format!("native t={time}"));
+    }
+}
+
+#[test]
+fn native_video_decoder_drains_final_gop_and_reseeks() {
+    let fixture = make_color_segments_video();
+    let mut decoder =
+        native::VideoDecoder::open(fixture.path.to_str().unwrap(), 320, true).unwrap();
+    for (time, color) in [
+        (3.5, 3),
+        (3.9, 3),
+        (3.999999, 3),
+        (4.0, 3),
+        (4.5, 3),
+        (0.5, 0),
+    ] {
+        let frame = decoder.frame_at(time).expect("native tail frame");
+        assert_color(frame_mean(&frame), color, &format!("native tail t={time}"));
+    }
+}
+
+#[test]
+fn native_video_decoder_streams_all_frames_and_reuses_buffer() {
+    let fixture = make_color_segments_video();
+    let mut decoder =
+        native::VideoDecoder::open(fixture.path.to_str().unwrap(), 320, true).unwrap();
+    let mut buffer = vec![0; 320 * 180 * 4];
+    let allocation = buffer.as_ptr();
+    for index in 0..40 {
+        let (pts, frame) = decoder.next_frame(buffer).expect("next native frame");
+        assert!(
+            (pts - index as f64 / 10.0).abs() < 1e-9,
+            "frame {index}: {pts}"
+        );
+        assert_color(
+            frame_mean(&frame),
+            index / 10,
+            &format!("sequential PTS={pts}"),
+        );
+        assert_eq!(
+            frame.rgba.as_ptr(),
+            allocation,
+            "reuse caller's RGBA storage"
+        );
+        buffer = frame.rgba;
+    }
+    assert!(decoder.next_frame(buffer).is_none(), "actual decoder EOF");
+    assert!(
+        decoder.next_frame(Vec::new()).is_none(),
+        "EOF remains drained"
+    );
+}
+
+#[test]
+fn native_video_decoder_uses_vfr_presentation_intervals() {
+    let fixture = make_color_segments_video();
+    let path = fixture.vfr();
+    let mut decoder = native::VideoDecoder::open(path.to_str().unwrap(), 320, false).unwrap();
+    for (time, color) in [
+        (1.0, 0),
+        (1.5, 0),
+        (1.999999, 0),
+        (2.0, 2),
+        (3.0, 3),
+        (3.9, 3),
+    ] {
+        let frame = decoder.frame_at(time).expect("native VFR frame");
+        assert_color(frame_mean(&frame), color, &format!("VFR t={time}"));
+    }
+}
+
+#[test]
+fn native_video_decoder_normalizes_nonzero_origin() {
+    let fixture = make_color_segments_video();
+    let path = fixture.nonzero_origin();
+    let mut decoder = native::VideoDecoder::open(path.to_str().unwrap(), 320, false).unwrap();
+    for (time, color) in [(1.0, 1), (1.5, 1), (3.5, 3), (0.0, 0)] {
+        let frame = decoder.frame_at(time).expect("native offset frame");
+        assert_color(frame_mean(&frame), color, &format!("offset t={time}"));
+    }
+    decoder.seek(0.0).expect("seek origin");
+    let (pts, frame) = decoder.next_frame(Vec::new()).expect("first source frame");
+    assert!(pts.abs() < 1e-9, "normalized first PTS: {pts}");
+    assert_color(frame_mean(&frame), 0, "normalized first frame");
+}
+
 #[test]
 fn still_decoder_returns_frame_at_requested_time() {
-    let path = make_color_segments_video();
-    let path_str = path.to_str().expect("utf8 path").to_owned();
+    let fixture = make_color_segments_video();
+    let path_str = fixture.path.to_str().expect("utf8 path").to_owned();
     let (decoder, rx) = openreel_media::StillDecoder::spawn(|| {});
-    for (i, (_, expected)) in COLORS.iter().enumerate() {
-        let t = i as f64 + 0.5;
+    for (i, (t, color)) in [(0.5, 0), (1.0, 1), (1.5, 1), (2.5, 2), (3.5, 3), (0.5, 0)]
+        .into_iter()
+        .enumerate()
+    {
         decoder.request(i as u64 + 1, path_str.clone(), 320, 180, t, 320, false);
         let (id, result) = rx
             .recv_timeout(Duration::from_secs(30))
             .expect("still result");
         assert_eq!(id, i as u64 + 1);
         let frame = result.expect("decode ok");
-        assert_eq!((frame.width, frame.height), (320, 180));
-        let mean = mean_rgb(&frame.rgba);
-        let nearest = COLORS
-            .iter()
-            .min_by(|a, b| {
-                color_distance(mean, a.1)
-                    .partial_cmp(&color_distance(mean, b.1))
-                    .expect("finite distances")
-            })
-            .expect("colors nonempty");
-        assert!(
-            color_distance(mean, nearest.1) == color_distance(mean, *expected),
-            "t={t}: expected segment color #{i} near {expected:?}, got mean {mean:?} (nearest {})",
-            nearest.0
-        );
+        assert_color(frame_mean(&frame), color, &format!("StillDecoder t={t}"));
     }
-    let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+    drop(decoder);
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    ));
+}
+
+fn collect_stream(path: &Path, start: f64) -> Vec<(f64, (f64, f64, f64))> {
+    let stream =
+        openreel_media::FrameStream::spawn(path.to_str().unwrap(), 320, 180, start, 320, 30.0)
+            .expect("native FrameStream");
+    let mut first_received = None;
+    let mut observed = Vec::new();
+    loop {
+        match stream.frames.recv_timeout(Duration::from_secs(5)) {
+            Ok(frame) => {
+                let elapsed = first_received
+                    .get_or_insert_with(Instant::now)
+                    .elapsed()
+                    .as_secs_f64();
+                observed.push((elapsed, frame_mean(&frame)));
+                stream.recycle(frame.rgba);
+                assert!(observed.len() <= 40, "stream must terminate at source EOF");
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(error) => panic!("stream did not finish: {error}"),
+        }
+    }
+    stream.stop();
+    eprintln!("FrameStream start={start}: (elapsed seconds, RGB)={observed:?}");
+    observed
+}
+
+fn assert_cfr_in_point(path: &Path) {
+    let observed = collect_stream(path, 1.5);
+    assert_color(observed[0].1, 1, "stream first at source 1.5");
+    assert_eq!(observed.len(), 25, "only source frames 1.5 through 3.9");
+    for (index, (_, mean)) in observed.iter().enumerate() {
+        assert_color(*mean, (15 + index) / 10, &format!("stream frame {index}"));
+    }
+    assert!(
+        (0.30..1.20).contains(&observed[5].0),
+        "source 2.0 is due 0.5 seconds after in-point, got {}",
+        observed[5].0
+    );
+}
+
+#[test]
+fn frame_stream_discards_preroll_and_reaches_final_frame() {
+    let fixture = make_color_segments_video();
+    assert_cfr_in_point(&fixture.path);
+}
+
+#[test]
+fn frame_stream_paces_from_inside_a_vfr_interval() {
+    let fixture = make_color_segments_video();
+    let path = fixture.vfr();
+    let observed = collect_stream(&path, 1.5);
+    assert_eq!(observed.len(), 21);
+    assert_color(observed[0].1, 0, "VFR frame covering source 1.5");
+    for (index, (_, mean)) in observed.iter().enumerate().skip(1) {
+        assert_color(*mean, if index <= 10 { 2 } else { 3 }, "VFR stream");
+    }
+    assert!(
+        (0.30..1.20).contains(&observed[1].0),
+        "source 2.0 is due after the remaining 0.5 seconds, not the full 2-second interval: {}",
+        observed[1].0
+    );
+}
+
+#[test]
+fn frame_stream_normalizes_nonzero_origin() {
+    let fixture = make_color_segments_video();
+    let path = fixture.nonzero_origin();
+    assert_cfr_in_point(&path);
+}
+
+#[test]
+fn frame_stream_stops_under_backpressure() {
+    let fixture = make_color_segments_video();
+    let stream = openreel_media::FrameStream::spawn(
+        fixture.path.to_str().unwrap(),
+        320,
+        180,
+        0.0,
+        320,
+        30.0,
+    )
+    .unwrap();
+    // Leave the three-frame output queue full while the producer waits.
+    std::thread::sleep(Duration::from_millis(600));
+    let stopping = Instant::now();
+    stream.stop();
+    eprintln!("stop with full queue: {:?}", stopping.elapsed());
+    assert!(stopping.elapsed() < Duration::from_secs(1));
+}
+
+fn await_preview(
+    preview: &openreel_media::FrameStream,
+    generation: u64,
+    time: f64,
+) -> MediaResult<RawFrame> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(result) = preview.preview_frame(generation, time) {
+            return result;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "preview generation {generation} timed out at {time}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn preview_follows_the_callers_clock_not_decoder_startup_or_consumer_delay() {
+    let fixture = make_color_segments_video();
+    let preview = openreel_media::FrameStream::spawn_preview(|| {}).unwrap();
+    let generation = preview
+        .request_preview(fixture.path.to_str().unwrap(), 0.5, 320, 30.0)
+        .unwrap();
+    let frame = await_preview(&preview, generation, 0.5).unwrap();
+    assert_color(frame_mean(&frame), 0, "preview at source 0.5");
+    preview.recycle(frame.rgba);
+
+    std::thread::sleep(Duration::from_millis(650));
+    assert!(
+        preview.preview_frame(generation, 0.5).is_none(),
+        "wall time cannot advance the caller's clock"
+    );
+    // A delayed UI advances by two seconds. There must be no queue of old
+    // red/green pictures to drain before the current blue interval appears.
+    let frame = await_preview(&preview, generation, 2.5).unwrap();
+    assert_color(frame_mean(&frame), 2, "preview catches up directly to 2.5");
+    preview.recycle(frame.rgba);
+    let frame = await_preview(&preview, generation, 3.9).unwrap();
+    assert_color(frame_mean(&frame), 3, "preview final delayed frame");
+    preview.recycle(frame.rgba);
+    assert!(
+        preview.preview_frame(generation, 8.0).is_none(),
+        "EOF holds the already displayed final picture"
+    );
+
+    let next = preview
+        .request_preview(fixture.path.to_str().unwrap(), 0.0, 320, 30.0)
+        .unwrap();
+    assert!(
+        preview.preview_frame(generation, 3.9).is_none(),
+        "old consumers cannot advance the new generation"
+    );
+    let frame = await_preview(&preview, next, 0.0).unwrap();
+    assert_color(frame_mean(&frame), 0, "preview reseeks after EOF");
+    preview.recycle(frame.rgba);
+    preview.stop();
+}
+
+#[test]
+fn preview_preserves_vfr_intervals_nonzero_origins_and_eof_clamping() {
+    let fixture = make_color_segments_video();
+    let preview = openreel_media::FrameStream::spawn_preview(|| {}).unwrap();
+    for (path, first_color) in [(fixture.vfr(), 0), (fixture.nonzero_origin(), 1)] {
+        for start in [1.5, 1.999999] {
+            let generation = preview
+                .request_preview(path.to_str().unwrap(), start, 320, 30.0)
+                .unwrap();
+            let first = await_preview(&preview, generation, start).unwrap();
+            assert_color(
+                frame_mean(&first),
+                first_color,
+                &format!("preview source interval containing {start}"),
+            );
+            preview.recycle(first.rgba);
+            let frame = await_preview(&preview, generation, 2.0).unwrap();
+            assert_color(frame_mean(&frame), 2, "preview half-open boundary at 2.0");
+            preview.recycle(frame.rgba);
+        }
+
+        let generation = preview
+            .request_preview(path.to_str().unwrap(), 8.0, 320, 30.0)
+            .unwrap();
+        let frame = await_preview(&preview, generation, 8.0).unwrap();
+        assert_color(
+            frame_mean(&frame),
+            3,
+            "preview seek past EOF clamps to last picture",
+        );
+        preview.recycle(frame.rgba);
+    }
+    preview.stop();
+}
+
+#[test]
+fn preview_reports_native_errors_and_recovers_on_a_new_request() {
+    let fixture = make_color_segments_video();
+    let preview = openreel_media::FrameStream::spawn_preview(|| {}).unwrap();
+    let bad = fixture.dir.join("not-a-video.mp4");
+    std::fs::write(&bad, b"not a media file").unwrap();
+    let generation = preview
+        .request_preview(bad.to_str().unwrap(), 0.0, 320, 30.0)
+        .unwrap();
+    let error = await_preview(&preview, generation, 0.0).unwrap_err();
+    eprintln!("asynchronous native preview failure: {error}");
+    assert!(error.contains("open input"));
+    assert!(
+        preview.preview_frame(generation, 0.0).is_none(),
+        "one failure, not a retry loop"
+    );
+    let generation = preview
+        .request_preview(fixture.path.to_str().unwrap(), 1.0, 320, 30.0)
+        .unwrap();
+    let frame = await_preview(&preview, generation, 1.0).unwrap();
+    assert_color(frame_mean(&frame), 1, "recovery after native open error");
+    preview.recycle(frame.rgba);
+    preview.cancel_preview();
+    assert!(preview.preview_frame(generation, 2.0).is_none());
+    assert!(preview
+        .request_preview(fixture.path.to_str().unwrap(), f64::NAN, 320, 30.0)
+        .is_err());
+    preview.stop();
+}
+
+#[cfg(unix)]
+#[test]
+fn preview_coalesces_requests_while_native_open_is_blocked() {
+    use std::io::Write;
+    use std::sync::mpsc::channel;
+
+    let fixture = make_color_segments_video();
+    let slow = fixture.dir.join("blocked.mp4");
+    let obsolete = fixture.dir.join("must-not-open.mp4");
+    for path in [&slow, &obsolete] {
+        assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+    }
+    // If a queued obsolete request is opened, its empty FIFO stalls the worker
+    // and the final real request times out. Drop the writer before joining so
+    // even a failing test releases that native read.
+    let obsolete_writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&obsolete)
+        .unwrap();
+    let (opened_tx, opened_rx) = channel();
+    let (release_tx, release_rx) = channel();
+    let writer = std::thread::spawn(move || {
+        let mut file = std::fs::File::create(slow).unwrap();
+        opened_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        file.write_all(b"invalid input after a blocked open")
+            .unwrap();
+    });
+    let preview = openreel_media::FrameStream::spawn_preview(|| {}).unwrap();
+    let first = preview
+        .request_preview(
+            fixture.dir.join("blocked.mp4").to_str().unwrap(),
+            0.0,
+            320,
+            30.0,
+        )
+        .unwrap();
+    opened_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let replacing = Instant::now();
+    preview.cancel_preview();
+    for _ in 0..1000 {
+        preview
+            .request_preview(obsolete.to_str().unwrap(), 0.0, 320, 30.0)
+            .unwrap();
+    }
+    let latest = preview
+        .request_preview(fixture.path.to_str().unwrap(), 2.5, 320, 30.0)
+        .unwrap();
+    let caller_time = replacing.elapsed();
+    assert!(preview.preview_frame(first, 0.0).is_none());
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    let result = await_preview(&preview, latest, 2.5);
+    drop(obsolete_writer);
+    preview.cancel_preview();
+    preview.stop();
+    eprintln!("cancel + replace 1001 requests while native open is blocked: {caller_time:?}");
+    assert!(caller_time < Duration::from_millis(100));
+    let frame = result.expect("only the final request may follow the blocked native open");
+    assert_color(
+        frame_mean(&frame),
+        2,
+        "latest generation after obsolete requests and error",
+    );
 }

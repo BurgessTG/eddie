@@ -6,6 +6,7 @@
 //! so a future `ffmpeg-next`/hardware-decode backend can replace it.
 
 mod decode;
+mod evidence;
 mod export;
 mod playback;
 mod samples;
@@ -13,10 +14,17 @@ mod sweep;
 
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
+pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::export_timeline;
 pub use playback::{AudioPlayer, FrameStream};
 pub use samples::generate_samples;
-pub use sweep::{build_segments, motion_samples, write_wav_24k, MotionSample, SweepSegment};
+pub use sweep::{
+    analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,
+    frame_visual_evidence, motion_samples, sam_unavailable_reason, write_wav_24k,
+    FrameVisualEvidence, MotionSample, SegmentVisualEvidence, SubjectMaskEvidence,
+    SubjectSegmentationProvider, SubjectSegmentationStatus, SweepSegment,
+    UnavailableSubjectSegmentation, VisualEvidenceSource,
+};
 
 use std::io::Read;
 use std::path::Path;
@@ -274,7 +282,7 @@ fn accumulate(
     current: &mut f32,
     count: &mut usize,
 ) {
-    *current = current.max(sample.abs() as f32 / 32768.0);
+    *current = current.max(sample.unsigned_abs() as f32 / 32768.0);
     *count += 1;
     if *count >= per_peak {
         peaks.push(*current);
@@ -282,6 +290,10 @@ fn accumulate(
         *count = 0;
     }
 }
+
+/// Import waveform resolution. Fifty buckets per second is fine
+/// enough for phrase-level silence cuts without retaining audio.
+pub const WAVEFORM_PEAKS_PER_SEC: u32 = 50;
 
 /// Peak waveform: one max-amplitude value per `1/peaks_per_sec` seconds.
 pub fn waveform_peaks(path: &str, duration: f64, peaks_per_sec: u32) -> MediaResult<Vec<f32>> {
@@ -359,12 +371,217 @@ pub fn waveform_peaks(path: &str, duration: f64, peaks_per_sec: u32) -> MediaRes
     Ok(peaks)
 }
 
+/// A half-open source-time range, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimeRange {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl TimeRange {
+    pub fn duration(&self) -> f64 {
+        (self.end - self.start).max(0.0)
+    }
+}
+
+fn valid_peak_rate(peaks_per_sec: f64) -> bool {
+    peaks_per_sec.is_finite() && peaks_per_sec > 0.0
+}
+
+/// Runs of waveform buckets at or below `threshold`, keeping only
+/// runs at least `min_duration` long. This is deliberately DSP,
+/// not speech recognition: a quiet room tone and true silence are
+/// separated by the caller's threshold, while meaning/filler words
+/// still come from transcription.
+pub fn silence_ranges(
+    peaks: &[f32],
+    peaks_per_sec: f64,
+    threshold: f32,
+    min_duration: f64,
+) -> Vec<TimeRange> {
+    if peaks.is_empty() || !valid_peak_rate(peaks_per_sec) {
+        return Vec::new();
+    }
+    let threshold = threshold.clamp(0.0, 1.0);
+    let min_duration = min_duration.max(0.0);
+    let mut ranges = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (index, peak) in peaks.iter().copied().enumerate() {
+        let silent = peak.is_finite() && peak <= threshold;
+        match (silent, run_start) {
+            (true, None) => run_start = Some(index),
+            (false, Some(start)) => {
+                let range = TimeRange {
+                    start: start as f64 / peaks_per_sec,
+                    end: index as f64 / peaks_per_sec,
+                };
+                if range.duration() + f64::EPSILON >= min_duration {
+                    ranges.push(range);
+                }
+                run_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = run_start {
+        let range = TimeRange {
+            start: start as f64 / peaks_per_sec,
+            end: peaks.len() as f64 / peaks_per_sec,
+        };
+        if range.duration() + f64::EPSILON >= min_duration {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+/// Audible source ranges inside `[range_start, range_end)`.
+/// Silences shorter than `min_silence` remain inside a phrase;
+/// each kept phrase is expanded by `padding` on both sides so
+/// tightening does not clip breaths or consonant attacks.
+#[allow(clippy::too_many_arguments)]
+pub fn audible_ranges(
+    peaks: &[f32],
+    peaks_per_sec: f64,
+    range_start: f64,
+    range_end: f64,
+    threshold: f32,
+    min_silence: f64,
+    padding: f64,
+) -> Vec<TimeRange> {
+    if peaks.is_empty() || !valid_peak_rate(peaks_per_sec) {
+        return Vec::new();
+    }
+    let media_end = peaks.len() as f64 / peaks_per_sec;
+    let range_start = range_start.clamp(0.0, media_end);
+    let range_end = range_end.clamp(range_start, media_end);
+    if range_end <= range_start {
+        return Vec::new();
+    }
+    let threshold = threshold.clamp(0.0, 1.0);
+    let min_silence = min_silence.max(0.0);
+    let padding = padding.max(0.0);
+    let start_index = (range_start * peaks_per_sec).floor() as usize;
+    let end_index = ((range_end * peaks_per_sec).ceil() as usize).min(peaks.len());
+
+    let mut groups: Vec<TimeRange> = Vec::new();
+    let mut group_start: Option<usize> = None;
+    let mut previous_audible: Option<usize> = None;
+    for index in start_index..end_index {
+        let peak = peaks[index];
+        if !peak.is_finite() || peak <= threshold {
+            continue;
+        }
+        match (group_start, previous_audible) {
+            (None, _) => group_start = Some(index),
+            (Some(start), Some(previous)) => {
+                let silent_buckets = index.saturating_sub(previous + 1);
+                let silence = silent_buckets as f64 / peaks_per_sec;
+                if silent_buckets > 0 && silence + f64::EPSILON >= min_silence {
+                    groups.push(TimeRange {
+                        start: start as f64 / peaks_per_sec,
+                        end: (previous + 1) as f64 / peaks_per_sec,
+                    });
+                    group_start = Some(index);
+                }
+            }
+            _ => {}
+        }
+        previous_audible = Some(index);
+    }
+    if let (Some(start), Some(previous)) = (group_start, previous_audible) {
+        groups.push(TimeRange {
+            start: start as f64 / peaks_per_sec,
+            end: (previous + 1) as f64 / peaks_per_sec,
+        });
+    }
+
+    let mut merged: Vec<TimeRange> = Vec::new();
+    for group in groups {
+        let range = TimeRange {
+            start: (group.start - padding).clamp(range_start, range_end),
+            end: (group.end + padding).clamp(range_start, range_end),
+        };
+        if range.duration() <= f64::EPSILON {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use openreel_engine::{ClipKind, Timeline};
     use std::collections::HashMap;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn waveform_peak_handles_full_scale_negative_sample() {
+        let mut peaks = Vec::new();
+        let mut current = 0.0;
+        let mut count = 0;
+        accumulate(i16::MIN, 1, &mut peaks, &mut current, &mut count);
+        assert_eq!(peaks, vec![1.0]);
+    }
+
+    #[test]
+    fn waveform_silence_and_audible_ranges_are_source_timed() {
+        let mut peaks = vec![0.0; 5];
+        peaks.extend([0.8; 5]);
+        peaks.extend([0.0; 5]);
+        peaks.extend([0.7; 5]);
+
+        let silences = silence_ranges(&peaks, 10.0, 0.03, 0.35);
+        assert_eq!(
+            silences,
+            vec![
+                TimeRange {
+                    start: 0.0,
+                    end: 0.5,
+                },
+                TimeRange {
+                    start: 1.0,
+                    end: 1.5,
+                },
+            ]
+        );
+
+        let audible = audible_ranges(&peaks, 10.0, 0.0, 2.0, 0.03, 0.35, 0.1);
+        assert_eq!(
+            audible,
+            vec![
+                TimeRange {
+                    start: 0.4,
+                    end: 1.1,
+                },
+                TimeRange {
+                    start: 1.4,
+                    end: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn short_waveform_pauses_stay_inside_one_audible_range() {
+        let peaks = [0.8, 0.8, 0.0, 0.0, 0.7, 0.7];
+        let audible = audible_ranges(&peaks, 10.0, 0.0, 0.6, 0.03, 0.35, 0.0);
+        assert_eq!(
+            audible,
+            vec![TimeRange {
+                start: 0.0,
+                end: 0.6,
+            }]
+        );
+    }
 
     #[test]
     fn samples_probe_decode_and_export_end_to_end() {
@@ -394,6 +611,9 @@ mod tests {
             frame_at(&video_path, video.width, video.height, 2.0, 320, false).expect("frame");
         assert_eq!((frame.width, frame.height), (320, 180));
         assert_eq!(frame.rgba.len(), 320 * 180 * 4);
+        let jpeg = frame_jpeg_at(&video_path, 2.0, 320).expect("representative JPEG");
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8], "JPEG start marker");
+        assert_eq!(&jpeg[jpeg.len() - 2..], &[0xff, 0xd9], "JPEG end marker");
         // The public API falls back to the CLI, so exercise the in-process
         // decoder directly to prove that path really works.
         let in_process =

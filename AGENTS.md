@@ -62,7 +62,22 @@ Known audit findings not yet fixed:
 The media bin and import pipeline live in `crates/app/src/app/media.rs`.
 Chat editing lives in `crates/app/src/app/chat.rs`. Its HTTP call runs on
 a worker thread in app code. Generated JavaScript still goes through
-`scripting.rs` and mutates state only as `ScriptCommand`s.
+`scripting.rs` and mutates state only as `ScriptCommand`s. Checked chat
+evals use a fresh QuickJS runtime/context, so a retry can reuse
+declarations without inheriting changed globals; the interactive REPL
+still persists vars. Each eval can enqueue at most 2,048 commands and
+1 MiB of owned command strings, and rejects nonfinite numeric inputs.
+The VM, command callbacks, and eval completion check a cooperative
+500 ms deadline; a single native operation cannot be preempted.
+Chat and local-intent batches roll back timeline, selection, transport,
+magnet, zoom, and music-bed policy on application errors. They preserve
+the previous Undo on failure or a timeline-neutral reply. Application
+checks a 250 ms deadline between commands; this is cooperative, not
+preemption of a single native operation. Generated import/export is
+rejected before any command runs; explicit console and GUI I/O remain.
+Pending chat retains its request-time timeline and state JSON. Timeline
+changes reject stale replies, selection/playhead defaults use that saved
+state, and an explicit timeline clear cancels the pending request.
 Chat session state (persisted history, pinned project summary, token
 budget `TOKEN_BUDGET`, and compaction of older turns into one summary
 message) lives in `crates/app/src/app/session.rs`, adapted from
@@ -71,8 +86,23 @@ research — state store and budget discipline only, not its
 coding-agent loop. Requests are assembled developer contract →
 few-shot → pinned summary → recent history → timeline JSON last, with
 a per-project `prompt_cache_key`, so the cached prefix stays stable.
+Editing requests omit repeated candidate transcripts, detailed visual
+measurements, and review frame arrays. They retain every range and ID;
+QuickJS still reads the full request-time snapshot. Requests that remain
+over the estimated context budget after history compaction fail before
+dispatch rather than silently dropping clips.
 The model replies with a structured `{code, explanation}` envelope
 (free-text parsing is a fallback). Only 429/500/503 are retried.
+Built-in Meta choices use `muse-spark-1.3` and `muse-wonder-1.0`.
+Settings load maps the old unversioned names to these API IDs, preserving
+explicit versioned/custom IDs. The Contributor checkbox is disclosure
+only; it does not automatically select a Contributor model ID.
+Settings save uses a same-directory atomic replacement, private from
+creation on Unix, and reports failures. Check connection runs off the UI
+thread and validates authentication plus the exact selected model through
+`GET /models`; it does not prove inference, ASR or SAM availability.
+Results from changed settings are discarded. Keyless endpoints must be
+parsed localhost or loopback addresses, not hostname-prefix matches.
 Button intents are declared in `crates/app/src/app/intents.rs`: local
 intents arrange sweep candidates offline through the same
 `ScriptCommand` batch path; model intents are fixed prompts through
@@ -80,23 +110,209 @@ the chat loop. AI edits snapshot the timeline first for one-click
 undo, and in-flight calls can be cancelled.
 The import QC sweep is the curator. It lives in
 `crates/app/src/app/sweep.rs`, with motion sampling and segmentation in
-`crates/media/src/sweep.rs`. Import only imports; curation runs after,
-per asset. Every candidate carries one category (`prime`, `reaction`,
+`crates/media/src/sweep.rs`. Import only imports; curation never runs
+automatically. The user selects a ready asset and presses Curate
+(Curate all new covers a batch; Re-curate replaces prior results).
+Scene boundaries are visual only: every frame is analyzed at 64 px
+wide with pixel motion kept separate from global and 4x4-block
+RGB-histogram scene scores. Histogram weights interpolate between
+color-bin centers so small lighting changes do not become cuts.
+High scene scores also check illumination-tolerant texture and coherent
+background motion. This rejects the labeled flash and foreground-exit
+false cuts without merging short shots. A defocused foreground passing
+the lens is an excursion: a featureless run (strong-edge share under 2%,
+at most 2 s) entered or left through a partly covered frame. Its
+boundaries drop to the score between a detailed frame 0.5 s before the
+run and a frame within 1 s after it, only when that across-run
+comparison is not a cut. Textured inserts, featureless runs between
+different views, and instant cuts to a flat card and back keep their
+cuts. Similar shots and textureless flashes remain ambiguous; this is
+not universal cut recognition.
+The adaptive median/MAD baseline uses neighboring score maxima to
+handle repeated-frame cadence, and needs eight history samples.
+The block term is load-bearing for same-palette montage shots in
+one location. Audio never creates a boundary. It only supplies energy,
+peak, coverage, music-bed, waveform silence, and transcript evidence for scoring and
+classification. Per-frame local visual evidence also records
+foreground coverage/centroid travel, center saliency, edge density,
+luminance, contrast, and a broad skin-tone pixel ratio. Those are
+measured proxies, not a person/face/expression detector.
+Curation returns two distinct lists, neither capped by clip count.
+`scene_clips` is the complete source-ordered detected-shot inventory,
+contiguous from zero to the asset duration, including one-frame inserts
+at their exact source PTS. `candidates` contains ranked workable ranges;
+without model access, every physical shot remains a local suggestion.
+Long takes are not arbitrarily chopped into eight-second candidates.
+Decode or scaling errors fail scene analysis instead of claiming that
+partially analyzed footage has complete detected coverage.
+The central Program/Gallery tabs keep browsing separate from the timeline
+preview. Curate opens Gallery and pauses playback; completion does not
+override a manual return to Program. Gallery lives in `app/gallery.rs`.
+Gallery uses a smaller default timeline height and remembers its resize
+separately from Program so browsing leaves room for complete clip cards.
+Its Clips grid combines text search, source, category, quality/review and
+duration filters. Best first is the default; source order, shortest and
+longest are alternatives. Search matches words across names, titles,
+categories, tags, review notes and transcripts. Add shown uses exactly
+the displayed ranges and order. All scenes ignores Clip filters and stays
+complete and source-ordered, including rejected material. Reset clears
+Clip filters and restores Best first without changing the selected source.
+Virtualized cards request source-range midpoint thumbnails lazily through
+one native still worker, with a shared 256-entry success/failure cache;
+audio-only ranges show their waveform. Compact layouts group filters in
+a popup and show the number of active type/quality/duration filters.
+JS/chat expose all assets through `sweepCandidates()` and `sceneClips()`
+independently of the UI filter. Dismiss hides a suggestion, not its source.
+Asset tooltips state which stages ran or failed, counts, coverage, and
+reported editorial-review and SAM usage. Review tokens include refinement;
+SAM reports requests, completions, failures and provider-metered frames/images.
+Those totals exclude ASR and retries whose usage the provider did not report.
+Every candidate/scene clip carries one category (`reaction`,
 `talking`, `action`, `broll`, `establishing`), tags from the
-`CURATOR_TAGS` vocabulary, and quality subscores (stability, audio,
-motion). Prime is scarce: top 20% of shown candidates per asset at
-score 75+, assigned by the app after ranking, never by the model.
-Local classification derives category and tags from measured signals.
-With a Meta API key it transcribes with `muse-voice-transcribe-1.0`
-and model-ranks plus classifies through chat completions; model
-categories and tags are validated against the vocabularies with local
-fallback. Candidates are suggestions only; the source asset stays
-whole. SAM 3.1 subject presence is not wired yet.
+`CURATOR_TAGS` vocabulary (including `subject-centered`,
+`subject-large`, `subject-moving`, and `face-visible`), quality subscores
+(stability, audio, motion), a cross-modal `talkingScore`, a `visual`
+evidence object, and `review` metadata. Prime is a quality tag, not a
+category: top 20% of candidates per asset at score 75+, assigned by the
+app after ranking, never by the model or to Needs review material.
+General-production tags include `detail`, `wide-shot`, `demonstration`,
+`interaction`, `reveal`, `subject-entering`, `subject-exiting`, `occluded`,
+`camera-move`, and `expressive`. These describe observed content, not
+guaranteed emotion, action completion, or subject identity.
+Reaction filtering uses the category, not reason substrings or soundtrack peaks.
+Local classification derives categories and tags from measured signals.
+With model access, `sweep/curation.rs` sends the selected Meta model
+timestamped JPEG sequences and transcripts in 24-second review windows
+with context, anchored to the shot origin so fractional-frame rounding
+cannot accumulate into an extra one-frame window. Requests contain at most
+40 images and eight windows; those
+are request-size limits, not extraction caps. The reusable native
+`EvidenceSampler` in `crates/media/src/evidence.rs` supplies 384px JPEGs
+and actual normalized PTS without a per-still subprocess. Discovery requests
+frames at intervals of at most one second, more densely for short windows. Its bounded
+`frames` API uses one seek followed by sequential decoding, returns at most
+40 distinct source pictures over 30 seconds and 16 MiB of JPEGs, and shares
+half-open presentation-interval selection with analysis video sampling.
+`curation/orientation.rs` first asks the selected model for a small routing
+description and optional concrete subject checks. It cannot reject footage;
+an invalid check (unknown edge ID, unshown anchor) is skipped, not the window.
+The substantive review then receives the complete overview and transcript,
+plus any SAM evidence; SAM is not a gate that hides untracked source ranges.
+Reviews can select multiple useful ranges inside one shot and must account
+for every other interval as rejected or Needs review. Integer edge IDs map
+to host-owned source PTS; source bounds, complete coverage, ordering,
+categories and continuation flags are validated. Metrics are recomputed
+for each range. Editorial scores use a declared 0–100 scale.
+`curation/seams.rs` reconciles useful beats across analysis windows using
+shared context. Explicit same-shot, same-category continuations join;
+otherwise the model can join, separate or preserve uncertainty. A window
+clock is not a physical cut. `sweep/curation/timing.rs` verifies interior
+editorial edges against source pictures sampled about every 0.1 seconds
+within 0.75 seconds of each proposal, can request one inspection out to
+two seconds, then resolves adjacent source pictures inside the chosen bracket.
+The model chooses supplied
+integer frame choices, not invented times; out-points use the selected
+picture's exclusive end. Adjacent searches meet at proposal midpoints,
+and each moment retains an original midpoint picture, so choices cannot
+cross or erase short moments. A shared split moves both edges once.
+This pass cannot discover missing moments, change categories, or move
+physical scene boundaries. An invalid or missing decision keeps that
+boundary's proposed edge. A failed seam keeps both window ranges
+unreconciled; a failed timing pass keeps the validated pre-timing ranges.
+Either way `review.edgeIssue` says the edges were not reconciled or
+frame-verified, the note reports it, and coverage, ordering and
+non-overlap still hold. Talking/speech edges on that path still move out
+of any available utterance (to its end, or back to the silence before it,
+only into Needs review or non-speech neighbors); a range that cannot
+becomes Needs review with its metadata. Only an invalid or missing
+editorial review preserves the whole window as Needs review.
+More
+than eight boundaries create more bounded requests, not fewer clips.
+Timing usage is included in review totals, with separate timing batch and
+boundary counts and per-stage usage. Built-in Meta models use low reasoning effort and an
+8,192-token completion allowance for this constrained choice pass; the
+allowance includes hidden reasoning, not just the visible JSON.
+Physical shots remain available even when the model rejects their content.
+Missing or invalid reviews preserve Needs review ranges. A provider failure
+stops later requests while retaining completed reviews. Sparse image
+sampling and model scores are not proof of every meaningful moment.
+Candidates are suggestions only; the source asset stays whole.
+The current Voice Transcribe contract returns speaker turns, not
+word timings. Transcript parsing/state now preserve word timings if
+a provider returns them, and expose `timingPrecision` as `turn` or
+`word`; exact filler-word boundaries still need word timing or a
+separate forced-alignment layer. ASR session identity and source intervals
+scope speaker labels; a turn touching an internal ASR chunk edge is not
+evidence of a whole utterance. Speech selections retain available complete
+turns with silence handles. Contiguous turns, and a turn without terminal
+punctuation followed within 120 ms, form one utterance: a speaker change
+without a pause is not a cut point. Adjacent selected beats without a source-picture
+edge between their turns join rather than inventing word cuts; explicitly
+omitted gaps do not join. Missing transcription is uncertainty, not silence.
+Waveform peaks are imported at
+50/sec and are never stretched to container duration. Model-enabled
+curation transcribes with `muse-voice-transcribe-1.0`; continuous music
+hints do not gate transcription because continuous speech can look similar.
+Reviewed-range audio evidence overrides whole-shot hints where it overlaps.
+Asset state exposes silence ranges, and `tightenSilence`
+removes pauses from speech, ripples later clips once, rebuilds linked
+detached audio in matching phrases, and rejects mostly music-bed
+clips. Editing chat sees compact metrics and transcript text, not frames;
+visual curation is the separate image-bearing request path.
+SAM 3.1 is wired through Meta's Responses API (`sam-3.1`) in app
+sweep code. It is part of Curate's orientation/review loop, not a separate
+user action or an after-the-fact quality bonus. Orientation can request
+up to two concrete subject checks per window, each with a concept, source
+interval and editorial question. An observed picture and normalized box can
+anchor a specific subject instead of a larger distractor; otherwise SAM
+searches the concept. Anchored video tracking runs in both directions.
+Concepts are not limited to people/faces.
+The native sampler makes an analysis video at roughly eight source samples
+per second (plus the last source frame); one-frame checks use a JPEG.
+Actual source PTS, not proxy playback time, maps every returned observation.
+Analysis copies are capped at 256 frames, 30 seconds and 16 MiB; each uses
+one native decoder and one bounded-thread encoder, not a subprocess per frame.
+Up to three temporally spread rectangular detail crops per check and
+range-scoped track summaries return to the selected model's substantive
+review, alongside the full overview. No second full draft or recursive checks
+are allowed. Empty detections are uncertainty, not an editorial rejection.
+Failed evidence or invalid review preserves the whole window as Needs
+review. Completed physical scenes remain available regardless of selection.
+Track IDs are request-local. Source-range metadata shares observations and
+derives scoped summaries; editing chat omits detailed tracks and crop arrays.
+Representative box/face fields and `face-visible` remain available, but box
+area, centering and region sharpness/exposure never add quality points.
+Eddie does not decode SAM's arithmetic-coded mask payload: `samMaskCoverage`
+and expression remain `null`. Rectangular proxies are not mask measurements,
+and a face box is not expression, lip-sync or active-speaker proof.
+Incomplete/failed streams, conflicting final text and malformed box records
+are errors, not negative detections. A later successful check cannot hide an
+earlier failure. Model tags cannot assert `face-visible`; that needs SAM evidence.
+The official mask decoder's SAM license needs an explicit licensing decision
+before copying/porting it or adding it as a dependency; no decoder is shipped.
+Without a key (or after a SAM error), local visual proxies remain and
+`samStatus` says `unavailable` or `error`. The in-process
+`SubjectSegmentationProvider` remains only a local-runtime boundary.
 Media paths passed as command-line arguments are imported on launch.
 Timeline lanes are free-form and kind-agnostic. Projects start with one
 lane; dragging or dropping above or below grows new lanes, gaps are
 allowed anywhere, and adds land on the first lane free at that span
-(or the dropped lane). The magnet only snaps edges while dragging; it
+(or the dropped lane). Media adds preserve exact start, source-in, and
+positive duration, including sub-project-frame scenes. Generated clips
+and explicit move/trim/split edits still use the project frame grid.
+Viewing Details does not snap starts or expand short scene durations;
+its timing controls clamp only on interaction.
+Linked detach/split/close-gap operations preserve media coverage and
+alignment. Output samples at the project frame rate; a shorter shot can
+remain in the timeline without appearing in a lower-rate render.
+Timeline hit-testing reserves a 12-point move body; narrow clips have no
+trim handles until zoom makes room. Final release coordinates apply to a
+drag, and rejected placements restore exact home bounds without lane growth.
+Adjacent unequal-length swaps validate linked partners atomically and preserve
+outer span, gaps, durations and source coverage; the internal reorder edge
+can remain off the project grid. Free moves/trims still use that grid.
+The magnet compares actual edge matches, excluding the moving linked partner.
+It only snaps edges while dragging; it
 never ripples clips closed (`close_gaps` runs only from the explicit
 script `CloseGaps`, all lanes). Split is playhead-based (toolbar
 Split, S or B); clicking a lane parks the playhead there. There is no
@@ -104,6 +320,57 @@ split tool mode and no in-app sample project (`loadSample` is gone);
 `samples/` exists for tests. Import batches queue instead of being
 refused while one runs. Dragging from the bin carries a grid-size
 thumbnail ghost at the cursor plus a drop-lane highlight.
+Music-bed muting on curator adds is user-selectable (Curator checkbox,
+`state().musicBedMuted`, `setMusicBedMuted(bool)`); it defaults on.
+Video audio can be detached into a linked audio clip. The picture's
+`embeddedAudio` turns off so preview/export never double the source;
+linked pairs move, trim, split, and close gaps together until
+explicitly unlinked for J/L cuts or replacement sound. Titles and
+generated captions share `TitleStyle` (`lower-third`, `caption`,
+`pop-caption`, `minimal-caption`) across preview and export.
+Preview and export share `Timeline::active_video`/`active_title`: the
+lowest video lane wins (insertion order breaks ties), its opacity fades
+against black rather than revealing another lane, and the first active
+title wins. All audible clips still mix independently of picture visibility.
+Export streams raw video batches into one H.264/AAC encoder rather
+than sharing decoded frames across clips on different source clocks.
+Batches use at most four independent video inputs and eight seconds;
+decoder, filter, and final encoder parallelism are bounded. A branch
+starts at its first visible output frame, not at batch time zero.
+Titles and audio remain on the whole timeline clock. Existing export
+resolution, CRF, and audio settings are unchanged. Batch bytes and
+child exits are checked before export can report success.
+SDR batches convert source YCbCr matrices and ranges to limited-range
+BT.709 with accurate rounding. The raw-video encoder input declares that
+same representation so the output keeps its color tags. This is not an
+HDR tone-mapping or wide-gamut color-management pipeline.
+Video sample boundaries and source offsets share one integer tick clock;
+floating-point noise from subtracting source timestamps must not add a frame.
+The finite raw-frame stream bounds video; audio is trimmed separately
+to the timeline end. An off-grid end retains its final active video
+sample, whose full CFR interval can extend past the timeline by less
+than one frame. Do not add a final encoder `-t` that rounds away that sample.
+Native seeks select presentation intervals `[PTS, next PTS)`, normalize
+source time to the container origin, and drain delayed frames at EOF.
+Playback discards seek preroll and paces from the requested source-in.
+Preview uses one latest-generation worker with two decoder lanes. While a
+clip plays or buffers, the idle lane prerolls the next visible cut's first
+picture; a request at that file/time hands over to it and shows that picture
+without decoding further. A cut that continues the active file forward stays
+on the active decoder and decodes forward when no keyframe seek would start
+later. Each lane holds one native decoder (about 100-190 MB at 1080p-1440p
+on 16 cores); pausing releases the idle lane's. Preroll remains CPU-bound:
+on two cores, ten 0.3 s cuts still buffer about 3 s. Clip switches and seeks
+do not wait for native open/seek/decode; obsolete frames and errors are ignored.
+Decode completes a captured clock target before chasing a newer one, preventing
+moving-clock starvation. Transport waits for each visible clip's first picture
+and pauses audio with it instead of consuming an unseen short clip. Buffering
+remains visible and extends wall-clock playback; this is not a real A/V sync
+clock or a guarantee of smooth real-time playback. Decode failure pauses with
+an error, not an automatic retry loop. Native calls themselves are not preemptible.
+`addCaptionsForClip` and the inspector generate readable caption
+clips from a placed clip's transcript, using word timing when
+present and turn-proportional estimates otherwise.
 
 ## UI rules
 
@@ -120,6 +387,12 @@ thumbnail ghost at the cursor plus a drop-lane highlight.
   to the timeline.
 - Buttons are borderless at rest. Hover and pressed fills carry the
   affordance. Do not reintroduce hard outlines.
+- Surfaces: `BACKGROUND` is the stage (program monitor, gallery, lanes);
+  docked panels and bars use `SURFACE` via `theme::panel_frame()`;
+  grouped blocks use `theme::card_frame()`. `BRAND` blue marks selection
+  only. Tabs use `theme::segmented`. Everyday actions use the filled
+  `secondary_button`; one `primary_button` per area. Inter loads from
+  `Inter.ttc` (Regular plus SemiBold via `theme::semibold()`).
 - The media bin is an image grid. Thumbnails and waveforms only. Names,
   metadata, and paths live in the hover tooltip.
 - Agent control goes through the QuickJS console in

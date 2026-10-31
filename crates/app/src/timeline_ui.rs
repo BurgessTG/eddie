@@ -1,7 +1,7 @@
 //! Custom-painted timeline: ruler, lanes, clips, playhead.
 //!
-//! Geometry and hit-testing live here; all edits go through
-//! `openreel_engine::Timeline` so the model stays frame-snapped.
+//! Geometry and hit-testing live here. Pointer placement uses the engine's
+//! project frame grid; reorders and rollbacks retain exact existing intervals.
 
 use std::collections::HashMap;
 
@@ -17,6 +17,7 @@ const RULER_H: f32 = 26.0;
 const TRACK_H: f32 = 46.0;
 const TRACK_GAP: f32 = 4.0;
 const EDGE_PX: f32 = 9.0;
+const MOVE_BODY_PX: f32 = 12.0;
 
 /// Per-source visual data supplied by the app for one frame of painting.
 pub struct ClipVisual<'a> {
@@ -28,11 +29,19 @@ pub struct ClipVisual<'a> {
 pub type VisualMap<'a> = HashMap<&'a str, ClipVisual<'a>>;
 
 #[derive(Clone, Copy)]
+enum ClipHit {
+    Body,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy)]
 enum DragMode {
     Move {
         grab_offset: f64,
         home_start: f64,
         home_track: usize,
+        home_linked: Option<(ClipId, f64)>,
     },
     TrimLeft {
         orig_start: f64,
@@ -95,14 +104,18 @@ fn filmstrip_tiles(
     tiles
 }
 
-/// Snap `time` to the nearest candidate within `threshold` seconds.
-fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
+/// An absent target must not compete with a real target as a zero-distance snap.
+fn snap_target(time: f64, candidates: &[f64], threshold: f64) -> Option<f64> {
     candidates
         .iter()
         .copied()
         .filter(|c| (c - time).abs() <= threshold)
         .min_by(|a, b| (a - time).abs().total_cmp(&(b - time).abs()))
-        .unwrap_or(time)
+}
+
+/// Snap `time` to the nearest candidate within `threshold` seconds.
+fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
+    snap_target(time, candidates, threshold).unwrap_or(time)
 }
 
 pub struct TimelineView {
@@ -110,6 +123,7 @@ pub struct TimelineView {
     pub scroll_x: f32,
     pub magnet: bool,
     drag: Option<(ClipId, DragMode)>,
+    press_origin: Option<Pos2>,
     last_drag_pos: Option<Pos2>,
     seeking: bool,
     last_rect: Option<Rect>,
@@ -122,6 +136,7 @@ impl Default for TimelineView {
             scroll_x: 0.0,
             magnet: true,
             drag: None,
+            press_origin: None,
             last_drag_pos: None,
             seeking: false,
             last_rect: None,
@@ -232,6 +247,56 @@ impl TimelineView {
         Some(((y - lanes_top) / (TRACK_H + TRACK_GAP)) as usize)
     }
 
+    fn clip_rect(&self, rect: Rect, clip: &Clip) -> Rect {
+        let content_left = rect.left() + HEADER_W;
+        let y = rect.top() + RULER_H + clip.track as f32 * (TRACK_H + TRACK_GAP) + 3.0;
+        Rect::from_min_max(
+            Pos2::new(self.x_at(content_left, clip.start), y),
+            Pos2::new(self.x_at(content_left, clip.end()), y + TRACK_H - 6.0),
+        )
+    }
+
+    /// Paint, hover and press classification share the same geometry. Handles
+    /// shrink before taking away the move body; tiny clips are entirely body
+    /// until zoomed in. An adjacent clip's outside handle cannot steal it.
+    fn hit_clip<'a>(
+        &self,
+        timeline: &'a Timeline,
+        rect: Rect,
+        pos: Pos2,
+    ) -> Option<(&'a Clip, ClipHit)> {
+        let track = self.track_at(rect, pos.y)?;
+        let mut outside_edge: Option<(f32, &Clip, ClipHit)> = None;
+        for clip in timeline.clips.iter().filter(|c| c.track == track) {
+            let bounds = self.clip_rect(rect, clip);
+            if !bounds.y_range().contains(pos.y) {
+                continue;
+            }
+            let handle = EDGE_PX.min(((bounds.width() - MOVE_BODY_PX) * 0.5).max(0.0));
+            let left_dist = (pos.x - bounds.left()).abs();
+            let right_dist = (pos.x - bounds.right()).abs();
+            if pos.x >= bounds.left() && pos.x < bounds.right() {
+                let hit = if handle > 0.0 && left_dist <= handle {
+                    ClipHit::Left
+                } else if handle > 0.0 && right_dist <= handle {
+                    ClipHit::Right
+                } else {
+                    ClipHit::Body
+                };
+                return Some((clip, hit));
+            }
+            for (distance, hit) in [(left_dist, ClipHit::Left), (right_dist, ClipHit::Right)] {
+                if handle > 0.0
+                    && distance <= handle
+                    && outside_edge.is_none_or(|(best, _, _)| distance < best)
+                {
+                    outside_edge = Some((distance, clip, hit));
+                }
+            }
+        }
+        outside_edge.map(|(_, clip, hit)| (clip, hit))
+    }
+
     /// End of the nearest same-track clip ending at or before `orig_start`.
     fn prev_end(timeline: &Timeline, clip: &Clip, orig_start: f64) -> f64 {
         timeline
@@ -262,8 +327,41 @@ impl TimelineView {
         content_left: f32,
         rect: Rect,
     ) {
-        let Some(pos) = response.interact_pointer_pos() else {
-            if response.drag_stopped() {
+        let (pressed, released, decidedly_dragging, origin, pointer_pos) =
+            response.ctx.input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.primary_released(),
+                    i.pointer.is_decidedly_dragging(),
+                    i.pointer.press_origin(),
+                    i.pointer.interact_pos(),
+                )
+            });
+        if pressed {
+            self.press_origin = response
+                .is_pointer_button_down_on()
+                .then_some(origin)
+                .flatten();
+        }
+        let saved_press = self.press_origin;
+        if released {
+            self.press_origin = None;
+        }
+        // egui drops its potential drag and press origin on release. A quick
+        // gesture can cross the drag threshold in that same frame, before it
+        // has ever reported drag_started. Only promote a press we owned.
+        let release_drag = released
+            && decidedly_dragging
+            && saved_press.is_some()
+            && self.drag.is_none()
+            && !self.seeking;
+        let drag_started = response.drag_started() || release_drag;
+        let drag_stopped = response.drag_stopped() || release_drag;
+        let Some(pos) = response
+            .interact_pointer_pos()
+            .or_else(|| release_drag.then_some(pointer_pos).flatten())
+        else {
+            if drag_stopped {
                 let last = self.last_drag_pos;
                 self.finish_drag(timeline, rect, last);
             }
@@ -275,10 +373,7 @@ impl TimelineView {
         // Classify from where the press began, not where the pointer is
         // when egui crosses its drag threshold (~6px later). Using the
         // current position misclassifies most edge grabs as moves.
-        let press_pos = response
-            .ctx
-            .input(|i| i.pointer.press_origin())
-            .unwrap_or(pos);
+        let press_pos = saved_press.or(origin).unwrap_or(pos);
         // Ignore presses deep in the track-header gutter, but allow the
         // strip of gutter next to t=0 where a full-length clip's left edge
         // lives. While an interaction is live, always keep tracking.
@@ -288,7 +383,7 @@ impl TimelineView {
 
         // Auto-scroll while dragging near the viewport edges so the far
         // edge of a long clip can be reached without letting go.
-        if self.seeking || self.drag.is_some() {
+        if (self.seeking || self.drag.is_some()) && !drag_stopped {
             const MARGIN: f32 = 36.0;
             const SPEED: f32 = 14.0;
             if pos.x > rect.right() - MARGIN {
@@ -303,81 +398,51 @@ impl TimelineView {
         let time = self.time_at(content_left, pos.x).max(0.0);
         let press_time = self.time_at(content_left, press_pos.x).max(0.0);
 
-        if response.drag_started() || response.clicked() {
+        // Clicks arrive on release without a later drag_stopped event.
+        // Only real drags may retain interaction state.
+        if drag_started || response.clicked() {
             if press_pos.y < rect.top() + RULER_H {
-                self.seeking = true;
+                self.seeking = drag_started;
                 *playhead = timeline.snap(time);
-            } else if let Some(track) = self.track_at(rect, press_pos.y) {
-                // Clicking anywhere in a lane parks the playhead there;
-                // split and transport act on the playhead from there.
-                *playhead = timeline.snap(press_time);
-                // Nearest edge wins, so the shared edge between two
-                // touching clips can trim either side: a press left of
-                // the edge grabs the left clip's right edge, a press
-                // right of it grabs the right clip's left edge. First
-                // match in the clip vec made one side ungrabbable.
-                let mut best_edge: Option<(f32, u8, ClipId, DragMode)> = None;
-                let mut containing: Option<(ClipId, f64, usize)> = None;
-                for c in timeline.clips.iter().filter(|c| c.track == track) {
-                    let left_x = self.x_at(content_left, c.start);
-                    let right_x = self.x_at(content_left, c.end());
-                    let edges = [
-                        (
-                            left_x,
-                            DragMode::TrimLeft {
-                                orig_start: c.start,
-                                press_time,
-                            },
-                            press_pos.x >= left_x,
-                        ),
-                        (
-                            right_x,
-                            DragMode::TrimRight {
-                                orig_end: c.end(),
-                                press_time,
-                            },
-                            press_pos.x <= right_x,
-                        ),
-                    ];
-                    for (x, mode, on_owning_side) in edges {
-                        let dist = (press_pos.x - x).abs();
-                        if dist <= EDGE_PX {
-                            // At equal distance (a shared edge), prefer
-                            // the edge whose clip the press is on.
-                            let penalty = u8::from(!on_owning_side);
-                            let replace = match best_edge {
-                                None => true,
-                                Some((d, p, _, _)) => dist < d || (dist == d && penalty < p),
-                            };
-                            if replace {
-                                best_edge = Some((dist, penalty, c.id, mode));
-                            }
-                        }
-                    }
-                    if press_pos.x >= left_x && press_pos.x <= right_x {
-                        containing = Some((c.id, c.start, c.track));
-                    }
+            } else {
+                // A click parks the playhead. A drag keeps the existing
+                // playhead target instead of snapping short clips to their
+                // own grab point, especially on a purely vertical move.
+                if response.clicked() {
+                    *playhead = timeline.snap(press_time);
                 }
-                if let Some((_, _, id, mode)) = best_edge {
-                    *selected = Some(id);
-                    self.drag = Some((id, mode));
-                } else if let Some((id, start, track)) = containing {
-                    *selected = Some(id);
-                    self.drag = Some((
-                        id,
-                        DragMode::Move {
-                            grab_offset: press_time - start,
-                            home_start: start,
-                            home_track: track,
+                if let Some((clip, hit)) = self.hit_clip(timeline, rect, press_pos) {
+                    let mode = match hit {
+                        ClipHit::Body => DragMode::Move {
+                            grab_offset: press_time - clip.start,
+                            home_start: clip.start,
+                            home_track: clip.track,
+                            home_linked: clip
+                                .linked_clip
+                                .and_then(|id| timeline.clip(id))
+                                .map(|linked| (linked.id, linked.start)),
                         },
-                    ));
+                        ClipHit::Left => DragMode::TrimLeft {
+                            orig_start: clip.start,
+                            press_time,
+                        },
+                        ClipHit::Right => DragMode::TrimRight {
+                            orig_end: clip.end(),
+                            press_time,
+                        },
+                    };
+                    *selected = Some(clip.id);
+                    self.drag = drag_started.then_some((clip.id, mode));
                 } else if response.clicked() {
                     *selected = None;
                 }
             }
         }
 
-        if response.dragged() {
+        // egui does not report `dragged` on the release frame, which can
+        // carry a new pointer position (including a different target lane).
+        if response.dragged() || drag_stopped {
+            self.last_drag_pos = Some(pos);
             if self.seeking {
                 *playhead = timeline.snap(time);
             } else if let Some((id, mode)) = self.drag {
@@ -387,14 +452,19 @@ impl TimelineView {
                 let mut candidates: Vec<f64> = Vec::new();
                 if self.magnet {
                     candidates.extend([0.0, *playhead]);
-                    for clip in timeline.clips.iter().filter(|c| c.id != id) {
+                    let linked = timeline.clip(id).and_then(|c| c.linked_clip);
+                    for clip in timeline
+                        .clips
+                        .iter()
+                        .filter(|c| c.id != id && Some(c.id) != linked)
+                    {
                         candidates.push(clip.start);
                         candidates.push(clip.end());
                     }
                 }
                 let clip_snapshot = timeline.clip(id).cloned();
                 match (mode, clip_snapshot) {
-                    (DragMode::Move { grab_offset, .. }, Some(mut clip)) => {
+                    (DragMode::Move { grab_offset, .. }, Some(clip)) => {
                         // Vertical lane change within existing lanes;
                         // growth past the top or bottom lane resolves
                         // on drop (finish_drag). Horizontal overlap is
@@ -407,20 +477,17 @@ impl TimelineView {
                         {
                             if target != clip.track {
                                 timeline.set_clip_track(id, target);
-                                if let Some(fresh) = timeline.clip(id).cloned() {
-                                    clip = fresh;
-                                }
                             }
                         }
                         let raw = time - grab_offset;
-                        let by_start = snap_to(raw, &candidates, threshold);
-                        let by_end =
-                            snap_to(raw + clip.duration, &candidates, threshold) - clip.duration;
-                        let snapped = if (by_start - raw).abs() <= (by_end - raw).abs() {
-                            by_start
-                        } else {
-                            by_end
-                        };
+                        let by_start = snap_target(raw, &candidates, threshold);
+                        let by_end = snap_target(raw + clip.duration, &candidates, threshold)
+                            .map(|end| end - clip.duration);
+                        let snapped = [by_start, by_end]
+                            .into_iter()
+                            .flatten()
+                            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
+                            .unwrap_or(raw);
                         timeline.move_clip(id, snapped);
                     }
                     (
@@ -466,7 +533,7 @@ impl TimelineView {
             }
         }
 
-        if response.drag_stopped() {
+        if drag_stopped {
             self.finish_drag(timeline, rect, Some(pos));
         }
     }
@@ -475,20 +542,19 @@ impl TimelineView {
     /// never closed here. A Move dropped above the first lane or
     /// below the last grows a new lane there for the clip. A Move
     /// dropped onto one neighbor on its home lane swaps positions
-    /// with it; any other overlap returns the clip home, so clips
-    /// never overlap on a lane.
+    /// with it. A wider preview may overlap more clips when the pointer
+    /// clearly targets an adjacent neighbor; only that pair reorders.
+    /// Ambiguous or colliding drops return home without moving other clips.
     fn finish_drag(&mut self, timeline: &mut Timeline, rect: Rect, drop_pos: Option<Pos2>) {
-        if let (
-            Some((
-                id,
-                DragMode::Move {
-                    home_start,
-                    home_track,
-                    ..
-                },
-            )),
-            Some(pos),
-        ) = (self.drag, drop_pos)
+        if let Some((
+            id,
+            DragMode::Move {
+                home_start,
+                home_track,
+                home_linked,
+                ..
+            },
+        )) = self.drag
         {
             let lanes_top = rect.top() + RULER_H;
             let lanes_bottom =
@@ -498,65 +564,131 @@ impl TimelineView {
             // clip does not grow one by accident. The ruler strip is
             // the only room above the first lane, hence the smaller
             // top threshold.
-            if pos.y < lanes_top - RULER_H * 0.5 {
+            let above = drop_pos.is_some_and(|pos| pos.y < lanes_top - RULER_H * 0.5);
+            let below = drop_pos.is_some_and(|pos| pos.y > lanes_bottom + TRACK_H * 0.5);
+            if drop_pos.is_none() || ((above || below) && !Self::linked_lane_clear(timeline, id)) {
+                Self::restore_move(timeline, id, home_start, home_track, home_linked);
+            } else if above {
                 timeline.insert_track_at(0);
                 timeline.set_clip_track(id, 0);
-            } else if pos.y > lanes_bottom + TRACK_H * 0.5 {
+            } else if below {
                 let track = timeline.append_track();
                 timeline.set_clip_track(id, track);
-            } else {
-                Self::resolve_move_drop(timeline, id, home_start, home_track);
+            } else if let Some(pos) = drop_pos {
+                Self::resolve_move_drop(
+                    timeline,
+                    id,
+                    home_start,
+                    home_track,
+                    home_linked,
+                    self.time_at(rect.left() + HEADER_W, pos.x),
+                );
             }
         }
         self.drag = None;
+        self.press_origin = None;
         self.last_drag_pos = None;
         self.seeking = false;
     }
 
-    fn lane_overlaps(timeline: &Timeline, clip: &Clip) -> Vec<Clip> {
+    fn lane_overlaps(timeline: &Timeline, clip: &Clip) -> Vec<ClipId> {
         timeline
             .clips
             .iter()
             .filter(|c| {
                 c.id != clip.id
                     && c.track == clip.track
-                    && c.start < clip.end()
-                    && clip.start < c.end()
+                    && c.start < clip.end() - 1e-9
+                    && clip.start < c.end() - 1e-9
             })
-            .cloned()
+            .map(|c| c.id)
             .collect()
     }
 
-    fn resolve_move_drop(timeline: &mut Timeline, id: ClipId, home_start: f64, home_track: usize) {
+    fn linked_lane_clear(timeline: &Timeline, id: ClipId) -> bool {
+        timeline
+            .clip(id)
+            .and_then(|clip| clip.linked_clip)
+            .and_then(|linked| timeline.clip(linked))
+            .is_none_or(|linked| {
+                // The dragged clip can be temporarily on its partner's lane
+                // before a drop creates a new lane for it.
+                Self::lane_overlaps(timeline, linked)
+                    .into_iter()
+                    .all(|other| other == id)
+            })
+    }
+
+    fn restore_move(
+        timeline: &mut Timeline,
+        id: ClipId,
+        home_start: f64,
+        home_track: usize,
+        home_linked: Option<(ClipId, f64)>,
+    ) {
+        // Rollback is not a new frame-grid edit. Imported starts can be
+        // fractional, so calling move_clip(home_start) would change them.
+        if let Some(clip) = timeline.clip_mut(id) {
+            clip.start = home_start;
+            clip.track = home_track;
+        }
+        if let Some((linked, start)) = home_linked {
+            if let Some(clip) = timeline.clip_mut(linked) {
+                clip.start = start;
+            }
+        }
+    }
+
+    fn resolve_move_drop(
+        timeline: &mut Timeline,
+        id: ClipId,
+        home_start: f64,
+        home_track: usize,
+        home_linked: Option<(ClipId, f64)>,
+        drop_time: f64,
+    ) {
         let Some(clip) = timeline.clip(id).cloned() else {
             return;
         };
         let overlaps = Self::lane_overlaps(timeline, &clip);
-        if overlaps.is_empty() {
+        if overlaps.is_empty() && Self::linked_lane_clear(timeline, id) {
             return;
         }
-        let mut swapped = false;
-        if overlaps.len() == 1 && clip.track == home_track {
-            let partner = &overlaps[0];
-            timeline.move_clip(id, partner.start);
-            timeline.move_clip(partner.id, home_start);
-            let clean = timeline
-                .clip(id)
-                .map(|c| Self::lane_overlaps(timeline, c).is_empty())
-                .unwrap_or(false)
-                && timeline
-                    .clip(partner.id)
-                    .map(|c| Self::lane_overlaps(timeline, c).is_empty())
-                    .unwrap_or(false);
-            if clean {
-                swapped = true;
-            } else {
-                timeline.move_clip(partner.id, partner.start);
-            }
+        // Attempt a swap from the original positions, not the overlapping
+        // drag preview. The engine validates all linked placements before
+        // mutating anything; rejection leaves the restored home untouched.
+        Self::restore_move(timeline, id, home_start, home_track, home_linked);
+        if clip.track != home_track {
+            return;
         }
-        if !swapped {
-            timeline.set_clip_track(id, home_track);
-            timeline.move_clip(id, home_start);
+        let partner = if overlaps.len() == 1 {
+            Some(overlaps[0])
+        } else {
+            // Centering a long clip on a short neighbor can make the drag
+            // preview extend over a third clip. The pointer disambiguates
+            // only an immediate neighbor, never a multi-clip ripple.
+            overlaps.into_iter().find(|other| {
+                let partner = timeline.clip(*other).unwrap();
+                if !partner.contains(drop_time) {
+                    return false;
+                }
+                let left_end = if home_start < partner.start {
+                    home_start + clip.duration
+                } else {
+                    partner.end()
+                };
+                let right_start = home_start.max(partner.start);
+                !timeline.clips.iter().any(|between| {
+                    between.id != id
+                        && between.id != partner.id
+                        && between.track == home_track
+                        && between.start < right_start - 1e-9
+                        && between.end() > left_end + 1e-9
+                })
+            })
+        };
+        if let Some(partner) = partner {
+            timeline.swap_clips(id, partner);
         }
     }
 
@@ -582,18 +714,36 @@ impl TimelineView {
                 Pos2::new(content_left, y),
                 Vec2::new(content.width(), TRACK_H),
             );
-            let fill = if track % 2 == 0 {
-                theme::CARD
-            } else {
-                theme::BACKGROUND
-            };
-            clipped.rect_filled(lane, 0, fill);
+            clipped.rect_filled(lane, theme::R_SM, theme::BACKGROUND);
 
-            let header =
-                Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(HEADER_W, TRACK_H));
-            painter.rect_filled(header, 0, theme::CARD);
+            let header = Rect::from_min_size(
+                Pos2::new(rect.left(), y),
+                Vec2::new(HEADER_W - 8.0, TRACK_H),
+            );
+            painter.rect_filled(header, theme::R_SM, theme::CARD);
+            // Lane kind stripe: the colour of the clips it mostly holds.
+            let kind_color = timeline
+                .clips
+                .iter()
+                .find(|clip| clip.track == track)
+                .map(|clip| match clip.kind {
+                    ClipKind::Video => theme::CLIP_VIDEO,
+                    ClipKind::Audio => theme::CLIP_AUDIO,
+                    ClipKind::Title => theme::CLIP_TITLE,
+                })
+                .unwrap_or(theme::BORDER_STRONG);
+            painter.rect_filled(
+                Rect::from_min_size(header.left_top(), Vec2::new(3.0, TRACK_H)),
+                egui::CornerRadius {
+                    nw: theme::R_SM,
+                    sw: theme::R_SM,
+                    ne: 0,
+                    se: 0,
+                },
+                kind_color.gamma_multiply(1.5),
+            );
             painter.text(
-                Pos2::new(rect.left() + 12.0, y + TRACK_H / 2.0),
+                Pos2::new(rect.left() + 14.0, y + TRACK_H / 2.0),
                 Align2::LEFT_CENTER,
                 &timeline.track_labels[track],
                 FontId::proportional(12.0),
@@ -605,37 +755,21 @@ impl TimelineView {
         self.paint_ruler(&clipped, rect, content_left);
 
         // Hovered clip brightens so the track feels responsive pre-click.
-        let hovered_clip = ui
+        let hovered = ui
             .input(|i| i.pointer.hover_pos())
-            .filter(|p| content.contains(*p))
-            .and_then(|p| {
-                let track = self.track_at(rect, p.y)?;
-                let time = self.time_at(content_left, p.x);
-                timeline
-                    .clips
-                    .iter()
-                    .find(|c| c.track == track && c.contains(time))
-                    .map(|c| c.id)
-            });
-        if let (Some(id), Some(pos)) = (hovered_clip, ui.input(|i| i.pointer.hover_pos())) {
-            let near_edge = timeline.clip(id).map(|c| {
-                (pos.x - self.x_at(content_left, c.start)).abs() <= EDGE_PX
-                    || (pos.x - self.x_at(content_left, c.end())).abs() <= EDGE_PX
-            }) == Some(true);
-            ui.ctx().set_cursor_icon(if near_edge {
-                egui::CursorIcon::ResizeHorizontal
-            } else {
-                egui::CursorIcon::Grab
+            .filter(|p| rect.contains(*p) && p.x >= content_left - EDGE_PX)
+            .and_then(|p| self.hit_clip(timeline, rect, p));
+        let hovered_clip = hovered.map(|(clip, _)| clip.id);
+        if let Some((_, hit)) = hovered {
+            ui.ctx().set_cursor_icon(match hit {
+                ClipHit::Body => egui::CursorIcon::Grab,
+                ClipHit::Left | ClipHit::Right => egui::CursorIcon::ResizeHorizontal,
             });
         }
 
         // Clips.
         for clip in &timeline.clips {
-            let y = lanes_top + clip.track as f32 * (TRACK_H + TRACK_GAP) + 3.0;
-            let clip_rect = Rect::from_min_max(
-                Pos2::new(self.x_at(content_left, clip.start), y),
-                Pos2::new(self.x_at(content_left, clip.end()), y + TRACK_H - 6.0),
-            );
+            let clip_rect = self.clip_rect(rect, clip);
             if clip_rect.right() < content.left() || clip_rect.left() > content.right() {
                 continue;
             }
@@ -652,7 +786,7 @@ impl TimelineView {
                 fill
             };
             let stroke = if is_selected {
-                Stroke::new(2.0_f32, theme::RING)
+                Stroke::new(2.0_f32, theme::BRAND)
             } else if is_hovered {
                 Stroke::new(1.0_f32, Color32::from_white_alpha(110))
             } else {
@@ -918,22 +1052,26 @@ mod tests {
         selected: &mut Option<ClipId>,
         visuals: &VisualMap<'_>,
         frames: &[Vec<egui::Event>],
-    ) {
-        for (i, events) in frames.iter().enumerate() {
+    ) -> egui::CursorIcon {
+        let mut cursor = egui::CursorIcon::Default;
+        for events in frames {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 400.0))),
-                time: Some(i as f64 * 0.016),
+                // A test can inspect a held gesture between frame batches.
+                time: Some(ctx.input(|i| i.time) + 0.016),
                 events: events.clone(),
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            let output = ctx.run(input, |ctx| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ctx, |ui| {
                         view.show(ui, timeline, playhead, selected, visuals);
                     });
             });
+            cursor = output.platform_output.cursor_icon;
         }
+        cursor
     }
 
     fn pointer_button(x: f32, y: f32, pressed: bool) -> egui::Event {
@@ -943,6 +1081,804 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::default(),
         }
+    }
+
+    fn clip_center(view: &TimelineView, timeline: &Timeline, id: ClipId) -> Pos2 {
+        let clip = timeline.clip(id).unwrap();
+        Pos2::new(
+            view.x_at(HEADER_W, clip.start + clip.duration / 2.0),
+            RULER_H + clip.track as f32 * (TRACK_H + TRACK_GAP) + TRACK_H / 2.0,
+        )
+    }
+
+    fn pointer_drag(
+        view: &mut TimelineView,
+        timeline: &mut Timeline,
+        from: Pos2,
+        to: Pos2,
+    ) -> Option<ClipId> {
+        let ctx = egui::Context::default();
+        let mut playhead = 0.0;
+        let mut selected = None;
+        run_frames(
+            &ctx,
+            view,
+            timeline,
+            &mut playhead,
+            &mut selected,
+            &VisualMap::new(),
+            &[
+                vec![],
+                vec![pointer_button(from.x, from.y, true)],
+                vec![egui::Event::PointerMoved(to)],
+                vec![pointer_button(to.x, to.y, false)],
+            ],
+        );
+        assert!(!view.is_interacting(), "release must end the drag");
+        assert!(view.last_drag_pos.is_none());
+        selected
+    }
+
+    #[test]
+    fn move_magnet_uses_start_target_when_end_has_no_target() {
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("move", ClipKind::Video, 0, 2.0, 1.0, 0.2, "move");
+        let target = timeline.add_media_clip("target", ClipKind::Video, 1, 8.0, 2.0, 0.0, "target");
+        let target_before = timeline.clip(target).unwrap().clone();
+        let mut view = TimelineView::default();
+        let from = clip_center(&view, &timeline, id);
+        let to = Pos2::new(view.x_at(HEADER_W, 7.9 + 0.5), from.y);
+        pointer_drag(&mut view, &mut timeline, from, to);
+        assert_eq!(timeline.clip(id).unwrap().start, 8.0);
+        assert_eq!(timeline.clip(target).unwrap(), &target_before);
+    }
+
+    #[test]
+    fn move_magnet_uses_end_target_when_start_has_no_target() {
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("move", ClipKind::Video, 0, 2.0, 1.0, 0.2, "move");
+        timeline.add_media_clip("target", ClipKind::Video, 1, 8.0, 2.0, 0.0, "target");
+        let mut view = TimelineView::default();
+        let from = clip_center(&view, &timeline, id);
+        let to = Pos2::new(view.x_at(HEADER_W, 6.9 + 0.5), from.y);
+        pointer_drag(&mut view, &mut timeline, from, to);
+        assert_eq!(timeline.clip(id).unwrap().end(), 8.0);
+    }
+
+    #[test]
+    fn move_magnet_respects_toggle_threshold_and_nearest_edge() {
+        for (magnet, raw, expected) in [
+            (true, 7.9, 238.0 / 30.0),
+            (false, 7.9, 7.9),
+            (true, 7.7, 7.7),
+        ] {
+            let mut timeline = Timeline::empty_project();
+            let id = timeline.add_media_clip("move", ClipKind::Video, 0, 2.0, 1.0, 0.2, "move");
+            timeline.add_media_clip(
+                "target",
+                ClipKind::Video,
+                1,
+                8.0,
+                28.0 / 30.0,
+                0.0,
+                "target",
+            );
+            let mut view = TimelineView {
+                magnet,
+                ..Default::default()
+            };
+            let from = clip_center(&view, &timeline, id);
+            let to = Pos2::new(view.x_at(HEADER_W, raw + 0.5), from.y);
+            pointer_drag(&mut view, &mut timeline, from, to);
+            assert!(
+                (timeline.clip(id).unwrap().start - expected).abs() < 1e-9,
+                "magnet={magnet} raw={raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_clip_center_moves_without_trimming() {
+        for duration in [1.0 / 120.0, 0.1, 0.2, 0.375] {
+            let mut timeline = Timeline::empty_project();
+            let id =
+                timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, duration, 0.157, "scene");
+            let mut view = TimelineView {
+                magnet: false,
+                ..Default::default()
+            };
+            let from = clip_center(&view, &timeline, id);
+            let selected =
+                pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(48.0, 0.0));
+            let clip = timeline.clip(id).unwrap();
+            assert_eq!(selected, Some(id));
+            assert_eq!(
+                (clip.start, clip.duration, clip.source_in),
+                (3.0, duration, 0.157),
+                "duration={duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_clip_center_moves_to_existing_lane_without_trimming() {
+        for duration in [1.0 / 120.0, 0.1, 0.2, 0.375] {
+            let mut timeline = Timeline::empty_project();
+            let id =
+                timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, duration, 0.157, "scene");
+            timeline.append_track();
+            let mut view = TimelineView::default();
+            let from = clip_center(&view, &timeline, id);
+            pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(0.0, 50.0));
+            let clip = timeline.clip(id).unwrap();
+            assert_eq!(
+                (clip.track, clip.start, clip.duration, clip.source_in),
+                (1, 2.0, duration, 0.157),
+                "duration={duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_clip_center_is_not_stolen_by_neighbor_edge() {
+        let mut timeline = Timeline::empty_project();
+        let left = timeline.add_media_clip("left", ClipKind::Video, 0, 0.0, 2.0, 0.0, "left");
+        let id = timeline.add_media_clip(
+            "insert",
+            ClipKind::Video,
+            0,
+            2.0,
+            1.0 / 120.0,
+            0.157,
+            "insert",
+        );
+        let right = timeline.add_media_clip(
+            "right",
+            ClipKind::Video,
+            0,
+            2.0 + 1.0 / 120.0,
+            2.0,
+            0.0,
+            "right",
+        );
+        timeline.append_track();
+        let before = timeline.clone();
+        let mut view = TimelineView {
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, id);
+        assert_eq!(
+            pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(0.0, 50.0)),
+            Some(id)
+        );
+        assert_eq!(timeline.clip(id).unwrap().track, 1);
+        assert_eq!(timeline.clip(id).unwrap().duration, 1.0 / 120.0);
+        for other in [left, right] {
+            assert_eq!(timeline.clip(other), before.clip(other));
+        }
+    }
+
+    #[test]
+    fn short_clip_hover_cursor_matches_move_body() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 0.2, 0.157, "scene");
+        let mut view = TimelineView::default();
+        let pos = clip_center(&view, &timeline, id);
+        let cursor = run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut 0.0,
+            &mut None,
+            &VisualMap::new(),
+            &[vec![], vec![egui::Event::PointerMoved(pos)]],
+        );
+        assert_eq!(cursor, egui::CursorIcon::Grab);
+    }
+
+    #[test]
+    fn short_clip_edges_still_trim_when_zoomed_in() {
+        for left in [true, false] {
+            let mut timeline = Timeline::empty_project();
+            let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 1.0, 0.2, 0.157, "scene");
+            let mut view = TimelineView {
+                px_per_sec: 300.0,
+                magnet: false,
+                ..Default::default()
+            };
+            let edge = if left { 1.0 } else { 1.2 };
+            let from = Pos2::new(
+                view.x_at(HEADER_W, edge) + if left { 3.0 } else { -3.0 },
+                49.0,
+            );
+            let to = from + Vec2::new(if left { 10.0 } else { -10.0 }, 0.0);
+            pointer_drag(&mut view, &mut timeline, from, to);
+            let clip = timeline.clip(id).unwrap();
+            let expected_start = if left { 31.0 / 30.0 } else { 1.0 };
+            let expected_end = if left { 1.2 } else { 35.0 / 30.0 };
+            assert!((clip.start - expected_start).abs() < 1e-9);
+            assert!((clip.end() - expected_end).abs() < 1e-9);
+            assert!((clip.source_in - (0.157 + expected_start - 1.0)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn move_release_uses_final_pointer_position() {
+        for pointer_gone in [false, true] {
+            let ctx = egui::Context::default();
+            let (mut timeline, id) = clip_fixture();
+            let mut view = TimelineView {
+                magnet: false,
+                ..Default::default()
+            };
+            let mut playhead = 0.0;
+            let mut selected = None;
+            let mut release = vec![
+                egui::Event::PointerMoved(Pos2::new(480.0, 49.0)),
+                pointer_button(480.0, 49.0, false),
+            ];
+            if pointer_gone {
+                release.push(egui::Event::PointerGone);
+            }
+            run_frames(
+                &ctx,
+                &mut view,
+                &mut timeline,
+                &mut playhead,
+                &mut selected,
+                &VisualMap::new(),
+                &[
+                    vec![],
+                    vec![pointer_button(384.0, 99.0, true)],
+                    vec![egui::Event::PointerMoved(Pos2::new(432.0, 99.0))],
+                    release,
+                ],
+            );
+            let clip = timeline.clip(id).unwrap();
+            assert_eq!(
+                (clip.track, clip.start, clip.duration, clip.source_in),
+                (0, 4.0, 6.0, 3.0),
+                "pointer_gone={pointer_gone}"
+            );
+            assert!(!view.is_interacting());
+        }
+    }
+
+    #[test]
+    fn move_drop_adjacent_unequal_clips_preserves_outer_span() {
+        for (left_duration, right_duration, drag_left) in [
+            (0.2, 0.4, true),
+            (0.2, 0.4, false),
+            (0.4, 0.2, true),
+            (0.4, 0.2, false),
+        ] {
+            let mut timeline = Timeline::empty_project();
+            let left = timeline.add_media_clip(
+                "left",
+                ClipKind::Video,
+                0,
+                2.0,
+                left_duration,
+                0.157,
+                "left",
+            );
+            let right = timeline.add_media_clip(
+                "right",
+                ClipKind::Video,
+                0,
+                2.0 + left_duration,
+                right_duration,
+                1.237,
+                "right",
+            );
+            let tail = timeline.add_media_clip(
+                "tail",
+                ClipKind::Video,
+                0,
+                2.0 + left_duration + right_duration,
+                0.5,
+                4.0,
+                "tail",
+            );
+            let before = timeline.clone();
+            let mut view = TimelineView {
+                px_per_sec: 240.0,
+                magnet: false,
+                ..Default::default()
+            };
+            let id = if drag_left { left } else { right };
+            let from = clip_center(&view, &timeline, id);
+            let raw = if drag_left { 2.0 + right_duration } else { 2.0 };
+            let to = Pos2::new(
+                view.x_at(HEADER_W, raw + timeline.clip(id).unwrap().duration / 2.0),
+                from.y,
+            );
+            pointer_drag(&mut view, &mut timeline, from, to);
+            assert!((timeline.clip(left).unwrap().start - (2.0 + right_duration)).abs() < 1e-9, "left_duration={left_duration} right_duration={right_duration} drag_left={drag_left}");
+            assert_eq!(timeline.clip(right).unwrap().start, 2.0);
+            for id in [left, right] {
+                let clip = timeline.clip(id).unwrap();
+                let original = before.clip(id).unwrap();
+                assert_eq!(
+                    (clip.duration, clip.source_in),
+                    (original.duration, original.source_in)
+                );
+            }
+            assert_eq!(timeline.clip(tail), before.clip(tail));
+        }
+    }
+
+    #[test]
+    fn move_drop_adjacent_with_gap_preserves_gap_and_neighbors() {
+        let mut timeline = Timeline::empty_project();
+        let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 0.4, 0.0, "a");
+        let b = timeline.add_media_clip("b", ClipKind::Video, 0, 2.6, 0.2, 0.0, "b");
+        let tail = timeline.add_media_clip("tail", ClipKind::Video, 0, 2.8, 1.0, 0.0, "tail");
+        let tail_before = timeline.clip(tail).unwrap().clone();
+        let mut view = TimelineView {
+            px_per_sec: 120.0,
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, a);
+        let to = Pos2::new(view.x_at(HEADER_W, 2.6), from.y);
+        pointer_drag(&mut view, &mut timeline, from, to);
+        assert!((timeline.clip(a).unwrap().start - 2.4).abs() < 1e-9);
+        assert!((timeline.clip(a).unwrap().end() - 2.8).abs() < 1e-9);
+        assert_eq!(timeline.clip(b).unwrap().start, 2.0);
+        assert!(
+            (timeline.clip(a).unwrap().start - timeline.clip(b).unwrap().end() - 0.2).abs() < 1e-9
+        );
+        assert_eq!(timeline.clip(tail).unwrap(), &tail_before);
+    }
+
+    #[test]
+    fn move_drop_blocked_on_another_lane_reverts_exact_fractional_start() {
+        for linked in [false, true] {
+            let mut timeline = Timeline::empty_project();
+            let id =
+                timeline.add_media_clip("scene", ClipKind::Video, 0, 2.157, 0.418, 0.157, "scene");
+            if linked {
+                timeline.detach_audio(id).unwrap();
+            }
+            timeline.add_media_clip("blocker", ClipKind::Video, 2, 5.0, 2.0, 0.0, "blocker");
+            let before = timeline.clone();
+            let mut view = TimelineView {
+                px_per_sec: 120.0,
+                magnet: false,
+                ..Default::default()
+            };
+            let from = clip_center(&view, &timeline, id);
+            let to = Pos2::new(view.x_at(HEADER_W, 5.0 + 0.209), 149.0);
+            pointer_drag(&mut view, &mut timeline, from, to);
+            assert_eq!(
+                timeline, before,
+                "rejected drop must restore exact placement (linked={linked})"
+            );
+        }
+    }
+
+    #[test]
+    fn move_drop_with_only_linked_audio_collision_reverts() {
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 1.0, 0.157, "scene");
+        timeline.detach_audio(id).unwrap();
+        timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+        let before = timeline.clone();
+        let mut view = TimelineView {
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, id);
+        pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(96.0, 0.0));
+        assert_eq!(timeline, before);
+    }
+
+    #[test]
+    fn move_drop_linked_swap_checks_both_linked_lanes_atomically() {
+        let mut timeline = Timeline::empty_project();
+        let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 1.0, 0.157, "a");
+        let b = timeline.add_media_clip("b", ClipKind::Video, 0, 4.0, 1.0, 1.237, "b");
+        timeline.detach_audio(a).unwrap();
+        let b_audio = timeline.detach_audio(b).unwrap();
+        timeline.set_clip_track(b_audio, 2);
+        timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+        let before = timeline.clone();
+        let mut view = TimelineView {
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, a);
+        pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(96.0, 0.0));
+        assert_eq!(
+            timeline, before,
+            "a blocked companion must reject the entire swap"
+        );
+    }
+
+    #[test]
+    fn move_drop_linked_swap_keeps_all_four_ranges() {
+        let mut timeline = Timeline::empty_project();
+        let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 0.2, 0.157, "a");
+        let b = timeline.add_media_clip("b", ClipKind::Video, 0, 2.2, 0.4, 1.237, "b");
+        let a_audio = timeline.detach_audio(a).unwrap();
+        let b_audio = timeline.detach_audio(b).unwrap();
+        let before = timeline.clone();
+        let mut view = TimelineView {
+            px_per_sec: 240.0,
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, a);
+        let to = Pos2::new(view.x_at(HEADER_W, 2.5), from.y);
+        pointer_drag(&mut view, &mut timeline, from, to);
+        for (id, expected_start) in [(a, 2.4), (a_audio, 2.4), (b, 2.0), (b_audio, 2.0)] {
+            let clip = timeline.clip(id).unwrap();
+            let original = before.clip(id).unwrap();
+            assert!((clip.start - expected_start).abs() < 1e-9);
+            assert_eq!(
+                (clip.duration, clip.source_in, clip.track, clip.linked_clip),
+                (
+                    original.duration,
+                    original.source_in,
+                    original.track,
+                    original.linked_clip
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn move_magnet_does_not_snap_to_linked_partner() {
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 2.0, 0.157, "scene");
+        let audio = timeline.detach_audio(id).unwrap();
+        let mut view = TimelineView::default();
+        let from = clip_center(&view, &timeline, id);
+        pointer_drag(&mut view, &mut timeline, from, from + Vec2::new(7.2, 0.0));
+        assert_eq!(timeline.clip(id).unwrap().start, 65.0 / 30.0);
+        assert_eq!(
+            timeline.clip(audio).unwrap().start,
+            timeline.clip(id).unwrap().start
+        );
+    }
+
+    #[test]
+    fn move_drop_new_lane_with_linked_collision_reverts_without_growing() {
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 1.0, 0.157, "scene");
+        timeline.detach_audio(id).unwrap();
+        timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+        let before = timeline.clone();
+        let mut view = TimelineView {
+            magnet: false,
+            ..Default::default()
+        };
+        let from = clip_center(&view, &timeline, id);
+        let to = Pos2::new(from.x + 96.0, 170.0);
+        pointer_drag(&mut view, &mut timeline, from, to);
+        assert_eq!(timeline, before);
+    }
+
+    #[test]
+    fn dense_short_timeline_default_zoom_reorders_only_the_adjacent_pair() {
+        for magnet in [false, true] {
+            for drag_left in [false, true] {
+                for (left_duration, right_duration) in [(0.2, 0.4), (0.4, 0.2)] {
+                    let mut timeline = Timeline::empty_project();
+                    for i in 0..40 {
+                        timeline.add_media_clip(
+                            "prefix",
+                            ClipKind::Video,
+                            0,
+                            i as f64 * 0.1,
+                            0.1,
+                            i as f64 * 0.1,
+                            "scene",
+                        );
+                    }
+                    let left = timeline.add_media_clip(
+                        "left",
+                        ClipKind::Video,
+                        0,
+                        4.0,
+                        left_duration,
+                        0.157,
+                        "left",
+                    );
+                    let right = timeline.add_media_clip(
+                        "right",
+                        ClipKind::Video,
+                        0,
+                        4.0 + left_duration,
+                        right_duration,
+                        1.237,
+                        "right",
+                    );
+                    for i in 0..40 {
+                        timeline.add_media_clip(
+                            "tail",
+                            ClipKind::Video,
+                            0,
+                            4.6 + i as f64 * 0.1,
+                            0.1,
+                            i as f64 * 0.1,
+                            "scene",
+                        );
+                    }
+                    let before = timeline.clone();
+                    let mut view = TimelineView {
+                        magnet,
+                        ..Default::default()
+                    };
+                    let id = if drag_left { left } else { right };
+                    let from = clip_center(&view, &timeline, id);
+                    let raw = if drag_left { 4.0 + right_duration } else { 4.0 };
+                    let to = Pos2::new(
+                        view.x_at(HEADER_W, raw + timeline.clip(id).unwrap().duration / 2.0),
+                        from.y,
+                    );
+                    assert_eq!(pointer_drag(&mut view, &mut timeline, from, to), Some(id));
+                    assert!(
+                        (timeline.clip(left).unwrap().start - (4.0 + right_duration)).abs() < 1e-9
+                    );
+                    assert_eq!(timeline.clip(right).unwrap().start, 4.0);
+                    assert_eq!(timeline.clips.len(), 82);
+                    for clip in &timeline.clips {
+                        let mut expected = before.clip(clip.id).unwrap().clone();
+                        if clip.id == left || clip.id == right {
+                            expected.start = clip.start;
+                        }
+                        assert_eq!(clip, &expected, "no ripple, trim or source change");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unequal_adjacent_center_drop_does_not_collide_with_unrelated_neighbors() {
+        for magnet in [false, true] {
+            for drag_left in [false, true] {
+                let (left_duration, right_duration) =
+                    if drag_left { (0.6, 0.2) } else { (0.2, 0.6) };
+                let mut timeline = Timeline::empty_project();
+                timeline.add_media_clip("prefix", ClipKind::Video, 0, 1.5, 0.5, 0.0, "prefix");
+                let left = timeline.add_media_clip(
+                    "left",
+                    ClipKind::Video,
+                    0,
+                    2.0,
+                    left_duration,
+                    0.157,
+                    "left",
+                );
+                let right = timeline.add_media_clip(
+                    "right",
+                    ClipKind::Video,
+                    0,
+                    2.0 + left_duration,
+                    right_duration,
+                    1.237,
+                    "right",
+                );
+                timeline.add_media_clip("tail", ClipKind::Video, 0, 2.8, 0.5, 0.0, "tail");
+                let before = timeline.clone();
+                let mut view = TimelineView {
+                    magnet,
+                    ..Default::default()
+                };
+                let (dragged, target) = if drag_left {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                let from = clip_center(&view, &timeline, dragged);
+                let to = clip_center(&view, &timeline, target);
+                pointer_drag(&mut view, &mut timeline, from, to);
+                assert!(
+                    (timeline.clip(left).unwrap().start - (2.0 + right_duration)).abs() < 1e-9,
+                    "magnet={magnet} drag_left={drag_left}"
+                );
+                assert_eq!(timeline.clip(right).unwrap().start, 2.0);
+                for clip in &timeline.clips {
+                    let mut expected = before.clip(clip.id).unwrap().clone();
+                    if clip.id == left || clip.id == right {
+                        expected.start = clip.start;
+                    }
+                    assert_eq!(clip, &expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_clips_can_grow_lanes_regardless_of_kind() {
+        for kind in [ClipKind::Video, ClipKind::Audio, ClipKind::Title] {
+            for above in [false, true] {
+                let mut timeline = Timeline::empty_project();
+                let id = timeline.add_clip("short", kind, 0, 2.0, 0.2, 0.157);
+                let other = timeline.add_clip("other", ClipKind::Video, 0, 4.0, 0.4, 1.237);
+                let mut view = TimelineView::default();
+                let from = clip_center(&view, &timeline, id);
+                let to = Pos2::new(from.x, if above { 10.0 } else { 120.0 });
+                pointer_drag(&mut view, &mut timeline, from, to);
+                let clip = timeline.clip(id).unwrap();
+                assert_eq!(timeline.track_labels.len(), 2);
+                assert_eq!(clip.track, if above { 0 } else { 1 });
+                assert_eq!(
+                    (clip.start, clip.duration, clip.source_in),
+                    (2.0, 0.2, 0.157)
+                );
+                assert_eq!(
+                    timeline.clip(other).unwrap().track,
+                    if above { 1 } else { 0 }
+                );
+                assert_eq!(timeline.clip(other).unwrap().start, 4.0);
+            }
+        }
+    }
+
+    #[test]
+    fn linked_short_clip_lane_change_preserves_sound_and_rejects_its_partner_lane() {
+        for target in [1, 2] {
+            let mut timeline = Timeline::empty_project();
+            let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 0.1, 0.157, "scene");
+            let audio = timeline.detach_audio(id).unwrap();
+            timeline.append_track();
+            let before = timeline.clone();
+            let mut view = TimelineView::default();
+            let from = clip_center(&view, &timeline, id);
+            pointer_drag(
+                &mut view,
+                &mut timeline,
+                from,
+                from + Vec2::new(0.0, target as f32 * 50.0),
+            );
+            let mut expected = before;
+            if target == 2 {
+                expected.clip_mut(id).unwrap().track = 2;
+            }
+            assert_eq!(timeline, expected);
+            assert_eq!(
+                timeline.clip(id).unwrap().start,
+                timeline.clip(audio).unwrap().start
+            );
+        }
+    }
+
+    #[test]
+    fn hover_and_press_ignore_the_gap_outside_painted_clip_height() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 1.0, 0.157, "scene");
+        let before = timeline.clone();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = Some(id);
+        let pos = Pos2::new(264.0, 73.0);
+        let cursor = run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &VisualMap::new(),
+            &[
+                vec![],
+                vec![egui::Event::PointerMoved(pos)],
+                vec![pointer_button(pos.x, pos.y, true)],
+                vec![pointer_button(pos.x, pos.y, false)],
+            ],
+        );
+        assert_eq!(cursor, egui::CursorIcon::Default);
+        assert_eq!(selected, None);
+        assert_eq!(timeline, before);
+        assert!(!view.is_interacting());
+    }
+
+    #[test]
+    fn trim_release_uses_final_pointer_position() {
+        for left in [false, true] {
+            let ctx = egui::Context::default();
+            let (mut timeline, id) = clip_fixture();
+            let mut view = TimelineView {
+                magnet: false,
+                ..Default::default()
+            };
+            let (press_x, delta) = if left { (246.0, 24.0) } else { (522.0, -24.0) };
+            run_frames(
+                &ctx,
+                &mut view,
+                &mut timeline,
+                &mut 0.0,
+                &mut None,
+                &VisualMap::new(),
+                &[
+                    vec![],
+                    vec![pointer_button(press_x, 99.0, true)],
+                    vec![egui::Event::PointerMoved(Pos2::new(press_x + delta, 99.0))],
+                    vec![
+                        egui::Event::PointerMoved(Pos2::new(press_x + 2.0 * delta, 99.0)),
+                        pointer_button(press_x + 2.0 * delta, 99.0, false),
+                    ],
+                ],
+            );
+            let clip = timeline.clip(id).unwrap();
+            assert_eq!(
+                (clip.start, clip.end(), clip.source_in),
+                if left {
+                    (3.0, 8.0, 4.0)
+                } else {
+                    (2.0, 7.0, 3.0)
+                }
+            );
+            assert!(!view.is_interacting());
+        }
+    }
+
+    #[test]
+    fn pointer_drag_started_outside_timeline_does_not_move_a_clip() {
+        let ctx = egui::Context::default();
+        let (mut timeline, id) = clip_fixture();
+        let before = timeline.clone();
+        let mut view = TimelineView::default();
+        let mut selected = Some(id);
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut 0.0,
+            &mut selected,
+            &VisualMap::new(),
+            &[
+                vec![],
+                vec![pointer_button(384.0, 420.0, true)],
+                vec![
+                    egui::Event::PointerMoved(Pos2::new(432.0, 99.0)),
+                    pointer_button(432.0, 99.0, false),
+                ],
+            ],
+        );
+        assert_eq!(timeline, before);
+        assert_eq!(selected, Some(id));
+        assert!(!view.is_interacting());
+        assert!(view.press_origin.is_none());
+    }
+
+    #[test]
+    fn short_clip_drag_can_cross_threshold_on_release_frame() {
+        let ctx = egui::Context::default();
+        let mut timeline = Timeline::empty_project();
+        let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 0.2, 0.157, "scene");
+        timeline.append_track();
+        let mut view = TimelineView::default();
+        let from = clip_center(&view, &timeline, id);
+        let to = from + Vec2::new(48.0, 50.0);
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut 0.0,
+            &mut None,
+            &VisualMap::new(),
+            &[
+                vec![],
+                vec![pointer_button(from.x, from.y, true)],
+                vec![
+                    egui::Event::PointerMoved(to),
+                    pointer_button(to.x, to.y, false),
+                ],
+            ],
+        );
+        let clip = timeline.clip(id).unwrap();
+        assert_eq!(
+            (clip.track, clip.start, clip.duration, clip.source_in),
+            (1, 3.0, 0.2, 0.157)
+        );
+        assert!(!view.is_interacting());
     }
 
     /// Full-length clip flush at t=0: grabbing its start edge from a few
@@ -1090,7 +2026,6 @@ mod tests {
             vec![],
             vec![pointer_button(246.0, y, true)],
             vec![egui::Event::PointerMoved(Pos2::new(270.0, y))],
-            vec![pointer_button(270.0, y, false)],
         ];
         run_frames(
             &ctx,
@@ -1101,6 +2036,20 @@ mod tests {
             &visuals,
             &frames,
         );
+        assert!(
+            view.is_interacting(),
+            "left trim must stay active while held"
+        );
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &[vec![pointer_button(270.0, y, false)]],
+        );
+        assert!(!view.is_interacting(), "left trim must end on release");
         let clip = timeline.clip(clip_id).unwrap();
         assert!(
             (clip.start - 2.5).abs() < 0.02,
@@ -1195,7 +2144,6 @@ mod tests {
             vec![],
             vec![pointer_button(522.0, y, true)],
             vec![egui::Event::PointerMoved(Pos2::new(498.0, y))],
-            vec![pointer_button(498.0, y, false)],
         ];
         run_frames(
             &ctx,
@@ -1206,6 +2154,20 @@ mod tests {
             &visuals,
             &frames,
         );
+        assert!(
+            view.is_interacting(),
+            "right trim must stay active while held"
+        );
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &[vec![pointer_button(498.0, y, false)]],
+        );
+        assert!(!view.is_interacting(), "right trim must end on release");
         let clip = timeline.clip(clip_id).unwrap();
         assert_eq!(clip.start, 2.0);
         assert!(
@@ -1388,7 +2350,7 @@ mod tests {
         );
     }
 
-    /// A drop overlapping more than one clip cannot swap cleanly,
+    /// A non-adjacent target inside a multi-clip overlap is ambiguous,
     /// so the dragged clip returns home and nobody overlaps.
     #[test]
     fn move_drop_overlapping_two_clips_returns_home() {
@@ -1464,7 +2426,6 @@ mod tests {
             vec![],
             vec![pointer_button(384.0, 99.0, true)],
             vec![egui::Event::PointerMoved(Pos2::new(384.0, 49.0))],
-            vec![pointer_button(384.0, 49.0, false)],
         ];
         run_frames(
             &ctx,
@@ -1475,6 +2436,17 @@ mod tests {
             &visuals,
             &frames,
         );
+        assert!(view.is_interacting(), "move must stay active while held");
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &[vec![pointer_button(384.0, 49.0, false)]],
+        );
+        assert!(!view.is_interacting(), "move must end on release");
         let clip = timeline.clip(clip_id).unwrap();
         assert_eq!(clip.track, 0, "clip should move up a lane");
         assert!(
@@ -1569,10 +2541,79 @@ mod tests {
         assert_eq!(timeline.clip(other_id).unwrap().track, 1);
     }
 
-    /// Clicking in a lane moves the playhead to the click (split and
-    /// transport act on the playhead from there) as well as selecting.
     #[test]
-    fn lane_click_moves_playhead() {
+    fn clip_click_moves_playhead_and_releases_interaction() {
+        // Click the body and both trim handles without moving the pointer.
+        for (x, time) in [(384.0, 5.0), (246.0, 2.125), (522.0, 7.875)] {
+            let ctx = egui::Context::default();
+            let (mut timeline, clip_id) = clip_fixture();
+            let visuals = full_visuals();
+            let mut view = TimelineView::default();
+            let mut playhead = 0.0;
+            let mut selected = None;
+            let frames = vec![
+                vec![],
+                vec![pointer_button(x, 99.0, true)],
+                vec![pointer_button(x, 99.0, false)],
+            ];
+            run_frames(
+                &ctx,
+                &mut view,
+                &mut timeline,
+                &mut playhead,
+                &mut selected,
+                &visuals,
+                &frames,
+            );
+            assert_eq!(selected, Some(clip_id));
+            assert_eq!(playhead, timeline.snap(time));
+            let clip = timeline.clip(clip_id).unwrap();
+            assert_eq!(
+                (clip.start, clip.duration, clip.source_in, clip.track),
+                (2.0, 6.0, 3.0, 1),
+                "a plain click must not move or trim the clip"
+            );
+            assert!(
+                !view.is_interacting(),
+                "released clip click at x={x} must not leave a move or trim active"
+            );
+        }
+    }
+
+    #[test]
+    fn ruler_click_moves_playhead_and_releases_interaction() {
+        let ctx = egui::Context::default();
+        let (mut timeline, clip_id) = clip_fixture();
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = Some(clip_id);
+        let frames = vec![
+            vec![],
+            vec![pointer_button(432.0, 10.0, true)],
+            vec![pointer_button(432.0, 10.0, false)],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert_eq!(playhead, 6.0);
+        assert_eq!(selected, Some(clip_id), "ruler clicks preserve selection");
+        assert!(
+            !view.is_interacting(),
+            "a released ruler click must not leave seeking active"
+        );
+    }
+
+    /// Clicking empty space after selecting a clip must park the playhead,
+    /// clear the selection, and leave transport free of any interaction.
+    #[test]
+    fn empty_lane_click_moves_playhead_and_clears_selection() {
         let ctx = egui::Context::default();
         let (mut timeline, clip_id) = clip_fixture();
         let visuals = full_visuals();
@@ -1619,5 +2660,107 @@ mod tests {
             (playhead - 10.0).abs() < 0.02,
             "playhead should jump to empty click, got {playhead}"
         );
+        assert!(
+            !view.is_interacting(),
+            "an empty-lane click must not retain the preceding clip interaction"
+        );
+    }
+
+    #[test]
+    fn ruler_drag_seeks_until_release() {
+        let ctx = egui::Context::default();
+        let (mut timeline, clip_id) = clip_fixture();
+        let visuals = full_visuals();
+        let mut view = TimelineView::default();
+        let mut playhead = 0.0;
+        let mut selected = Some(clip_id);
+        let frames = vec![
+            vec![],
+            vec![pointer_button(384.0, 10.0, true)],
+            vec![egui::Event::PointerMoved(Pos2::new(432.0, 10.0))],
+        ];
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &frames,
+        );
+        assert!(
+            view.is_interacting(),
+            "ruler drag must stay active while held"
+        );
+        assert_eq!(playhead, 6.0);
+        run_frames(
+            &ctx,
+            &mut view,
+            &mut timeline,
+            &mut playhead,
+            &mut selected,
+            &visuals,
+            &[
+                vec![egui::Event::PointerMoved(Pos2::new(528.0, 10.0))],
+                vec![pointer_button(528.0, 10.0, false)],
+            ],
+        );
+        assert_eq!(playhead, 8.0);
+        assert_eq!(selected, Some(clip_id));
+        assert!(!view.is_interacting(), "ruler drag must end on release");
+    }
+
+    #[test]
+    fn move_drag_released_outside_finishes_and_clears_interaction() {
+        for pointer_gone in [false, true] {
+            let ctx = egui::Context::default();
+            let (mut timeline, clip_id) = clip_fixture();
+            let visuals = full_visuals();
+            let mut view = TimelineView::default();
+            let mut playhead = 0.0;
+            let mut selected = None;
+            let outside = Pos2::new(480.0, 420.0);
+            let frames = vec![
+                vec![],
+                vec![pointer_button(384.0, 99.0, true)],
+                vec![egui::Event::PointerMoved(Pos2::new(432.0, 99.0))],
+                vec![egui::Event::PointerMoved(outside)],
+            ];
+            run_frames(
+                &ctx,
+                &mut view,
+                &mut timeline,
+                &mut playhead,
+                &mut selected,
+                &visuals,
+                &frames,
+            );
+            assert!(!view.last_rect.unwrap().contains(outside));
+            assert!(view.is_interacting(), "move must track outside while held");
+            assert_eq!(timeline.track_labels.len(), 2);
+            let mut release = vec![pointer_button(outside.x, outside.y, false)];
+            if pointer_gone {
+                release.push(egui::Event::PointerGone);
+            }
+            run_frames(
+                &ctx,
+                &mut view,
+                &mut timeline,
+                &mut playhead,
+                &mut selected,
+                &visuals,
+                &[release],
+            );
+            assert!(
+                !view.is_interacting(),
+                "outside release must end the move (pointer_gone={pointer_gone})"
+            );
+            assert!(view.last_drag_pos.is_none());
+            assert_eq!(selected, Some(clip_id));
+            assert_eq!(timeline.track_labels.len(), 3);
+            let clip = timeline.clip(clip_id).unwrap();
+            assert_eq!(clip.track, 2, "outside drop must still append a lane");
+            assert_eq!((clip.start, clip.duration, clip.source_in), (4.0, 6.0, 3.0));
+        }
     }
 }

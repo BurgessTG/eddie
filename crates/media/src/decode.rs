@@ -7,6 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Once;
 use std::thread;
 
+use ffmpeg::Rescale;
 use ffmpeg_next as ffmpeg;
 
 use crate::{scaled_height, MediaResult, RawFrame};
@@ -28,11 +29,14 @@ pub struct VideoDecoder {
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::Context,
     stream_index: usize,
-    time_base: f64,
-    frame_duration: f64,
+    time_base: ffmpeg::Rational,
+    source_origin: i64,
     target_w: u32,
     target_h: u32,
     decoded: ffmpeg::frame::Video,
+    lookahead: ffmpeg::frame::Video,
+    lookahead_pts: Option<f64>,
+    seek_target: Option<f64>,
     scaled: ffmpeg::frame::Video,
     eof_sent: bool,
 }
@@ -41,17 +45,27 @@ impl VideoDecoder {
     pub fn open(path: &str, target_w: u32, fast: bool) -> MediaResult<Self> {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
-        let (stream_index, time_base, frame_rate, parameters) = {
+        let (stream_index, time_base, stream_start, parameters) = {
             let stream = input
                 .streams()
                 .best(ffmpeg::media::Type::Video)
                 .ok_or_else(|| "no video stream".to_owned())?;
             (
                 stream.index(),
-                f64::from(stream.time_base()),
-                f64::from(stream.avg_frame_rate()),
+                stream.time_base(),
+                stream.start_time(),
                 stream.parameters(),
             )
+        };
+        // Match input-relative source times, retaining any video offset from
+        // the asset's other streams. ffmpeg-next has no format start accessor.
+        let format_start = unsafe { (*input.as_ptr()).start_time };
+        let source_origin = if format_start != ffmpeg::ffi::AV_NOPTS_VALUE {
+            format_start.rescale(ffmpeg::rescale::TIME_BASE, time_base)
+        } else if stream_start != ffmpeg::ffi::AV_NOPTS_VALUE {
+            stream_start
+        } else {
+            0
         };
 
         let mut context = ffmpeg::codec::context::Context::from_parameters(parameters)
@@ -88,14 +102,13 @@ impl VideoDecoder {
             scaler,
             stream_index,
             time_base,
-            frame_duration: if frame_rate > 0.0 {
-                1.0 / frame_rate
-            } else {
-                1.0 / 30.0
-            },
+            source_origin,
             target_w,
             target_h,
             decoded: ffmpeg::frame::Video::empty(),
+            lookahead: ffmpeg::frame::Video::empty(),
+            lookahead_pts: None,
+            seek_target: None,
             scaled: ffmpeg::frame::Video::empty(),
             eof_sent: false,
         })
@@ -105,49 +118,129 @@ impl VideoDecoder {
         (self.target_w, self.target_h)
     }
 
+    /// Seek in source-relative seconds. The next frame covers `time`, not
+    /// the demuxer's keyframe preroll. Selection happens on the next decode.
     pub fn seek(&mut self, time: f64) -> MediaResult<()> {
-        let ts = (time.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64) as i64;
-        self.input.seek(ts, ..).map_err(|e| err("seek", e))?;
+        let time = time.max(0.0);
+        let ts = self
+            .source_origin
+            .rescale(self.time_base, ffmpeg::rescale::TIME_BASE)
+            .saturating_add((time * ffmpeg::ffi::AV_TIME_BASE as f64) as i64);
+        // The wrapper passes the range end directly as the inclusive max_ts.
+        // Never seek to a future keyframe: we need the interval containing t.
+        self.input.seek(ts, ..ts).map_err(|e| err("seek", e))?;
         self.decoder.flush();
         self.eof_sent = false;
+        self.lookahead_pts = None;
+        self.seek_target = Some(time);
         Ok(())
+    }
+
+    /// Select the picture covering `time` by decoding forward from the current
+    /// position, without a demuxer seek. Only correct when `time` is at or
+    /// after every picture already returned; the next frame is returned as-is
+    /// if it already starts after `time`.
+    pub(crate) fn skip_to(&mut self, time: f64) {
+        self.seek_target = Some(time.max(0.0));
+    }
+
+    /// Source time of the keyframe that a seek to `time` would decode from,
+    /// when the container has an index (MP4/MOV do; raw streams may not).
+    pub(crate) fn keyframe_before(&self, time: f64) -> Option<f64> {
+        let ts = ((time.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64) as i64)
+            .rescale(ffmpeg::rescale::TIME_BASE, self.time_base)
+            .saturating_add(self.source_origin);
+        // SAFETY: the stream belongs to the open input owned by `self`, and the
+        // returned entry is only read before any further demuxer call.
+        let entry = unsafe {
+            let stream = *(*self.input.as_ptr()).streams.add(self.stream_index);
+            let entry = ffmpeg::ffi::avformat_index_get_entry_from_timestamp(
+                stream,
+                ts,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD as i32,
+            );
+            (!entry.is_null()).then(|| (*entry).timestamp)?
+        };
+        Some(
+            entry.saturating_sub(self.source_origin) as f64 * self.time_base.numerator() as f64
+                / self.time_base.denominator() as f64,
+        )
     }
 
     fn frame_seconds(&self, frame: &ffmpeg::frame::Video) -> f64 {
         frame
             .timestamp()
-            .map(|ts| ts as f64 * self.time_base)
+            .map(|ts| {
+                // Subtract in ticks and divide last, avoiding cancellation at
+                // nonzero origins and premature rounding of the time base.
+                ts.saturating_sub(self.source_origin) as f64 * self.time_base.numerator() as f64
+                    / self.time_base.denominator() as f64
+            })
             .unwrap_or(0.0)
     }
 
-    /// Decode the next frame. Returns its presentation time in seconds.
-    fn receive_decoded(&mut self) -> Option<f64> {
+    /// Decode one frame, including delayed frames after send_eof. Only a
+    /// receive-side EOF means the decoder has actually finished draining.
+    fn receive_decoded(&mut self) -> MediaResult<Option<f64>> {
         loop {
             match self.decoder.receive_frame(&mut self.decoded) {
-                Ok(()) => return Some(self.frame_seconds(&self.decoded)),
-                Err(_) => {
-                    if self.eof_sent {
-                        return None;
+                Ok(()) => return Ok(Some(self.frame_seconds(&self.decoded))),
+                Err(ffmpeg::Error::Eof) => return Ok(None),
+                Err(ffmpeg::Error::Other { errno })
+                    if errno == ffmpeg::error::EAGAIN && !self.eof_sent => {}
+                Err(e) => return Err(err("receive frame", e)),
+            }
+            // A receive-side EAGAIN guarantees that sending can make progress.
+            // Read directly so a demux error cannot masquerade as clean EOF.
+            loop {
+                let mut packet = ffmpeg::Packet::empty();
+                match packet.read(&mut self.input) {
+                    Ok(()) if packet.stream() == self.stream_index => {
+                        self.decoder
+                            .send_packet(&packet)
+                            .map_err(|e| err("send packet", e))?;
+                        break;
                     }
-                    // Feed one packet, then retry receiving.
-                    loop {
-                        match self.input.packets().next() {
-                            Some((stream, packet)) if stream.index() == self.stream_index => {
-                                if self.decoder.send_packet(&packet).is_err() {
-                                    // Decoder was full; outer loop drains it.
-                                }
-                                break;
-                            }
-                            Some(_) => continue,
-                            None => {
-                                let _ = self.decoder.send_eof();
-                                self.eof_sent = true;
-                                break;
-                            }
-                        }
+                    Ok(()) => continue,
+                    Err(ffmpeg::Error::Eof) => {
+                        self.decoder.send_eof().map_err(|e| err("send EOF", e))?;
+                        self.eof_sent = true;
+                        break;
                     }
+                    Err(e) => return Err(err("read packet", e)),
                 }
             }
+        }
+    }
+
+    fn next_decoded(&mut self) -> MediaResult<Option<f64>> {
+        let seconds = if let Some(pts) = self.lookahead_pts.take() {
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            Some(pts)
+        } else {
+            self.receive_decoded()?
+        };
+        let Some(target) = self.seek_target.take() else {
+            return Ok(seconds);
+        };
+        let Some(mut seconds) = seconds else {
+            return Ok(None);
+        };
+
+        loop {
+            // Keep the candidate while decoding its interval's end. Swapping
+            // two reusable AVFrames holds references, never copies pixels.
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            let next = self.receive_decoded()?;
+            if let Some(pts) = next.filter(|pts| *pts <= target) {
+                seconds = pts;
+                continue;
+            }
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            self.lookahead_pts = next;
+            // [seconds, next): equality selected the new frame above. At
+            // actual EOF (or before the first PTS), clamp to the nearest frame.
+            return Ok(Some(seconds));
         }
     }
 
@@ -172,24 +265,38 @@ impl VideoDecoder {
         })
     }
 
-    /// Next streamed frame plus its presentation time.
+    /// Next streamed frame plus its source-relative presentation time.
     pub fn next_frame(&mut self, buffer: Vec<u8>) -> Option<(f64, RawFrame)> {
-        let seconds = self.receive_decoded()?;
-        let frame = self.scale_decoded_into(buffer).ok()?;
-        Some((seconds, frame))
+        self.try_next_frame(buffer).ok().flatten()
     }
 
-    /// Seek and return the frame covering `time`.
+    pub(crate) fn try_next_frame(
+        &mut self,
+        buffer: Vec<u8>,
+    ) -> MediaResult<Option<(f64, RawFrame)>> {
+        let Some(seconds) = self.next_decoded()? else {
+            return Ok(None);
+        };
+        let frame = self.scale_decoded_into(buffer)?;
+        Ok(Some((seconds, frame)))
+    }
+
+    /// Seek and return the frame covering `time` in [PTS, next PTS).
+    /// Before/after the source, return its first/last decoded frame.
     pub fn frame_at(&mut self, time: f64) -> MediaResult<RawFrame> {
+        self.frame_at_into(time, Vec::new()).map(|(_, frame)| frame)
+    }
+
+    pub(crate) fn frame_at_into(
+        &mut self,
+        time: f64,
+        buffer: Vec<u8>,
+    ) -> MediaResult<(f64, RawFrame)> {
         self.seek(time)?;
-        loop {
-            let seconds = self
-                .receive_decoded()
-                .ok_or_else(|| "no frame decoded at requested time".to_owned())?;
-            if seconds + self.frame_duration >= time || self.eof_sent {
-                return self.scale_decoded_into(Vec::new());
-            }
-        }
+        let pts = self
+            .next_decoded()?
+            .ok_or_else(|| "no frame decoded at requested time".to_owned())?;
+        self.scale_decoded_into(buffer).map(|frame| (pts, frame))
     }
 }
 

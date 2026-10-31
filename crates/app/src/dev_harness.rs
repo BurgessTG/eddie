@@ -11,11 +11,10 @@
 //! `ScriptCommand`s to a real `Timeline`, and the one self-correction
 //! retry on console rejection.
 //!
-//! Known hazard this harness mirrors on purpose: the QuickJS context
-//! persists across evals (REPL variables survive), so chat JS that
-//! redeclares a top-level `const`/`let` on the self-correction retry
-//! dies with a redeclaration `SyntaxError`. See
-//! `persistent_console_redeclaration_hazard`.
+//! Checked chat evals isolate top-level declarations, so a
+//! self-correction retry can reuse `const`/`let` names. The
+//! interactive REPL still persists variables. See
+//! `checked_evals_isolate_top_level_declarations`.
 //!
 //! What this does NOT validate: the API model's behavior. The live
 //! driver runs whatever model this machine's Muse Code is
@@ -50,7 +49,8 @@
 //! Optional env: `OPENREEL_MUSE_BIN` (default `muse`),
 //! `OPENREEL_MUSE_MODEL` (passed as `--model` when set).
 
-use openreel_engine::{ClipKind, Timeline};
+use openreel_engine::{ClipKind, Timeline, TitleStyle};
+use openreel_media::sam_unavailable_reason;
 
 use crate::app::chat::{
     build_context_messages, parse_generated_text, render_messages_as_prompt, SYSTEM_PROMPT,
@@ -138,6 +138,9 @@ impl Fixture {
                     "source": c.source,
                     "opacity": c.opacity,
                     "volume": c.volume,
+                    "embeddedAudio": c.embedded_audio,
+                    "linkedClip": c.linked_clip,
+                    "titleStyle": c.title_style.as_str(),
                 })
             })
             .collect();
@@ -154,16 +157,45 @@ impl Fixture {
                     "hasVideo": a.has_video,
                     "hasAudio": a.has_audio,
                     "ready": true,
+                    "waveformPeaksPerSec": 0,
+                    "silenceRanges": [],
                 })
             })
             .collect();
         let mut sweep: Vec<FakeCandidate> = self.sweep.clone();
         sweep.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let sweep_candidates: Vec<serde_json::Value> = sweep
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "id": c.id,
+        let candidate_json = |c: &FakeCandidate, id: String| {
+            let talking_score = if c.category == "talking" { 0.55 } else { 0.0 };
+            let visual = serde_json::json!({
+                "source": "none",
+                "samStatus": "unavailable",
+                "samUnavailableReason": sam_unavailable_reason(),
+                "subjectCoverage": null,
+                "subjectCenter": {"x": null, "y": null},
+                "subjectMotion": null,
+                "centerSaliency": null,
+                "edgeDensity": null,
+                "luminance": null,
+                "contrast": null,
+                "skinToneRatio": null,
+                "samMaskCoverage": null,
+                "samMaskCenter": {"x": null, "y": null},
+                "samBoxCoverage": null,
+                "samBoxCenter": {"x": null, "y": null},
+                "samConfidence": null,
+                "samObjectCount": null,
+                "samFaceBoxCoverage": null,
+                "samFaceBoxCenter": {"x": null, "y": null},
+                "samFaceConfidence": null,
+                "samFaceCount": null,
+                "samFrameTime": null,
+                "samError": null,
+                "facePresent": null,
+                "expression": null,
+                "talkingScore": talking_score,
+            });
+            serde_json::json!({
+                    "id": id,
                     "asset": c.asset_path,
                     "assetName": c.asset_name,
                     "title": c.title,
@@ -182,7 +214,25 @@ impl Fixture {
                     "quality": {"stability": 0.9, "audio": 0.5, "motion": 0.4},
                     "hasVideo": c.has_video,
                     "transcript": "",
-                })
+                    "talkingScore": talking_score,
+                    "visual": visual,
+            })
+        };
+        let sweep_candidates: Vec<serde_json::Value> = sweep
+            .iter()
+            .map(|candidate| candidate_json(candidate, candidate.id.clone()))
+            .collect();
+        let mut scenes = self.sweep.clone();
+        scenes.sort_by(|a, b| {
+            a.asset_path
+                .cmp(&b.asset_path)
+                .then_with(|| a.source_in.total_cmp(&b.source_in))
+        });
+        let scene_clips: Vec<serde_json::Value> = scenes
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                candidate_json(candidate, format!("{}#scene-{index}", candidate.asset_path))
             })
             .collect();
         let transcript_segments: Vec<serde_json::Value> = self
@@ -197,6 +247,8 @@ impl Fixture {
                     "end": t.end,
                     "speaker": t.speaker,
                     "text": t.text,
+                    "timingPrecision": "turn",
+                    "words": [],
                 })
             })
             .collect();
@@ -208,9 +260,11 @@ impl Fixture {
             "fps": self.timeline.fps,
             "tool": "select",
             "magnet": true,
+            "musicBedMuted": true,
             "clips": clips,
             "assets": assets,
             "sweepCandidates": sweep_candidates,
+            "sceneClips": scene_clips,
             "transcriptSegments": transcript_segments,
         })
         .to_string()
@@ -616,6 +670,7 @@ impl JsSource for CannedSource {
 struct HeadlessEditor {
     timeline: Timeline,
     assets: Vec<FakeAsset>,
+    transcripts: Vec<FakeTranscript>,
     playhead: f64,
     selected: Option<u64>,
     playing: bool,
@@ -626,6 +681,7 @@ impl HeadlessEditor {
         Self {
             timeline: fixture.timeline.clone(),
             assets: fixture.assets.clone(),
+            transcripts: fixture.transcripts.clone(),
             playhead: fixture.playhead,
             selected: fixture.selected,
             playing: false,
@@ -748,12 +804,194 @@ impl HeadlessEditor {
                         c.volume = value.clamp(0.0, 2.0);
                     }
                 }
-                ScriptCommand::AddTitle { text, at, duration } => {
-                    let track = self.first_free_track(at, duration);
-                    let id =
-                        self.timeline
-                            .add_clip(&text, ClipKind::Title, track, at, duration, 0.0);
-                    self.selected = Some(id);
+                ScriptCommand::DetachAudio { clip } => {
+                    let has_audio = self
+                        .timeline
+                        .clip(clip)
+                        .and_then(|c| c.source.as_ref())
+                        .and_then(|source| self.asset_by_path(source))
+                        .map(|asset| asset.has_audio)
+                        .unwrap_or(false);
+                    if !has_audio {
+                        notes.push(format!("error: clip {clip} has no detachable audio"));
+                    } else {
+                        match self.timeline.detach_audio(clip) {
+                            Some(audio) => self.selected = Some(audio),
+                            None => {
+                                notes.push(format!("error: clip {clip} audio is already detached"))
+                            }
+                        }
+                    }
+                }
+                ScriptCommand::UnlinkClip { clip } => {
+                    if !self.timeline.unlink_clip(clip) {
+                        notes.push(format!("error: clip {clip} is not linked"));
+                    }
+                }
+                ScriptCommand::SetEmbeddedAudio { clip, enabled } => {
+                    let source_has_audio = !enabled
+                        || self
+                            .timeline
+                            .clip(clip)
+                            .and_then(|c| c.source.as_ref())
+                            .and_then(|source| self.asset_by_path(source))
+                            .map(|asset| asset.has_audio)
+                            .unwrap_or(false);
+                    if !source_has_audio || !self.timeline.set_embedded_audio(clip, enabled) {
+                        notes.push(format!(
+                            "error: cannot {} embedded audio on clip {clip}",
+                            if enabled { "enable" } else { "disable" }
+                        ));
+                    }
+                }
+                ScriptCommand::TightenSilence { clip, .. } => {
+                    notes.push(format!(
+                        "error: clip {clip} has no analyzed waveform in the harness"
+                    ));
+                }
+                ScriptCommand::AddTitle {
+                    text,
+                    at,
+                    duration,
+                    style,
+                } => match TitleStyle::from_name(&style) {
+                    Some(style) => {
+                        let track = self.first_free_track(at, duration);
+                        let id = self.timeline.add_clip(
+                            &text,
+                            ClipKind::Title,
+                            track,
+                            at,
+                            duration,
+                            0.0,
+                        );
+                        if let Some(clip) = self.timeline.clip_mut(id) {
+                            clip.title_style = style;
+                        }
+                        self.selected = Some(id);
+                    }
+                    None => notes.push(format!("error: unknown title style '{style}'")),
+                },
+                ScriptCommand::SetTitleStyle { clip, style } => {
+                    match TitleStyle::from_name(&style) {
+                        Some(style) => {
+                            if let Some(target) = self.timeline.clip_mut(clip) {
+                                if target.kind == ClipKind::Title {
+                                    target.title_style = style;
+                                } else {
+                                    notes.push(format!("error: clip {clip} is not a title"));
+                                }
+                            } else {
+                                notes.push(format!("error: no clip {clip}"));
+                            }
+                        }
+                        None => notes.push(format!("error: unknown title style '{style}'")),
+                    }
+                }
+                ScriptCommand::AddCaptionsForClip { clip, style } => {
+                    match TitleStyle::from_name(&style) {
+                        Some(style) => {
+                            let Some(target) = self.timeline.clip(clip).cloned() else {
+                                notes.push(format!("error: no clip {clip}"));
+                                continue;
+                            };
+                            let Some(source) = target.source.clone() else {
+                                notes.push(format!("error: clip {clip} has no transcript source"));
+                                continue;
+                            };
+                            let source_start = target.source_in;
+                            let source_end = target.source_in + target.duration;
+                            let mut added_any = false;
+                            for segment in self
+                                .transcripts
+                                .iter()
+                                .filter(|segment| segment.asset_path == source)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                            {
+                                if segment.end <= source_start || segment.start >= source_end {
+                                    continue;
+                                }
+                                let mut pieces: Vec<String> = Vec::new();
+                                let mut current = String::new();
+                                for word in segment.text.split_whitespace() {
+                                    if !current.is_empty() && current.len() + 1 + word.len() > 42 {
+                                        pieces.push(std::mem::take(&mut current));
+                                    }
+                                    if !current.is_empty() {
+                                        current.push(' ');
+                                    }
+                                    current.push_str(word);
+                                }
+                                if !current.is_empty() {
+                                    pieces.push(current);
+                                }
+                                let total_chars: usize =
+                                    pieces.iter().map(|piece| piece.len()).sum();
+                                let mut cursor = segment.start;
+                                let last_index = pieces.len().saturating_sub(1);
+                                for (index, text) in pieces.into_iter().enumerate() {
+                                    let end = if index == last_index || total_chars == 0 {
+                                        segment.end
+                                    } else {
+                                        cursor
+                                            + (segment.end - segment.start) * text.len() as f64
+                                                / total_chars as f64
+                                    };
+                                    let clipped_start = cursor.max(source_start);
+                                    let clipped_end = end.min(source_end);
+                                    cursor = end;
+                                    if clipped_end <= clipped_start {
+                                        continue;
+                                    }
+                                    let start = self
+                                        .timeline
+                                        .snap(target.start + (clipped_start - source_start));
+                                    let finish = self
+                                        .timeline
+                                        .snap(target.start + (clipped_end - source_start));
+                                    if finish <= start {
+                                        continue;
+                                    }
+                                    let duplicate = self.timeline.clips.iter().any(|c| {
+                                        c.kind == ClipKind::Title
+                                            && c.name == text
+                                            && c.title_style == style
+                                            && (c.start - start).abs() <= 0.5 / self.timeline.fps
+                                    });
+                                    if duplicate {
+                                        continue;
+                                    }
+                                    let duration = finish - start;
+                                    let track = self.first_free_track(start, duration);
+                                    let id = self.timeline.add_clip(
+                                        &text,
+                                        ClipKind::Title,
+                                        track,
+                                        start,
+                                        duration,
+                                        0.0,
+                                    );
+                                    if let Some(caption) = self.timeline.clip_mut(id) {
+                                        caption.title_style = style;
+                                    }
+                                    self.selected = Some(id);
+                                    added_any = true;
+                                }
+                            }
+                            if !added_any
+                                && !self
+                                    .transcripts
+                                    .iter()
+                                    .any(|segment| segment.asset_path == source)
+                            {
+                                notes.push(format!(
+                                    "error: clip {clip} has no transcript to caption"
+                                ));
+                            }
+                        }
+                        None => notes.push(format!("error: unknown title style '{style}'")),
+                    }
                 }
                 ScriptCommand::AddAsset { asset, at } => {
                     match self.asset_by_name_or_path(&asset).cloned() {
@@ -789,7 +1027,9 @@ impl HeadlessEditor {
                     "select" => {}
                     other => notes.push(format!("error: unknown tool '{other}'")),
                 },
-                ScriptCommand::SetMagnet(_) | ScriptCommand::SetZoom(_) => {}
+                ScriptCommand::SetMagnet(_)
+                | ScriptCommand::SetMusicBedMuted(_)
+                | ScriptCommand::SetZoom(_) => {}
                 ScriptCommand::CloseGaps => {
                     for track in 0..self.timeline.track_labels.len() {
                         self.timeline.close_gaps(track);
@@ -1403,19 +1643,25 @@ fn offline_self_correction_retry() {
 }
 
 #[test]
-fn persistent_console_redeclaration_hazard() {
-    // Known contract hazard, faithfully mirrored from the app: the
-    // QuickJS context persists across evals, so a retry that redeclares
-    // a top-level `const` from the failed attempt dies with a
-    // redeclaration SyntaxError before doing anything. Model JS should
-    // prefer `var` or block scope until the chat path isolates evals.
+fn checked_evals_isolate_top_level_declarations() {
+    // Chat retries must not die just because a failed attempt used
+    // the same top-level `const` name. Checked evals are isolated;
+    // the interactive REPL (`eval`) still persists variables.
     let mut engine = ScriptEngine::new().expect("quickjs engine");
     let state = sample_project_fixture().state_json();
     let first = engine.eval_checked("const s = state(); bogusCall();", &state);
     assert!(first.is_err());
-    let second = engine.eval_checked("const s = state(); seek(1);", &state);
-    let error = second.expect_err("redeclaration must reject the retry");
-    assert!(error.contains("redeclaration"), "{error}");
+    let (_, commands) = engine
+        .eval_checked("const s = state(); seek(1);", &state)
+        .expect("isolated retry may reuse const names");
+    assert_eq!(commands, vec![ScriptCommand::Seek(1.0)]);
+
+    let _ = engine.eval("var kept = 40", &state);
+    let _ = engine
+        .eval_checked("const kept = 1; seek(2);", &state)
+        .expect("checked eval shadows instead of leaking declarations");
+    let (out, _) = engine.eval("kept + 2", &state);
+    assert_eq!(out, "42", "REPL variables still persist");
 }
 
 #[test]
@@ -1486,6 +1732,7 @@ fn fixture_state_matches_console_shape() {
         "clips",
         "assets",
         "sweepCandidates",
+        "sceneClips",
         "transcriptSegments",
     ] {
         assert!(value.get(key).is_some(), "missing state key {key}");
@@ -1499,8 +1746,19 @@ fn fixture_state_matches_console_shape() {
     assert_eq!(scores, vec![91.0, 84.0, 77.0], "candidates ranked desc");
     let clip = &value["clips"][0];
     for key in [
-        "id", "name", "kind", "track", "start", "duration", "sourceIn", "source", "opacity",
+        "id",
+        "name",
+        "kind",
+        "track",
+        "start",
+        "duration",
+        "sourceIn",
+        "source",
+        "opacity",
         "volume",
+        "embeddedAudio",
+        "linkedClip",
+        "titleStyle",
     ] {
         assert!(clip.get(key).is_some(), "missing clip key {key}");
     }

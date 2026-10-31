@@ -12,7 +12,7 @@ use eframe::egui::{
 use openreel_engine::{format_timecode, ClipKind};
 use openreel_media::{MediaInfo, RawFrame};
 
-use super::sweep::{minute_second, SweepData, SweepStatus};
+use super::sweep::{ReviewStatus, SweepData, SweepStatus};
 use super::{EditorApp, UiAction};
 use crate::theme;
 
@@ -115,8 +115,12 @@ impl EditorApp {
                         }
                         ctx.request_repaint();
                         let peaks = if info.has_audio {
-                            openreel_media::waveform_peaks(&path_str, info.duration, 20)
-                                .unwrap_or_default()
+                            openreel_media::waveform_peaks(
+                                &path_str,
+                                info.duration,
+                                openreel_media::WAVEFORM_PEAKS_PER_SEC,
+                            )
+                            .unwrap_or_default()
                         } else {
                             Vec::new()
                         };
@@ -229,7 +233,9 @@ impl EditorApp {
                             sweep: SweepData::default(),
                         });
                     }
-                    self.queue_sweep(ctx, ready_path);
+                    // Import only makes the asset ready. Curation is
+                    // an explicit Curate action in the media bin.
+                    let _ = ready_path;
                 }
                 ImportMsg::Failed(path, err) => {
                     self.assets
@@ -283,22 +289,45 @@ impl EditorApp {
         source_in: f64,
         duration: f64,
     ) {
+        if let Err(error) =
+            self.try_add_asset_range_to_timeline(path, title, track, at, source_in, duration)
+        {
+            self.status = error;
+        }
+    }
+
+    /// The command path needs a typed failure, not a status that
+    /// its caller can accidentally replace with a success message.
+    pub(super) fn try_add_asset_range_to_timeline(
+        &mut self,
+        path: &str,
+        title: &str,
+        track: Option<usize>,
+        at: f64,
+        source_in: f64,
+        duration: f64,
+    ) -> Result<openreel_engine::ClipId, String> {
         let Some(asset) = self.asset(path) else {
-            self.status = "That media is no longer in the bin.".to_owned();
-            return;
+            return Err("That media is no longer in the bin.".to_owned());
         };
         if asset.state != AssetState::Ready {
-            self.status = format!("Still importing {}", asset.info.name);
-            return;
+            return Err(format!("Still importing {}", asset.info.name));
         }
         let asset_name = asset.info.name.clone();
         let source_duration = asset.info.duration;
         let has_video = asset.info.has_video;
+        // Baked-in montage music must not ride into a new edit.
+        // JS cannot mute a clip it just added (its id exists only
+        // after apply), so the add path does it: if most of the
+        // added range is curator-flagged music bed, start muted.
+        // The volume slider in Details brings it back.
+        let range_end = source_in + duration;
+        let bed_overlap = asset.sweep.music_bed_overlap(source_in, range_end);
+        let starts_muted = self.mute_music_beds && duration > 0.0 && bed_overlap >= duration * 0.5;
         let source_in = source_in.clamp(0.0, source_duration.max(0.0));
         let duration = duration.min((source_duration - source_in).max(0.0));
         if duration <= 0.0 {
-            self.status = "That clip range is outside the media.".to_owned();
-            return;
+            return Err("That clip range is outside the media.".to_owned());
         }
         let name = if title.trim().is_empty() {
             asset_name
@@ -329,8 +358,22 @@ impl EditorApp {
             source_in,
             path,
         );
+        if starts_muted {
+            if let Some(clip) = self.timeline.clip_mut(id) {
+                clip.volume = 0.0;
+            }
+        }
         self.selected = Some(id);
-        self.status = format!("Added {name} at {}", format_timecode(at, self.timeline.fps));
+        self.status = format!(
+            "Added {name} at {}{}",
+            format_timecode(at, self.timeline.fps),
+            if starts_muted {
+                " (muted: music bed)"
+            } else {
+                ""
+            }
+        );
+        Ok(id)
     }
 
     // -- playback --------------------------------------------------------------
@@ -341,17 +384,24 @@ impl EditorApp {
         }
         let mut action: Option<UiAction> = None;
         let mut add_request: Option<(String, Option<usize>, f64)> = None;
-        let mut sweep_add: Option<String> = None;
-        let mut sweep_dismiss: Option<String> = None;
-        let mut sweep_add_all = false;
+        let mut open_gallery = false;
+        let mut curate_selected: Option<String> = None;
+        let mut curate_all_new = false;
         egui::SidePanel::left("media_bin")
             .resizable(true)
-            .default_width(268.0)
-            .width_range(210.0..=400.0)
-            .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(12))
+            .default_width(280.0)
+            .width_range(220.0..=420.0)
+            .frame(theme::panel_frame())
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    theme::panel_title(ui, "MEDIA");
+                    theme::panel_title(ui, "Media");
+                    if !self.assets.is_empty() {
+                        ui.label(
+                            RichText::new(self.assets.len().to_string())
+                                .size(11.5)
+                                .color(theme::SUBTLE_FG),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::ghost_button(ui, "Import")
                             .on_hover_text("Import video or audio files")
@@ -364,9 +414,34 @@ impl EditorApp {
                 ui.add_space(8.0);
 
                 if self.assets.is_empty() {
-                    ui.label(RichText::new("No media yet.").color(theme::MUTED_FG));
+                    ui.add_space(8.0);
+                    let (drop, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 132.0),
+                        Sense::hover(),
+                    );
+                    ui.painter().rect(
+                        drop,
+                        CornerRadius::same(theme::R_LG),
+                        theme::CARD,
+                        Stroke::new(1.0_f32, theme::BORDER),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        drop.center() - Vec2::new(0.0, 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        "No media yet",
+                        egui::FontId::proportional(13.0),
+                        theme::FOREGROUND,
+                    );
+                    ui.painter().text(
+                        drop.center() + Vec2::new(0.0, 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Drop files here",
+                        egui::FontId::proportional(11.5),
+                        theme::MUTED_FG,
+                    );
                     ui.add_space(10.0);
-                    if theme::primary_button(ui, "Import media")
+                    if theme::primary_button_wide(ui, "Import media")
                         .on_hover_text("Import files, or drop them onto this window")
                         .clicked()
                     {
@@ -378,16 +453,20 @@ impl EditorApp {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .hint_text("Search media…")
+                        .margin(egui::Margin::symmetric(8, 6))
                         .desired_width(f32::INFINITY),
                 )
                 .on_hover_text("Filter media by name");
-                ui.add_space(8.0);
+                ui.add_space(10.0);
 
                 let query = self.search.to_lowercase();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    const TILE_W: f32 = 118.0;
-                    const TILE_H: f32 = 66.0;
+                let grid_height = (ui.available_height() - 196.0).max(66.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("media_grid")
+                    .max_height(grid_height)
+                    .show(ui, |ui| {
                     const GAP: f32 = 8.0;
+                    const MIN_TILE_W: f32 = 112.0;
                     let filtered: Vec<usize> = self
                         .assets
                         .iter()
@@ -398,7 +477,14 @@ impl EditorApp {
                         .map(|(i, _)| i)
                         .collect();
                     let columns =
-                        (((ui.available_width() + GAP) / (TILE_W + GAP)).floor() as usize).max(1);
+                        (((ui.available_width() + GAP) / (MIN_TILE_W + GAP)).floor() as usize)
+                            .max(1);
+                    // Tiles stretch to fill the row so the grid has even edges.
+                    let tile_w = ((ui.available_width() - GAP * (columns - 1) as f32)
+                        / columns as f32)
+                        .floor()
+                        .max(40.0);
+                    let tile_h = (tile_w * 9.0 / 16.0).round();
                     for row in filtered.chunks(columns) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = GAP;
@@ -407,11 +493,11 @@ impl EditorApp {
                                 let is_selected = self.selected_asset.as_deref()
                                     == Some(asset.info.path.as_str());
                                 let (rect, response) = ui.allocate_exact_size(
-                                    Vec2::new(TILE_W, TILE_H),
+                                    Vec2::new(tile_w, tile_h),
                                     Sense::click_and_drag(),
                                 );
                                 let stroke = if is_selected {
-                                    Stroke::new(2.0_f32, theme::RING)
+                                    Stroke::new(2.0_f32, theme::BRAND)
                                 } else if response.hovered() || response.is_pointer_button_down_on()
                                 {
                                     Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70))
@@ -432,12 +518,11 @@ impl EditorApp {
                                     } else {
                                         egui::Color32::from_rgb(105, 105, 105)
                                     };
-                                    painter.image(
-                                        thumb.id(),
-                                        thumb_rect,
-                                        cover_uv(thumb.size_vec2(), thumb_rect.size()),
-                                        tint,
-                                    );
+                                    egui::Image::from_texture(thumb)
+                                        .uv(cover_uv(thumb.size_vec2(), thumb_rect.size()))
+                                        .tint(tint)
+                                        .corner_radius(theme::R_MD)
+                                        .paint_at(ui, thumb_rect);
                                 } else if !asset.peaks.is_empty() {
                                     let mid = thumb_rect.center().y;
                                     let max_amp = thumb_rect.height() * 0.38;
@@ -534,7 +619,7 @@ impl EditorApp {
                                         }
                                         let ghost = egui::Rect::from_min_size(
                                             pos + Vec2::new(12.0, 12.0),
-                                            Vec2::new(TILE_W, TILE_H),
+                                            Vec2::new(tile_w, tile_h),
                                         );
                                         ghost_painter.rect_filled(
                                             ghost,
@@ -588,197 +673,148 @@ impl EditorApp {
                         });
                         ui.add_space(GAP);
                     }
+                });
 
-                    let sweep_started = self
+                    let has_ready_assets = self
                         .assets
                         .iter()
-                        .any(|asset| asset.sweep.status != SweepStatus::NotStarted);
-                    if sweep_started {
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        let candidate_refs = self.visible_sweep_candidates();
+                        .any(|asset| asset.state == AssetState::Ready);
+                    if has_ready_assets {
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().id_salt("curator_panel")
+                            .auto_shrink([false, false]).show(ui, |ui| {
+                        theme::card_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 8.0;
                         ui.horizontal(|ui| {
-                            theme::panel_title(ui, "SWEEP");
+                            theme::panel_title(ui, "Curator");
                             if self
                                 .assets
                                 .iter()
                                 .any(|asset| asset.sweep.status == SweepStatus::Running)
                             {
                                 ui.add(egui::Spinner::new().size(13.0));
-                                ui.label(RichText::new("Sweeping…").color(theme::MUTED_FG));
+                                ui.label(RichText::new("Curating…").color(theme::MUTED_FG));
                             }
-                            if !candidate_refs.is_empty() {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if theme::outline_button(ui, "Add all to timeline")
+                        });
+                        let selected_asset = self.selected_asset.as_deref().and_then(|path| {
+                            self.assets.iter().find(|asset| asset.info.path == path)
+                        });
+                        if let Some(asset) = selected_asset {
+                            ui.add(egui::Label::new(
+                                RichText::new(&asset.info.name)
+                                    .size(12.0)
+                                    .strong(),
+                            ).truncate()).on_hover_text(&asset.info.path);
+                            ui.vertical(|ui| {
+                                match asset.sweep.status {
+                                    SweepStatus::NotStarted => {
+                                        if theme::primary_button_wide(ui, "Curate selected")
                                             .on_hover_text(
-                                                "Append every sweep clip in ranked order",
+                                                "Extract every shot and review useful ranges; Meta review sends sampled frames and audio when configured",
                                             )
                                             .clicked()
                                         {
-                                            sweep_add_all = true;
+                                            curate_selected = Some(asset.info.path.clone());
                                         }
-                                    },
-                                );
-                            }
-                        });
-                        ui.add_space(6.0);
-
-                        if candidate_refs.is_empty() {
-                            if let Some(asset) = self.assets.iter().find(|asset| {
-                                asset.sweep.status == SweepStatus::Failed
-                                    || asset.sweep.status == SweepStatus::Ready
-                            }) {
-                                if !asset.sweep.note.is_empty() {
-                                    ui.label(
-                                        RichText::new(&asset.sweep.note)
-                                            .size(12.0)
-                                            .color(theme::MUTED_FG),
-                                    );
-                                }
-                            }
-                        }
-
-                        for (rank, (asset_idx, candidate_idx)) in
-                            candidate_refs.iter().copied().enumerate()
-                        {
-                            let asset = &self.assets[asset_idx];
-                            let candidate = &asset.sweep.candidates[candidate_idx];
-                            ui.horizontal_top(|ui| {
-                                let (rect, thumb_response) =
-                                    ui.allocate_exact_size(Vec2::new(76.0, 43.0), Sense::hover());
-                                let painter = ui.painter().clone();
-                                painter.rect_filled(
-                                    rect,
-                                    CornerRadius::same(theme::R_MD),
-                                    theme::CARD,
-                                );
-                                let nearest_thumb = asset.thumb_textures.iter().min_by(|a, b| {
-                                    (a.0 - candidate.source_in)
-                                        .abs()
-                                        .total_cmp(&(b.0 - candidate.source_in).abs())
-                                });
-                                if let Some((_, thumb)) = nearest_thumb {
-                                    painter.image(
-                                        thumb.id(),
-                                        rect,
-                                        cover_uv(thumb.size_vec2(), rect.size()),
-                                        egui::Color32::WHITE,
-                                    );
-                                } else if !asset.peaks.is_empty() && asset.info.duration > 0.0 {
-                                    let mid = rect.center().y;
-                                    let max_amp = rect.height() * 0.36;
-                                    let mut x = rect.left() + 4.0;
-                                    while x < rect.right() - 4.0 {
-                                        let frac = (x - rect.left()) / rect.width().max(1.0);
-                                        let source_time =
-                                            candidate.source_in + frac as f64 * candidate.duration;
-                                        let idx = ((source_time / asset.info.duration) as f32
-                                            * asset.peaks.len() as f32)
-                                            as usize;
-                                        let idx = idx.min(asset.peaks.len() - 1);
-                                        let amp = (asset.peaks[idx] * max_amp).max(1.0);
-                                        painter.line_segment(
-                                            [
-                                                egui::Pos2::new(x, mid - amp),
-                                                egui::Pos2::new(x, mid + amp),
-                                            ],
-                                            Stroke::new(
-                                                2.0_f32,
-                                                egui::Color32::from_rgb(0x4C, 0x9A, 0x68),
-                                            ),
-                                        );
-                                        x += 4.0;
                                     }
-                                }
-                                let transcript = candidate.transcript_text();
-                                thumb_response.on_hover_text(format!(
-                                    "{}\n{} · Score {:.0} · Stability {:.0}% · Audio {:.0}% · Motion {:.0}%{}\n{}",
-                                    candidate.title,
-                                    candidate.category,
-                                    candidate.score,
-                                    candidate.stability * 100.0,
-                                    candidate.audio_score * 100.0,
-                                    candidate.motion_score * 100.0,
-                                    if candidate.tags.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(" · {}", candidate.tags.join(", "))
-                                    },
-                                    if transcript.is_empty() {
-                                        "No speech in this clip.".to_owned()
-                                    } else {
-                                        transcript.clone()
-                                    }
-                                ));
-
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{}. {} · {}–{} · {}",
-                                            rank + 1,
-                                            candidate.asset_name,
-                                            minute_second(candidate.source_in),
-                                            minute_second(candidate.end()),
-                                            candidate.category
-                                        ))
-                                        .size(12.0)
-                                        .strong(),
-                                    );
-                                    ui.label(
-                                        RichText::new(&candidate.reason)
-                                            .size(12.0)
-                                            .color(theme::MUTED_FG),
-                                    );
-                                    if !transcript.is_empty() {
-                                        let excerpt: String = transcript.chars().take(96).collect();
+                                    SweepStatus::Running => {
                                         ui.label(
-                                            RichText::new(format!("“{excerpt}”"))
+                                            RichText::new("Curating…")
                                                 .size(12.0)
                                                 .color(theme::MUTED_FG),
                                         );
                                     }
-                                    ui.horizontal(|ui| {
-                                        if theme::primary_button(ui, "Add")
-                                            .on_hover_text("Add this sweep clip to the timeline")
+                                    SweepStatus::Ready => {
+                                        if theme::secondary_button_wide(ui, "Re-curate")
+                                            .on_hover_text(
+                                                "Analyze again, for example after adding an API key",
+                                            )
                                             .clicked()
                                         {
-                                            sweep_add = Some(candidate.id.clone());
+                                            curate_selected = Some(asset.info.path.clone());
                                         }
-                                        if theme::ghost_button(ui, "Dismiss")
-                                            .on_hover_text("Hide this suggestion")
+                                    }
+                                    SweepStatus::Failed => {
+                                        if theme::secondary_button_wide(ui, "Retry curation")
+                                            .on_hover_text("Try analyzing this video again")
                                             .clicked()
                                         {
-                                            sweep_dismiss = Some(candidate.id.clone());
+                                            curate_selected = Some(asset.info.path.clone());
                                         }
-                                    });
-                                });
+                                    }
+                                }
+                                let uncurated = self.assets.iter().filter(|asset| {
+                                    asset.state == AssetState::Ready
+                                        && asset.sweep.status == SweepStatus::NotStarted
+                                }).count();
+                                if uncurated > 1
+                                    || (uncurated == 1
+                                        && asset.sweep.status != SweepStatus::NotStarted)
+                                {
+                                    if theme::secondary_button_wide(ui, "Curate all new")
+                                        .on_hover_text(
+                                            "Curate every imported video that has not been curated",
+                                        )
+                                        .clicked()
+                                    {
+                                        curate_all_new = true;
+                                    }
+                                }
                             });
-                            ui.add_space(8.0);
+                            if asset.sweep.status == SweepStatus::NotStarted {
+                                ui.label(
+                                    RichText::new("Not curated yet.")
+                                        .size(12.0)
+                                        .color(theme::MUTED_FG),
+                                );
+                            } else if !asset.sweep.note.is_empty() {
+                                let needs_review = asset.sweep.candidates.iter()
+                                    .filter(|clip| clip.review.status == ReviewStatus::NeedsReview).count();
+                                let label = match asset.sweep.status {
+                                    SweepStatus::Running => "Analyzing source".to_owned(),
+                                    SweepStatus::Failed => "Analysis failed".to_owned(),
+                                    _ if needs_review > 0 => format!("{} clips · {needs_review} need review", asset.sweep.candidates.len()),
+                                    _ => format!("{} · {} clips · {} scenes",
+                                        if asset.sweep.usage.batches > 0 { "Reviewed" } else { "Local" },
+                                        asset.sweep.candidates.len(), asset.sweep.scene_clips.len()),
+                                };
+                                ui.add(egui::Label::new(RichText::new(label).size(12.0)
+                                    .color(theme::MUTED_FG)).truncate())
+                                    .on_hover_text(&asset.sweep.note);
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new("Select a video, then press Curate.")
+                                    .size(12.0)
+                                    .color(theme::MUTED_FG),
+                            );
                         }
+                        open_gallery = theme::secondary_button_wide(ui, "Browse gallery")
+                            .on_hover_text("Pause playback and search, filter or sort curated clips")
+                            .clicked();
+                        });
+                        });
                     }
-                });
             });
         if let Some((path, track, at)) = add_request {
             self.add_asset_to_timeline(&path, track, at);
         }
-        if let Some(candidate_id) = sweep_add {
-            self.add_sweep_candidate(&candidate_id);
+        if open_gallery {
+            self.open_curator_gallery();
         }
-        if let Some(candidate_id) = sweep_dismiss {
-            self.dismiss_sweep_candidate(&candidate_id);
+        if let Some(path) = curate_selected {
+            self.curate_asset(ctx, path);
         }
-        if sweep_add_all {
-            self.add_all_sweep_candidates();
+        if curate_all_new {
+            self.curate_all_new(ctx);
         }
         action
     }
 }
 
 /// Center-crop UVs so a thumbnail fills its tile without distortion.
-fn cover_uv(source: Vec2, target: Vec2) -> egui::Rect {
+pub(super) fn cover_uv(source: Vec2, target: Vec2) -> egui::Rect {
     if source.x <= 0.0 || source.y <= 0.0 || target.x <= 0.0 || target.y <= 0.0 {
         return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
     }
