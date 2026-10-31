@@ -321,11 +321,14 @@ fn stream_video(
             // Pad before fps so EOF holds the final source frame even if it
             // falls between output samples.
             // Accurate rounding avoids darkening during matrix conversion.
+            // Full chroma interpolation avoids a green shift when the matrix
+            // changes (BT.601 phone footage to BT.709) on textured pictures.
             filters.push(format!(
                 "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
                  tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
                  trim=end_frame={layer_frames},setpts=PTS+{first},\
-                 scale={width}:{height}:force_original_aspect_ratio=decrease:flags=bicubic+accurate_rnd:\
+                 scale={width}:{height}:force_original_aspect_ratio=decrease:\
+                 flags=bicubic+accurate_rnd+full_chroma_int:\
                  out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE},\
                  pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1{alpha}[seg{index}]"
             ));

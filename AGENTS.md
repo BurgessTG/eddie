@@ -373,7 +373,9 @@ Titles and audio remain on the whole timeline clock. Existing export
 resolution, CRF, and audio settings are unchanged. Batch bytes and
 child exits are checked before export can report success.
 SDR batches convert source YCbCr matrices and ranges to limited-range
-BT.709 with accurate rounding. The raw-video encoder input declares that
+BT.709 with accurate rounding and full chroma interpolation (without it,
+BT.601 phone footage shifted green by about 1.3 levels on textured
+pictures; flat test colors hide this). The raw-video encoder input declares that
 same representation so the output keeps its color tags. This is not an
 HDR tone-mapping or wide-gamut color-management pipeline.
 Video sample boundaries and source offsets share one integer tick clock;
