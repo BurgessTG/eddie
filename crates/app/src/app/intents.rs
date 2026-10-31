@@ -7,7 +7,7 @@
 //!
 //! Local intents still mutate only through `ScriptCommand`s: they
 //! build a command batch here and the app applies it through the
-//! same `apply_script_commands` path (and undo snapshot) as model
+//! same transactional `apply_edit_commands` path as model
 //! JavaScript. No new state-mutation path.
 
 use crate::scripting::ScriptCommand;
@@ -84,11 +84,24 @@ pub(crate) const INTENTS: &[Intent] = &[
         tooltip: "Ask the model to tighten the opening of the timeline",
         kind: IntentKind::Model,
         prompt: Some(
-            "Tighten the intro: make the opening of the timeline faster and cleaner. Trim \
-             dead air at the starts of the first clips, close any gaps, and keep the rest \
-             of the edit intact.",
+            "Tighten the intro: make the opening faster and cleaner. For each opening \
+             speech clip, call tightenSilence(id) to remove waveform dead air, then close \
+             any remaining gaps and keep the rest of the edit intact. Do not tighten \
+             music-bed clips.",
         ),
         progress: "Writing the edit…",
+    },
+    Intent {
+        id: "caption-the-speech",
+        label: "Caption speech",
+        tooltip: "Ask the model to add styled captions to speech clips with transcripts",
+        kind: IntentKind::Model,
+        prompt: Some(
+            "Caption the speech: for every current timeline video or audio clip whose \
+             source has transcriptSegments(), call addCaptionsForClip(id, 'caption') once. \
+             Do not caption music-bed-only clips or clips with no transcript.",
+        ),
+        progress: "Writing captions…",
     },
 ];
 

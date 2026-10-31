@@ -12,12 +12,13 @@
 //! settings file and sent as a header. It is never logged, never
 //! put in status text, and never included in prompts.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
 use openreel_engine::{ClipId, ClipKind, Timeline};
@@ -29,10 +30,11 @@ use super::session::{
     ChatRole, ChatSession, PinnedAsset, PinnedCandidate, PinnedTranscriptSegment, TOKEN_BUDGET,
 };
 use super::EditorApp;
+use crate::scripting::ScriptCommand;
 use crate::theme;
 
-pub(super) const MODEL_SPARK: &str = "muse-spark";
-pub(super) const MODEL_WONDER: &str = "muse-wonder";
+pub(super) const MODEL_SPARK: &str = "muse-spark-1.3";
+pub(super) const MODEL_WONDER: &str = "muse-wonder-1.0";
 const DEFAULT_BASE_URL: &str = "https://api.meta.ai/v1";
 /// Internal marker for a cancelled worker. Never shown to the user;
 /// the cancel path clears pending state before this can surface.
@@ -48,7 +50,7 @@ fn model_label(model: &str) -> &str {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ChatSettings {
     pub(super) api_key: String,
     pub(super) base_url: String,
@@ -70,8 +72,15 @@ impl Default for ChatSettings {
     }
 }
 
+pub(super) struct PendingConnectionCheck {
+    settings: ChatSettings,
+    rx: Receiver<Result<(), String>>,
+}
+
 pub(super) struct PendingChat {
     request: String,
+    timeline: Timeline,
+    state_json: String,
     attempt: u8,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -80,10 +89,19 @@ pub(super) struct PendingChat {
 
 impl PendingChat {
     #[cfg(test)]
-    pub(super) fn for_test(request: &str, progress: &str) -> Self {
+    pub(super) fn for_test(
+        request: &str,
+        progress: &str,
+        timeline: &Timeline,
+        state_json: String,
+    ) -> Self {
         Self {
             request: request.to_owned(),
-            attempt: 0,
+            timeline: timeline.clone(),
+            state_json,
+            // A fixture has no HTTP worker: never send a correction to a
+            // real provider if the supplied JavaScript fails evaluation.
+            attempt: 1,
             generation: 1,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(progress.to_owned())),
@@ -188,7 +206,12 @@ impl ChatSettings {
         }
         if let Some(v) = value["model"].as_str() {
             if !v.trim().is_empty() {
-                settings.model = v.to_owned();
+                settings.model = match v {
+                    "muse-spark" => MODEL_SPARK,
+                    "muse-wonder" => MODEL_WONDER,
+                    other => other,
+                }
+                .to_owned();
             }
         }
         if let Some(v) = value["contributor_opt_in"].as_bool() {
@@ -197,26 +220,47 @@ impl ChatSettings {
         settings
     }
 
-    pub(super) fn save(&self) {
-        let Some(path) = config_path() else { return };
-        if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return;
-            }
-        }
+    pub(super) fn save(&self) -> Result<(), String> {
+        let save_error = || "Couldn't save settings.".to_owned();
+        let path = config_path().ok_or_else(save_error)?;
+        let parent = path.parent().ok_or_else(save_error)?;
+        std::fs::create_dir_all(parent).map_err(|_| save_error())?;
         let body = serde_json::json!({
             "api_key": self.api_key,
             "base_url": self.base_url,
             "model": self.model,
             "contributor_opt_in": self.contributor_opt_in,
         });
-        if std::fs::write(&path, body.to_string()).is_ok() {
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let (temporary, mut file) = loop {
+            let temporary = parent.join(format!(
+                ".config-{}-{}.tmp",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
+            match options.open(&temporary) {
+                Ok(file) => break (temporary, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(save_error()),
+            }
+        };
+        let result = (|| -> std::io::Result<()> {
+            file.write_all(body.to_string().as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, &path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary);
         }
+        result.map_err(|_| save_error())
     }
 
     pub(super) fn can_call_model(&self) -> bool {
@@ -224,8 +268,18 @@ impl ChatSettings {
     }
 
     fn allows_missing_key(&self) -> bool {
-        let base = self.base_url.to_lowercase();
-        base.contains("://localhost") || base.contains("://127.0.0.1")
+        let Ok(uri) = self.base_url.trim().parse::<ureq::http::Uri>() else {
+            return false;
+        };
+        let Some(host) = uri.host() else {
+            return false;
+        };
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
     }
 }
 
@@ -236,22 +290,26 @@ You edit a video timeline inside Eddie by writing JavaScript. \
 Reply with a single JSON object {\"code\": \"...\", \"explanation\": \"...\"} and nothing else. \
 \"code\" is executable JavaScript only, with no markdown fences inside it, ending with exactly one console.log(\"Done — ...\") line. \
 \"explanation\" is one short plain-language summary for the user. \
-Available functions: state(), clips(), assets(), sweepCandidates(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
+Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
 selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
-setVolume(id, v), addTitle(text, at?, dur?), addAsset(nameOrPath, at?), \
+setVolume(id, v), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
-setMagnet(bool), setZoom(pxPerSec), closeGaps(). \
-state() returns {playhead, playing, selected, duration, fps, tool, magnet, clips, assets, sweepCandidates, transcriptSegments}. \
-Sweep candidate fields: id, asset, assetName, title, sourceIn, duration, score, reason, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript. \
-Transcript segment fields: id, asset, assetName, start, end, speaker, text. Transcript timestamps are turn-level only. \
+setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
+state() returns {playhead, playing, selected, duration, fps, tool, magnet, musicBedMuted, clips, assets, sweepCandidates, sceneClips, transcriptSegments}. \
+Sweep candidates contain all curated workable ranges, not a top-N selection; they can include multiple useful moments inside one long shot. sceneClips are the complete contiguous physical-shot inventory, including rejected material, in source order. To deconstruct or rebuild an edited video shot by shot, use sceneClips grouped by asset and sorted by sourceIn. Use sweepCandidates for editorial ranges, optionally filtered by category or quality. Both inventories have no clip-count cap. Fields: id, asset, assetName, title, sourceIn, duration, score, reason, category, tags, musicBed, quality {stability, audio, motion}, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript, talkingScore, visual, review. review.status is local, reviewed, needs-review or rejected. Local ranges are measured suggestions, not semantic review; needs-review means missing or failed review, not unusable footage. Model review uses sampled images and transcript, not exhaustive frame understanding; its score is an editorial judgment. \
+This request carries compact records without repeated candidate transcripts, low-level visual measurements or review frame arrays. transcriptSegments contains speech once. Sandbox queries still return the complete request-time snapshot, including those omitted fields. review.subjectEvidence summarizes source-timed SAM checks used by the visual curator before its final decision: concept, status, checked range, sampled/observed frames and first/last observations. Tracking is sampled, detection gaps are uncertain, IDs are request-local, and boxes are not masks, emotion or proof of lip sync. visual includes representative box/face measurements at samFrameTime. SAM can check objects besides people; use the concept, not a box alone, to interpret the evidence. Local subject-centered, subject-large and subject-moving tags are measured proxies; face-visible requires SAM face evidence. \
+category is one of reaction, talking, action, broll, establishing. prime is a scarce quality tag, not a category. musicBed true marks suspected baked-in montage music: judge it on visuals, not soundtrack peaks. When state().musicBedMuted is true the app adds such clips muted so old soundtracks never stack; call setMusicBedMuted(false) only when the user explicitly wants the baked-in score kept, and setMusicBedMuted(true) when building a new soundtrack. \
+Transcript segment fields: id, asset, assetName, start, end, speaker, text, timingPrecision ('turn'|'word'), words [{start,end,text,confidence}], asrSession {id,sourceStart,sourceEnd}. Speaker labels are scoped to that source/session, not identities across uploads. Full sandbox review.speech records identify retained fragments of source turns; completeAvailableTurn means the reported turn is retained, not verified sentence completion. Only timingPrecision 'word' supports exact word/filler boundaries; turn timings locate the spoken passage, not each word. \
+Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from local waveform DSP. tightenSilence(id) removes pauses at least 0.35s from a speech clip, keeps 0.08s around phrases, ripples later clips left, rebuilds linked detached audio in matching phrases, and rejects mostly music-bed clips. Waveforms locate silence only; use transcript text/meaning for filler-word decisions, and do not claim exact filler boundaries from turn timestamps. \
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
-Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume. \
-Tracks: 0 titles, 1 main video, 2 audio. Times are seconds. \
+Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot; edits are queued, so additions do not return IDs and newly placed clips cannot be queried or captioned until a subsequent edit. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
+Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Times are seconds. \
+For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
 Refer to clips, sweep candidates, and transcript segments by the ids in state(). Do not invent ids or asset names. \
-Prefer var or block scope over top-level const/let; the console persists between evals and redeclaration throws. \
+Top-level const/let are isolated per checked chat eval, so retries may reuse names. \
 Keep edits minimal and preserve source limits. If the request is impossible with the given state, \
 make code throw new Error('short reason').";
 
@@ -263,9 +321,83 @@ const FEW_SHOT_USER: &str = r#"Example request:
 Build it from the reaction shots.
 
 Timeline state JSON:
-{"playhead":0,"playing":false,"selected":null,"duration":0,"fps":30,"tool":"select","magnet":true,"clips":[],"assets":[{"name":"Rushes.mp4","path":"media/Rushes.mp4","duration":60,"width":1280,"height":720,"hasVideo":true,"hasAudio":true,"ready":true}],"sweepCandidates":[{"id":"media/Rushes.mp4#1","asset":"media/Rushes.mp4","assetName":"Rushes.mp4","title":"Rushes.mp4 · 0:12","sourceIn":12,"duration":4,"score":88,"reason":"Big laugh, steady frame.","stability":0.8,"audioEnergy":0.5,"audioPeak":0.9,"isReaction":true,"reactionScore":0.84,"hasVideo":true,"transcript":""}],"transcriptSegments":[]}"#;
+{"playhead":0,"playing":false,"selected":null,"duration":0,"fps":30,"tool":"select","magnet":true,"musicBedMuted":true,"clips":[],"assets":[{"name":"Rushes.mp4","path":"media/Rushes.mp4","duration":60,"width":1280,"height":720,"hasVideo":true,"hasAudio":true,"ready":true}],"sceneClips":[],"sweepCandidates":[{"id":"media/Rushes.mp4#1","asset":"media/Rushes.mp4","assetName":"Rushes.mp4","title":"Rushes.mp4 · 0:12","sourceIn":12,"duration":4,"score":88,"reason":"Big laugh, steady frame.","category":"reaction","tags":["loud-peak","steady"],"musicBed":false,"quality":{"stability":0.8,"audio":0.7,"motion":0.3},"stability":0.8,"audioEnergy":0.5,"audioPeak":0.9,"isReaction":true,"reactionScore":0.84,"hasVideo":true,"transcript":""}],"transcriptSegments":[]}"#;
 
 const FEW_SHOT_ASSISTANT: &str = r#"{"code": "var shots = sweepCandidates().filter(function (c) { return c.isReaction; });\nclips().forEach(function (c) { deleteClip(c.id); });\nvar cursor = 0;\nshots.forEach(function (c) { addAssetRange(c.asset, cursor, c.sourceIn, c.duration); cursor += c.duration; });\nconsole.log(\"Done — built the cut from the reaction shots.\");", "explanation": "Built the cut from the reaction shots."}"#;
+
+fn model_context_state(snapshot: &str) -> String {
+    let Ok(mut state) = serde_json::from_str::<serde_json::Value>(snapshot) else {
+        return snapshot.to_owned();
+    };
+    let mut changed = false;
+    for field in ["sweepCandidates", "sceneClips"] {
+        let Some(ranges) = state[field].as_array_mut() else {
+            continue;
+        };
+        for range in ranges {
+            let Some(range) = range.as_object_mut() else {
+                continue;
+            };
+            changed = true;
+            range.remove("transcript");
+            if let Some(review) = range
+                .get_mut("review")
+                .and_then(|value| value.as_object_mut())
+            {
+                review.retain(|key, _| matches!(key.as_str(), "status" | "subjectEvidence"));
+                if let Some(evidence) = review
+                    .get_mut("subjectEvidence")
+                    .and_then(|v| v.as_array_mut())
+                {
+                    for observation in evidence {
+                        if let Some(fields) = observation.as_object_mut() {
+                            fields.retain(|key, value| {
+                                !value.is_null()
+                                    && matches!(
+                                        key.as_str(),
+                                        "concept"
+                                            | "status"
+                                            | "checkedStart"
+                                            | "checkedEnd"
+                                            | "sampledFrames"
+                                            | "observedFrames"
+                                            | "observedFraction"
+                                            | "firstObserved"
+                                            | "lastObserved"
+                                            | "maxSampleSpacing"
+                                    )
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(visual) = range
+                .get_mut("visual")
+                .and_then(|value| value.as_object_mut())
+            {
+                visual.retain(|key, value| {
+                    !value.is_null()
+                        && matches!(
+                            key.as_str(),
+                            "source"
+                                | "samStatus"
+                                | "facePresent"
+                                | "samFrameTime"
+                                | "samBoxCoverage"
+                                | "samFaceBoxCoverage"
+                                | "samConfidence"
+                                | "samFaceConfidence"
+                        )
+                });
+            }
+        }
+    }
+    if changed {
+        state.to_string()
+    } else {
+        snapshot.to_owned()
+    }
+}
 
 /// Final (volatile) user message: correction context if any, then
 /// the request, then the timeline JSON last so the shared prefix
@@ -276,6 +408,7 @@ pub(crate) fn final_user_content(
     state_json: &str,
     correction: Option<(&str, &str)>,
 ) -> String {
+    let state_json = model_context_state(state_json);
     let mut user = format!("Request:\n{request}\n\nTimeline state JSON:\n{state_json}");
     if let Some((failed_js, error)) = correction {
         user = format!(
@@ -335,22 +468,22 @@ pub(crate) fn estimate_messages_tokens(messages: &[serde_json::Value]) -> usize 
 }
 
 /// Compact oldest exchanges until the assembled request estimates
-/// inside `TOKEN_BUDGET`, or only the verbatim tail remains. The
-/// current timeline is never dropped to make room.
+/// inside `TOKEN_BUDGET`. Reject when the verbatim tail and state cannot
+/// fit; dropping source ranges to make room would change the edit contract.
 pub(crate) fn ensure_within_budget(
     session: &mut ChatSession,
     request: &str,
     state_json: &str,
     correction: Option<(&str, &str)>,
-) {
+) -> Result<(), String> {
     loop {
         let recent = recent_excluding_current(session);
         let messages = build_context_messages(session, recent, request, state_json, correction);
         if estimate_messages_tokens(&messages) <= TOKEN_BUDGET {
-            return;
+            return Ok(());
         }
         if !session.compact_oldest_exchange() {
-            return;
+            return Err("Request exceeds the model context budget; use a smaller project or a shorter conversation.".to_owned());
         }
     }
 }
@@ -610,13 +743,62 @@ fn progress_for_request(request: &str) -> &'static str {
     }
 }
 
-fn chat_completions_url(settings: &ChatSettings) -> String {
+pub(super) fn api_endpoint(settings: &ChatSettings, endpoint: &str) -> String {
     let base = settings.base_url.trim().trim_end_matches('/');
-    if base.ends_with("/chat/completions") {
-        base.to_owned()
-    } else {
-        format!("{base}/chat/completions")
+    let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+    format!("{base}/{}", endpoint.trim_start_matches('/'))
+}
+
+/// Validates authentication and catalog availability, not inference capability.
+pub(super) fn check_model_connection(settings: &ChatSettings) -> Result<(), String> {
+    if !settings.can_call_model() {
+        return Err("Add your API key in Settings first.".to_owned());
     }
+    if settings.model.trim().is_empty() {
+        return Err("Choose a model in Settings.".to_owned());
+    }
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut call = agent
+        .get(api_endpoint(settings, "models"))
+        .header("Accept", "application/json");
+    if !settings.api_key.trim().is_empty() {
+        call = call.header(
+            "Authorization",
+            format!("Bearer {}", settings.api_key.trim()),
+        );
+    }
+    let mut response = call
+        .call()
+        .map_err(|_| "Couldn't reach the model service.".to_owned())?;
+    if !response.status().is_success() {
+        return Err(match response.status().as_u16() {
+            404 => "Couldn't find the model catalog; check Base URL.".to_owned(),
+            status => api_error_for_status(status),
+        });
+    }
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(1024 * 1024)
+        .read_to_string()
+        .map_err(|_| "Couldn't read the model catalog.".to_owned())?;
+    let catalog: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "The model catalog was invalid.".to_owned())?;
+    let models = catalog["data"]
+        .as_array()
+        .ok_or_else(|| "The model catalog was invalid.".to_owned())?;
+    if !models
+        .iter()
+        .any(|model| model["id"].as_str() == Some(settings.model.as_str()))
+    {
+        return Err("Selected model isn't available for this key.".to_owned());
+    }
+    Ok(())
 }
 
 /// One attempt. Returns (status, Retry-After, body text); transport
@@ -626,7 +808,7 @@ fn post_once(
     settings: &ChatSettings,
     body: &serde_json::Value,
 ) -> Result<(u16, Option<Duration>, String), String> {
-    let url = chat_completions_url(settings);
+    let url = api_endpoint(settings, "chat/completions");
     let mut call = agent.post(&url).header("Content-Type", "application/json");
     if !settings.api_key.trim().is_empty() {
         call = call.header(
@@ -707,7 +889,9 @@ fn request_generated_edit(
 
 impl EditorApp {
     fn save_session(&self) {
-        self.chat_session.save();
+        if self.persist_session {
+            self.chat_session.save();
+        }
     }
 
     fn push_chat(&mut self, role: ChatRole, text: String) {
@@ -810,12 +994,74 @@ impl EditorApp {
         }
     }
 
-    fn snapshot_for_undo(&mut self) {
-        self.chat_undo = Some(TimelineSnapshot::capture(
-            &self.timeline,
-            self.selected,
-            self.playhead,
-        ));
+    /// Model and local-intent edits either finish completely or restore the
+    /// editor. Explicit console I/O uses the same command executor without
+    /// this transaction; generated code cannot authorize filesystem effects.
+    fn apply_edit_commands(
+        &mut self,
+        ctx: &egui::Context,
+        commands: Vec<ScriptCommand>,
+    ) -> Result<Vec<String>, String> {
+        for command in &commands {
+            if matches!(command, ScriptCommand::Import(_) | ScriptCommand::Export(_)) {
+                return Err("use the Import or Export controls for files".to_owned());
+            }
+            command.validate()?;
+        }
+        let before = TimelineSnapshot::capture(&self.timeline, self.selected, self.playhead);
+        let was_playing = self.playing;
+        let magnet = self.timeline_view.magnet;
+        let zoom = self.timeline_view.px_per_sec;
+        let mute_music_beds = self.mute_music_beds;
+        let started = Instant::now();
+        let result = (|| {
+            let mut notes = Vec::new();
+            for command in commands {
+                if let Some(note) = self.apply_script_command(ctx, command)? {
+                    notes.push(note);
+                }
+                // Finite input can still overflow frame-grid arithmetic.
+                if !self.playhead.is_finite()
+                    || self.timeline.clips.iter().any(|clip| {
+                        !clip.start.is_finite()
+                            || !clip.duration.is_finite()
+                            || !clip.source_in.is_finite()
+                            || !clip.end().is_finite()
+                    })
+                {
+                    return Err("edit exceeds the supported timeline range".to_owned());
+                }
+                // Cooperative bound: individual native commands are not
+                // preemptible, but a long finite batch cannot run unchecked.
+                if started.elapsed() > Duration::from_millis(250) {
+                    return Err("edit took too long; try a smaller batch".to_owned());
+                }
+            }
+            Ok(notes)
+        })();
+        match result {
+            Ok(notes) => {
+                if self.timeline != before.timeline {
+                    self.chat_undo = Some(before);
+                    self.stop_sources();
+                    self.still_key = None;
+                    self.still_cache.clear();
+                }
+                Ok(notes)
+            }
+            Err(error) => {
+                before.restore_into(&mut self.timeline, &mut self.selected, &mut self.playhead);
+                self.playing = was_playing;
+                self.timeline_view.magnet = magnet;
+                self.timeline_view.px_per_sec = zoom;
+                self.mute_music_beds = mute_music_beds;
+                self.stop_sources();
+                self.last_now = None;
+                self.still_key = None;
+                self.still_cache.clear();
+                Err(error)
+            }
+        }
     }
 
     fn undo_chat_edit(&mut self) {
@@ -832,7 +1078,7 @@ impl EditorApp {
         self.status = message;
     }
 
-    fn cancel_chat(&mut self) {
+    pub(super) fn cancel_chat(&mut self) {
         let Some(pending) = self.chat_pending.take() else {
             return;
         };
@@ -847,10 +1093,11 @@ impl EditorApp {
 
     fn spawn_chat_request(&mut self, ctx: &egui::Context, correction: Option<(String, String)>) {
         self.refresh_pinned_summary();
-        let state = self.script_state_json();
         let Some(pending) = self.chat_pending.as_ref() else {
             return;
         };
+        // Corrections use the same basis as the initial request.
+        let state = pending.state_json.clone();
         let request = pending.request.clone();
         let generation = pending.generation;
         let cancel = pending.cancel.clone();
@@ -859,7 +1106,16 @@ impl EditorApp {
         let correction_ref = correction
             .as_ref()
             .map(|(js, err)| (js.as_str(), err.as_str()));
-        ensure_within_budget(&mut self.chat_session, &request, &state, correction_ref);
+        if let Err(message) =
+            ensure_within_budget(&mut self.chat_session, &request, &state, correction_ref)
+        {
+            cancel.store(true, Ordering::Relaxed);
+            self.chat_pending = None;
+            self.chat_rx = None;
+            self.push_chat(ChatRole::Assistant, message.clone());
+            self.status = message;
+            return;
+        }
         self.save_session();
         let recent: Vec<ChatMessage> = recent_excluding_current(&self.chat_session).to_vec();
         let body = build_request_body(
@@ -913,6 +1169,8 @@ impl EditorApp {
         self.chat_generation += 1;
         self.chat_pending = Some(PendingChat {
             request,
+            timeline: self.timeline.clone(),
+            state_json: self.script_state_json(),
             attempt: 0,
             generation: self.chat_generation,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -969,16 +1227,61 @@ impl EditorApp {
                     .map(|clip| clip.id)
                     .collect();
                 let commands = super::intents::local_commands(&existing, &ordered);
-                self.snapshot_for_undo();
-                let notes = self.apply_script_commands(ctx, commands);
-                let message = summarize_chat_result(&notes, ordered.len());
+                let message = match self.apply_edit_commands(ctx, commands) {
+                    Ok(notes) => summarize_chat_result(&notes, ordered.len()),
+                    Err(error) => format!("No changes made: {}.", error.trim_end_matches('.')),
+                };
                 self.push_chat(ChatRole::Assistant, message.clone());
                 self.status = message;
             }
         }
     }
 
+    fn start_connection_check(&mut self, ctx: &egui::Context) {
+        if self.connection_check.is_some() {
+            return;
+        }
+        let settings = self.chat_settings.clone();
+        let (tx, rx) = channel();
+        self.connection_check = Some(PendingConnectionCheck {
+            settings: settings.clone(),
+            rx,
+        });
+        self.status = "Checking connection…".to_owned();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(check_model_connection(&settings));
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_connection_check(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.connection_check.as_ref() else {
+            return;
+        };
+        if pending.settings != self.chat_settings {
+            self.connection_check = None;
+            return;
+        }
+        let result = match pending.rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(120));
+                return;
+            }
+            Err(TryRecvError::Disconnected) => {
+                Err("Connection check stopped; try again.".to_owned())
+            }
+        };
+        self.connection_check = None;
+        self.status = match result {
+            Ok(()) => "Connection checked; selected model is listed.".to_owned(),
+            Err(error) => error,
+        };
+    }
+
     pub(super) fn poll_chat(&mut self, ctx: &egui::Context) {
+        self.poll_connection_check(ctx);
         let Some((generation, result)) = self.chat_rx.as_ref().and_then(|rx| rx.try_recv().ok())
         else {
             if self.chat_pending.is_some() {
@@ -1013,7 +1316,17 @@ impl EditorApp {
             ChatWorkerResult::Generated(edit) => {
                 let js = edit.code;
                 self.last_generated_js = js.clone();
-                let state = self.script_state_json();
+                let pending = self.chat_pending.as_ref().expect("current generation");
+                if pending.timeline != self.timeline {
+                    self.chat_pending = None;
+                    let message = "Timeline changed; send the edit again.".to_owned();
+                    self.push_chat(ChatRole::Assistant, message.clone());
+                    self.status = message;
+                    return;
+                }
+                // Selection and playhead may change without editing the
+                // timeline. Defaults still refer to what the model saw.
+                let state = pending.state_json.clone();
                 let Some(engine) = self.script_engine.as_mut() else {
                     self.chat_pending = None;
                     let message = "I couldn't do that one — scripting is unavailable.".to_owned();
@@ -1024,24 +1337,16 @@ impl EditorApp {
                 match engine.eval_checked(&js, &state) {
                     Ok((_, commands)) => {
                         let command_count = commands.len();
-                        if command_count > 0 {
-                            self.snapshot_for_undo();
-                        }
-                        let notes = self.apply_script_commands(ctx, commands);
-                        let errors: Vec<String> = notes
-                            .iter()
-                            .filter(|n| n.starts_with("error:"))
-                            .cloned()
-                            .collect();
+                        let result = self.apply_edit_commands(ctx, commands);
                         self.chat_pending = None;
-                        let message = if !errors.is_empty() {
-                            "I couldn't finish that one — try naming the clip.".to_owned()
-                        } else if let Some(explanation) =
-                            edit.explanation.filter(|text| !text.trim().is_empty())
-                        {
-                            explanation
-                        } else {
-                            summarize_chat_result(&notes, command_count)
+                        let message = match result {
+                            Err(error) => {
+                                format!("No changes made: {}.", error.trim_end_matches('.'))
+                            }
+                            Ok(notes) => edit
+                                .explanation
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or_else(|| summarize_chat_result(&notes, command_count)),
                         };
                         self.push_chat(ChatRole::Assistant, message.clone());
                         self.status = message;
@@ -1127,17 +1432,30 @@ impl EditorApp {
 
             // Button intents: one registry, local first. New
             // buttons are declared in `intents.rs`.
-            ui.horizontal_wrapped(|ui| {
-                for intent in INTENTS {
-                    let response = match intent.kind {
-                        IntentKind::Local(_) => theme::outline_button(ui, intent.label),
-                        IntentKind::Model => theme::ghost_button(ui, intent.label),
-                    };
-                    if response.on_hover_text(intent.tooltip).clicked() {
-                        clicked_intent = Some(intent.id);
+            // Quick actions in an even two-column grid; local and model
+            // intents look alike, the tooltip says which runs offline.
+            let column_w = ((ui.available_width() - 6.0) / 2.0).floor();
+            for pair in INTENTS.chunks(2) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for intent in pair {
+                        ui.allocate_ui(egui::vec2(column_w, 30.0), |ui| {
+                            let tooltip = match intent.kind {
+                                IntentKind::Local(_) => format!("{} Runs locally.", intent.tooltip),
+                                IntentKind::Model => format!("{} Uses the model.", intent.tooltip),
+                            };
+                            if theme::secondary_button_wide(ui, intent.label)
+                                .on_hover_text(tooltip)
+                                .clicked()
+                            {
+                                clicked_intent = Some(intent.id);
+                            }
+                        });
                     }
-                }
-            });
+                });
+            }
+            ui.add_space(8.0);
+            theme::divider(ui);
             ui.add_space(4.0);
 
             let debug_height = if self.show_chat_debug { 58.0 } else { 0.0 };
@@ -1148,19 +1466,36 @@ impl EditorApp {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     if self.chat_session.messages.is_empty() {
-                        ui.label(
-                            RichText::new("Ask for an edit in plain words.").color(theme::MUTED_FG),
-                        );
-                    }
-                    for message in &self.chat_session.messages {
-                        let (who, color) = match message.role {
-                            ChatRole::User => ("You", theme::FOREGROUND),
-                            ChatRole::Assistant => ("Eddie", theme::MUTED_FG),
-                        };
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(who).strong().color(color));
-                            ui.label(&message.text);
+                        ui.add_space(16.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new("Ask for an edit in plain words.")
+                                    .color(theme::MUTED_FG),
+                            );
+                            ui.label(theme::caption(
+                                "For example: cut the dead air from the intro.",
+                            ));
                         });
+                    }
+                    let width = ui.available_width();
+                    for message in &self.chat_session.messages {
+                        let user = matches!(message.role, ChatRole::User);
+                        let layout = if user {
+                            egui::Layout::right_to_left(egui::Align::Min)
+                        } else {
+                            egui::Layout::left_to_right(egui::Align::Min)
+                        };
+                        ui.with_layout(layout, |ui| {
+                            egui::Frame::new()
+                                .fill(if user { theme::SECONDARY } else { theme::CARD })
+                                .corner_radius(egui::CornerRadius::same(theme::R_LG))
+                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(width * 0.82);
+                                    ui.add(egui::Label::new(&message.text).wrap());
+                                });
+                        });
+                        ui.add_space(4.0);
                     }
                 });
 
@@ -1174,13 +1509,14 @@ impl EditorApp {
             }
 
             // Pin the composer to the bottom of the dock.
-            ui.add_space((ui.available_height() - 34.0).max(0.0));
+            ui.add_space((ui.available_height() - 38.0).max(0.0));
             ui.horizontal(|ui| {
-                let input_width = (ui.available_width() - 76.0).max(80.0);
+                let input_width = (ui.available_width() - 80.0).max(80.0);
                 let response = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.chat_input)
                             .hint_text("Describe the edit…")
+                            .margin(egui::Margin::symmetric(10, 8))
                             .desired_width(input_width),
                     )
                     .on_hover_text("Describe an edit. Enter sends it. Ctrl+K focuses chat.");
@@ -1219,6 +1555,7 @@ impl EditorApp {
         }
         let mut open = true;
         let mut dirty = false;
+        let mut check_connection = false;
         egui::Window::new("Settings")
             .open(&mut open)
             .resizable(false)
@@ -1299,10 +1636,28 @@ impl EditorApp {
                     .size(11.5)
                     .color(theme::MUTED_FG),
                 );
+                ui.add_space(6.0);
+                check_connection = ui
+                    .add_enabled_ui(self.connection_check.is_none(), |ui| {
+                        theme::ghost_button(ui, "Check connection")
+                            .on_hover_text(
+                                "Check authentication and model availability without running inference",
+                            )
+                            .clicked()
+                    })
+                    .inner;
             });
         self.show_chat_settings = open;
         if dirty {
-            self.chat_settings.save();
+            self.connection_check = None;
+            if let Err(error) = self.chat_settings.save() {
+                self.status = error;
+                return;
+            }
+            self.status = "Settings saved.".to_owned();
+        }
+        if check_connection {
+            self.start_connection_check(ctx);
         }
     }
 }
@@ -1324,6 +1679,852 @@ fn summarize_chat_result(notes: &[String], command_count: usize) -> String {
 mod tests {
     use super::super::session::RECENT_MESSAGES_KEPT_VERBATIM;
     use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("openreel-chat-test-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn with_isolated_config(test: &str, run: impl FnOnce(PathBuf)) {
+        if std::env::var("OPENREEL_ISOLATED_CHAT_TEST").as_deref() == Ok(test) {
+            run(config_path().expect("isolated settings path"));
+            return;
+        }
+        let dir = TestDir::new();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env("OPENREEL_ISOLATED_CHAT_TEST", test)
+            .env("HOME", &dir.0)
+            .env("XDG_CONFIG_HOME", &dir.0)
+            .env("APPDATA", &dir.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated settings test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn settings_frame(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 768.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                app.poll_chat(ctx);
+                app.chat_settings_window(ctx);
+            },
+        )
+    }
+
+    fn click_settings_label(ctx: &egui::Context, app: &mut EditorApp, label: &str) {
+        settings_frame(ctx, app, Vec::new());
+        let output = settings_frame(ctx, app, Vec::new());
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("settings control");
+        for pressed in [true, false] {
+            settings_frame(
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            );
+        }
+    }
+
+    fn fake_model_api(
+        respond: impl FnOnce(&str) -> (u16, String) + Send + 'static,
+    ) -> (ChatSettings, thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let settings = ChatSettings {
+            api_key: "fixture-key-only".to_owned(),
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            ..ChatSettings::default()
+        };
+        let server = thread::spawn(move || {
+            use std::io::{BufRead, Read};
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "expected a local HTTP request");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("local HTTP accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = String::new();
+            {
+                let mut reader = std::io::BufReader::new(&mut stream);
+                while !request.ends_with("\r\n\r\n") {
+                    assert!(reader.read_line(&mut request).unwrap() > 0);
+                    assert!(request.len() < 64 * 1024);
+                }
+                let length = request
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                request.push_str(&String::from_utf8(body).unwrap());
+            }
+            let (status, body) = respond(&request);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            request
+        });
+        (settings, server)
+    }
+
+    fn catalog(models: &[&str]) -> String {
+        serde_json::json!({
+            "object": "list",
+            "data": models.iter().map(|id| serde_json::json!({
+                "id": id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "meta",
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn connection_check_authenticates_and_finds_the_exact_selected_model() {
+        for suffix in ["", "/", "/chat/completions", "/chat/completions/"] {
+            for model in [MODEL_SPARK, MODEL_WONDER, "custom-model"] {
+                let (mut settings, server) = fake_model_api(|_| {
+                    (200, catalog(&[MODEL_SPARK, MODEL_WONDER, "custom-model"]))
+                });
+                settings.base_url.push_str(suffix);
+                settings.model = model.to_owned();
+                settings.api_key = "  fixture-key-only  ".to_owned();
+                assert_eq!(check_model_connection(&settings), Ok(()));
+                let request = server.join().unwrap();
+                assert!(request.starts_with("GET /v1/models HTTP/1.1\r\n"));
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("\r\nauthorization: bearer fixture-key-only\r\n"));
+                assert!(request.ends_with("\r\n\r\n"), "no inference body");
+            }
+        }
+    }
+
+    #[test]
+    fn connection_check_allows_keyless_local_mock() {
+        let (mut settings, server) = fake_model_api(|_| (200, catalog(&[MODEL_SPARK])));
+        settings.api_key.clear();
+        assert_eq!(check_model_connection(&settings), Ok(()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/models HTTP/1.1\r\n"));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[test]
+    fn connection_check_rejects_invalid_auth_without_provider_text() {
+        for status in [401, 403, 404, 429, 500, 503] {
+            let (settings, server) = fake_model_api(move |_| {
+                (
+                    status,
+                    r#"{"error":{"message":"provider-private-detail fixture-key-only"}}"#
+                        .to_owned(),
+                )
+            });
+            let error = check_model_connection(&settings).unwrap_err();
+            server.join().unwrap();
+            assert!(!error.contains("provider-private-detail"));
+            assert!(!error.contains("fixture-key-only"));
+            match status {
+                401 | 403 => assert!(error.contains("API key")),
+                404 => assert!(error.contains("Base URL")),
+                429 => assert!(error.contains("busy")),
+                _ => assert!(error.contains("service had a problem")),
+            }
+        }
+    }
+
+    #[test]
+    fn connection_check_does_not_substitute_contributor_or_other_models() {
+        for contributor in [false, true] {
+            let (mut settings, server) =
+                fake_model_api(|_| (200, catalog(&[MODEL_WONDER, "muse-spark-1.3-contributor"])));
+            settings.contributor_opt_in = contributor;
+            let error = check_model_connection(&settings).unwrap_err();
+            server.join().unwrap();
+            assert!(error.contains("Selected model"));
+            assert_eq!(settings.model, MODEL_SPARK);
+        }
+        let (mut settings, server) =
+            fake_model_api(|_| (200, catalog(&["muse-spark-1.3-contributor"])));
+        settings.model = "muse-spark-1.3-contributor".to_owned();
+        assert_eq!(check_model_connection(&settings), Ok(()));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn connection_check_rejects_invalid_or_oversized_catalogs_safely() {
+        for body in [
+            "provider-private-detail fixture-key-only".to_owned(),
+            r#"{"models":["muse-spark-1.3"]}"#.to_owned(),
+            r#"{"data":{}}"#.to_owned(),
+            "x".repeat(1024 * 1024 + 1),
+        ] {
+            let oversized = body.len() > 1024 * 1024;
+            let (settings, server) = fake_model_api(move |_| (200, body));
+            let error = check_model_connection(&settings).unwrap_err();
+            server.join().unwrap();
+            assert!(!error.contains("provider-private-detail"));
+            assert!(!error.contains("fixture-key-only"));
+            assert_eq!(
+                error,
+                if oversized {
+                    "Couldn't read the model catalog."
+                } else {
+                    "The model catalog was invalid."
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn connection_check_reports_invalid_settings_without_echoing_them() {
+        let mut settings = ChatSettings {
+            base_url: "not a URL with provider-private-detail".to_owned(),
+            ..ChatSettings::default()
+        };
+        assert!(check_model_connection(&settings)
+            .unwrap_err()
+            .contains("API key"));
+        settings.api_key = "fixture-key-only".to_owned();
+        assert_eq!(
+            check_model_connection(&settings).unwrap_err(),
+            "Couldn't reach the model service.",
+        );
+        settings.model.clear();
+        assert_eq!(
+            check_model_connection(&settings).unwrap_err(),
+            "Choose a model in Settings.",
+        );
+    }
+
+    #[test]
+    fn normalized_endpoints_keep_existing_chat_requests_working() {
+        for suffix in ["", "/", "/chat/completions", "/chat/completions/"] {
+            let (mut settings, server) = fake_model_api(|_| {
+                (
+                    200,
+                    r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_owned(),
+                )
+            });
+            let base = settings.base_url.clone();
+            settings.base_url = format!("  {base}{suffix}  ");
+            assert_eq!(api_endpoint(&settings, "models"), format!("{base}/models"));
+            assert_eq!(
+                api_endpoint(&settings, "/responses"),
+                format!("{base}/responses")
+            );
+            assert_eq!(
+                api_endpoint(&settings, "asr/transcribe"),
+                format!("{base}/asr/transcribe"),
+            );
+            let body = serde_json::json!({"model": MODEL_SPARK, "messages": []});
+            let response = post_chat_completion(&settings, &body).unwrap();
+            assert_eq!(chat_content(&response), "ok");
+            let request = server.join().unwrap();
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+            let (_, sent_body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(sent_body).unwrap(),
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn connection_button_uses_a_worker_and_reports_after_the_dialog_closes() {
+        for status in [200, 401] {
+            let (seen_tx, seen_rx) = channel();
+            let (release_tx, release_rx) = channel();
+            let (settings, server) = fake_model_api(move |_| {
+                seen_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the UI must return before the HTTP reply");
+                (status, catalog(&[MODEL_SPARK]))
+            });
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            app.chat_settings = settings;
+            app.show_chat_settings = true;
+            click_settings_label(&ctx, &mut app, "Check connection");
+            seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(app.connection_check.is_some());
+            assert_eq!(app.status, "Checking connection…");
+            click_settings_label(&ctx, &mut app, "Check connection");
+            app.show_chat_settings = false;
+            release_tx.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.connection_check.is_some() {
+                app.poll_chat(&ctx);
+                assert!(
+                    Instant::now() < deadline,
+                    "connection result must reach the UI"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                app.status,
+                if status == 200 {
+                    "Connection checked; selected model is listed."
+                } else {
+                    "Check your API key in Settings."
+                },
+            );
+            assert!(app.chat_session.messages.is_empty());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn connection_results_ignore_every_changed_setting() {
+        for field in ["key", "base", "model", "contributor"] {
+            for result in [Ok(()), Err("Check your API key in Settings.".to_owned())] {
+                let ctx = egui::Context::default();
+                let mut app = EditorApp::headless_for_test(&ctx);
+                let (tx, rx) = channel();
+                app.connection_check = Some(PendingConnectionCheck {
+                    settings: app.chat_settings.clone(),
+                    rx,
+                });
+                tx.send(result).unwrap();
+                match field {
+                    "key" => app.chat_settings.api_key = "new-fixture-key".to_owned(),
+                    "base" => app.chat_settings.base_url = "http://localhost:8000/v1".to_owned(),
+                    "model" => app.chat_settings.model = MODEL_WONDER.to_owned(),
+                    _ => app.chat_settings.contributor_opt_in = true,
+                }
+                app.status = "Newer status.".to_owned();
+                app.poll_chat(&ctx);
+                assert!(app.connection_check.is_none());
+                assert_eq!(app.status, "Newer status.", "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_save_atomically_replaces_previous_file() {
+        with_isolated_config(
+            "app::chat::tests::settings_save_atomically_replaces_previous_file",
+            |path| {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let original = r#"{"model":"muse-wonder-1.0"}"#;
+                std::fs::write(&path, original).unwrap();
+                let previous = path.with_file_name("previous.json");
+                std::fs::hard_link(&path, &previous).unwrap();
+                let settings = ChatSettings::default();
+                let _ = settings.save();
+                assert_eq!(ChatSettings::load().model, MODEL_SPARK);
+                assert_eq!(
+                    std::fs::read_to_string(previous).unwrap(),
+                    original,
+                    "a reader of the previous file must never see a partial replacement"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn settings_save_reloads_private_credentials_and_preserves_schema() {
+        with_isolated_config(
+            "app::chat::tests::settings_save_reloads_private_credentials_and_preserves_schema",
+            |path| {
+                let mut settings = ChatSettings {
+                    api_key: "fixture-key-only".to_owned(),
+                    model: MODEL_WONDER.to_owned(),
+                    ..ChatSettings::default()
+                };
+                for contributor in [false, true] {
+                    settings.contributor_opt_in = contributor;
+                    settings.save().unwrap();
+                    assert!(ChatSettings::load() == settings, "settings round-trip");
+                    let value: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                    assert_eq!(value.as_object().unwrap().len(), 4);
+                    assert_eq!(value["model"], "muse-wonder-1.0");
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                            0o600,
+                        );
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                            .unwrap();
+                    }
+                }
+                assert_eq!(
+                    std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+                    1
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn settings_load_only_migrates_unversioned_builtin_models() {
+        with_isolated_config(
+            "app::chat::tests::settings_load_only_migrates_unversioned_builtin_models",
+            |path| {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                for (stored, expected) in [
+                    ("muse-spark", "muse-spark-1.3"),
+                    ("muse-wonder", "muse-wonder-1.0"),
+                    ("muse-spark-1.2", "muse-spark-1.2"),
+                    ("muse-spark-1.3-contributor", "muse-spark-1.3-contributor"),
+                    ("custom-model", "custom-model"),
+                ] {
+                    std::fs::write(
+                        &path,
+                        serde_json::json!({"model": stored, "contributor_opt_in": false})
+                            .to_string(),
+                    )
+                    .unwrap();
+                    let settings = ChatSettings::load();
+                    assert_eq!(settings.model, expected);
+                    assert!(!settings.contributor_opt_in);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn settings_save_failure_is_displayed_and_cleans_temporary_file() {
+        with_isolated_config(
+            "app::chat::tests::settings_save_failure_is_displayed_and_cleans_temporary_file",
+            |path| {
+                std::fs::create_dir_all(&path).unwrap();
+                let previous = path.join("previous.json");
+                std::fs::write(&previous, "keep this file").unwrap();
+                let settings = ChatSettings::default();
+                let error = settings.save().unwrap_err();
+                assert_eq!(error, "Couldn't save settings.");
+
+                let ctx = egui::Context::default();
+                let mut app = EditorApp::headless_for_test(&ctx);
+                app.show_chat_settings = true;
+                click_settings_label(&ctx, &mut app, "Contributor models");
+                assert!(app.chat_settings.contributor_opt_in);
+                assert_eq!(app.chat_settings.model, MODEL_SPARK);
+                assert_eq!(app.status, error);
+                assert_eq!(std::fs::read_to_string(previous).unwrap(), "keep this file");
+                assert_eq!(
+                    std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+                    1
+                );
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_partial_write_failure_preserves_previous_file() {
+        with_isolated_config(
+            "app::chat::tests::settings_partial_write_failure_preserves_previous_file",
+            |path| {
+                if std::env::var_os("OPENREEL_SETTINGS_FILE_LIMIT").is_some() {
+                    let settings = ChatSettings {
+                        model: "large-fixture-model".repeat(1024),
+                        ..ChatSettings::default()
+                    };
+                    assert_eq!(settings.save().unwrap_err(), "Couldn't save settings.");
+                    return;
+                }
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let original = r#"{"model":"muse-wonder-1.0"}"#;
+                std::fs::write(&path, original).unwrap();
+                let output = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        "ulimit -f 1; trap '' XFSZ; exec \"$@\"",
+                        "settings-test",
+                    ])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "app::chat::tests::settings_partial_write_failure_preserves_previous_file",
+                        "--exact",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("OPENREEL_SETTINGS_FILE_LIMIT", "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "limited-file test failed:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+                assert_eq!(
+                    std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+                    1
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn settings_edits_invalidate_checks_even_after_changing_back() {
+        with_isolated_config(
+            "app::chat::tests::settings_edits_invalidate_checks_even_after_changing_back",
+            |_| {
+                let ctx = egui::Context::default();
+                let mut app = EditorApp::headless_for_test(&ctx);
+                app.show_chat_settings = true;
+                let original = app.chat_settings.clone();
+                let (tx, rx) = channel();
+                app.connection_check = Some(PendingConnectionCheck {
+                    settings: original.clone(),
+                    rx,
+                });
+                click_settings_label(&ctx, &mut app, "Contributor models");
+                assert!(app.chat_settings.contributor_opt_in);
+                assert!(app.connection_check.is_none());
+                click_settings_label(&ctx, &mut app, "Contributor models");
+                assert!(app.chat_settings == original);
+                assert!(tx.send(Ok(())).is_err(), "the old receiver was dropped");
+                app.poll_chat(&ctx);
+                assert_eq!(app.status, "Settings saved.");
+            },
+        );
+    }
+
+    #[test]
+    fn settings_window_offers_connection_check() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.show_chat_settings = true;
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(ctx.run(egui::RawInput::default(), |ctx| {
+                app.chat_settings_window(ctx);
+            }));
+        }
+        assert!(output.unwrap().shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == "Check connection"
+            )
+        }));
+    }
+
+    #[test]
+    fn missing_keys_are_only_allowed_for_loopback_hosts() {
+        for base in [
+            "https://localhost.example/v1",
+            "https://127.0.0.1.example/v1",
+            "https://example.test/://localhost",
+        ] {
+            let settings = ChatSettings {
+                base_url: base.to_owned(),
+                ..ChatSettings::default()
+            };
+            assert!(!settings.can_call_model(), "{base} is not a loopback host");
+        }
+        for base in [
+            "http://localhost:8000/v1",
+            "http://127.0.0.1:8000/v1/chat/completions",
+            "http://[::1]:8000/v1",
+        ] {
+            let settings = ChatSettings {
+                base_url: base.to_owned(),
+                ..ChatSettings::default()
+            };
+            assert!(settings.can_call_model(), "{base} is a loopback host");
+        }
+    }
+
+    fn queue_reply(app: &mut EditorApp) -> std::sync::mpsc::Sender<(u64, ChatWorkerResult)> {
+        let (tx, rx) = channel();
+        app.chat_pending = Some(PendingChat::for_test(
+            "Edit the timeline",
+            "Editing…",
+            &app.timeline,
+            app.script_state_json(),
+        ));
+        app.chat_rx = Some(rx);
+        tx
+    }
+
+    fn deliver_reply(
+        app: &mut EditorApp,
+        ctx: &egui::Context,
+        tx: &std::sync::mpsc::Sender<(u64, ChatWorkerResult)>,
+        code: &str,
+    ) {
+        // A cancelled request may already have dropped its receiver.
+        let _ = tx.send((
+            1,
+            ChatWorkerResult::Generated(GeneratedEdit {
+                code: code.to_owned(),
+                explanation: Some("Edited the timeline.".to_owned()),
+            }),
+        ));
+        app.poll_chat(ctx);
+    }
+
+    #[test]
+    fn failed_generated_batch_restores_the_entire_edit() {
+        for (state, failing_command) in [
+            (AssetState::Ready, "addAsset('missing.mp4', 0)"),
+            (AssetState::Ready, "addAssetRange('ready.mp4', 0, 11, 1)"),
+            (AssetState::Processing, "addAsset('ready.mp4', 0)"),
+            (
+                AssetState::Processing,
+                "addAssetRange('ready.mp4', 0, 1, 2)",
+            ),
+            (AssetState::Ready, "moveClip(999, 4)"),
+            (
+                AssetState::Ready,
+                "addTitle('Overflow', Number.MAX_VALUE, 2)",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            app.assets.push(super::super::media::BinAsset {
+                info: openreel_media::MediaInfo {
+                    path: "ready.mp4".to_owned(),
+                    name: "ready.mp4".to_owned(),
+                    duration: 10.0,
+                    width: 320,
+                    height: 180,
+                    fps: 30.0,
+                    has_video: true,
+                    has_audio: false,
+                },
+                size_bytes: 0,
+                state,
+                peaks: Vec::new(),
+                thumb_textures: Vec::new(),
+                sweep: super::super::sweep::SweepData::default(),
+            });
+            let id = app
+                .timeline
+                .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+            app.selected = Some(id);
+            app.playhead = 1.0;
+            app.playing = true;
+            let before = app.timeline.clone();
+            let zoom = app.timeline_view.px_per_sec;
+            let tx = queue_reply(&mut app);
+            deliver_reply(
+                &mut app,
+                &ctx,
+                &tx,
+                &format!(
+                    "deleteClip({id}); addTitle('Transient', 0, 2); pause(); seek(0); \
+                     setMagnet(false); setMusicBedMuted(false); setZoom(123); {failing_command}"
+                ),
+            );
+            assert_eq!(app.timeline, before, "{failing_command}");
+            assert_eq!(app.selected, Some(id));
+            assert_eq!(app.playhead, 1.0);
+            assert!(app.playing);
+            assert!(app.timeline_view.magnet && app.mute_music_beds);
+            assert_eq!(app.timeline_view.px_per_sec, zoom);
+            assert!(app.chat_undo.is_none());
+            assert!(app.chat_pending.is_none());
+            assert_ne!(app.status, "Edited the timeline.");
+        }
+    }
+
+    #[test]
+    fn generated_reply_cannot_delete_replacement_after_clear() {
+        for console_clear in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            let old = app
+                .timeline
+                .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+            let before = app.timeline.clone();
+            let tx = queue_reply(&mut app);
+            if console_clear {
+                app.run_console(&ctx, "clearTimeline()".to_owned());
+            } else {
+                app.handle_action(&ctx, super::super::UiAction::ClearTimeline);
+            }
+            let replacement = app
+                .timeline
+                .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+            assert_eq!(old, replacement, "fixture exercises recycled IDs");
+            assert_eq!(
+                app.timeline, before,
+                "cancellation must cover identical content too"
+            );
+            deliver_reply(&mut app, &ctx, &tx, &format!("deleteClip({old})"));
+            assert_eq!(app.timeline.clip(replacement).unwrap().name, "Keep");
+            assert!(app.chat_pending.is_none());
+        }
+    }
+
+    #[test]
+    fn generated_reply_rejects_manual_timeline_changes() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let id = app
+            .timeline
+            .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+        let tx = queue_reply(&mut app);
+        app.timeline.move_clip(id, 7.0);
+        deliver_reply(&mut app, &ctx, &tx, &format!("deleteClip({id})"));
+        assert_eq!(app.timeline.clip(id).unwrap().start, 7.0);
+        assert!(app.chat_pending.is_none());
+        assert!(app.chat_undo.is_none());
+    }
+
+    #[test]
+    fn generated_defaults_use_the_requested_selection_and_playhead() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let first = app
+            .timeline
+            .add_clip("First", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+        let second = app
+            .timeline
+            .add_clip("Second", ClipKind::Title, 1, 0.0, 7.0, 0.0);
+        app.selected = Some(first);
+        app.playhead = 1.0;
+        let tx = queue_reply(&mut app);
+        app.selected = Some(second);
+        app.playhead = 4.0;
+        deliver_reply(&mut app, &ctx, &tx, "split()");
+        assert_eq!(app.timeline.clip(first).unwrap().duration, 1.0);
+        assert_eq!(app.timeline.clip(second).unwrap().duration, 7.0);
+        assert_eq!(app.timeline.clips.len(), 3);
+        app.undo_chat_edit();
+        assert_eq!(app.timeline.clip(first).unwrap().duration, 5.0);
+        assert_eq!(app.selected, Some(second));
+        assert_eq!(app.playhead, 4.0);
+    }
+
+    #[test]
+    fn generated_filesystem_commands_are_rejected_before_editing() {
+        for operation in ["importMedia", "exportTo"] {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            let id = app
+                .timeline
+                .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+            let before = app.timeline.clone();
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "openreel_denied_io_{}_{}",
+                    std::process::id(),
+                    operation
+                ))
+                .join("output.mp4");
+            assert!(!path.exists());
+            let tx = queue_reply(&mut app);
+            deliver_reply(
+                &mut app,
+                &ctx,
+                &tx,
+                &format!(
+                    "renameClip({id}, 'Changed'); {operation}({})",
+                    serde_json::to_string(&path).unwrap(),
+                ),
+            );
+            assert_eq!(app.timeline, before, "{operation}");
+            assert!(app.assets.is_empty(), "model must not start an import");
+            assert!(!path.exists(), "model must not write an export");
+            assert!(app.status.contains("Import or Export"), "{}", app.status);
+        }
+    }
+
+    #[test]
+    fn successful_edit_is_undoable_after_a_log_only_reply() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let id = app
+            .timeline
+            .add_clip("Before", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+        let tx = queue_reply(&mut app);
+        deliver_reply(&mut app, &ctx, &tx, &format!("renameClip({id}, 'After')"));
+        assert_eq!(app.timeline.clip(id).unwrap().name, "After");
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            &format!("deleteClip({id}); addAsset('missing.mp4', 0)"),
+        );
+        assert_eq!(app.timeline.clip(id).unwrap().name, "After");
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "console.log('No further edit needed.')",
+        );
+        app.undo_chat_edit();
+        assert_eq!(app.timeline.clip(id).unwrap().name, "Before");
+    }
 
     #[test]
     fn extract_code_strips_fences() {
@@ -1381,7 +2582,21 @@ mod tests {
             "{\"clips\":[]}",
             Some(("bad()", "ReferenceError")),
         );
-        assert_eq!(body["model"], MODEL_SPARK);
+        assert_eq!(body["model"], "muse-spark-1.3");
+        let wonder_settings = ChatSettings {
+            model: MODEL_WONDER.to_owned(),
+            contributor_opt_in: true,
+            ..settings.clone()
+        };
+        let wonder_body = build_request_body(
+            &wonder_settings,
+            &session,
+            &recent,
+            "tighten it",
+            "{\"clips\":[]}",
+            None,
+        );
+        assert_eq!(wonder_body["model"], "muse-wonder-1.0");
         assert_eq!(body["prompt_cache_key"], "proj-cache-1");
         assert_eq!(body["prompt_cache_retention"], "24h");
         assert_eq!(body["response_format"]["type"], "json_schema");
@@ -1417,6 +2632,115 @@ mod tests {
         let timeline_at = final_body.find("Timeline state JSON:").unwrap();
         assert!(request_at < timeline_at, "timeline JSON must be last");
         assert!(final_body.trim_end().ends_with("{\"clips\":[]}"));
+    }
+
+    #[test]
+    fn model_context_keeps_every_range_and_full_repl_evidence_without_repeating_it() {
+        let ranges: Vec<_> = (0..503)
+            .map(|index| serde_json::json!({
+                "id": format!("source.mp4#scene-{index}"), "asset": "source.mp4",
+                "assetName": "source.mp4", "title": "Source scene",
+                "sourceIn": index as f64 * 0.25, "duration": 0.25,
+                "category": "action", "tags": ["subject-moving"], "score": 81,
+                "quality": {"stability": 0.8, "audio": 0.6, "motion": 0.9},
+                "transcript": "A repeated passage from the same speaker turn.",
+                "review": {"status": "reviewed", "model": MODEL_SPARK, "frameTimes": [0.0, 0.2],
+                    "subjectEvidence":[{"concept":"vehicle", "status":"ready", "sampledFrames":8,
+                        "observedFrames":6, "firstObserved":0.25, "lastObserved":0.875,
+                        "tracks":[{"requestLocalId":"12", "imagePlaneTravel":0.5}]}]},
+                "visual": {"source": "sam", "samStatus": "ready", "facePresent": true,
+                    "samFrameTime": 0.2, "samBoxCoverage": 0.4, "samConfidence": 0.9,
+                    "subjectCoverage": 0.3, "edgeDensity": 0.17, "samMaskCoverage": null},
+            }))
+            .collect();
+        let state = serde_json::json!({
+            "clips": [], "sweepCandidates": ranges, "sceneClips": ranges,
+            "transcriptSegments": [{"id": "turn-0", "asset": "source.mp4", "start": 0,
+                "end": 125.75, "text": "A repeated passage from the same speaker turn.",
+                "timingPrecision": "turn", "words": []}],
+        })
+        .to_string();
+        let body = build_request_body(
+            &ChatSettings::default(),
+            &ChatSession::new("context-test"),
+            &[],
+            "Use all action clips",
+            &state,
+            None,
+        );
+        let message = body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        let compact: serde_json::Value =
+            serde_json::from_str(message.split_once("Timeline state JSON:\n").unwrap().1).unwrap();
+        for field in ["sweepCandidates", "sceneClips"] {
+            assert_eq!(compact[field].as_array().unwrap().len(), 503);
+            for (before, after) in ranges.iter().zip(compact[field].as_array().unwrap()) {
+                for key in [
+                    "id", "asset", "sourceIn", "duration", "category", "tags", "score", "quality",
+                ] {
+                    assert_eq!(after[key], before[key], "preserve {field}.{key}");
+                }
+                assert_eq!(after["review"]["status"], "reviewed");
+                assert_eq!(after["review"]["subjectEvidence"][0]["concept"], "vehicle");
+                assert_eq!(after["review"]["subjectEvidence"][0]["observedFrames"], 6);
+                assert!(after["review"]["subjectEvidence"][0]
+                    .get("tracks")
+                    .is_none());
+                assert_eq!(after["visual"]["facePresent"], true);
+                assert!(
+                    after.get("transcript").is_none(),
+                    "one transcript source, not per range"
+                );
+                assert!(after["review"].get("frameTimes").is_none());
+            }
+        }
+        assert_eq!(
+            compact["transcriptSegments"][0]["text"],
+            "A repeated passage from the same speaker turn."
+        );
+        let mut engine = crate::scripting::ScriptEngine::new().unwrap();
+        let (_, commands) = engine.eval_checked(
+            "if (sceneClips().length !== 503 || sweepCandidates()[502].visual.edgeDensity !== 0.17 || sweepCandidates()[0].review.frameTimes.length !== 2) throw Error('missing evidence'); addAssetRange(sceneClips()[502].asset, 0, sceneClips()[502].sourceIn, sceneClips()[502].duration);",
+            &state,
+        ).unwrap();
+        assert!(
+            matches!(&commands[..], [ScriptCommand::AddAssetRange { source_in, duration, .. }]
+            if *source_in == 125.5 && *duration == 0.25)
+        );
+        println!("Full snapshot {} bytes; model snapshot {} bytes; 503 ranges in each inventory retained.", state.len(), compact.to_string().len());
+    }
+
+    #[test]
+    fn oversized_context_is_rejected_before_starting_a_model_request() {
+        with_isolated_config(
+            "app::chat::tests::oversized_context_is_rejected_before_starting_a_model_request",
+            |_| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let ctx = egui::Context::default();
+                let mut app = EditorApp::headless_for_test(&ctx);
+                app.chat_settings.base_url =
+                    format!("http://{}/v1", listener.local_addr().unwrap());
+                app.submit_chat_request(
+                    &ctx,
+                    "Oversized request".to_owned(),
+                    "x".repeat(TOKEN_BUDGET * 4 + 100),
+                    "Testing",
+                );
+                assert!(
+                    app.chat_pending.is_none(),
+                    "oversized context must not start a request"
+                );
+                assert!(app.chat_rx.is_none());
+                assert!(app.status.contains("context budget"), "{}", app.status);
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                assert!(app.timeline.clips.is_empty());
+            },
+        );
     }
 
     #[test]
@@ -1487,7 +2811,7 @@ mod tests {
             before > TOKEN_BUDGET,
             "fixture must start over budget ({before})"
         );
-        ensure_within_budget(&mut session, "turn 30: one more thing", state, None);
+        ensure_within_budget(&mut session, "turn 30: one more thing", state, None).unwrap();
         let messages = build_context_messages(
             &session,
             recent_excluding_current(&session),

@@ -1,7 +1,7 @@
 //! UI-independent timeline model.
 //!
-//! All times are seconds (`f64`), always snapped to the timeline frame grid
-//! at edit boundaries so clips can never land between frames.
+//! Times are seconds (`f64`). Media placement preserves source intervals;
+//! generated clips and explicit move/trim/split edits use the project frame grid.
 
 pub type ClipId = u64;
 
@@ -12,7 +12,52 @@ pub enum ClipKind {
     Title,
 }
 
-#[derive(Clone, Debug)]
+/// Presentation style for title/caption clips. Preview and export
+/// interpret the same value so generated captions do not change
+/// appearance when rendered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TitleStyle {
+    #[default]
+    LowerThird,
+    Caption,
+    PopCaption,
+    MinimalCaption,
+}
+
+impl TitleStyle {
+    pub const ALL: [Self; 4] = [
+        Self::LowerThird,
+        Self::Caption,
+        Self::PopCaption,
+        Self::MinimalCaption,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LowerThird => "lower-third",
+            Self::Caption => "caption",
+            Self::PopCaption => "pop-caption",
+            Self::MinimalCaption => "minimal-caption",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LowerThird => "Lower third",
+            Self::Caption => "Caption",
+            Self::PopCaption => "Pop caption",
+            Self::MinimalCaption => "Minimal caption",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|style| style.as_str() == name.trim().to_lowercase())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Clip {
     pub id: ClipId,
     pub name: String,
@@ -29,6 +74,14 @@ pub struct Clip {
     pub opacity: f32,
     /// Audio gain, 0..=2 (1 = unity). Applies to audio and embedded audio.
     pub volume: f32,
+    /// Whether a video clip still plays the audio embedded in its
+    /// source. Detaching moves that sound to an `Audio` clip and
+    /// clears this flag so playback/export never double it.
+    pub embedded_audio: bool,
+    /// Detached picture/sound partner. Linked clips move, trim, and
+    /// split together until explicitly unlinked.
+    pub linked_clip: Option<ClipId>,
+    pub title_style: TitleStyle,
 }
 
 impl Clip {
@@ -41,7 +94,7 @@ impl Clip {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Timeline {
     pub fps: f64,
     pub track_labels: Vec<String>,
@@ -126,10 +179,13 @@ impl Timeline {
         duration: f64,
         source_in: f64,
     ) -> ClipId {
+        let start = self.snap(start.max(0.0));
+        let duration = self.snap(duration.max(1.0 / self.fps));
         self.add_clip_inner(name, kind, track, start, duration, source_in, None)
     }
 
-    /// Add a clip backed by a media file at `source_path`.
+    /// Add a media interval without rounding its start or positive duration.
+    /// Source-frame boundaries need not align with the project frame grid.
     #[allow(clippy::too_many_arguments)]
     pub fn add_media_clip(
         &mut self,
@@ -171,12 +227,19 @@ impl Timeline {
             name: name.to_owned(),
             kind,
             track,
-            start: self.snap(start.max(0.0)),
-            duration: self.snap(duration.max(1.0 / self.fps)),
+            start: start.max(0.0),
+            duration: if duration > 0.0 {
+                duration
+            } else {
+                1.0 / self.fps
+            },
             source_in: source_in.max(0.0),
             source: source.map(str::to_owned),
             opacity: 1.0,
             volume: 1.0,
+            embedded_audio: kind == ClipKind::Video && source.is_some(),
+            linked_clip: None,
+            title_style: TitleStyle::default(),
         });
         id
     }
@@ -189,22 +252,228 @@ impl Timeline {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
+    /// The picture shown by both preview and export. Lower lane
+    /// indexes win; insertion order breaks ties. Opacity fades this
+    /// picture against black, not against pictures on other lanes.
+    pub fn active_video(&self, time: f64) -> Option<&Clip> {
+        self.clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Video && clip.contains(time))
+            .min_by_key(|clip| clip.track)
+    }
+
+    /// Only the first active title is shown, in insertion order.
+    pub fn active_title(&self, time: f64) -> Option<&Clip> {
+        self.clips
+            .iter()
+            .find(|clip| clip.kind == ClipKind::Title && clip.contains(time))
+    }
+
     /// End of the last clip, or 0 for an empty timeline.
     pub fn end(&self) -> f64 {
         self.clips.iter().map(Clip::end).fold(0.0, f64::max)
     }
 
-    /// Move a clip. Start is clamped to >= 0 and snapped to a frame.
-    pub fn move_clip(&mut self, id: ClipId, new_start: f64) {
-        let snapped = self.snap(new_start.max(0.0));
-        if let Some(clip) = self.clip_mut(id) {
-            clip.start = snapped;
+    fn linked_id(&self, id: ClipId) -> Option<ClipId> {
+        self.clip(id)
+            .and_then(|clip| clip.linked_clip)
+            .filter(|linked| self.clip(*linked).is_some())
+    }
+
+    fn link_pair(&mut self, left: ClipId, right: ClipId) {
+        if let Some(clip) = self.clip_mut(left) {
+            clip.linked_clip = Some(right);
+        }
+        if let Some(clip) = self.clip_mut(right) {
+            clip.linked_clip = Some(left);
         }
     }
 
-    /// Trim the left edge to `new_start`, keeping the end fixed.
-    /// `source_in` moves with the edge and clamps at 0 (start of media).
-    pub fn trim_left(&mut self, id: ClipId, new_start: f64) {
+    /// Detach a video clip's embedded sound into a linked audio
+    /// clip on the first lane free for the same span. The engine
+    /// does not know whether the source has an audio stream; the
+    /// app checks probed metadata before calling this.
+    pub fn detach_audio(&mut self, id: ClipId) -> Option<ClipId> {
+        let clip = self.clip(id)?.clone();
+        let source = clip.source.as_deref()?;
+        if clip.kind != ClipKind::Video || !clip.embedded_audio || clip.linked_clip.is_some() {
+            return None;
+        }
+        let mut free_track = None;
+        for track in 0..self.track_labels.len() {
+            if track == clip.track {
+                continue;
+            }
+            let blocked = self
+                .clips
+                .iter()
+                .any(|c| c.track == track && c.start < clip.end() && clip.start < c.end());
+            if !blocked {
+                free_track = Some(track);
+                break;
+            }
+        }
+        let track = free_track.unwrap_or_else(|| self.append_track());
+        let audio_name = format!("{} (audio)", clip.name);
+        let audio = self.add_clip_inner(
+            &audio_name,
+            ClipKind::Audio,
+            track,
+            clip.start,
+            clip.duration,
+            clip.source_in,
+            Some(source),
+        );
+        if let Some(sound) = self.clip_mut(audio) {
+            sound.volume = clip.volume;
+        }
+        if let Some(picture) = self.clip_mut(id) {
+            picture.embedded_audio = false;
+        }
+        self.link_pair(id, audio);
+        Some(audio)
+    }
+
+    /// Break a detach link while keeping both clips.
+    pub fn unlink_clip(&mut self, id: ClipId) -> bool {
+        let Some(linked) = self.linked_id(id) else {
+            // Clear a stale pointer too, but report no live link broke.
+            if let Some(clip) = self.clip_mut(id) {
+                clip.linked_clip = None;
+            }
+            return false;
+        };
+        if let Some(clip) = self.clip_mut(id) {
+            clip.linked_clip = None;
+        }
+        if let Some(clip) = self.clip_mut(linked) {
+            if clip.linked_clip == Some(id) {
+                clip.linked_clip = None;
+            }
+        }
+        true
+    }
+
+    /// Enable or disable a video clip's own embedded sound. It
+    /// cannot be re-enabled while a detached partner exists, which
+    /// would otherwise play the same source audio twice.
+    pub fn set_embedded_audio(&mut self, id: ClipId, enabled: bool) -> bool {
+        let Some(clip) = self.clip(id).cloned() else {
+            return false;
+        };
+        if clip.kind != ClipKind::Video
+            || clip.source.is_none()
+            || (enabled && self.linked_id(id).is_some())
+        {
+            return false;
+        }
+        if let Some(clip) = self.clip_mut(id) {
+            clip.embedded_audio = enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move a clip. Start is clamped to >= 0 and snapped to a frame.
+    /// A linked detach partner moves by the same amount.
+    pub fn move_clip(&mut self, id: ClipId, new_start: f64) {
+        let Some(original) = self.clip(id).cloned() else {
+            return;
+        };
+        let snapped = self.snap(new_start.max(0.0));
+        let delta = snapped - original.start;
+        if let Some(clip) = self.clip_mut(id) {
+            clip.start = snapped;
+        }
+        if delta != 0.0 {
+            if let Some(linked) = self.linked_id(id) {
+                if let Some(companion) = self.clip(linked).cloned() {
+                    let companion_start = self.snap((companion.start + delta).max(0.0));
+                    if let Some(clip) = self.clip_mut(linked) {
+                        clip.start = companion_start;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Swap two non-overlapping clips on one lane, including their detached
+    /// partners, atomically. Adjacent clips keep their occupied outer span
+    /// and gap; non-adjacent clips exchange start positions only if they fit.
+    /// This reorders existing intervals without rounding source durations or
+    /// their derived boundary. Ordinary free moves still use `move_clip`.
+    /// Any collision on any affected lane leaves the whole timeline unchanged.
+    pub fn swap_clips(&mut self, first: ClipId, second: ClipId) -> bool {
+        let (Some(first), Some(second)) = (self.clip(first), self.clip(second)) else {
+            return false;
+        };
+        if first.id == second.id || first.track != second.track {
+            return false;
+        }
+        let (left, right) = if first.start <= second.start {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        const EPSILON: f64 = 1e-9;
+        if left.end() > right.start + EPSILON {
+            return false;
+        }
+        let adjacent = !self.clips.iter().any(|clip| {
+            clip.id != left.id
+                && clip.id != right.id
+                && clip.track == left.track
+                && clip.start < right.start
+                && clip.end() > left.end() + EPSILON
+        });
+        let left_start = if adjacent {
+            right.end() - left.duration
+        } else {
+            right.start
+        };
+        let mut placements = Vec::with_capacity(4);
+        for (clip, new_start) in [(left, left_start), (right, left.start)] {
+            placements.push((clip.id, new_start));
+            if let Some(companion) = self.linked_id(clip.id).and_then(|id| self.clip(id)) {
+                // Swapping members of the same linked group would move one
+                // clip twice and cannot preserve their relative placement.
+                if companion.id == left.id || companion.id == right.id {
+                    return false;
+                }
+                placements.push((companion.id, companion.start + (new_start - clip.start)));
+            }
+        }
+        for (index, &(id, start)) in placements.iter().enumerate() {
+            if !start.is_finite()
+                || start < 0.0
+                || placements[..index].iter().any(|(other, _)| *other == id)
+            {
+                return false;
+            }
+            let clip = self.clip(id).unwrap();
+            let blocked = self.clips.iter().any(|other| {
+                if other.id == id || other.track != clip.track {
+                    return false;
+                }
+                let other_start = placements
+                    .iter()
+                    .find(|(moved, _)| *moved == other.id)
+                    .map_or(other.start, |(_, new_start)| *new_start);
+                start < other_start + other.duration - EPSILON
+                    && other_start < start + clip.duration - EPSILON
+            });
+            if blocked {
+                return false;
+            }
+        }
+        for (id, start) in placements {
+            self.clip_mut(id).unwrap().start = start;
+        }
+        true
+    }
+
+    fn trim_left_one(&mut self, id: ClipId, new_start: f64) {
         let frame = 1.0 / self.fps;
         let Some(clip) = self.clip(id).cloned() else {
             return;
@@ -220,9 +489,28 @@ impl Timeline {
         }
     }
 
-    /// Trim the right edge to `new_end`. The caller clamps against the
-    /// source media duration; the model only enforces one frame minimum.
-    pub fn trim_right(&mut self, id: ClipId, new_end: f64) {
+    /// Trim the left edge to `new_start`, keeping the end fixed.
+    /// `source_in` moves with the edge and clamps at 0 (start of media).
+    /// A linked detach partner receives the same edge movement.
+    pub fn trim_left(&mut self, id: ClipId, new_start: f64) {
+        let Some(original) = self.clip(id).cloned() else {
+            return;
+        };
+        self.trim_left_one(id, new_start);
+        let Some(updated) = self.clip(id).cloned() else {
+            return;
+        };
+        let delta = updated.start - original.start;
+        if delta != 0.0 {
+            if let Some(linked) = self.linked_id(id) {
+                if let Some(companion) = self.clip(linked).cloned() {
+                    self.trim_left_one(linked, companion.start + delta);
+                }
+            }
+        }
+    }
+
+    fn trim_right_one(&mut self, id: ClipId, new_end: f64) {
         let frame = 1.0 / self.fps;
         let snapped = self.snap(new_end);
         if let Some(clip) = self.clip_mut(id) {
@@ -230,9 +518,28 @@ impl Timeline {
         }
     }
 
-    /// Split a clip at `time`. Returns the new (right-hand) clip id.
-    /// No-op (`None`) if the point is not strictly inside the clip.
-    pub fn split_at(&mut self, id: ClipId, time: f64) -> Option<ClipId> {
+    /// Trim the right edge to `new_end`. The caller clamps against the
+    /// source media duration; the model only enforces one frame minimum.
+    /// A linked detach partner receives the same edge movement.
+    pub fn trim_right(&mut self, id: ClipId, new_end: f64) {
+        let Some(original) = self.clip(id).cloned() else {
+            return;
+        };
+        self.trim_right_one(id, new_end);
+        let Some(updated) = self.clip(id).cloned() else {
+            return;
+        };
+        let delta = updated.end() - original.end();
+        if delta != 0.0 {
+            if let Some(linked) = self.linked_id(id) {
+                if let Some(companion) = self.clip(linked).cloned() {
+                    self.trim_right_one(linked, companion.end() + delta);
+                }
+            }
+        }
+    }
+
+    fn split_one(&mut self, id: ClipId, time: f64) -> Option<ClipId> {
         let at = self.snap(time);
         let clip = self.clip(id)?.clone();
         let frame = 1.0 / self.fps;
@@ -255,6 +562,24 @@ impl Timeline {
         if let Some(right_clip) = self.clip_mut(right) {
             right_clip.opacity = clip.opacity;
             right_clip.volume = clip.volume;
+            right_clip.embedded_audio = clip.embedded_audio;
+            right_clip.linked_clip = None;
+            right_clip.title_style = clip.title_style;
+        }
+        Some(right)
+    }
+
+    /// Split a clip at `time`. Returns the new (right-hand) clip id.
+    /// No-op (`None`) if the point is not strictly inside the clip.
+    /// A linked detach partner splits at the same timeline point
+    /// and the two right-hand pieces stay linked to each other.
+    pub fn split_at(&mut self, id: ClipId, time: f64) -> Option<ClipId> {
+        let linked = self.linked_id(id);
+        let right = self.split_one(id, time)?;
+        if let Some(companion) = linked {
+            if let Some(right_companion) = self.split_one(companion, time) {
+                self.link_pair(right, right_companion);
+            }
         }
         Some(right)
     }
@@ -271,19 +596,42 @@ impl Timeline {
         ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut cursor: Option<f64> = None;
         for (_, id) in ordered {
-            if let Some(clip) = self.clip_mut(id) {
-                if let Some(expected) = cursor {
-                    if clip.start > expected {
-                        clip.start = expected;
+            let Some(original) = self.clip(id).cloned() else {
+                continue;
+            };
+            let mut new_start = original.start;
+            if let Some(expected) = cursor {
+                if new_start > expected {
+                    new_start = expected;
+                }
+            }
+            let delta = new_start - original.start;
+            if delta != 0.0 {
+                if let Some(clip) = self.clip_mut(id) {
+                    clip.start = new_start;
+                }
+                if let Some(linked) = self.linked_id(id) {
+                    if let Some(companion) = self.clip(linked).cloned() {
+                        if companion.track != track {
+                            let companion_start = (companion.start + delta).max(0.0);
+                            if let Some(clip) = self.clip_mut(linked) {
+                                clip.start = companion_start;
+                            }
+                        }
                     }
                 }
-                cursor = Some(clip.end());
             }
+            cursor = Some(new_start + original.duration);
         }
     }
 
     pub fn remove_clip(&mut self, id: ClipId) {
         self.clips.retain(|c| c.id != id);
+        for clip in &mut self.clips {
+            if clip.linked_clip == Some(id) {
+                clip.linked_clip = None;
+            }
+        }
     }
 
     /// Topmost video/title clip active at `time` (lowest track index wins).
@@ -351,11 +699,257 @@ mod tests {
     }
 
     #[test]
+    fn media_placement_preserves_source_intervals() {
+        let mut tl = Timeline::new(30.0);
+        for kind in [ClipKind::Video, ClipKind::Audio] {
+            for (start, duration, source_in) in [
+                (49.0 / 60.0, 1.235 - 49.0 / 60.0, 49.0 / 60.0),
+                (0.0, 1.0 / 120.0, 17.0 / 120.0),
+                (2.157, 0.001, 0.157),
+            ] {
+                let id = tl.add_media_clip(
+                    "scene",
+                    kind,
+                    0,
+                    start,
+                    duration,
+                    source_in,
+                    "/media/scene.mp4",
+                );
+                let clip = tl.clip(id).unwrap();
+                assert_eq!(
+                    (clip.start, clip.duration, clip.source_in),
+                    (start, duration, source_in)
+                );
+                assert_eq!(clip.end(), start + duration);
+            }
+        }
+
+        let title = tl.add_clip("title", ClipKind::Title, 1, 1.02, 0.01, 0.0);
+        assert_eq!(tl.clip(title).unwrap().start, 31.0 / 30.0);
+        assert_eq!(tl.clip(title).unwrap().duration, 1.0 / 30.0);
+        tl.move_clip(tl.clips[0].id, 2.02);
+        assert_eq!(tl.clips[0].start, 61.0 / 30.0);
+    }
+
+    #[test]
+    fn fractional_media_keeps_coverage_and_linked_audio_through_edits() {
+        let mut tl = Timeline::empty_project();
+        let video = tl.add_media_clip(
+            "scene",
+            ClipKind::Video,
+            0,
+            0.817,
+            0.418,
+            2.135,
+            "/media/scene.mp4",
+        );
+        let audio = tl.detach_audio(video).unwrap();
+        for id in [video, audio] {
+            let clip = tl.clip(id).unwrap();
+            assert_eq!(
+                (clip.start, clip.duration, clip.source_in),
+                (0.817, 0.418, 2.135)
+            );
+        }
+
+        let right_video = tl.split_at(video, 1.0).unwrap();
+        let right_audio = tl.clip(right_video).unwrap().linked_clip.unwrap();
+        for (left, right) in [(video, right_video), (audio, right_audio)] {
+            let left = tl.clip(left).unwrap();
+            let right = tl.clip(right).unwrap();
+            assert_eq!(left.end(), 1.0);
+            assert_eq!(right.start, left.end());
+            assert!((right.end() - 1.235).abs() < 1e-12);
+            assert!((left.duration + right.duration - 0.418).abs() < 1e-12);
+            assert_eq!(right.source_in, left.source_in + left.duration);
+        }
+
+        let tail = tl.add_media_clip(
+            "tail",
+            ClipKind::Video,
+            0,
+            2.0,
+            0.007,
+            4.0,
+            "/media/scene.mp4",
+        );
+        let tail_audio = tl.detach_audio(tail).unwrap();
+        tl.close_gaps(0);
+        for id in [tail, tail_audio] {
+            let clip = tl.clip(id).unwrap();
+            assert_eq!(clip.start, tl.clip(right_video).unwrap().end());
+            assert_eq!(clip.duration, 0.007);
+            assert_eq!(clip.source_in, 4.0);
+        }
+        let unchanged = tl.clone();
+        for track in 0..tl.track_labels.len() {
+            tl.close_gaps(track);
+        }
+        assert_eq!(tl, unchanged, "closing linked lanes again is a no-op");
+    }
+
+    #[test]
     fn move_clamps_to_zero() {
         let mut tl = Timeline::demo();
         let id = tl.clips[0].id;
         tl.move_clip(id, -5.0);
         assert_eq!(tl.clip(id).unwrap().start, 0.0);
+    }
+
+    #[test]
+    fn adjacent_swaps_preserve_fractional_span_gap_and_linked_coverage() {
+        for left_duration in [1.0 / 120.0, 0.157, 0.418] {
+            for right_duration in [0.001, 0.1, 7.0 / 30.0] {
+                for gap in [0.0, 0.23] {
+                    for reverse in [false, true] {
+                        let mut tl = Timeline::empty_project();
+                        let left = tl.add_media_clip(
+                            "left",
+                            ClipKind::Video,
+                            0,
+                            0.817,
+                            left_duration,
+                            2.135,
+                            "left",
+                        );
+                        let right = tl.add_media_clip(
+                            "right",
+                            ClipKind::Video,
+                            0,
+                            0.817 + left_duration + gap,
+                            right_duration,
+                            4.237,
+                            "right",
+                        );
+                        let left_audio = tl.detach_audio(left).unwrap();
+                        let right_audio = tl.detach_audio(right).unwrap();
+                        let outer_end = tl.clip(right).unwrap().end();
+                        let prefix = tl.add_media_clip(
+                            "prefix",
+                            ClipKind::Video,
+                            0,
+                            0.0,
+                            0.817,
+                            0.0,
+                            "prefix",
+                        );
+                        let tail = tl.add_media_clip(
+                            "tail",
+                            ClipKind::Video,
+                            0,
+                            outer_end,
+                            0.1,
+                            0.0,
+                            "tail",
+                        );
+                        let before = tl.clone();
+                        let (first, second) = if reverse {
+                            (right, left)
+                        } else {
+                            (left, right)
+                        };
+                        assert!(tl.swap_clips(first, second), "left={left_duration} right={right_duration} gap={gap} reverse={reverse}");
+                        for (id, expected_start) in [
+                            (left, outer_end - left_duration),
+                            (left_audio, outer_end - left_duration),
+                            (right, 0.817),
+                            (right_audio, 0.817),
+                        ] {
+                            let clip = tl.clip(id).unwrap();
+                            assert!((clip.start - expected_start).abs() < 1e-12);
+                            let mut expected = before.clip(id).unwrap().clone();
+                            expected.start = clip.start;
+                            assert_eq!(clip, &expected, "only start may change");
+                        }
+                        assert!((tl.clip(left).unwrap().end() - outer_end).abs() < 1e-12);
+                        assert!(
+                            (tl.clip(left).unwrap().start - tl.clip(right).unwrap().end() - gap)
+                                .abs()
+                                < 1e-12
+                        );
+                        assert_eq!(tl.clip(prefix), before.clip(prefix));
+                        assert_eq!(tl.clip(tail), before.clip(tail));
+                        assert_eq!(tl.track_labels, before.track_labels);
+                        assert!(tl.swap_clips(first, second));
+                        for clip in &tl.clips {
+                            assert!(
+                                (clip.start - before.clip(clip.id).unwrap().start).abs() < 1e-12,
+                                "swapping back restores the original order"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn swap_rejects_collisions_on_either_companion_lane_atomically() {
+        for block_left in [false, true] {
+            let mut tl = Timeline::empty_project();
+            let left = tl.add_media_clip("left", ClipKind::Video, 0, 2.0, 0.4, 0.157, "left");
+            let right = tl.add_media_clip("right", ClipKind::Video, 0, 2.4, 0.2, 1.237, "right");
+            tl.detach_audio(left).unwrap();
+            let right_audio = tl.detach_audio(right).unwrap();
+            tl.set_clip_track(right_audio, 2);
+            let (track, start) = if block_left { (1, 2.4) } else { (2, 2.0) };
+            tl.add_media_clip(
+                "blocker",
+                ClipKind::Audio,
+                track,
+                start,
+                0.2,
+                0.0,
+                "blocker",
+            );
+            let before = tl.clone();
+            assert!(!tl.swap_clips(left, right));
+            assert_eq!(tl, before);
+            assert!(!tl.swap_clips(right, left));
+            assert_eq!(tl, before);
+        }
+    }
+
+    #[test]
+    fn nonadjacent_swaps_leave_middle_clips_unchanged_and_reject_collisions() {
+        for duration in [0.4, 1.0] {
+            let mut tl = Timeline::empty_project();
+            let left = tl.add_media_clip("left", ClipKind::Video, 0, 2.0, duration, 0.0, "left");
+            let right = tl.add_media_clip("right", ClipKind::Video, 0, 5.0, 0.4, 0.0, "right");
+            let middle = tl.add_media_clip("middle", ClipKind::Video, 0, 3.0, 1.0, 0.0, "middle");
+            let tail = tl.add_media_clip("tail", ClipKind::Video, 0, 5.4, 1.0, 0.0, "tail");
+            let before = tl.clone();
+            if duration == 0.4 {
+                assert!(tl.swap_clips(left, right));
+                assert_eq!(tl.clip(left).unwrap().start, 5.0);
+                assert_eq!(tl.clip(right).unwrap().start, 2.0);
+                assert_eq!(tl.clip(middle), before.clip(middle));
+                assert_eq!(tl.clip(tail), before.clip(tail));
+            } else {
+                assert!(!tl.swap_clips(left, right));
+                assert_eq!(tl, before);
+            }
+        }
+    }
+
+    #[test]
+    fn swap_rejects_invalid_pairs_without_mutating() {
+        let mut tl = Timeline::empty_project();
+        let video = tl.add_media_clip("scene", ClipKind::Video, 0, 2.0, 0.4, 0.157, "scene");
+        let audio = tl.detach_audio(video).unwrap();
+        let before = tl.clone();
+        for (first, second) in [(video, video), (video, audio), (video, 99), (99, video)] {
+            assert!(!tl.swap_clips(first, second));
+            assert_eq!(tl, before);
+        }
+        // Even if a caller places linked members at distinct times on one
+        // lane, they cannot be swapped independently of their shared group.
+        tl.set_clip_track(audio, 0);
+        tl.clip_mut(audio).unwrap().start = 3.0;
+        let before = tl.clone();
+        assert!(!tl.swap_clips(video, audio));
+        assert_eq!(tl, before);
     }
 
     #[test]
@@ -507,5 +1101,95 @@ mod tests {
         assert_eq!(right.source.as_deref(), Some("/media/song.mp3"));
         assert_eq!(right.source_in, 6.0);
         assert!((right.volume - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn detach_audio_creates_linked_clip_and_silences_picture() {
+        let mut tl = Timeline::empty_project();
+        let video = tl.add_media_clip(
+            "interview.mp4",
+            ClipKind::Video,
+            0,
+            2.0,
+            8.0,
+            3.0,
+            "/media/interview.mp4",
+        );
+        tl.clip_mut(video).unwrap().volume = 0.6;
+
+        let audio = tl.detach_audio(video).expect("detach embedded audio");
+        let picture = tl.clip(video).unwrap().clone();
+        let sound = tl.clip(audio).unwrap().clone();
+        assert!(!picture.embedded_audio);
+        assert_eq!(picture.linked_clip, Some(audio));
+        assert_eq!(sound.kind, ClipKind::Audio);
+        assert_eq!(sound.linked_clip, Some(video));
+        assert_eq!(sound.start, picture.start);
+        assert_eq!(sound.duration, picture.duration);
+        assert_eq!(sound.source_in, picture.source_in);
+        assert_eq!(sound.source, picture.source);
+        assert!((sound.volume - 0.6).abs() < f32::EPSILON);
+        assert_ne!(sound.track, picture.track);
+
+        tl.move_clip(video, 5.0);
+        assert_eq!(tl.clip(audio).unwrap().start, 5.0, "linked audio moves");
+        tl.trim_left(audio, 6.0);
+        assert_eq!(tl.clip(video).unwrap().start, 6.0, "linked picture trims");
+        assert_eq!(tl.clip(video).unwrap().source_in, 4.0);
+
+        let right_video = tl.split_at(video, 8.0).expect("split linked pair");
+        let right_audio_id = tl
+            .clip(right_video)
+            .unwrap()
+            .linked_clip
+            .expect("right picture stays linked");
+        assert_ne!(right_audio_id, audio);
+        assert_eq!(tl.clip(right_audio_id).unwrap().start, 8.0);
+        assert_eq!(
+            tl.clip(right_audio_id).unwrap().linked_clip,
+            Some(right_video)
+        );
+
+        tl.remove_clip(right_audio_id);
+        assert_eq!(tl.clip(right_video).unwrap().linked_clip, None);
+        assert!(tl.set_embedded_audio(right_video, true));
+        assert!(tl.clip(right_video).unwrap().embedded_audio);
+    }
+
+    #[test]
+    fn title_style_defaults_parses_and_survives_split() {
+        let mut tl = Timeline::empty_project();
+        let title = tl.add_clip("Hello", ClipKind::Title, 0, 0.0, 4.0, 0.0);
+        assert_eq!(tl.clip(title).unwrap().title_style, TitleStyle::LowerThird);
+        tl.clip_mut(title).unwrap().title_style =
+            TitleStyle::from_name("pop-caption").expect("known style");
+        let right = tl.split_at(title, 2.0).expect("split title");
+        assert_eq!(tl.clip(right).unwrap().title_style, TitleStyle::PopCaption);
+        assert_eq!(TitleStyle::Caption.as_str(), "caption");
+        assert_eq!(
+            TitleStyle::from_name("minimal-caption"),
+            Some(TitleStyle::MinimalCaption)
+        );
+        assert_eq!(TitleStyle::from_name("comic-sans"), None);
+    }
+
+    #[test]
+    fn unlinking_detached_audio_keeps_both_clips_independent() {
+        let mut tl = Timeline::empty_project();
+        let video = tl.add_media_clip(
+            "interview.mp4",
+            ClipKind::Video,
+            0,
+            0.0,
+            6.0,
+            0.0,
+            "/media/interview.mp4",
+        );
+        let audio = tl.detach_audio(video).expect("detach embedded audio");
+        assert!(tl.unlink_clip(video));
+        assert_eq!(tl.clip(video).unwrap().linked_clip, None);
+        assert_eq!(tl.clip(audio).unwrap().linked_clip, None);
+        tl.move_clip(video, 3.0);
+        assert_eq!(tl.clip(audio).unwrap().start, 0.0);
     }
 }

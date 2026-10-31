@@ -1,0 +1,1104 @@
+//! Public export regressions, checked by independently decoding every output
+//! frame with FFmpeg. No native still/preview decoder is used as the oracle.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::channel;
+
+use openreel_engine::{ClipKind, Timeline, TitleStyle};
+use openreel_media::{export_timeline, probe};
+
+static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "openreel_export_{}_{}",
+            std::process::id(),
+            FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).expect("temp dir");
+        Self(dir)
+    }
+
+    fn video(&self, name: &str, source: &str, filter: &str, tone: Option<u32>) -> String {
+        let path = self.0.join(name);
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i", source]);
+        if let Some(hz) = tone {
+            cmd.args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency={hz}:sample_rate=48000"),
+                "-shortest",
+            ]);
+        }
+        cmd.args([
+            "-vf",
+            filter,
+            "-fps_mode",
+            "vfr",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "0",
+            "-g",
+            "120",
+            "-sc_threshold",
+            "0",
+            "-threads:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ])
+        .arg(&path);
+        run(&mut cmd);
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn indices(&self, name: &str, rate: &str) -> String {
+        self.video(
+            name,
+            &format!("nullsrc=s=64x36:r={rate}:d=1"),
+            "geq=lum='24+6*N+16*mod(floor(X/8)+floor(Y/6),2)':cb=128:cr=128",
+            None,
+        )
+    }
+
+    fn color(&self, name: &str, color: &str, tone: Option<u32>) -> String {
+        self.video(
+            name,
+            &format!("color=c={color}:s=320x180:r=30:d=3"),
+            "null",
+            tone,
+        )
+    }
+
+    fn export(&self, name: &str, timeline: &Timeline) -> PathBuf {
+        let mut infos = HashMap::new();
+        for path in timeline
+            .clips
+            .iter()
+            .filter_map(|clip| clip.source.as_ref())
+        {
+            infos
+                .entry(path.clone())
+                .or_insert_with(|| probe(path).expect("probe fixture"));
+        }
+        let path = self.0.join(name);
+        let (tx, rx) = channel();
+        export_timeline(timeline, &infos, &path, tx).expect("public export_timeline");
+        let progress: Vec<_> = rx.try_iter().collect();
+        assert_eq!(progress.last(), Some(&1.0));
+        path
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn run(cmd: &mut Command) -> Output {
+    let out = cmd.output().expect("run FFmpeg tool");
+    assert!(
+        out.status.success(),
+        "{cmd:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+fn frames(path: &Path) -> Vec<Vec<u8>> {
+    let info = probe(path.to_str().unwrap()).expect("probe decoded file");
+    let out = run(Command::new("ffmpeg").args([
+        "-v",
+        "error",
+        "-i",
+        path.to_str().unwrap(),
+        "-map",
+        "0:v:0",
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-",
+    ]));
+    let bytes = info.width as usize * info.height as usize * 3;
+    assert_eq!(out.stdout.len() % bytes, 0, "complete RGB frames");
+    out.stdout.chunks_exact(bytes).map(<[u8]>::to_vec).collect()
+}
+
+fn assert_frames(label: &str, actual: &[Vec<u8>], expected: &[&[u8]]) {
+    assert_eq!(actual.len(), expected.len(), "{label}: frame count");
+    let errors: Vec<_> = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| {
+            assert_eq!(a.len(), b.len(), "{label}: frame size");
+            a.iter()
+                .zip(b.iter())
+                .map(|(&x, &y)| x.abs_diff(y) as f64)
+                .sum::<f64>()
+                / a.len() as f64
+        })
+        .collect();
+    eprintln!(
+        "{label}: {} frames, full-frame RGB mean absolute errors={errors:?}",
+        actual.len()
+    );
+    for (index, error) in errors.iter().enumerate() {
+        assert!(
+            *error < 2.5,
+            "{label}: frame {index}, full-frame RGB error {error} (limit 2.5)"
+        );
+    }
+}
+
+fn video(
+    timeline: &mut Timeline,
+    path: &str,
+    track: usize,
+    start: f64,
+    duration: f64,
+    source_in: f64,
+) -> u64 {
+    timeline.add_media_clip(
+        "picture",
+        ClipKind::Video,
+        track,
+        start,
+        duration,
+        source_in,
+        path,
+    )
+}
+
+fn extend(timeline: &mut Timeline, end: f64) {
+    // A source-less audio clip extends the canvas without rendering a title
+    // or supplying another picture. The public model permits generated clips.
+    timeline.add_clip("tail", ClipKind::Audio, 0, 0.0, end, 0.0);
+}
+
+fn stream_json(path: &Path) -> serde_json::Value {
+    let out = run(Command::new("ffprobe").args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=time_base,r_frame_rate:frame=best_effort_timestamp_time",
+        "-of",
+        "json",
+        path.to_str().unwrap(),
+    ]));
+    serde_json::from_slice(&out.stdout).expect("timestamp JSON")
+}
+
+#[test]
+fn source_in_preserves_mp4_frame_indices_and_mkv_control() {
+    let fixture = Fixture::new();
+    for (name, source_in, time_base) in [
+        ("indices.mp4", 2.0 / 30.0, "1/15360"),
+        // MKV stores frame 2 at .067, not at the ideal CFR time 2/30.
+        ("indices.mkv", 0.067, "1/1000"),
+    ] {
+        let source = fixture.indices(name, "30");
+        assert_eq!(
+            stream_json(Path::new(&source))["streams"][0]["time_base"],
+            time_base
+        );
+        let original = frames(Path::new(&source));
+        let mut timeline = Timeline::new(30.0);
+        video(&mut timeline, &source, 0, 0.0, 3.0 / 30.0, source_in);
+        let exported = fixture.export(&format!("{name}.export.mp4"), &timeline);
+        assert_frames(
+            name,
+            &frames(&exported),
+            &[&original[2], &original[3], &original[4]],
+        );
+    }
+}
+
+#[test]
+fn arbitrary_source_in_holds_the_covering_frame() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "30");
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &source, 0, 0.0, 3.0 / 30.0, 2.4 / 30.0);
+    let exported = fixture.export("arbitrary.mp4", &timeline);
+    assert_frames(
+        "source in 2.4/30",
+        &frames(&exported),
+        &[&original[2], &original[3], &original[4]],
+    );
+}
+
+#[test]
+fn scene_placement_preserves_source_playback_across_frame_rates() {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "scenes.mp4",
+        "nullsrc=s=80x48:r=120:d=1",
+        "geq=lum='40+160*mod(floor(N/pow(2,floor(X/8))),2)':cb=128:cr=128",
+        Some(440),
+    );
+    let original = frames(Path::new(&source));
+    assert_eq!(original.len(), 120);
+    let boundaries = [0, 1, 2, 17, 18, 19, 61, 97, 120];
+    for fps in [30, 120] {
+        let mut timeline = Timeline::new(fps as f64);
+        for pair in boundaries.windows(2) {
+            video(
+                &mut timeline,
+                &source,
+                0,
+                pair[0] as f64 / 120.0,
+                (pair[1] - pair[0]) as f64 / 120.0,
+                pair[0] as f64 / 120.0,
+            );
+        }
+        let expected: Vec<_> = (0..fps)
+            .map(|n| original[n * 120 / fps].as_slice())
+            .collect();
+        let exported = fixture.export(&format!("scenes-{fps}.mp4"), &timeline);
+        assert_frames(
+            &format!("120 fps scenes at {fps} fps"),
+            &frames(&exported),
+            &expected,
+        );
+        assert!(tone_amplitude(&exported, 440.0) > 0.08);
+    }
+}
+
+fn audio_samples(path: &Path) -> Vec<f32> {
+    let pcm = run(Command::new("ffmpeg").args([
+        "-v",
+        "error",
+        "-i",
+        path.to_str().unwrap(),
+        "-vn",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-f",
+        "f32le",
+        "-",
+    ]));
+    assert_eq!(pcm.stdout.len() % 4, 0, "complete audio samples");
+    pcm.stdout
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
+fn assert_export_end(fps: f64, end: f64, count: usize, with_audio: bool) {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "end.mp4",
+        "nullsrc=s=80x48:r=60:d=1.5",
+        "geq=lum='40+160*mod(floor(N/pow(2,floor(X/8))),2)':cb=128:cr=128",
+        with_audio.then_some(440),
+    );
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(fps);
+    let boundaries: Vec<_> = [0.0, 1.0 / 3.0, 49.0 / 60.0]
+        .into_iter()
+        .filter(|time| *time < end)
+        .chain([end])
+        .collect();
+    for pair in boundaries.windows(2) {
+        video(
+            &mut timeline,
+            &source,
+            0,
+            pair[0],
+            pair[1] - pair[0],
+            pair[0],
+        );
+    }
+    let exported = fixture.export("end-export.mp4", &timeline);
+    let actual = frames(&exported);
+    let samples = audio_samples(&exported);
+    let expected_samples = (end * 48000.0).round() as usize;
+    let label = format!("{fps} fps, end={end}, audio={with_audio}");
+    eprintln!(
+        "{label}: decoded {} of {count} expected frames, {} of {expected_samples} expected audio samples",
+        actual.len(),
+        samples.len()
+    );
+    let expected: Vec<_> = (0..count)
+        .map(|n| original[(n as f64 * 60.0 / fps + 1e-10).floor() as usize].as_slice())
+        .collect();
+    assert_frames(&label, &actual, &expected);
+    assert_eq!(samples.len(), expected_samples, "{label}: audio duration");
+    if with_audio {
+        let tail_peak = samples[samples.len() - 48..]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(tail_peak > 0.02, "{label}: final millisecond is audible");
+    } else {
+        assert!(samples.iter().all(|sample| sample.abs() < 0.0001));
+    }
+    let json = stream_json(&exported);
+    assert_eq!(json["frames"].as_array().unwrap().len(), count);
+    for (n, frame) in json["frames"].as_array().unwrap().iter().enumerate() {
+        let pts: f64 = frame["best_effort_timestamp_time"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((pts - n as f64 / fps).abs() < 0.000001);
+        assert!(pts < end, "{label}: frame {n} is outside the timeline");
+    }
+}
+
+#[test]
+fn off_grid_end_exports_the_final_active_frame_without_extending_audio() {
+    for with_audio in [true, false] {
+        assert_export_end(30.0, 1.235, 38, with_audio);
+    }
+}
+
+#[test]
+fn exact_grid_end_excludes_the_end_sample() {
+    for (fps, count, source_frame) in [
+        (30.0, 37, 0),
+        (30000.0 / 1001.0, 37, 0),
+        (60000.0 / 1001.0, 74, 0),
+        (24000.0 / 1001.0, 6, 947),
+        (24000.0 / 1001.0, 1, 953),
+        (24000.0 / 1001.0, 6, 100_000),
+    ] {
+        // Curated durations subtract source timestamps, which can have much
+        // more floating-point cancellation error than a duration made at zero.
+        let end = (source_frame + count) as f64 / fps - source_frame as f64 / fps;
+        assert_export_end(fps, end, count, true);
+    }
+}
+
+#[test]
+fn fractional_rate_off_grid_end_exports_the_final_active_frame() {
+    for (fps, count) in [(30000.0 / 1001.0, 38), (60000.0 / 1001.0, 75)] {
+        assert_export_end(fps, 1.235, count, true);
+    }
+    let fps = 24000.0 / 1001.0;
+    // Six 48 kHz samples keep audio expectations exact on both sides too.
+    assert_export_end(fps, 6.0 / fps - 0.000125, 6, true);
+    assert_export_end(fps, 6.0 / fps + 0.000125, 7, true);
+}
+
+#[test]
+fn off_grid_end_limits_delayed_audio_on_the_sample_clock() {
+    let fixture = Fixture::new();
+    let source = fixture.color("delayed-tone.mp4", "red", Some(440));
+    for contributions in [1, 2] {
+        let mut timeline = Timeline::new(30.0);
+        let picture = video(&mut timeline, &source, 0, 0.0, 1.235, 0.0);
+        timeline.clip_mut(picture).unwrap().embedded_audio = false;
+        for track in 0..contributions {
+            timeline.add_media_clip(
+                "sound",
+                ClipKind::Audio,
+                track,
+                0.0006,
+                1.235 - 0.0006,
+                0.0,
+                &source,
+            );
+        }
+        let exported = fixture.export(&format!("delayed-{contributions}.mp4"), &timeline);
+        let samples = audio_samples(&exported);
+        eprintln!(
+            "{contributions} delayed audio contributions: decoded {} of 59280 expected samples",
+            samples.len()
+        );
+        assert_eq!(samples.len(), 59280, "rounded delays must not extend audio");
+        let tail_peak = samples[samples.len() - 48..]
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(tail_peak > 0.02, "final millisecond is audible");
+    }
+}
+
+#[test]
+fn gaps_and_adjacent_cuts_use_exact_output_frame_offsets() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "30");
+    let original = frames(Path::new(&source));
+    let black = vec![0; original[0].len()];
+    let mut timeline = Timeline::new(30.0);
+    video(
+        &mut timeline,
+        &source,
+        0,
+        1.0 / 30.0,
+        2.0 / 30.0,
+        2.0 / 30.0,
+    );
+    video(
+        &mut timeline,
+        &source,
+        0,
+        3.0 / 30.0,
+        1.0 / 30.0,
+        9.0 / 30.0,
+    );
+    video(
+        &mut timeline,
+        &source,
+        0,
+        5.0 / 30.0,
+        2.0 / 30.0,
+        5.0 / 30.0,
+    );
+    extend(&mut timeline, 8.0 / 30.0);
+    let exported = fixture.export("gaps.mp4", &timeline);
+    assert_frames(
+        "leading/interior/trailing gaps and adjacent cut",
+        &frames(&exported),
+        &[
+            &black,
+            &original[2],
+            &original[3],
+            &original[9],
+            &black,
+            &original[5],
+            &original[6],
+            &black,
+        ],
+    );
+}
+
+#[test]
+fn fractional_rate_keeps_frame_offsets_content_and_cadence() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("ntsc.mp4", "30000/1001");
+    let original = frames(Path::new(&source));
+    let black = vec![0; original[0].len()];
+    let fps = 30000.0 / 1001.0;
+    let mut timeline = Timeline::new(fps);
+    video(&mut timeline, &source, 0, 1.0 / fps, 3.0 / fps, 2.0 / fps);
+    extend(&mut timeline, 6.0 / fps);
+    let exported = fixture.export("fractional.mp4", &timeline);
+    assert_frames(
+        "30000/1001",
+        &frames(&exported),
+        &[
+            &black,
+            &original[2],
+            &original[3],
+            &original[4],
+            &black,
+            &black,
+        ],
+    );
+    let json = stream_json(&exported);
+    assert_eq!(json["streams"][0]["r_frame_rate"], "30000/1001");
+    for (i, frame) in json["frames"].as_array().unwrap().iter().enumerate() {
+        let pts: f64 = frame["best_effort_timestamp_time"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (pts - i as f64 / fps).abs() < 0.000001,
+            "frame {i}: PTS {pts}"
+        );
+    }
+    eprintln!("fractional output stream and frame timestamps: {json}");
+}
+
+#[test]
+fn rate_conversion_samples_the_covering_frame_not_the_nearest_frame() {
+    let fixture = Fixture::new();
+    for (source_rate, source_fps, output_fps, source_in, count) in [
+        ("30", 30.0, 10.0, 2.0 / 30.0, 5),
+        ("10", 10.0, 30.0, 0.04, 10),
+        ("24", 24.0, 30000.0 / 1001.0, 2.25 / 24.0, 10),
+    ] {
+        let source = fixture.indices(&format!("rate-{source_rate}.mp4"), source_rate);
+        let original = frames(Path::new(&source));
+        let mut timeline = Timeline::new(output_fps);
+        video(
+            &mut timeline,
+            &source,
+            0,
+            0.0,
+            count as f64 / output_fps,
+            source_in,
+        );
+        let exported = fixture.export(&format!("converted-{source_rate}.mp4"), &timeline);
+        let indices: Vec<_> = (0..count)
+            .map(|n| ((source_in + n as f64 / output_fps) * source_fps + 1e-10).floor() as usize)
+            .collect();
+        let expected: Vec<_> = indices.iter().map(|&n| original[n].as_slice()).collect();
+        eprintln!("{source_rate} -> {output_fps}: expected source frames {indices:?}");
+        assert_frames("rate conversion", &frames(&exported), &expected);
+    }
+}
+
+#[test]
+fn source_in_is_relative_to_a_nonzero_container_origin() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "30");
+    let offset = fixture.0.join("offset.mp4");
+    run(Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            &source,
+            "-c",
+            "copy",
+            "-output_ts_offset",
+            "3.25",
+        ])
+        .arg(&offset));
+    assert_eq!(
+        stream_json(&offset)["frames"][0]["best_effort_timestamp_time"],
+        "3.250000"
+    );
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    video(
+        &mut timeline,
+        offset.to_str().unwrap(),
+        0,
+        0.0,
+        3.0 / 30.0,
+        2.0 / 30.0,
+    );
+    let exported = fixture.export("normalized.mp4", &timeline);
+    assert_frames(
+        "normalized source origin",
+        &frames(&exported),
+        &[&original[2], &original[3], &original[4]],
+    );
+}
+
+#[test]
+fn vfr_in_point_uses_presentation_intervals_and_holds_at_eof() {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "vfr.mp4",
+        "nullsrc=s=64x36:r=10:d=3",
+        "geq=lum='24+6*N':cb=128:cr=128,select='eq(n,0)+gte(n,20)'",
+        None,
+    );
+    let json = stream_json(Path::new(&source));
+    assert_eq!(json["frames"][1]["best_effort_timestamp_time"], "2.000000");
+    let original = frames(Path::new(&source));
+    assert_eq!(original.len(), 11);
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 1.1, 1.5);
+    let exported = fixture.export("vfr-in-point.mp4", &timeline);
+    assert_frames(
+        "VFR hold and exact next PTS",
+        &frames(&exported),
+        &[
+            &original[0],
+            &original[0],
+            &original[0],
+            &original[0],
+            &original[0],
+            &original[1],
+            &original[2],
+            &original[3],
+            &original[4],
+            &original[5],
+            &original[6],
+        ],
+    );
+    let mut tail = Timeline::new(10.0);
+    video(&mut tail, &source, 0, 0.0, 0.3, 2.9);
+    let exported = fixture.export("vfr-tail.mp4", &tail);
+    assert_frames(
+        "VFR final frame hold",
+        &frames(&exported),
+        &[original[10].as_slice(); 3],
+    );
+
+    let source = fixture.indices("fast-tail.mp4", "30");
+    let original = frames(Path::new(&source));
+    assert_eq!(original.len(), 30);
+    let longer_audio = fixture.0.join("longer-audio.mp4");
+    run(Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-i", &source])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1.2",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+        ])
+        .arg(&longer_audio));
+    let source = longer_audio.to_str().unwrap();
+    assert!((probe(source).unwrap().duration - 1.2).abs() < 0.001);
+    let mut tail = Timeline::new(10.0);
+    video(&mut tail, source, 0, 0.0, 0.4, 0.8);
+    let exported = fixture.export("last-source-frame.mp4", &tail);
+    assert_frames(
+        "Audio tail holds the final source frame, not the last sampled frame",
+        &frames(&exported),
+        &[&original[24], &original[27], &original[29], &original[29]],
+    );
+}
+
+#[test]
+fn mixed_color_matrices_and_ranges_preserve_rgb_through_export() {
+    let fixture = Fixture::new();
+    let mut timeline = Timeline::new(10.0);
+    let mut expected = Vec::new();
+    for (index, (matrix, range)) in [("bt709", "tv"), ("bt470bg", "tv"), ("bt709", "pc")]
+        .into_iter()
+        .enumerate()
+    {
+        let source = fixture.video(
+            &format!("{matrix}-{range}.mp4"),
+            "color=c=0xD14C29:s=64x36:r=10:d=0.5",
+            &format!(
+                "drawbox=x=32:y=0:w=32:h=36:color=0x2369BD:t=fill,\
+                 scale=in_color_matrix=bt601:out_color_matrix={matrix}:out_range={range},\
+                 setparams=colorspace={matrix}:range={range}"
+            ),
+            None,
+        );
+        let metadata = run(Command::new("ffprobe").args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_space,color_range",
+            "-of",
+            "json",
+            &source,
+        ]));
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        assert_eq!(metadata["streams"][0]["color_space"], matrix);
+        assert_eq!(metadata["streams"][0]["color_range"], range);
+        let original = frames(Path::new(&source));
+        for (offset, opacity) in [(0.0, 1.0), (0.2, 0.5)] {
+            let id = video(
+                &mut timeline,
+                &source,
+                0,
+                index as f64 * 0.4 + offset,
+                0.2,
+                0.0,
+            );
+            timeline.clip_mut(id).unwrap().opacity = opacity;
+            let picture: Vec<_> = original[0]
+                .iter()
+                .map(|&value| (value as f32 * opacity).round() as u8)
+                .collect();
+            expected.extend([picture.clone(), picture]);
+        }
+    }
+    let exported = fixture.export("mixed-colors.mp4", &timeline);
+    let references: Vec<_> = expected.iter().map(Vec::as_slice).collect();
+    assert_frames(
+        "mixed SDR matrices/ranges, full and half opacity",
+        &frames(&exported),
+        &references,
+    );
+}
+
+#[test]
+fn lower_track_wins_even_when_a_higher_track_starts_later() {
+    let fixture = Fixture::new();
+    let red = fixture.color("red.mp4", "red", None);
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let original = frames(Path::new(&red));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &red, 0, 0.0, 3.0, 0.0);
+    video(&mut timeline, &blue, 1, 1.0, 1.0, 0.0);
+    let exported = fixture.export("lanes.mp4", &timeline);
+    assert_frames(
+        "lowest lane, including t=1.5",
+        &frames(&exported),
+        &[original[0].as_slice(); 30],
+    );
+}
+
+#[test]
+fn same_track_ties_use_insertion_order_not_start_order() {
+    let fixture = Fixture::new();
+    let red = fixture.color("red.mp4", "red", None);
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let original = frames(Path::new(&red));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &red, 0, 0.0, 0.4, 0.0);
+    video(&mut timeline, &blue, 0, 0.1, 0.2, 0.0);
+    let exported = fixture.export("ties.mp4", &timeline);
+    assert_frames(
+        "same-track insertion order",
+        &frames(&exported),
+        &[original[0].as_slice(); 4],
+    );
+}
+
+fn opacity_over_black(opacity: f32) {
+    let fixture = Fixture::new();
+    let red = fixture.color("red.mp4", "red", None);
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let mut timeline = Timeline::new(10.0);
+    let id = video(&mut timeline, &red, 0, 0.0, 0.3, 0.0);
+    timeline.clip_mut(id).unwrap().opacity = opacity;
+    video(&mut timeline, &blue, 1, 0.0, 0.3, 0.0);
+    let expected: Vec<_> = frames(Path::new(&red))[0]
+        .iter()
+        .map(|&value| (value as f32 * opacity).round() as u8)
+        .collect();
+    let exported = fixture.export("opacity.mp4", &timeline);
+    assert_frames(
+        &format!("opacity={opacity} over black"),
+        &frames(&exported),
+        &[expected.as_slice(); 3],
+    );
+}
+
+#[test]
+fn zero_opacity_video_does_not_reveal_another_lane() {
+    opacity_over_black(0.0);
+}
+
+#[test]
+fn partial_opacity_video_fades_against_black() {
+    opacity_over_black(0.5);
+}
+
+#[test]
+fn occluded_video_resumes_at_advanced_source_time() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "10");
+    let original = frames(Path::new(&source));
+    let black = vec![0; original[0].len()];
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 1, 0.0, 0.6, 0.0);
+    timeline.add_clip("source-less picture", ClipKind::Video, 0, 0.2, 0.2, 0.0);
+    let exported = fixture.export("occlusion.mp4", &timeline);
+    assert_frames(
+        "source-less winner and resumed source",
+        &frames(&exported),
+        &[
+            &original[0],
+            &original[1],
+            &black,
+            &black,
+            &original[4],
+            &original[5],
+        ],
+    );
+}
+
+#[test]
+fn titles_have_first_inserted_precedence_and_exclusive_ends() {
+    let fixture = Fixture::new();
+    let source = fixture.color("white.mp4", "white", None);
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 0.5, 0.0);
+    let a = timeline.add_clip("FIRST WIDE TITLE", ClipKind::Title, 9, 0.0, 0.2, 0.0);
+    let b = timeline.add_clip("B", ClipKind::Title, 0, 0.1, 0.3, 0.0);
+    let c = timeline.add_clip("C", ClipKind::Title, 0, 0.4, 0.1, 0.0);
+    for id in [a, b, c] {
+        timeline.clip_mut(id).unwrap().title_style = TitleStyle::Caption;
+    }
+    let overlap = fixture.export("titles-overlap.mp4", &timeline);
+    let mut reference = timeline.clone();
+    let b = reference.clip_mut(b).unwrap();
+    b.start = 0.2;
+    b.duration = 0.2;
+    // Export each title alone to form an independent boundary oracle. The
+    // reference graph must not accidentally validate an inclusive-end bug.
+    let mut expected = Vec::new();
+    for (id, count) in [(a, 2), (b.id, 2), (c, 1)] {
+        let mut single = reference.clone();
+        single
+            .clips
+            .retain(|clip| clip.kind != ClipKind::Title || clip.id == id);
+        let title = single.clip_mut(id).unwrap();
+        title.start = 0.0;
+        title.duration = 0.5;
+        let out = fixture.export(&format!("title-{id}.mp4"), &single);
+        let decoded = frames(&out);
+        let dark = decoded[0]
+            .chunks_exact(3)
+            .filter(|rgb| rgb[0] < 200)
+            .count();
+        assert!(
+            dark > 100,
+            "title {id} must actually be rendered, dark pixels={dark}"
+        );
+        expected.extend(std::iter::repeat_n(decoded[0].clone(), count));
+    }
+    let references: Vec<_> = expected.iter().map(Vec::as_slice).collect();
+    assert_frames(
+        "title precedence and half-open cuts",
+        &frames(&overlap),
+        &references,
+    );
+}
+
+#[test]
+fn transparent_first_title_hides_its_box_and_blocks_later_titles() {
+    let fixture = Fixture::new();
+    let source = fixture.color("white.mp4", "white", None);
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 0.3, 0.0);
+    let id = timeline.add_clip("INVISIBLE", ClipKind::Title, 1, 0.0, 0.3, 0.0);
+    timeline.clip_mut(id).unwrap().opacity = 0.0;
+    timeline.add_clip("HIDDEN TOO", ClipKind::Title, 0, 0.0, 0.3, 0.0);
+    let exported = fixture.export("transparent-title.mp4", &timeline);
+    assert_frames(
+        "transparent selected title",
+        &frames(&exported),
+        &[original[0].as_slice(); 3],
+    );
+}
+
+fn tone_amplitude(path: &Path, frequency: f64) -> f64 {
+    let out = run(Command::new("ffmpeg").args([
+        "-v",
+        "error",
+        "-i",
+        path.to_str().unwrap(),
+        "-vn",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-f",
+        "f32le",
+        "-",
+    ]));
+    let samples: Vec<_> = out
+        .stdout
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()) as f64)
+        .collect();
+    let window = &samples[4800..43200];
+    let (mut sin, mut cos) = (0.0, 0.0);
+    for (i, sample) in window.iter().enumerate() {
+        let angle = std::f64::consts::TAU * frequency * i as f64 / 48000.0;
+        sin += sample * angle.sin();
+        cos += sample * angle.cos();
+    }
+    2.0 * sin.hypot(cos) / window.len() as f64
+}
+
+#[test]
+fn hidden_video_audio_is_mixed_and_detachment_is_still_honored() {
+    let fixture = Fixture::new();
+    let red = fixture.color("red-tone.mp4", "red", Some(440));
+    let blue = fixture.color("blue-tone.mp4", "blue", Some(880));
+    let original = frames(Path::new(&red));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &red, 0, 0.0, 1.0, 0.0);
+    let hidden = video(&mut timeline, &blue, 1, 0.0, 1.0, 0.0);
+    let mixed = fixture.export("mixed.mp4", &timeline);
+    let a = tone_amplitude(&mixed, 440.0);
+    let b = tone_amplitude(&mixed, 880.0);
+    eprintln!("mixed audio amplitudes: visible 440 Hz={a}, hidden 880 Hz={b}");
+    assert!(
+        a > 0.08 && b > 0.08,
+        "both original sine tones must survive"
+    );
+    timeline.clip_mut(hidden).unwrap().embedded_audio = false;
+    let detached = fixture.export("detached.mp4", &timeline);
+    let a = tone_amplitude(&detached, 440.0);
+    let b = tone_amplitude(&detached, 880.0);
+    eprintln!("detached audio amplitudes: visible 440 Hz={a}, hidden 880 Hz={b}");
+    assert!(
+        a > 0.08 && b < 0.002,
+        "detached embedded audio must be absent"
+    );
+    assert_frames(
+        "hidden-video audio does not change picture",
+        &frames(&mixed),
+        &[original[0].as_slice(); 10],
+    );
+    assert_frames(
+        "detached audio does not change picture",
+        &frames(&detached),
+        &[original[0].as_slice(); 10],
+    );
+}
+
+#[test]
+fn audio_coalescing_preserves_overlaps_and_gain_changes() {
+    let fixture = Fixture::new();
+    let source = fixture.color("tone.mp4", "red", Some(440));
+    for overlap in [true, false] {
+        let mut timeline = Timeline::new(30.0);
+        let picture = video(&mut timeline, &source, 0, 0.0, 1.0, 0.0);
+        timeline.clip_mut(picture).unwrap().embedded_audio = false;
+        for n in 0..2 {
+            let (start, duration, gain) = if overlap {
+                (0.0, 1.0, 0.25)
+            } else {
+                (n as f64 * 0.5, 0.5, if n == 0 { 0.25 } else { 0.75 })
+            };
+            let id = timeline.add_media_clip(
+                "sound",
+                ClipKind::Audio,
+                n,
+                start,
+                duration,
+                start,
+                &source,
+            );
+            timeline.clip_mut(id).unwrap().volume = gain;
+        }
+        let exported = fixture.export(&format!("audio-overlap-{overlap}.mp4"), &timeline);
+        let amplitude = tone_amplitude(&exported, 440.0);
+        eprintln!("overlap={overlap}, 440 Hz amplitude={amplitude}, expected about 0.0625");
+        assert!(
+            (0.05..0.075).contains(&amplitude),
+            "do not merge overlaps or differing gains"
+        );
+    }
+}
+
+#[test]
+fn encoder_failure_is_reported_without_success_progress() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "30");
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &source, 0, 0.0, 0.1, 0.0);
+    let infos = [(source.clone(), probe(&source).unwrap())].into();
+    let (tx, rx) = channel();
+    let output = fixture.0.join("missing-directory/export.mp4");
+    let error = export_timeline(&timeline, &infos, &output, tx).unwrap_err();
+    eprintln!("expected encoder failure: {error}");
+    assert!(error.starts_with("export failed:"));
+    assert!(!output.exists());
+    assert!(!rx.try_iter().any(|progress| progress == 1.0));
+}
+
+#[test]
+fn reordered_repeated_ranges_preserve_every_frame_across_a_long_edit() {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "reordered.mp4",
+        "nullsrc=s=80x48:r=10:d=12",
+        "geq=lum='40+160*mod(floor(N/pow(2,floor(X/8))),2)':cb=128:cr=128",
+        Some(440),
+    );
+    let original = frames(Path::new(&source));
+    let black = vec![0; original[0].len()];
+    let mut timeline = Timeline::new(10.0);
+    let mut expected = vec![black.as_slice(); 97];
+    for (start, count, source_frame) in [
+        (0, 6, 92),
+        (6, 7, 13),
+        (13, 4, 102),
+        (17, 5, 31),
+        (22, 8, 4),
+        (30, 55, 32),
+        (90, 7, 56),
+    ] {
+        video(
+            &mut timeline,
+            &source,
+            0,
+            start as f64 / 10.0,
+            count as f64 / 10.0,
+            source_frame as f64 / 10.0,
+        );
+        for offset in 0..count {
+            expected[start + offset] = &original[source_frame + offset];
+        }
+    }
+    let exported = fixture.export("reordered-export.mp4", &timeline);
+    assert_frames(
+        "reordered source clocks and late gap",
+        &frames(&exported),
+        &expected,
+    );
+    assert!(tone_amplitude(&exported, 440.0) > 0.06);
+}
+
+#[test]
+fn five_hundred_scene_montage_exports_every_frame_with_audio() {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "montage.mp4",
+        "nullsrc=s=64x36:r=30:d=17",
+        "geq=lum='40+160*mod(N,2)':cb=128:cr=128",
+        Some(440),
+    );
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    for n in 0..500 {
+        video(
+            &mut timeline,
+            &source,
+            0,
+            n as f64 / 30.0,
+            1.0 / 30.0,
+            n as f64 / 30.0,
+        );
+    }
+    let exported = fixture.export("montage-export.mp4", &timeline);
+    let references: Vec<_> = original[..500].iter().map(Vec::as_slice).collect();
+    assert_frames("500 scene montage", &frames(&exported), &references);
+    assert!(
+        tone_amplitude(&exported, 440.0) > 0.06,
+        "montage embedded audio survives"
+    );
+}
+
+#[test]
+fn five_hundred_distinct_frames_with_unmergeable_audio_do_not_stall() {
+    let fixture = Fixture::new();
+    // Ten binary bars identify every frame uniquely, so even a multi-frame
+    // shift cannot pass by matching a periodic solid-color fixture.
+    let source = fixture.video(
+        "distinct.mp4",
+        "nullsrc=s=80x48:r=30:d=17",
+        "geq=lum='40+160*mod(floor(N/pow(2,floor(X/8))),2)':cb=128:cr=128",
+        Some(440),
+    );
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    for n in 0..500 {
+        let id = video(
+            &mut timeline,
+            &source,
+            0,
+            n as f64 / 30.0,
+            1.0 / 30.0,
+            n as f64 / 30.0,
+        );
+        // Different gains prevent audio-run coalescing. Video and audio must
+        // independently advance, even with all 500 amix inputs present.
+        timeline.clip_mut(id).unwrap().volume = if n % 2 == 0 { 0.5 } else { 1.0 };
+    }
+    let exported = fixture.export("distinct-export.mp4", &timeline);
+    let expected: Vec<_> = original[..500].iter().map(Vec::as_slice).collect();
+    assert_frames("500 unique frame identities", &frames(&exported), &expected);
+    let amplitude = tone_amplitude(&exported, 440.0);
+    eprintln!("500 unmergeable audio contributions: 440 Hz amplitude={amplitude}");
+    assert!(amplitude > 0.04, "unmergeable embedded audio survives");
+}

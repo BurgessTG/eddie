@@ -5,7 +5,7 @@
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2,
 };
-use openreel_engine::{format_timecode, ClipKind, Timeline};
+use openreel_engine::{format_timecode, ClipKind, Timeline, TitleStyle};
 
 use crate::theme;
 
@@ -24,11 +24,7 @@ pub fn paint(
     texture: Option<&TextureHandle>,
     audio_peaks: Option<(&[f32], f64)>,
 ) {
-    let video = timeline
-        .clips
-        .iter()
-        .filter(|c| c.kind == ClipKind::Video && c.contains(playhead))
-        .min_by_key(|c| c.track);
+    let video = timeline.active_video(playhead);
     let audio = timeline
         .clips
         .iter()
@@ -109,29 +105,78 @@ pub fn paint(
         }
     }
 
-    // Title overlay, positioned like the export lower-third.
-    if let Some(title) = timeline
-        .clips
-        .iter()
-        .find(|c| c.kind == ClipKind::Title && c.contains(playhead))
-    {
+    // Title/caption overlay, positioned like export for its style.
+    if let Some(title) = timeline.active_title(playhead) {
         let alpha = (title.opacity.clamp(0.0, 1.0) * 255.0) as u8;
-        let card = Rect::from_min_size(
-            frame.left_bottom() + Vec2::new(28.0, -72.0),
-            Vec2::new((frame.width() - 56.0).clamp(120.0, 420.0), 48.0),
-        );
-        painter.rect_filled(
-            card,
-            6,
-            Color32::from_rgba_unmultiplied(0, 0, 0, (alpha as f32 * 0.55) as u8),
-        );
-        painter.text(
-            card.left_center() + Vec2::new(14.0, 0.0),
-            Align2::LEFT_CENTER,
-            &title.name,
-            FontId::proportional(17.0),
-            Color32::from_white_alpha(alpha),
-        );
+        match title.title_style {
+            TitleStyle::LowerThird => {
+                let card = Rect::from_min_size(
+                    frame.left_bottom() + Vec2::new(28.0, -72.0),
+                    Vec2::new((frame.width() - 56.0).clamp(120.0, 420.0), 48.0),
+                );
+                painter.rect_filled(
+                    card,
+                    6,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, (alpha as f32 * 0.55) as u8),
+                );
+                painter.text(
+                    card.left_center() + Vec2::new(14.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    &title.name,
+                    FontId::proportional(17.0),
+                    Color32::from_white_alpha(alpha),
+                );
+            }
+            TitleStyle::Caption | TitleStyle::PopCaption => {
+                let pop = title.title_style == TitleStyle::PopCaption;
+                let font_size = if pop { 21.0 } else { 17.0 };
+                let estimated_width = title.name.chars().count() as f32 * font_size * 0.56 + 28.0;
+                let width = estimated_width.clamp(140.0, (frame.width() - 40.0).max(140.0));
+                let card = Rect::from_center_size(
+                    Pos2::new(frame.center().x, frame.bottom() - 38.0),
+                    Vec2::new(width, 42.0),
+                );
+                painter.rect_filled(
+                    card,
+                    6,
+                    Color32::from_rgba_unmultiplied(
+                        0,
+                        0,
+                        0,
+                        (alpha as f32 * if pop { 0.75 } else { 0.65 }) as u8,
+                    ),
+                );
+                let color = if pop {
+                    Color32::from_rgba_unmultiplied(255, 214, 64, alpha)
+                } else {
+                    Color32::from_white_alpha(alpha)
+                };
+                painter.text(
+                    card.center(),
+                    Align2::CENTER_CENTER,
+                    &title.name,
+                    FontId::proportional(font_size),
+                    color,
+                );
+            }
+            TitleStyle::MinimalCaption => {
+                let center = Pos2::new(frame.center().x, frame.bottom() - 34.0);
+                painter.text(
+                    center + Vec2::new(1.0, 1.0),
+                    Align2::CENTER_CENTER,
+                    &title.name,
+                    FontId::proportional(16.0),
+                    Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
+                );
+                painter.text(
+                    center,
+                    Align2::CENTER_CENTER,
+                    &title.name,
+                    FontId::proportional(16.0),
+                    Color32::from_white_alpha(alpha),
+                );
+            }
+        }
     }
 
     painter.text(

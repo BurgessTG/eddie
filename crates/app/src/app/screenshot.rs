@@ -305,7 +305,12 @@ fn render_slice6_screenshots() {
     write_ppm(Path::new("/tmp/openreel_slice6_long_session.ppm"), &fb);
 
     // Second scene: an in-flight model call (progress + Cancel).
-    app.chat_pending = Some(PendingChat::for_test("Build the montage", "Ranking clips…"));
+    app.chat_pending = Some(PendingChat::for_test(
+        "Build the montage",
+        "Ranking clips…",
+        &app.timeline,
+        app.script_state_json(),
+    ));
     app.chat_generation = 1;
     let primitives = run_frames_n(&ctx, &mut app, &mut textures, &mut clock, Vec::new(), 2);
     let fb = rasterize(&primitives, &textures);
