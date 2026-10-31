@@ -1269,6 +1269,7 @@ impl EditorApp {
                                     "end": word.end,
                                     "text": word.text,
                                     "confidence": word.confidence,
+                                    "estimated": word.estimated,
                                 })
                             }).collect::<Vec<_>>(),
                         })
@@ -4648,6 +4649,7 @@ mod tests {
             end,
             text: text.to_owned(),
             confidence: None,
+            estimated: false,
         })
         .collect();
         app.assets.push(media::BinAsset {

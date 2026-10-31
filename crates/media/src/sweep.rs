@@ -1214,6 +1214,34 @@ pub fn write_wav_24k(path: &str, start: f64, duration: f64, output: &Path) -> Me
     Ok(())
 }
 
+/// Decode a mono 16 kHz float PCM excerpt, the input local speech models
+/// expect. Bounded by the caller's duration; never a whole-file decode.
+pub fn pcm_mono_16k(path: &str, start: f64, duration: f64) -> MediaResult<Vec<f32>> {
+    let output = run(Command::new("ffmpeg").args([
+        "-v",
+        "error",
+        "-ss",
+        &format!("{:.3}", start.max(0.0)),
+        "-t",
+        &format!("{:.3}", duration.max(0.0)),
+        "-i",
+        path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "f32le",
+        "-",
+    ]))?;
+    Ok(output
+        .stdout
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

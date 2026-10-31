@@ -19,6 +19,7 @@ use super::chat::{api_endpoint, api_error_for_status, check_model_connection};
 use super::media::AssetState;
 use super::{ChatSettings, EditorApp};
 
+mod align;
 mod curation;
 #[cfg(test)]
 mod curation_tests;
@@ -94,12 +95,26 @@ pub(super) struct TranscriptSession {
     end: Option<f64>,
 }
 
+/// Whether a word or turn text ends on a sentence mark. A trailing ellipsis
+/// leaves the thought open.
+pub(super) fn ends_sentence(text: &str) -> bool {
+    let text = text
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}']);
+    !text.ends_with("...")
+        && !text.ends_with('\u{2026}')
+        && text.ends_with(['.', '?', '!', '\u{3002}', '\u{ff1f}', '\u{ff01}'])
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TranscriptWord {
     pub(super) start: f64,
     pub(super) end: f64,
     pub(super) text: String,
     pub(super) confidence: Option<f32>,
+    /// Interpolated between heard words by local alignment; good enough for
+    /// captions, never a cut point.
+    pub(super) estimated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,9 +123,8 @@ pub(super) struct TranscriptSegment {
     pub(super) end: f64,
     pub(super) speaker: Option<String>,
     pub(super) text: String,
-    /// Optional provider word timings. The current Voice
-    /// Transcribe contract is turn-level, so this normally stays
-    /// empty; parsers preserve words if a provider returns them.
+    /// Word timings. Voice Transcribe is turn-level only; these come from
+    /// a provider that returns words, or from local alignment (`align`).
     pub(super) words: Vec<TranscriptWord>,
     /// Speaker labels only identify speakers inside this upload/session.
     pub(super) session: Option<Arc<TranscriptSession>>,
@@ -897,11 +911,23 @@ fn run_sweep_with_mode(
         // speech. It may discount energy, but must not suppress transcription.
         progress("Transcribing audio…");
         match transcribe_asset(settings, info) {
-            Ok(transcript) => {
+            Ok(mut transcript) => {
                 stage_notes.push(format!(
                     "Transcription: {} speaker turns.",
                     transcript.len()
                 ));
+                // Voice Transcribe has no word timing. A local model adds it
+                // to multi-sentence turns so cuts can fall between sentences.
+                if align::model_path().is_some() {
+                    progress("Aligning words…");
+                }
+                match align::align_transcript(info, &mut transcript) {
+                    Ok((_, 0)) => {}
+                    Ok((aligned, candidates)) => stage_notes.push(format!(
+                        "Word timing: {aligned}/{candidates} multi-sentence turns aligned locally."
+                    )),
+                    Err(error) => stage_notes.push(format!("Word timing: {error}.")),
+                }
                 (transcript, true)
             }
             Err(error) => {
@@ -1795,6 +1821,7 @@ fn parse_transcript_words(row: &serde_json::Value, offset: f64) -> Vec<Transcrip
                 confidence: word["confidence"]
                     .as_f64()
                     .map(|value| value.clamp(0.0, 1.0) as f32),
+                estimated: false,
             })
         })
         .collect();
@@ -2214,6 +2241,7 @@ mod tests {
                 end,
                 text: text.to_owned(),
                 confidence: None,
+                estimated: false,
             })
             .collect(),
             session: None,
