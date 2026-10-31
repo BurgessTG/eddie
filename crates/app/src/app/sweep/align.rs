@@ -24,6 +24,8 @@ const SAMPLE_RATE: usize = 16_000;
 /// Heard word edges are good to about ±0.2 s. A sentence break moves to the
 /// quietest 20 ms of audio within this distance.
 const SNAP_SECONDS: f64 = 0.25;
+/// A snapped break leaves each neighboring word at least this much.
+const MIN_KEEP_SECONDS: f64 = 0.04;
 
 /// The multilingual base model (`ggml-base.bin`): `EDDIE_WHISPER_MODEL`, or
 /// `whisper/ggml-base.bin` beside the settings file. Absent means no local
@@ -128,12 +130,21 @@ fn snap_breaks(words: &mut [TranscriptWord], pcm: &[f32], offset: f64) {
         if !ends_sentence(&words[k].text) || words[k].estimated || words[k + 1].estimated {
             continue;
         }
-        let low = (words[k].start + words[k].end) / 2.0;
-        let high = (words[k + 1].start + words[k + 1].end) / 2.0;
-        let from = ((words[k].end - SNAP_SECONDS).max(low) - offset).max(0.0);
+        // Heard edges can be early or late by more than half a short word,
+        // so search up to each word's far edge, leaving it MIN_KEEP_SECONDS.
+        let low = words[k].start + MIN_KEEP_SECONDS;
+        let high = words[k + 1].end - MIN_KEEP_SECONDS;
+        let from = (words[k].end - SNAP_SECONDS).max(low) - offset;
         let to = (words[k + 1].start + SNAP_SECONDS).min(high) - offset;
-        let quietest = (((from * SAMPLE_RATE as f64) as usize / FRAME)
-            ..((to * SAMPLE_RATE as f64).max(0.0) as usize / FRAME))
+        // Frames whose centre lies in [from, to].
+        let first = ((from * SAMPLE_RATE as f64 / FRAME as f64) - 0.5)
+            .ceil()
+            .max(0.0) as usize;
+        let last = ((to * SAMPLE_RATE as f64 / FRAME as f64) - 0.5).floor();
+        if last < first as f64 {
+            continue;
+        }
+        let quietest = (first..=last as usize)
             .filter_map(|frame| {
                 let samples = pcm.get(frame * FRAME..(frame + 1) * FRAME)?;
                 Some((samples.iter().map(|x| x * x).sum::<f32>(), frame))
@@ -306,5 +317,28 @@ mod tests {
         assert!(needs_alignment(&turn("Done here. Next part now", 0.0, 4.0)));
         assert!(!needs_alignment(&turn("One long sentence only.", 0.0, 4.0)));
         assert!(!needs_alignment(&turn("Short. Turn.", 0.0, 1.5)));
+    }
+
+    #[test]
+    fn a_sentence_break_finds_the_pause_past_the_next_words_midpoint() {
+        // Heard edges are early: "You" really starts after the dip at
+        // 7.14 s, past its heard midpoint (7.10 s). A quieter frame at the
+        // very end of "You" must not swallow the word.
+        let word = |text: &str, start, end| TranscriptWord {
+            start,
+            end,
+            text: text.to_owned(),
+            confidence: None,
+            estimated: false,
+        };
+        let mut words = vec![word("parts.", 6.7, 7.0), word("You", 7.0, 7.2)];
+        let offset = 6.0;
+        let mut pcm = vec![0.5_f32; SAMPLE_RATE * 2];
+        let frame = |at: f64| ((at - offset) * SAMPLE_RATE as f64).round() as usize;
+        pcm[frame(7.14)..frame(7.16)].fill(0.05);
+        pcm[frame(7.18)..frame(7.20)].fill(0.0);
+        snap_breaks(&mut words, &pcm, offset);
+        assert!((words[0].end - 7.15).abs() < 1e-9, "{:?}", words[0].end);
+        assert!((words[1].start - 7.15).abs() < 1e-9, "{:?}", words[1].start);
     }
 }

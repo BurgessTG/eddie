@@ -254,7 +254,8 @@ Meta's text made the base model hallucinate). Heard words are matched to
 Meta's words by longest common subsequence; Meta's words and punctuation
 stay authoritative, unmatched words are interpolated and `estimated`, and
 a turn under half matched keeps turn timing. Each sentence break between
-two heard words snaps to the quietest 20 ms within 0.25 s. Speech grouping
+two heard words snaps to the quietest 20 ms within 0.25 s, searching past
+word midpoints but leaving each neighbor 40 ms. Speech grouping
 splits a turn at those breaks only, never at estimated words. Without the
 model, curation keeps turn-level timing. Tests ignore the installed model
 unless `EDDIE_WHISPER_MODEL` is set. `timingPrecision` is `turn` or
