@@ -595,21 +595,19 @@ fn open_device(
     let Some(device) = host.default_output_device() else {
         return Err((mixer, "no default output".to_owned()));
     };
-    let name = device.name().unwrap_or_else(|_| "audio device".to_owned());
+    let name = device
+        .description()
+        .map_or_else(|_| "audio device".to_owned(), |d| d.name().to_owned());
     let config = match device.supported_output_configs() {
         Ok(configs) => configs
             .filter(|range| {
                 range.sample_format() == cpal::SampleFormat::F32
-                    && range.min_sample_rate().0 <= AUDIO_RATE
-                    && AUDIO_RATE <= range.max_sample_rate().0
+                    && range.min_sample_rate() <= AUDIO_RATE
+                    && AUDIO_RATE <= range.max_sample_rate()
                     && (1..=8).contains(&range.channels())
             })
             .min_by_key(|range| (range.channels() as i32 - 2).abs())
-            .map(|range| {
-                range
-                    .with_sample_rate(cpal::SampleRate(AUDIO_RATE))
-                    .config()
-            }),
+            .map(|range| range.with_sample_rate(AUDIO_RATE).config()),
         Err(error) => return Err((mixer, error.to_string())),
     };
     let Some(config) = config else {
@@ -621,26 +619,15 @@ fn open_device(
     let callback_slot = Arc::clone(&slot);
     let latency_shared = Arc::clone(shared);
     let mut owned: Option<Mixer> = None;
-    // The first callback fills the empty device buffer.
-    let mut buffer_frames = 0;
     let stream = device.build_output_stream(
-        &config,
+        config,
         move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
             let mixer = owned.get_or_insert_with(|| callback_slot.lock().unwrap().take().unwrap());
-            let frames = data.len() / channels;
-            buffer_frames = buffer_frames.max(frames);
-            // PipeWire's ALSA plugin reports no delay. Then the queue ahead
-            // of this block is the buffer minus the space just requested.
+            // ALSA's delay: everything queued ahead of this block, including
+            // PipeWire's graph quantum. (cpal <= 0.16 read it through alsa
+            // 0.9.1, whose status struct reads as zero in release builds.)
             let stamp = info.timestamp();
-            let reported = stamp
-                .playback
-                .duration_since(&stamp.callback)
-                .unwrap_or_default();
-            let latency = if reported.is_zero() {
-                Duration::from_secs_f64((buffer_frames - frames) as f64 / RATE)
-            } else {
-                reported
-            };
+            let latency = stamp.playback.duration_since(stamp.callback);
             latency_shared
                 .latency_nanos
                 .store(latency.as_nanos() as u64, Ordering::Relaxed);

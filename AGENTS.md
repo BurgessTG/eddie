@@ -402,9 +402,10 @@ Decode completes a captured clock target before chasing a newer one, preventing
 moving-clock starvation. Audio plays in process (`crates/media/src/audio.rs`):
 one mixer at 48 kHz stereo, one ffmpeg-next decode/swresample thread per
 audible clip, with clips starting within 0.75 s prerolled. The samples the
-mixer renders are the transport clock; the playhead reads it less the device
-queue (PipeWire's ALSA plugin reports no delay, so the queue is estimated as
-buffer minus the requested period, about 57 ms here). Silent held blocks do
+mixer renders are the transport clock; the playhead reads it less ALSA's
+reported delay, which includes PipeWire's graph quantum (about 21 ms here).
+Keep cpal >= 0.18: older cpal used alsa 0.9.1, whose status struct reads as
+zero in release builds, so the delay was silently lost. Silent held blocks do
 not restart that interpolation, so a held clock reaches its limit (and the
 timeline end) once the queue drains; between seeks it never steps back. The app gives the mixer
 a limit: the next visible cut, or the one after when its first picture is
@@ -414,8 +415,10 @@ still lands on each cut for one tick so the clip is requested at its first
 picture. A voice under the clock with no decoded data holds the clock too.
 Without a device (headless, `SDL_AUDIODRIVER=dummy`) a paced null output
 keeps the same clock silently; app tests use the deterministic manual output.
-This is not loopback-measured sync, and it does not make CPU-bound preroll
-smooth. Decode failure pauses with an error, not an automatic retry loop.
+A PipeWire null-sink loopback measured audio reaching the sink 0.0-0.2 ms
+after the clock crosses it (30 clicks, including after a 0.5 s hold; it was
+21.4 ms, one quantum, before the cpal fix). Hardware output latency beyond
+the sink is not measured or compensated. This does not make CPU-bound preroll smooth. Decode failure pauses with an error, not an automatic retry loop.
 Native calls themselves are not preemptible.
 `addCaptionsForClip` and the inspector generate readable caption
 clips from a placed clip's transcript, using word timing when

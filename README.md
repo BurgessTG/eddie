@@ -126,8 +126,9 @@ detailed curator contract.
 
 ## Limitations
 
-- Audio is the playback clock, but sync is not loopback-measured, and the
-  device delay is estimated where the sound server does not report it.
+- Audio is the playback clock. Sound reaches the PipeWire sink within
+  0.2 ms of the playhead (loopback-measured); the sound card's own output
+  latency beyond that is not compensated.
 - Meta's ASR returns speaker turns only. Word timing comes from a local
   whisper model when installed; without it, speech edges are turn-level,
   and noisy audio can still fail to align.
