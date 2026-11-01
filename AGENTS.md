@@ -359,7 +359,10 @@ explicitly unlinked for J/L cuts or replacement sound. Titles and
 generated captions share `TitleStyle` (`lower-third`, `caption`,
 `pop-caption`, `minimal-caption`) across preview and export.
 Preview and export share `export_canvas` (the monitor pillarboxes like
-export) and `Timeline::active_video`/`active_title`: the
+export). Its orientation is the one most video clips use; a tie follows the
+first clip in insertion order, square counts as landscape, and the largest
+source of that orientation sets the size, so one rotated phone clip in a
+landscape edit is pillarboxed rather than turning the edit portrait and `Timeline::active_video`/`active_title`: the
 lowest video lane wins (insertion order breaks ties), its opacity fades
 against black rather than revealing another lane, and the first active
 title wins. All audible clips still mix independently of picture visibility.
