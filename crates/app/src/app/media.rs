@@ -460,10 +460,20 @@ impl EditorApp {
                 ui.add_space(10.0);
 
                 let query = self.search.to_lowercase();
-                let grid_height = (ui.available_height() - 196.0).max(66.0);
+                let has_ready_assets = self
+                    .assets
+                    .iter()
+                    .any(|asset| asset.state == AssetState::Ready);
+                // The curator card is pinned below the grid at its measured
+                // height from the last frame, so it never covers thumbnails.
+                let card_id = ui.id().with("curator_card_height");
+                let card_height: f32 = ui.ctx().data(|d| d.get_temp(card_id)).unwrap_or(132.0);
+                let reserve = if has_ready_assets { card_height + 12.0 } else { 0.0 };
+                let grid_height = (ui.available_height() - reserve).max(66.0);
                 egui::ScrollArea::vertical()
                     .id_salt("media_grid")
                     .max_height(grid_height)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                     const GAP: f32 = 8.0;
                     const MIN_TILE_W: f32 = 112.0;
@@ -675,123 +685,146 @@ impl EditorApp {
                     }
                 });
 
-                    let has_ready_assets = self
-                        .assets
-                        .iter()
-                        .any(|asset| asset.state == AssetState::Ready);
-                    if has_ready_assets {
-                        ui.add_space(4.0);
-                        egui::ScrollArea::vertical().id_salt("curator_panel")
-                            .auto_shrink([false, false]).show(ui, |ui| {
-                        theme::card_frame().show(ui, |ui| {
+                if has_ready_assets {
+                    ui.add_space((ui.available_height() - card_height).max(12.0));
+                    // On a short window the card scrolls rather than
+                    // running off the bottom of the panel.
+                    let card_area = ui.available_height();
+                    egui::ScrollArea::vertical()
+                        .id_salt("curator_card")
+                        .max_height(card_area)
+                        .show(ui, |ui| {
+                    let card = theme::card_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 8.0;
                         ui.horizontal(|ui| {
                             theme::panel_title(ui, "Curator");
-                            if self
+                            let running = self
                                 .assets
                                 .iter()
-                                .any(|asset| asset.sweep.status == SweepStatus::Running)
-                            {
-                                ui.add(egui::Spinner::new().size(13.0));
-                                ui.label(RichText::new("Curating…").color(theme::MUTED_FG));
+                                .filter(|asset| asset.sweep.status == SweepStatus::Running)
+                                .count();
+                            if running > 0 {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(egui::Spinner::new().size(13.0))
+                                            .on_hover_text(format!("Curating {}", count(running, "video")));
+                                    },
+                                );
                             }
                         });
                         let selected_asset = self.selected_asset.as_deref().and_then(|path| {
                             self.assets.iter().find(|asset| asset.info.path == path)
                         });
-                        if let Some(asset) = selected_asset {
-                            ui.add(egui::Label::new(
-                                RichText::new(&asset.info.name)
-                                    .size(12.0)
-                                    .strong(),
-                            ).truncate()).on_hover_text(&asset.info.path);
-                            ui.vertical(|ui| {
-                                match asset.sweep.status {
-                                    SweepStatus::NotStarted => {
-                                        if theme::primary_button_wide(ui, "Curate selected")
-                                            .on_hover_text(
-                                                "Extract every shot and review useful ranges; Meta review sends sampled frames and audio when configured",
-                                            )
-                                            .clicked()
-                                        {
-                                            curate_selected = Some(asset.info.path.clone());
-                                        }
-                                    }
-                                    // The stage line below says what is running.
-                                    SweepStatus::Running => {}
-                                    SweepStatus::Ready => {
-                                        if theme::secondary_button_wide(ui, "Re-curate")
-                                            .on_hover_text(
-                                                "Analyze again, for example after adding an API key",
-                                            )
-                                            .clicked()
-                                        {
-                                            curate_selected = Some(asset.info.path.clone());
-                                        }
-                                    }
-                                    SweepStatus::Failed => {
-                                        if theme::secondary_button_wide(ui, "Retry curation")
-                                            .on_hover_text("Try analyzing this video again")
-                                            .clicked()
-                                        {
-                                            curate_selected = Some(asset.info.path.clone());
-                                        }
-                                    }
-                                }
-                                let uncurated = self.assets.iter().filter(|asset| {
-                                    asset.state == AssetState::Ready
-                                        && asset.sweep.status == SweepStatus::NotStarted
-                                }).count();
-                                if uncurated > 1
-                                    || (uncurated == 1
-                                        && asset.sweep.status != SweepStatus::NotStarted)
-                                {
-                                    if theme::secondary_button_wide(ui, "Curate all new")
-                                        .on_hover_text(
-                                            "Curate every imported video that has not been curated",
-                                        )
-                                        .clicked()
-                                    {
-                                        curate_all_new = true;
-                                    }
-                                }
-                            });
-                            if asset.sweep.status == SweepStatus::NotStarted {
-                                ui.label(
-                                    RichText::new("Not curated yet.")
-                                        .size(12.0)
-                                        .color(theme::MUTED_FG),
-                                );
-                            } else if !asset.sweep.note.is_empty() {
-                                let needs_review = asset.sweep.candidates.iter()
-                                    .filter(|clip| clip.review.status == ReviewStatus::NeedsReview).count();
-                                let label = match asset.sweep.status {
-                                    SweepStatus::Running if self.sweep_queue.contains(&asset.info.path) => "Queued".to_owned(),
-                                    SweepStatus::Running => asset.sweep.note.clone(),
-                                    SweepStatus::Failed => "Analysis failed".to_owned(),
-                                    _ if needs_review > 0 => format!("{} · {needs_review} need review", count(asset.sweep.candidates.len(), "clip")),
-                                    _ => format!("{} · {} · {}",
-                                        if asset.sweep.usage.batches > 0 { "Reviewed" } else { "Local" },
-                                        count(asset.sweep.candidates.len(), "clip"), count(asset.sweep.scene_clips.len(), "scene")),
-                                };
-                                ui.add(egui::Label::new(RichText::new(label).size(12.0)
-                                    .color(theme::MUTED_FG)).truncate())
-                                    .on_hover_text(&asset.sweep.note);
+                        let half = ((ui.available_width() - 6.0) / 2.0).floor();
+                        let Some(asset) = selected_asset else {
+                            ui.label(theme::caption("Select a video, then press Curate."));
+                            open_gallery = theme::secondary_button_wide(ui, "Browse gallery")
+                                .on_hover_text("Pause playback and search, filter or sort curated clips")
+                                .clicked();
+                            return;
+                        };
+                        let needs_review = asset
+                            .sweep
+                            .candidates
+                            .iter()
+                            .filter(|clip| clip.review.status == ReviewStatus::NeedsReview)
+                            .count();
+                        let summary = match asset.sweep.status {
+                            SweepStatus::NotStarted => "Not curated yet".to_owned(),
+                            SweepStatus::Running if self.sweep_queue.contains(&asset.info.path) => {
+                                "Queued".to_owned()
                             }
-                        } else {
-                            ui.label(
-                                RichText::new("Select a video, then press Curate.")
-                                    .size(12.0)
-                                    .color(theme::MUTED_FG),
-                            );
+                            SweepStatus::Running => asset.sweep.note.clone(),
+                            SweepStatus::Failed => "Analysis failed".to_owned(),
+                            _ if needs_review > 0 => format!(
+                                "{} · {needs_review} need review",
+                                count(asset.sweep.candidates.len(), "clip")
+                            ),
+                            _ => format!(
+                                "{} · {} · {}",
+                                if asset.sweep.usage.batches > 0 { "Reviewed" } else { "Local" },
+                                count(asset.sweep.candidates.len(), "clip"),
+                                count(asset.sweep.scene_clips.len(), "scene")
+                            ),
+                        };
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&asset.info.name).size(12.5).color(theme::FOREGROUND),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&asset.info.path);
+                            let note = if asset.sweep.note.is_empty() {
+                                summary.clone()
+                            } else {
+                                asset.sweep.note.clone()
+                            };
+                            ui.add(egui::Label::new(theme::caption(summary)).truncate())
+                                .on_hover_text(note);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let curate = match asset.sweep.status {
+                                SweepStatus::NotStarted => Some((
+                                    "Curate",
+                                    true,
+                                    "Extract every shot and review useful ranges; Meta review sends sampled frames and audio when configured",
+                                )),
+                                SweepStatus::Running => None,
+                                SweepStatus::Ready => Some((
+                                    "Re-curate",
+                                    false,
+                                    "Analyze again, for example after adding an API key",
+                                )),
+                                SweepStatus::Failed => {
+                                    Some(("Retry", false, "Try analyzing this video again"))
+                                }
+                            };
+                            let gallery_w = if curate.is_some() { half } else { half * 2.0 + 6.0 };
+                            if let Some((label, primary, tooltip)) = curate {
+                                ui.allocate_ui(egui::vec2(half, 30.0), |ui| {
+                                    let response = if primary {
+                                        theme::primary_button_wide(ui, label)
+                                    } else {
+                                        theme::secondary_button_wide(ui, label)
+                                    };
+                                    if response.on_hover_text(tooltip).clicked() {
+                                        curate_selected = Some(asset.info.path.clone());
+                                    }
+                                });
+                            }
+                            ui.allocate_ui(egui::vec2(gallery_w, 30.0), |ui| {
+                                open_gallery = theme::secondary_button_wide(ui, "Gallery")
+                                    .on_hover_text("Pause playback and search, filter or sort curated clips")
+                                    .clicked();
+                            });
+                        });
+                        let uncurated = self
+                            .assets
+                            .iter()
+                            .filter(|asset| {
+                                asset.state == AssetState::Ready
+                                    && asset.sweep.status == SweepStatus::NotStarted
+                            })
+                            .count();
+                        let offer_all = uncurated > 1
+                            || (uncurated == 1 && asset.sweep.status != SweepStatus::NotStarted);
+                        if offer_all
+                            && theme::ghost_button_wide(ui, &format!("Curate all new ({uncurated})"))
+                                .on_hover_text("Curate every imported video that has not been curated")
+                                .clicked()
+                        {
+                            curate_all_new = true;
                         }
-                        open_gallery = theme::secondary_button_wide(ui, "Browse gallery")
-                            .on_hover_text("Pause playback and search, filter or sort curated clips")
-                            .clicked();
+                    });
+                    let height = card.response.rect.height();
+                    ui.ctx().data_mut(|d| d.insert_temp(card_id, height));
                         });
-                        });
-                    }
+                }
             });
         if let Some((path, track, at)) = add_request {
             self.add_asset_to_timeline(&path, track, at);

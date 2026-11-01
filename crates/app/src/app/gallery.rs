@@ -402,6 +402,14 @@ impl EditorApp {
             ui.label(
                 RichText::new(if running {
                     "Results appear when curation finishes."
+                } else if !self.assets.iter().any(|asset| {
+                    asset.sweep.status == SweepStatus::Ready
+                        && self
+                            .selected_asset
+                            .as_deref()
+                            .is_none_or(|path| path == asset.info.path)
+                }) {
+                    "Curate a video to see its clips here."
                 } else {
                     "No matching clips."
                 })
@@ -422,7 +430,12 @@ impl EditorApp {
         const MIN_CARD_WIDTH: f32 = 176.0;
         let width = (ui.available_width() - ui.spacing().scroll.bar_width - 4.0).max(1.0);
         let columns = ((width + GAP) / (MIN_CARD_WIDTH + GAP)).floor().max(1.0) as usize;
-        let card_width = ((width - GAP * (columns - 1) as f32) / columns as f32).min(280.0);
+        // A whole card, actions included, must fit the viewport height, so
+        // a wide but short gallery shrinks its cards instead of cutting them.
+        let fit_height = ((ui.available_height() - 88.0) * 16.0 / 9.0).max(120.0);
+        let card_width = ((width - GAP * (columns - 1) as f32) / columns as f32)
+            .min(280.0)
+            .min(fit_height);
         let card_height = card_width * 9.0 / 16.0 + 84.0;
         let thumbnails = self
             .curator

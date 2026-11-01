@@ -342,14 +342,14 @@ pub fn secondary_button_wide(ui: &mut Ui, label: &str) -> Response {
     variant_button(ui, label, secondary(), width)
 }
 
-/// Historical name: the outline variant is now the borderless secondary
-/// fill, per the "no hard outlines at rest" rule.
-pub fn outline_button(ui: &mut Ui, label: &str) -> Response {
-    secondary_button(ui, label)
-}
-
 pub fn ghost_button(ui: &mut Ui, label: &str) -> Response {
     variant_button(ui, label, ghost(), 0.0)
+}
+
+/// Ghost button that fills the available width.
+pub fn ghost_button_wide(ui: &mut Ui, label: &str) -> Response {
+    let width = ui.available_width();
+    variant_button(ui, label, ghost(), width)
 }
 
 /// Destructive button that fills the available width.

@@ -1861,12 +1861,6 @@ impl EditorApp {
                         {
                             action = Some(UiAction::Export);
                         }
-                        if theme::secondary_button(ui, "Import media")
-                            .on_hover_text("Import video or audio files")
-                            .clicked()
-                        {
-                            action = Some(UiAction::Import);
-                        }
                     });
                 });
             });
@@ -1926,10 +1920,13 @@ impl EditorApp {
     }
 
     fn timeline_panel(&mut self, ctx: &egui::Context) {
+        // Short windows give the monitor room; this only sets the first
+        // height, and a user resize is remembered.
+        let screen_h = ctx.screen_rect().height();
         let (id, height) = if self.curator.open {
             ("gallery_timeline", 170.0)
         } else {
-            ("timeline", 240.0)
+            ("timeline", (screen_h * 0.27).clamp(170.0, 240.0))
         };
         egui::TopBottomPanel::bottom(id)
             .resizable(true)
@@ -2071,8 +2068,8 @@ impl EditorApp {
         }
         egui::SidePanel::right("right_dock")
             .resizable(true)
-            .default_width(330.0)
-            .width_range(260.0..=480.0)
+            .default_width(340.0)
+            .width_range(280.0..=460.0)
             .frame(theme::panel_frame())
             .show(ctx, |ui| {
                 let mut tabs = Vec::new();
@@ -2086,10 +2083,48 @@ impl EditorApp {
                         "Fine-grained numbers for the selected clip",
                     ));
                 }
-                if let Some(tab) = theme::segmented(ui, self.right_tab, &tabs) {
-                    self.right_tab = tab;
-                }
-                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if let Some(tab) = theme::segmented(ui, self.right_tab, &tabs) {
+                        self.right_tab = tab;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if tool_icon_button(
+                            ui,
+                            ToolIcon::Settings,
+                            self.show_chat_settings,
+                            "Meta Model API settings",
+                        )
+                        .clicked()
+                        {
+                            self.show_chat_settings = !self.show_chat_settings;
+                        }
+                        if self.right_tab == RightTab::Chat {
+                            if tool_icon_button(
+                                ui,
+                                ToolIcon::Code,
+                                self.show_chat_debug,
+                                "Show the last generated JavaScript",
+                            )
+                            .clicked()
+                            {
+                                self.show_chat_debug = !self.show_chat_debug;
+                            }
+                            if self.chat_undo.is_some()
+                                && tool_icon_button(
+                                    ui,
+                                    ToolIcon::Undo,
+                                    false,
+                                    "Undo the last AI edit",
+                                )
+                                .clicked()
+                            {
+                                self.undo_chat_edit();
+                            }
+                        }
+                    });
+                });
+                ui.add_space(12.0);
                 match self.right_tab {
                     RightTab::Chat => self.chat_content(ui, ctx),
                     RightTab::Details => {
@@ -2175,7 +2210,7 @@ impl EditorApp {
                     .num_columns(2)
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Start (s)");
+                        ui.label(RichText::new("Start (s)").color(theme::MUTED_FG));
                         start_changed = ui
                             .add(
                                 egui::DragValue::new(&mut edited_start)
@@ -2185,7 +2220,7 @@ impl EditorApp {
                             )
                             .changed();
                         ui.end_row();
-                        ui.label("Duration (s)");
+                        ui.label(RichText::new("Duration (s)").color(theme::MUTED_FG));
                         ui.add(
                             egui::DragValue::new(&mut clip.duration)
                                 .speed(0.05)
@@ -2194,7 +2229,7 @@ impl EditorApp {
                         );
                         ui.end_row();
                         if clip.source.is_some() {
-                            ui.label("Source in (s)");
+                            ui.label(RichText::new("Source in (s)").color(theme::MUTED_FG));
                             ui.add(
                                 egui::DragValue::new(&mut clip.source_in)
                                     .speed(0.05)
@@ -2204,12 +2239,12 @@ impl EditorApp {
                             ui.end_row();
                         }
                         if !is_audio {
-                            ui.label("Opacity");
+                            ui.label(RichText::new("Opacity").color(theme::MUTED_FG));
                             ui.add(egui::Slider::new(&mut clip.opacity, 0.0..=1.0));
                             ui.end_row();
                         }
                         if clip.source.is_some() {
-                            ui.label("Volume");
+                            ui.label(RichText::new("Volume").color(theme::MUTED_FG));
                             ui.add(egui::Slider::new(&mut clip.volume, 0.0..=1.5));
                             ui.end_row();
                         }
@@ -2254,28 +2289,42 @@ impl EditorApp {
                     ui.add_space(6.0);
                 }
                 if snapshot.kind == ClipKind::Title {
-                    let combo = egui::ComboBox::from_label("Style")
-                        .selected_text(clip.title_style.label())
-                        .show_ui(ui, |ui| {
-                            for style in TitleStyle::ALL {
-                                ui.selectable_value(&mut clip.title_style, style, style.label());
-                            }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Style").color(theme::MUTED_FG));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::ComboBox::from_id_salt("title_style")
+                                .width(ui.available_width().min(180.0))
+                                .selected_text(clip.title_style.label())
+                                .show_ui(ui, |ui| {
+                                    for style in TitleStyle::ALL {
+                                        ui.selectable_value(
+                                            &mut clip.title_style,
+                                            style,
+                                            style.label(),
+                                        );
+                                    }
+                                })
+                                .response
+                                .on_hover_text("Choose how this title or caption is drawn");
                         });
-                    combo
-                        .response
-                        .on_hover_text("Choose how this title or caption is drawn");
+                    });
                     ui.add_space(6.0);
                 } else if has_transcript {
-                    let combo = egui::ComboBox::from_label("Caption style")
-                        .selected_text(caption_style.label())
-                        .show_ui(ui, |ui| {
-                            for style in TitleStyle::ALL {
-                                ui.selectable_value(&mut caption_style, style, style.label());
-                            }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Captions").color(theme::MUTED_FG));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::ComboBox::from_id_salt("caption_style")
+                                .width(ui.available_width().min(180.0))
+                                .selected_text(caption_style.label())
+                                .show_ui(ui, |ui| {
+                                    for style in TitleStyle::ALL {
+                                        ui.selectable_value(&mut caption_style, style, style.label());
+                                    }
+                                })
+                                .response
+                                .on_hover_text("Choose the style for generated captions");
                         });
-                    combo
-                        .response
-                        .on_hover_text("Choose the style for generated captions");
+                    });
                     ui.add_space(6.0);
                     if theme::secondary_button_wide(ui, "Add captions")
                         .on_hover_text(
@@ -2482,11 +2531,14 @@ impl EditorApp {
                             .filter_map(|c| self.asset(c.source.as_deref()?))
                             .map(|a| (a.info.width, a.info.height)),
                     ),
+                    !self.assets.is_empty(),
                 );
 
                 ui.add_space(8.0);
                 let row = ui.available_rect_before_wrap();
                 let bar_w = 520.0_f32.min(row.width());
+                // Below this the length readout would overlap the controls.
+                let show_length = bar_w >= 470.0;
                 let bar = egui::Rect::from_center_size(
                     egui::pos2(row.center().x, row.top() + 22.0),
                     Vec2::new(bar_w, 44.0),
@@ -2512,7 +2564,12 @@ impl EditorApp {
                         )
                         .on_hover_text("Playhead position");
                         let controls_w = 38.0 * 5.0 + 2.0 * 4.0;
-                        let left_pad = (ui.available_width() - controls_w) / 2.0 - 52.0;
+                        let readout_w = ui.min_rect().width();
+                        let left_pad = if show_length {
+                            (ui.available_width() + readout_w - controls_w) / 2.0 - readout_w
+                        } else {
+                            ui.available_width() - controls_w
+                        };
                         ui.add_space(left_pad.max(8.0));
                         if transport_button(ui, TransportIcon::ToStart, "Go to start (Home)")
                             .clicked()
@@ -2544,6 +2601,9 @@ impl EditorApp {
                         }
                         if transport_button(ui, TransportIcon::ToEnd, "Go to end (End)").clicked() {
                             self.seek(self.timeline.end());
+                        }
+                        if !show_length {
+                            return;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
@@ -2652,6 +2712,9 @@ enum ToolIcon {
     Delete,
     ZoomIn,
     ZoomOut,
+    Settings,
+    Code,
+    Undo,
 }
 
 /// App mark: a rounded tile with a play notch, drawn as shapes.
@@ -2725,18 +2788,49 @@ fn tool_icon_button(ui: &mut Ui, icon: ToolIcon, active: bool, tooltip: &str) ->
             }
         }
         ToolIcon::Magnet => {
-            // Horseshoe: two poles and a U arc.
-            let left = egui::Rect::from_min_size(c + Vec2::new(-7.0, -8.0), Vec2::new(4.0, 7.0));
-            let right = egui::Rect::from_min_size(c + Vec2::new(3.0, -8.0), Vec2::new(4.0, 7.0));
-            painter.rect_filled(left, CornerRadius::same(1), fg);
-            painter.rect_filled(right, CornerRadius::same(1), fg);
-            let arc: Vec<egui::Pos2> = (0..=12)
+            // Horseshoe with separated pole tips, so it reads as a magnet
+            // rather than a letter U.
+            let mut body = vec![c + Vec2::new(-5.0, -3.5)];
+            body.extend((0..=12).map(|i| {
+                let angle = std::f32::consts::PI * (i as f32 / 12.0);
+                c + Vec2::new(-5.0 * angle.cos(), 1.0 + 5.0 * angle.sin())
+            }));
+            body.push(c + Vec2::new(5.0, -3.5));
+            painter.add(Shape::line(body, Stroke::new(3.0_f32, fg)));
+            for x in [-5.0_f32, 5.0] {
+                let tip = egui::Rect::from_center_size(c + Vec2::new(x, -7.0), Vec2::new(3.0, 3.0));
+                painter.rect_filled(tip, CornerRadius::same(1), fg);
+            }
+        }
+        ToolIcon::Settings => {
+            // Gear: ring plus eight teeth.
+            painter.circle_stroke(c, 4.6, line);
+            for i in 0..8 {
+                let angle = std::f32::consts::TAU * i as f32 / 8.0;
+                let dir = Vec2::new(angle.cos(), angle.sin());
+                painter.line_segment([c + dir * 5.4, c + dir * 7.6], Stroke::new(2.2_f32, fg));
+            }
+            painter.circle_filled(c, 1.6, fg);
+        }
+        ToolIcon::Code => {
+            painter.line_segment([c + Vec2::new(-3.0, -5.0), c + Vec2::new(-7.0, 0.0)], line);
+            painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(-3.0, 5.0)], line);
+            painter.line_segment([c + Vec2::new(3.0, -5.0), c + Vec2::new(7.0, 0.0)], line);
+            painter.line_segment([c + Vec2::new(7.0, 0.0), c + Vec2::new(3.0, 5.0)], line);
+            painter.line_segment([c + Vec2::new(1.5, -6.0), c + Vec2::new(-1.5, 6.0)], line);
+        }
+        ToolIcon::Undo => {
+            // Counter-clockwise arrow.
+            let arc: Vec<egui::Pos2> = (0..=14)
                 .map(|i| {
-                    let angle = std::f32::consts::PI * (i as f32 / 12.0);
-                    c + Vec2::new(-5.0 * angle.cos(), -1.0 + 6.0 * angle.sin())
+                    let angle = std::f32::consts::PI * (1.1 - 1.3 * i as f32 / 14.0);
+                    c + Vec2::new(1.0 + 5.5 * angle.cos(), 1.5 - 5.5 * angle.sin())
                 })
                 .collect();
-            painter.add(Shape::line(arc, Stroke::new(3.6_f32, fg)));
+            let start = arc[0];
+            painter.add(Shape::line(arc, line));
+            painter.line_segment([start, start + Vec2::new(0.5, -4.0)], line);
+            painter.line_segment([start, start + Vec2::new(4.0, 0.8)], line);
         }
         ToolIcon::Title => {
             painter.text(
