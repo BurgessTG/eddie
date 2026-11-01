@@ -346,7 +346,9 @@ can remain off the project grid. Free moves/trims still use that grid.
 The magnet compares actual edge matches, excluding the moving linked partner.
 It only snaps edges while dragging; it
 never ripples clips closed (`close_gaps` runs only from the explicit
-script `CloseGaps`, all lanes). Split is playhead-based (toolbar
+script `CloseGaps`). It removes time no video or audio covers and shifts
+every lane together, so captions and titles stay over their pictures;
+closing lanes independently desynced them. Split is playhead-based (toolbar
 Split, S or B); clicking a lane parks the playhead there. There is no
 split tool mode and no in-app sample project (`loadSample` is gone);
 `samples/` exists for tests. Import batches queue instead of being
@@ -360,7 +362,8 @@ linked pairs move, trim, split, and close gaps together until
 explicitly unlinked for J/L cuts or replacement sound. Titles and
 generated captions share `TitleStyle` (`lower-third`, `caption`,
 `pop-caption`, `minimal-caption`) across preview and export.
-Preview and export share `Timeline::active_video`/`active_title`: the
+Preview and export share `export_canvas` (the monitor pillarboxes like
+export) and `Timeline::active_video`/`active_title`: the
 lowest video lane wins (insertion order breaks ties), its opacity fades
 against black rather than revealing another lane, and the first active
 title wins. All audible clips still mix independently of picture visibility.

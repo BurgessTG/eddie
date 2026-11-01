@@ -1031,9 +1031,7 @@ impl HeadlessEditor {
                 | ScriptCommand::SetMusicBedMuted(_)
                 | ScriptCommand::SetZoom(_) => {}
                 ScriptCommand::CloseGaps => {
-                    for track in 0..self.timeline.track_labels.len() {
-                        self.timeline.close_gaps(track);
-                    }
+                    self.timeline.close_gaps();
                 }
             }
         }

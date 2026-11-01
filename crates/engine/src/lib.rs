@@ -586,42 +586,37 @@ impl Timeline {
 
     /// Magnetic main-track behavior: shift clips on `track` left so no
     /// gaps remain between them. The first clip keeps its start.
-    pub fn close_gaps(&mut self, track: usize) {
-        let mut ordered: Vec<(f64, ClipId)> = self
+    /// Remove timeline time that no video or audio clip covers, after the
+    /// first such clip. Every clip after a gap, on every lane, moves left by
+    /// the same amount, so titles, captions and linked or layered media stay
+    /// in sync with the pictures they sit over. A title inside a removed gap
+    /// moves to the gap's start.
+    pub fn close_gaps(&mut self) {
+        let mut covered: Vec<(f64, f64)> = self
             .clips
             .iter()
-            .filter(|c| c.track == track)
-            .map(|c| (c.start, c.id))
+            .filter(|c| c.kind != ClipKind::Title)
+            .map(|c| (c.start, c.end()))
             .collect();
-        ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut cursor: Option<f64> = None;
-        for (_, id) in ordered {
-            let Some(original) = self.clip(id).cloned() else {
-                continue;
-            };
-            let mut new_start = original.start;
-            if let Some(expected) = cursor {
-                if new_start > expected {
-                    new_start = expected;
+        covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut gaps: Vec<(f64, f64)> = Vec::new();
+        let mut reach: Option<f64> = None;
+        for (start, end) in covered {
+            match reach {
+                Some(at) if start > at => {
+                    gaps.push((at, start));
+                    reach = Some(end);
                 }
+                Some(at) => reach = Some(at.max(end)),
+                None => reach = Some(end),
             }
-            let delta = new_start - original.start;
-            if delta != 0.0 {
-                if let Some(clip) = self.clip_mut(id) {
-                    clip.start = new_start;
-                }
-                if let Some(linked) = self.linked_id(id) {
-                    if let Some(companion) = self.clip(linked).cloned() {
-                        if companion.track != track {
-                            let companion_start = (companion.start + delta).max(0.0);
-                            if let Some(clip) = self.clip_mut(linked) {
-                                clip.start = companion_start;
-                            }
-                        }
-                    }
-                }
-            }
-            cursor = Some(new_start + original.duration);
+        }
+        for clip in &mut self.clips {
+            let shift: f64 = gaps
+                .iter()
+                .map(|&(a, b)| (clip.start.min(b) - a).max(0.0))
+                .sum();
+            clip.start -= shift;
         }
     }
 
@@ -775,7 +770,7 @@ mod tests {
             "/media/scene.mp4",
         );
         let tail_audio = tl.detach_audio(tail).unwrap();
-        tl.close_gaps(0);
+        tl.close_gaps();
         for id in [tail, tail_audio] {
             let clip = tl.clip(id).unwrap();
             assert_eq!(clip.start, tl.clip(right_video).unwrap().end());
@@ -783,9 +778,7 @@ mod tests {
             assert_eq!(clip.source_in, 4.0);
         }
         let unchanged = tl.clone();
-        for track in 0..tl.track_labels.len() {
-            tl.close_gaps(track);
-        }
+        tl.close_gaps();
         assert_eq!(tl, unchanged, "closing linked lanes again is a no-op");
     }
 
@@ -1024,18 +1017,29 @@ mod tests {
     }
 
     #[test]
-    fn close_gaps_shifts_following_clips_left() {
+    fn close_gaps_removes_empty_time_on_every_lane_together() {
         let mut tl = Timeline::new(30.0);
         let main = tl.add_track("V1");
         let other = tl.add_track("A1");
-        tl.add_clip("a.mp4", ClipKind::Video, main, 0.0, 2.0, 0.0);
+        let captions = tl.add_track("Captions");
+        tl.add_clip("a.mp4", ClipKind::Video, main, 1.0, 2.0, 0.0);
         let b = tl.add_clip("b.mp4", ClipKind::Video, main, 5.0, 2.0, 0.0);
         let c = tl.add_clip("c.mp4", ClipKind::Video, main, 10.0, 1.0, 0.0);
-        let keep = tl.add_clip("x.wav", ClipKind::Audio, other, 7.0, 1.0, 0.0);
-        tl.close_gaps(main);
-        assert_eq!(tl.clip(b).unwrap().start, 2.0);
-        assert_eq!(tl.clip(c).unwrap().start, 4.0);
-        assert_eq!(tl.clip(keep).unwrap().start, 7.0);
+        // Audio on another lane bridges 7-8, so only 3-5 and 8-10 are empty.
+        let bridge = tl.add_clip("x.wav", ClipKind::Audio, other, 7.0, 1.0, 0.0);
+        // Captions over b and c, and a title alone in the 8-10 gap.
+        let over_b = tl.add_clip("over b", ClipKind::Title, captions, 5.5, 1.0, 0.0);
+        let over_c = tl.add_clip("over c", ClipKind::Title, captions, 10.2, 0.5, 0.0);
+        let in_gap = tl.add_clip("in gap", ClipKind::Title, captions, 9.0, 0.5, 0.0);
+        tl.close_gaps();
+        let start = |id| tl.clip(id).unwrap().start;
+        // The leading gap before the first media clip stays.
+        assert_eq!(start(b), 3.0);
+        assert_eq!(start(bridge), 5.0);
+        assert_eq!(start(c), 6.0);
+        assert_eq!(start(over_b) - start(b), 0.5);
+        assert!((start(over_c) - start(c) - 0.2).abs() < 1e-9);
+        assert_eq!(start(in_gap), 6.0);
     }
 
     #[test]

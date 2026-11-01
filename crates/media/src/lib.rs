@@ -15,7 +15,7 @@ mod sweep;
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
-pub use export::export_timeline;
+pub use export::{export_canvas, export_timeline};
 pub use playback::{AudioPlayer, FrameStream};
 pub use samples::generate_samples;
 pub use sweep::{

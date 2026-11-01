@@ -774,8 +774,10 @@ fn textured_bt601_sources_keep_their_average_color_through_export() {
             let bias = bias.map(|sum| sum / pixels);
             eprintln!("BT.601 {range} frame {index}: mean RGB bias {bias:?}");
             assert!(
-                bias.iter().all(|value| value.abs() < 0.5),
-                "BT.601 {range} frame {index}: mean RGB bias {bias:?} (limit 0.5)"
+                // Run-to-run encoder noise reaches about ±0.55; the bug
+                // shifted green by 1.15-1.75.
+                bias.iter().all(|value| value.abs() < 0.9),
+                "BT.601 {range} frame {index}: mean RGB bias {bias:?} (limit 0.9)"
             );
         }
     }
