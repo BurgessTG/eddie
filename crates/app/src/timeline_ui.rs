@@ -721,33 +721,48 @@ impl TimelineView {
                 Vec2::new(HEADER_W - 8.0, TRACK_H),
             );
             painter.rect_filled(header, theme::R_SM, theme::CARD);
-            // Lane kind stripe: the colour of the clips it mostly holds.
-            let kind_color = timeline
-                .clips
-                .iter()
-                .find(|clip| clip.track == track)
-                .map(|clip| match clip.kind {
-                    ClipKind::Video => theme::CLIP_VIDEO,
-                    ClipKind::Audio => theme::CLIP_AUDIO,
-                    ClipKind::Title => theme::CLIP_TITLE,
-                })
-                .unwrap_or(theme::BORDER_STRONG);
+            // Lanes are kind-agnostic; the header shows the kind that
+            // covers the most time there, and stays neutral when empty.
+            let mut cover = [0.0_f64; 3];
+            for clip in timeline.clips.iter().filter(|c| c.track == track) {
+                cover[kind_index(clip.kind)] += clip.duration;
+            }
+            let kind = (cover.iter().any(|c| *c > 0.0)).then(|| {
+                [ClipKind::Video, ClipKind::Audio, ClipKind::Title]
+                    .into_iter()
+                    .max_by(|a, b| cover[kind_index(*a)].total_cmp(&cover[kind_index(*b)]))
+                    .unwrap_or(ClipKind::Video)
+            });
+            let accent = kind.map_or(theme::BORDER_STRONG, |k| kind_color(k).gamma_multiply(1.8));
             painter.rect_filled(
-                Rect::from_min_size(header.left_top(), Vec2::new(3.0, TRACK_H)),
-                egui::CornerRadius {
-                    nw: theme::R_SM,
-                    sw: theme::R_SM,
-                    ne: 0,
-                    se: 0,
+                Rect::from_min_size(
+                    header.left_top() + Vec2::new(0.0, 10.0),
+                    Vec2::new(3.0, TRACK_H - 20.0),
+                ),
+                2,
+                accent,
+            );
+            let icon_center = Pos2::new(header.left() + 22.0, header.center().y);
+            paint_kind_glyph(
+                &painter,
+                icon_center,
+                kind,
+                if kind.is_some() {
+                    theme::MUTED_FG
+                } else {
+                    theme::SUBTLE_FG
                 },
-                kind_color.gamma_multiply(1.5),
             );
             painter.text(
-                Pos2::new(rect.left() + 14.0, y + TRACK_H / 2.0),
+                Pos2::new(header.left() + 38.0, header.center().y),
                 Align2::LEFT_CENTER,
                 &timeline.track_labels[track],
                 FontId::proportional(12.0),
-                theme::MUTED_FG,
+                if kind.is_some() {
+                    theme::FOREGROUND
+                } else {
+                    theme::SUBTLE_FG
+                },
             );
         }
 
@@ -773,68 +788,108 @@ impl TimelineView {
             if clip_rect.right() < content.left() || clip_rect.left() > content.right() {
                 continue;
             }
-            let fill = match clip.kind {
-                ClipKind::Video => theme::CLIP_VIDEO,
-                ClipKind::Audio => theme::CLIP_AUDIO,
-                ClipKind::Title => theme::CLIP_TITLE,
-            };
+            let base = kind_color(clip.kind);
             let is_selected = selected == Some(clip.id);
             let is_hovered = hovered_clip == Some(clip.id);
             let fill = if is_hovered && !is_selected {
-                fill.gamma_multiply(1.35)
+                base.gamma_multiply(1.3)
             } else {
-                fill
+                base
             };
-            let stroke = if is_selected {
-                Stroke::new(2.0_f32, theme::BRAND)
-            } else if is_hovered {
-                Stroke::new(1.0_f32, Color32::from_white_alpha(110))
-            } else {
-                // At rest clips separate by fill alone, no hard outline.
-                Stroke::new(1.0_f32, Color32::from_black_alpha(80))
-            };
-            clipped.rect(
-                clip_rect,
-                theme::R_SM,
-                fill,
-                stroke,
-                egui::StrokeKind::Outside,
-            );
+            clipped.rect_filled(clip_rect, theme::R_SM, fill);
 
             let visual = clip
                 .source
                 .as_ref()
                 .and_then(|src| visuals.get(src.as_str()));
-            let has_filmstrip = visual.map(|v| !v.thumbs.is_empty()).unwrap_or(false);
-            if clip.kind == ClipKind::Audio {
-                if let Some(visual) = visual {
-                    self.paint_waveform(&clipped, clip_rect, clip, visual);
+            match (clip.kind, visual) {
+                (ClipKind::Audio, Some(visual)) => {
+                    self.paint_waveform(&clipped, clip_rect, clip, visual)
                 }
-            } else if clip.kind == ClipKind::Video {
-                if let Some(visual) = visual {
-                    self.paint_filmstrip(&clipped, clip_rect, clip, visual);
+                (ClipKind::Video, Some(visual)) => {
+                    self.paint_filmstrip(&clipped, clip_rect, clip, visual)
                 }
+                _ => {}
             }
-            if clip_rect.width() > 48.0 && clip.kind != ClipKind::Audio {
-                let max_chars = (clip_rect.width() / 6.2) as usize;
-                let label: String = clip.name.chars().take(max_chars.max(1)).collect();
-                if has_filmstrip {
-                    let bg = Rect::from_min_size(
-                        clip_rect.left_top(),
-                        Vec2::new(
-                            (label.len() as f32 * 6.2 + 14.0).min(clip_rect.width()),
-                            20.0,
-                        ),
+            // A lighter top edge gives the body depth without an outline.
+            clipped.line_segment(
+                [
+                    clip_rect.left_top() + Vec2::new(4.0, 0.5),
+                    clip_rect.right_top() + Vec2::new(-4.0, 0.5),
+                ],
+                Stroke::new(1.0_f32, Color32::from_white_alpha(40)),
+            );
+
+            if clip_rect.width() > 40.0 {
+                let link_w = if clip.linked_clip.is_some() {
+                    16.0
+                } else {
+                    0.0
+                };
+                let font = FontId::proportional(11.0);
+                let max_w = clip_rect.width() - 14.0 - link_w;
+                let galley = ui.fonts(|f| {
+                    let mut job = egui::text::LayoutJob::simple_singleline(
+                        clip.name.clone(),
+                        font.clone(),
+                        Color32::from_white_alpha(235),
                     );
-                    clipped.rect_filled(bg, theme::R_SM, Color32::from_black_alpha(150));
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(8.0));
+                    f.layout_job(job)
+                });
+                let chip = Rect::from_min_size(
+                    clip_rect.left_top() + Vec2::new(3.0, 3.0),
+                    Vec2::new(galley.size().x + 10.0 + link_w, 16.0),
+                );
+                // Media carries pictures/peaks under the name, so it gets
+                // a dark chip; flat title bodies read without one.
+                if clip.kind != ClipKind::Title {
+                    clipped.rect_filled(chip, 4, Color32::from_black_alpha(140));
                 }
-                clipped.text(
-                    clip_rect.left_top() + Vec2::new(8.0, 4.0),
-                    Align2::LEFT_TOP,
-                    label,
-                    FontId::proportional(11.5),
+                clipped.galley(
+                    chip.left_center() + Vec2::new(5.0, -galley.size().y / 2.0),
+                    galley,
                     Color32::from_white_alpha(235),
                 );
+                if link_w > 0.0 {
+                    paint_link_glyph(
+                        &clipped,
+                        Pos2::new(chip.right() - 10.0, chip.center().y),
+                        Color32::from_white_alpha(200),
+                    );
+                }
+            }
+
+            if is_selected {
+                clipped.rect_stroke(
+                    clip_rect,
+                    theme::R_SM,
+                    Stroke::new(2.0_f32, theme::BRAND),
+                    egui::StrokeKind::Inside,
+                );
+            } else if is_hovered {
+                clipped.rect_stroke(
+                    clip_rect,
+                    theme::R_SM,
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(90)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            // Trim affordance: a grip on the hovered edge.
+            if let Some((hover, hit @ (ClipHit::Left | ClipHit::Right))) = hovered {
+                if hover.id == clip.id {
+                    let x = match hit {
+                        ClipHit::Left => clip_rect.left() + 3.5,
+                        _ => clip_rect.right() - 3.5,
+                    };
+                    clipped.line_segment(
+                        [
+                            Pos2::new(x, clip_rect.center().y - 8.0),
+                            Pos2::new(x, clip_rect.center().y + 8.0),
+                        ],
+                        Stroke::new(2.5_f32, theme::FOREGROUND),
+                    );
+                }
             }
         }
 
@@ -871,11 +926,19 @@ impl TimelineView {
                 [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
                 Stroke::new(1.5_f32, theme::PLAYHEAD),
             );
-            let handle = Rect::from_center_size(
-                Pos2::new(px, rect.top() + RULER_H / 2.0),
-                Vec2::new(11.0, RULER_H - 6.0),
-            );
-            clipped.rect_filled(handle, 3, theme::PLAYHEAD);
+            // Pentagon head pointing at the lanes.
+            let top = rect.top() + RULER_H - 15.0;
+            clipped.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(px - 5.5, top),
+                    Pos2::new(px + 5.5, top),
+                    Pos2::new(px + 5.5, top + 8.0),
+                    Pos2::new(px, top + 14.0),
+                    Pos2::new(px - 5.5, top + 8.0),
+                ],
+                theme::PLAYHEAD,
+                Stroke::NONE,
+            ));
         }
     }
 
@@ -887,26 +950,40 @@ impl TimelineView {
             .find(|s| *s as f32 * self.px_per_sec >= 72.0)
             .unwrap_or(60.0);
         let first = (self.time_at(content_left, content_left) / step).floor() * step;
-        let mut t = first;
-        while self.x_at(content_left, t) <= rect.right() {
+        let minor = step / 4.0;
+        let bottom = rect.top() + RULER_H;
+        let mut i = 0;
+        loop {
+            let t = first + i as f64 * minor;
             let x = self.x_at(content_left, t);
+            if x > rect.right() {
+                break;
+            }
+            let major = i % 4 == 0;
             painter.line_segment(
                 [
-                    Pos2::new(x, rect.top() + RULER_H - 8.0),
-                    Pos2::new(x, rect.top() + RULER_H),
+                    Pos2::new(x, bottom - if major { 9.0 } else { 4.0 }),
+                    Pos2::new(x, bottom),
                 ],
-                Stroke::new(1.0_f32, theme::BORDER_STRONG),
+                Stroke::new(
+                    1.0_f32,
+                    if major {
+                        theme::BORDER_STRONG
+                    } else {
+                        theme::BORDER
+                    },
+                ),
             );
-            if t >= 0.0 {
+            if major && t >= 0.0 {
                 painter.text(
-                    Pos2::new(x + 4.0, rect.top() + 4.0),
+                    Pos2::new(x + 6.0, rect.top() + 3.0),
                     Align2::LEFT_TOP,
-                    format!("{:02}:{:02}", (t / 60.0) as u64, (t % 60.0) as u64),
-                    FontId::monospace(10.5),
-                    theme::MUTED_FG,
+                    ruler_label(t, step),
+                    FontId::proportional(10.5),
+                    theme::SUBTLE_FG,
                 );
             }
-            t += step;
+            i += 1;
         }
         painter.line_segment(
             [
@@ -930,20 +1007,24 @@ impl TimelineView {
             return;
         }
         let peaks_per_sec = visual.peaks.len() as f64 / visual.duration;
-        let mid = rect.center().y;
-        let max_amp = rect.height() / 2.0 - 3.0;
+        // Below the name chip, so the label never sits on the peaks.
+        let mid = rect.center().y + 5.0;
+        let max_amp = rect.height() / 2.0 - 8.0;
+        let color = theme::CLIP_AUDIO.gamma_multiply(2.6);
         let mut x = rect.left() + 2.0;
         while x < rect.right() - 2.0 {
             let source_time = clip.source_in + (x - rect.left()) as f64 / self.px_per_sec as f64;
             let idx = (source_time * peaks_per_sec) as usize;
             if let Some(peak) = visual.peaks.get(idx) {
-                let amp = (peak * max_amp).max(1.0);
+                // Square-root scale so quiet dialogue stays visible
+                // beside loud music, as in common editor waveforms.
+                let amp = (peak.clamp(0.0, 1.0).sqrt() * max_amp).max(1.0);
                 painter.line_segment(
                     [Pos2::new(x, mid - amp), Pos2::new(x, mid + amp)],
-                    Stroke::new(2.0_f32, Color32::from_white_alpha(110)),
+                    Stroke::new(2.0_f32, color),
                 );
             }
-            x += 4.0;
+            x += 3.0;
         }
     }
 
@@ -989,6 +1070,88 @@ impl TimelineView {
                 );
             }
         }
+    }
+}
+
+fn kind_index(kind: ClipKind) -> usize {
+    match kind {
+        ClipKind::Video => 0,
+        ClipKind::Audio => 1,
+        ClipKind::Title => 2,
+    }
+}
+
+fn kind_color(kind: ClipKind) -> Color32 {
+    match kind {
+        ClipKind::Video => theme::CLIP_VIDEO,
+        ClipKind::Audio => theme::CLIP_AUDIO,
+        ClipKind::Title => theme::CLIP_TITLE,
+    }
+}
+
+/// Small header glyph: film frame, level bars, a T, or an empty dot.
+fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: Option<ClipKind>, fg: Color32) {
+    let line = Stroke::new(1.4_f32, fg);
+    match kind {
+        Some(ClipKind::Video) => {
+            let body = Rect::from_center_size(c, Vec2::new(13.0, 10.0));
+            painter.rect_stroke(body, 2, line, egui::StrokeKind::Inside);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    c + Vec2::new(-1.5, -2.5),
+                    c + Vec2::new(2.5, 0.0),
+                    c + Vec2::new(-1.5, 2.5),
+                ],
+                fg,
+                Stroke::NONE,
+            ));
+        }
+        Some(ClipKind::Audio) => {
+            for (i, h) in [4.0_f32, 9.0, 12.0, 7.0, 3.0].into_iter().enumerate() {
+                let x = c.x - 6.0 + i as f32 * 3.0;
+                painter.line_segment(
+                    [Pos2::new(x, c.y - h / 2.0), Pos2::new(x, c.y + h / 2.0)],
+                    line,
+                );
+            }
+        }
+        Some(ClipKind::Title) => {
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                "T",
+                FontId::proportional(13.0),
+                fg,
+            );
+        }
+        None => {
+            painter.circle_stroke(c, 3.5, line);
+        }
+    }
+}
+
+/// Two interlocked rings marking a linked picture/sound pair.
+fn paint_link_glyph(painter: &egui::Painter, c: Pos2, fg: Color32) {
+    let stroke = Stroke::new(1.3_f32, fg);
+    for dx in [-2.5_f32, 2.5] {
+        painter.rect_stroke(
+            Rect::from_center_size(c + Vec2::new(dx, 0.0), Vec2::new(7.0, 5.0)),
+            2,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// Ruler label: `M:SS`, with hundredths only when the step needs them.
+fn ruler_label(t: f64, step: f64) -> String {
+    let minutes = (t / 60.0).floor() as u64;
+    let seconds = t - minutes as f64 * 60.0;
+    if step < 1.0 {
+        let text = format!("{minutes}:{seconds:05.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        format!("{minutes}:{:02}", seconds.round() as u64)
     }
 }
 
