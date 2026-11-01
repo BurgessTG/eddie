@@ -1,10 +1,11 @@
-//! Media engine built on the FFmpeg command-line tools.
+//! Media engine built on FFmpeg: libav in process for preview decode and
+//! audio playback, the command-line tools for probe and export.
 //!
-//! Rationale: `ffmpeg/ffprobe/ffplay` ship on every target platform and
-//! track codec support for us. Frames move as raw RGBA over pipes, which is
-//! plenty for proxy-resolution preview. The module boundary is kept narrow
-//! so a future `ffmpeg-next`/hardware-decode backend can replace it.
+//! Rationale: `ffmpeg/ffprobe` ship on every target platform and
+//! track codec support for us. The module boundary is kept narrow so
+//! probe and export can move in process too.
 
+mod audio;
 mod decode;
 mod evidence;
 mod export;
@@ -12,11 +13,12 @@ mod playback;
 mod samples;
 mod sweep;
 
+pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::{export_canvas, export_timeline};
-pub use playback::{AudioPlayer, FrameStream};
+pub use playback::FrameStream;
 pub use samples::generate_samples;
 pub use sweep::{
     analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,
@@ -646,11 +648,36 @@ mod tests {
         assert_eq!((streamed.width, streamed.height), (320, 180));
         stream.stop();
 
-        let mut player =
-            crate::AudioPlayer::play_segment(&music_path, 0.0, 5.0, 0.0).expect("audio player");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!player.is_finished());
-        drop(player);
+        // Decode the MP3 in process: one second from source 4 s, placed at
+        // timeline 1 s, renders exactly that span and is not silent.
+        let mut audio = crate::AudioEngine::manual();
+        audio.seek(0.0);
+        audio.set_limit(3.0);
+        audio.set_running(true);
+        audio.set_voices(&[(
+            1,
+            crate::AudioSegment {
+                path: music_path.clone(),
+                start: 1.0,
+                duration: 1.0,
+                source_in: 4.0,
+                volume: 1.0,
+            },
+        )]);
+        let mut mix = Vec::new();
+        while mix.len() < 3 * crate::AUDIO_RATE as usize * 2 {
+            let block = audio.render(4096);
+            assert!(!block.is_empty(), "audio clock stopped");
+            mix.extend_from_slice(block);
+        }
+        let rate = crate::AUDIO_RATE as usize;
+        let loud = |a: usize, b: usize| mix[a * 2..b * 2].iter().any(|s| s.abs() > 0.01);
+        assert!(
+            !loud(0, rate) && !loud(2 * rate, 3 * rate),
+            "audio outside clip"
+        );
+        assert!(loud(rate, 2 * rate), "decoded music is silent");
+        assert!(audio.take_error().is_none());
 
         // Chop two segments out of the sample video, lay the MP3 under the
         // whole thing, burn a title — then export and re-probe the result.

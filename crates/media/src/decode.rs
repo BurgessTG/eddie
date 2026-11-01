@@ -14,9 +14,11 @@ use crate::{scaled_height, MediaResult, RawFrame};
 
 static INIT: Once = Once::new();
 
-fn ensure_init() {
+pub(crate) fn ensure_init() {
     INIT.call_once(|| {
         let _ = ffmpeg::init();
+        // Seek and skip-sample notices are routine for preview and audio.
+        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Error);
     });
 }
 
