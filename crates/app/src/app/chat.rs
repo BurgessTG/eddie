@@ -1212,7 +1212,12 @@ impl EditorApp {
                 );
                 self.push_chat(ChatRole::User, intent.label.to_owned());
                 if ordered.is_empty() {
-                    let message = "No sweep clips yet. Import media first.".to_owned();
+                    let message = if self.assets.is_empty() {
+                        "No clips yet. Import media first."
+                    } else {
+                        "No curated clips yet. Curate a video first."
+                    }
+                    .to_owned();
                     self.push_chat(ChatRole::Assistant, message.clone());
                     self.status = message;
                     return;
@@ -1410,30 +1415,25 @@ impl EditorApp {
                 ui.add_space(6.0);
             }
 
-            // Button intents: one registry, local first. New
-            // buttons are declared in `intents.rs`.
-            // Quick actions in an even two-column grid; local and model
-            // intents look alike, the tooltip says which runs offline.
-            let column_w = ((ui.available_width() - 6.0) / 2.0).floor();
-            for pair in INTENTS.chunks(2) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for intent in pair {
-                        ui.allocate_ui(egui::vec2(column_w, 30.0), |ui| {
-                            let tooltip = match intent.kind {
-                                IntentKind::Local(_) => format!("{} Runs locally.", intent.tooltip),
-                                IntentKind::Model => format!("{} Uses the model.", intent.tooltip),
-                            };
-                            if theme::secondary_button_wide(ui, intent.label)
-                                .on_hover_text(tooltip)
-                                .clicked()
-                            {
-                                clicked_intent = Some(intent.id);
-                            }
-                        });
+            // Button intents: one registry, local first. New buttons are
+            // declared in `intents.rs`. Compact chips at natural width wrap
+            // like suggestions instead of a grid of full-width buttons; the
+            // tooltip says which run offline.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for intent in INTENTS {
+                    let tooltip = match intent.kind {
+                        IntentKind::Local(_) => format!("{} Runs locally.", intent.tooltip),
+                        IntentKind::Model => format!("{} Uses the model.", intent.tooltip),
+                    };
+                    if theme::secondary_button(ui, intent.label)
+                        .on_hover_text(tooltip)
+                        .clicked()
+                    {
+                        clicked_intent = Some(intent.id);
                     }
-                });
-            }
+                }
+            });
             ui.add_space(8.0);
             theme::divider(ui);
             ui.add_space(4.0);
@@ -1465,17 +1465,35 @@ impl EditorApp {
                         } else {
                             egui::Layout::left_to_right(egui::Align::Min)
                         };
+                        // Requests sit in bubbles on the right; replies read
+                        // as plain text across the dock, like a transcript.
                         ui.with_layout(layout, |ui| {
-                            egui::Frame::new()
-                                .fill(if user { theme::SECONDARY } else { theme::CARD })
-                                .corner_radius(egui::CornerRadius::same(theme::R_LG))
-                                .inner_margin(egui::Margin::symmetric(10, 7))
-                                .show(ui, |ui| {
-                                    ui.set_max_width(width * 0.82);
-                                    ui.add(egui::Label::new(&message.text).wrap());
-                                });
+                            if user {
+                                egui::Frame::new()
+                                    .fill(theme::SECONDARY)
+                                    .corner_radius(egui::CornerRadius::same(theme::R_LG))
+                                    .inner_margin(egui::Margin::symmetric(11, 7))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(width * 0.8);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&message.text)
+                                                    .color(theme::FOREGROUND),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                            } else {
+                                ui.add_space(2.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&message.text).color(theme::MUTED_FG),
+                                    )
+                                    .wrap(),
+                                );
+                            }
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(10.0);
                     }
                 });
 
@@ -1488,45 +1506,51 @@ impl EditorApp {
                     });
             }
 
-            // Pin the composer to the bottom of the dock.
-            ui.add_space((ui.available_height() - 38.0).max(0.0));
-            ui.horizontal(|ui| {
-                // TextEdit adds its margin outside the desired width; the
-                // row must fit exactly or the dock grows every frame.
-                let send_w = ui
-                    .painter()
-                    .layout_no_wrap(
-                        "Send".to_owned(),
-                        egui::FontId::proportional(13.0),
-                        theme::FOREGROUND,
-                    )
-                    .size()
-                    .x
-                    + 24.0;
-                let input_width =
-                    (ui.available_width() - send_w - ui.spacing().item_spacing.x - 20.0).max(80.0);
-                let response = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.chat_input)
-                            .hint_text("Describe the edit…")
-                            .margin(egui::Margin::symmetric(10, 8))
-                            .desired_width(input_width),
-                    )
-                    .on_hover_text("Describe an edit. Enter sends it. Ctrl+K focuses chat.");
-                if focus_requested {
-                    response.request_focus();
-                }
-                let send_clicked = theme::primary_button(ui, "Send")
-                    .on_hover_text("Send this edit request")
-                    .clicked();
-                if send_clicked
-                    || ((response.has_focus() || response.lost_focus())
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                {
-                    submitted = Some(std::mem::take(&mut self.chat_input));
-                    response.request_focus();
-                }
-            });
+            // Pin the composer to the bottom of the dock: one input surface
+            // with the send action inside it.
+            ui.add_space((ui.available_height() - 42.0).max(0.0));
+            egui::Frame::new()
+                .fill(theme::INPUT)
+                .corner_radius(egui::CornerRadius::same(theme::R_LG))
+                .inner_margin(egui::Margin {
+                    left: 4,
+                    right: 5,
+                    top: 4,
+                    bottom: 4,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        // TextEdit adds its margin outside the desired width;
+                        // the row must fit exactly or the dock grows each frame.
+                        let input_width = (ui.available_width() - 28.0 - 4.0 - 16.0).max(80.0);
+                        let response = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.chat_input)
+                                    .hint_text("Describe the edit…")
+                                    .frame(false)
+                                    .margin(egui::Margin::symmetric(8, 6))
+                                    .desired_width(input_width),
+                            )
+                            .on_hover_text(
+                                "Describe an edit. Enter sends it. Ctrl+K focuses chat.",
+                            );
+                        if focus_requested {
+                            response.request_focus();
+                        }
+                        let ready = !self.chat_input.trim().is_empty();
+                        let send_clicked = send_button(ui, ready)
+                            .on_hover_text("Send this edit request (Enter)")
+                            .clicked();
+                        if send_clicked
+                            || ((response.has_focus() || response.lost_focus())
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            submitted = Some(std::mem::take(&mut self.chat_input));
+                            response.request_focus();
+                        }
+                    });
+                });
         }
         if cancel_clicked {
             self.cancel_chat();
@@ -1688,6 +1712,43 @@ impl EditorApp {
             self.start_connection_check(ctx);
         }
     }
+}
+
+/// Round send button with an up arrow; bright once there is text to send.
+fn send_button(ui: &mut egui::Ui, ready: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let fill = if !ready {
+        theme::SECONDARY
+    } else if response.hovered() {
+        theme::MUTED_FG
+    } else {
+        theme::PRIMARY
+    };
+    let fg = if ready {
+        theme::PRIMARY_FG
+    } else {
+        theme::SUBTLE_FG
+    };
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), 13.0, fill);
+    let c = rect.center();
+    let stroke = egui::Stroke::new(1.8_f32, fg);
+    painter.line_segment(
+        [c + egui::vec2(0.0, 5.5), c + egui::vec2(0.0, -5.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [c + egui::vec2(-4.5, -0.5), c + egui::vec2(0.0, -5.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [c + egui::vec2(4.5, -0.5), c + egui::vec2(0.0, -5.0)],
+        stroke,
+    );
+    if ready && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
 }
 
 fn summarize_chat_result(notes: &[String], command_count: usize) -> String {
