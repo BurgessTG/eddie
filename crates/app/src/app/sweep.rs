@@ -130,6 +130,12 @@ pub(super) struct TranscriptSegment {
     pub(super) session: Option<Arc<TranscriptSession>>,
 }
 
+/// A turn this long with fewer letters per second than this carries no
+/// thought to protect. Crowd ambience comes back as one long turn with a word
+/// or two ("LT" across 16 s); speech, even slow or in CJK, is far denser.
+const AMBIENT_MIN_SECONDS: f64 = 2.0;
+const AMBIENT_LETTERS_PER_SECOND: f64 = 1.5;
+
 impl TranscriptSegment {
     pub(super) fn timing_precision(&self) -> &'static str {
         if self.words.is_empty() {
@@ -148,6 +154,15 @@ impl TranscriptSegment {
             })
     }
 
+    /// Whether a turn's text is too sparse for its span to be evidence that
+    /// someone speaks throughout it.
+    pub(super) fn is_ambient(&self) -> bool {
+        let seconds = self.end - self.start;
+        seconds >= AMBIENT_MIN_SECONDS
+            && (self.text.chars().filter(|c| c.is_alphanumeric()).count() as f64)
+                < AMBIENT_LETTERS_PER_SECOND * seconds
+    }
+
     fn reaches_internal_asr_edge(&self, source_end: f64) -> bool {
         self.session.as_ref().is_some_and(|session| {
             (session.start > 0.0 && self.start <= session.start + SPEECH_HANDLE_SECONDS)
@@ -156,6 +171,23 @@ impl TranscriptSegment {
                         && self.end >= end - SPEECH_HANDLE_SECONDS
                 })
         })
+    }
+}
+
+/// Curation frees gigabytes of decode and analysis buffers from worker
+/// threads; glibc keeps them mapped (measured 1.3 GB of 2.9 GB RSS on the
+/// expo clips) until asked to return them.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // SAFETY: malloc_trim only releases free heap pages; it has no
+        // preconditions and is thread-safe.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
@@ -172,7 +204,7 @@ pub(super) struct CaptionChunk {
 pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
     const MAX_CHARS: usize = 42;
     const MAX_DURATION: f64 = 3.5;
-    if segment.text.trim().is_empty() || segment.end <= segment.start {
+    if segment.text.trim().is_empty() || segment.end <= segment.start || segment.is_ambient() {
         return Vec::new();
     }
 
@@ -721,6 +753,7 @@ impl EditorApp {
             }
         }
         self.sweep_rx = None;
+        release_freed_memory();
         // The sweep changed: this is a pinned-summary refresh point
         // (the only other one is chat submit, as a safety net).
         self.refresh_pinned_summary();
@@ -2271,6 +2304,17 @@ mod tests {
                 text: "A short turn.".to_owned(),
             }]
         );
+
+        // Crowd ambience transcribed as one sparse turn is not speech.
+        let ambient = TranscriptSegment {
+            start: 2.86,
+            end: 18.94,
+            speaker: None,
+            text: "LT".to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        assert_eq!(caption_chunks(&ambient), Vec::new());
     }
 
     #[test]

@@ -174,21 +174,6 @@ fn pieces(turn: &TranscriptSegment) -> Vec<Piece<'_>> {
 /// a turn boundary is on that boundary, not inside the neighboring turn.
 const TURN_SLOP_SECONDS: f64 = 0.05;
 
-/// A turn this long with fewer letters per second than this carries no
-/// thought to protect. Crowd ambience comes back as one long turn with a word
-/// or two ("LT" across 16 s); speech, even slow or in CJK, is far denser.
-const AMBIENT_MIN_SECONDS: f64 = 2.0;
-const AMBIENT_LETTERS_PER_SECOND: f64 = 1.5;
-
-/// Whether a turn's text is too sparse for its span to be evidence that
-/// someone speaks throughout it.
-fn ambient(turn: &TranscriptSegment) -> bool {
-    let seconds = turn.end - turn.start;
-    seconds >= AMBIENT_MIN_SECONDS
-        && (turn.text.chars().filter(|c| c.is_alphanumeric()).count() as f64)
-            < AMBIENT_LETTERS_PER_SECOND * seconds
-}
-
 /// Words that leave a sentence hanging when a turn ends on them.
 const DANGLING_WORDS: &[&str] = &[
     "a", "an", "and", "because", "but", "from", "if", "into", "of", "or", "than", "the", "to",
@@ -229,7 +214,7 @@ pub(super) fn speech_groups(source: &Source<'_>) -> Vec<(f64, f64)> {
     let mut turns: Vec<_> = source
         .transcript
         .iter()
-        .filter(|turn| turn.end > turn.start && !ambient(turn))
+        .filter(|turn| turn.end > turn.start && !turn.is_ambient())
         .flat_map(pieces)
         .collect();
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -291,7 +276,7 @@ pub(super) fn speech_turns(
         let ambient_only = source
             .transcript
             .iter()
-            .any(|turn| ambient(turn) && turn.start < clip.end() && turn.end > clip.source_in);
+            .any(|turn| turn.is_ambient() && turn.start < clip.end() && turn.end > clip.source_in);
         return if source.info.has_audio && !ambient_only {
             Err("Speech timing is unavailable for this selection".to_owned())
         } else {

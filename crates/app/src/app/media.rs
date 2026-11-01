@@ -718,13 +718,8 @@ impl EditorApp {
                                             curate_selected = Some(asset.info.path.clone());
                                         }
                                     }
-                                    SweepStatus::Running => {
-                                        ui.label(
-                                            RichText::new("Curating…")
-                                                .size(12.0)
-                                                .color(theme::MUTED_FG),
-                                        );
-                                    }
+                                    // The stage line below says what is running.
+                                    SweepStatus::Running => {}
                                     SweepStatus::Ready => {
                                         if theme::secondary_button_wide(ui, "Re-curate")
                                             .on_hover_text(
@@ -772,12 +767,13 @@ impl EditorApp {
                                 let needs_review = asset.sweep.candidates.iter()
                                     .filter(|clip| clip.review.status == ReviewStatus::NeedsReview).count();
                                 let label = match asset.sweep.status {
-                                    SweepStatus::Running => "Analyzing source".to_owned(),
+                                    SweepStatus::Running if self.sweep_queue.contains(&asset.info.path) => "Queued".to_owned(),
+                                    SweepStatus::Running => asset.sweep.note.clone(),
                                     SweepStatus::Failed => "Analysis failed".to_owned(),
-                                    _ if needs_review > 0 => format!("{} clips · {needs_review} need review", asset.sweep.candidates.len()),
-                                    _ => format!("{} · {} clips · {} scenes",
+                                    _ if needs_review > 0 => format!("{} · {needs_review} need review", count(asset.sweep.candidates.len(), "clip")),
+                                    _ => format!("{} · {} · {}",
                                         if asset.sweep.usage.batches > 0 { "Reviewed" } else { "Local" },
-                                        asset.sweep.candidates.len(), asset.sweep.scene_clips.len()),
+                                        count(asset.sweep.candidates.len(), "clip"), count(asset.sweep.scene_clips.len(), "scene")),
                                 };
                                 ui.add(egui::Label::new(RichText::new(label).size(12.0)
                                     .color(theme::MUTED_FG)).truncate())
@@ -874,4 +870,8 @@ fn format_file_size(bytes: u64) -> String {
 fn format_duration(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64;
     format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }

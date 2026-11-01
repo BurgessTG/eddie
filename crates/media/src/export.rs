@@ -387,6 +387,19 @@ fn stream_video(
     Ok(())
 }
 
+/// The export canvas: the largest video source on the timeline (displayed
+/// size), capped at 1920 wide; 1280x720 without video. The program monitor
+/// uses the same canvas so titles and pillarboxing preview as exported.
+pub fn export_canvas(sources: impl Iterator<Item = (u32, u32)>) -> (u32, u32) {
+    sources
+        .max_by_key(|&(w, h)| u64::from(w) * u64::from(h))
+        .map(|(width, height)| {
+            let w = width.min(1920) / 2 * 2;
+            (w, scaled_height(width, height, w))
+        })
+        .unwrap_or((1280, 720))
+}
+
 /// Export `timeline` to `output` (H.264/AAC MP4). Sends 0..=1 progress on
 /// `progress` as ffmpeg reports it. Blocks — call from a worker thread.
 pub fn export_timeline(
@@ -423,17 +436,12 @@ pub fn export_timeline(
         .filter(|c| c.kind == ClipKind::Title)
         .collect();
 
-    // Canvas from the largest video source, capped at 1080p.
-    let (canvas_w, canvas_h) = video_clips
-        .iter()
-        .filter_map(|c| infos.get(c.source.as_ref()?))
-        .max_by_key(|i| i.width * i.height)
-        .map(|i| {
-            let w = i.width.min(1920);
-            let w = w / 2 * 2;
-            (w, scaled_height(i.width, i.height, w))
-        })
-        .unwrap_or((1280, 720));
+    let (canvas_w, canvas_h) = export_canvas(
+        video_clips
+            .iter()
+            .filter_map(|c| infos.get(c.source.as_ref()?))
+            .map(|i| (i.width, i.height)),
+    );
 
     // Input zero is the bounded video stream. Audio remains independent of
     // picture visibility and is encoded once, without seams between batches.

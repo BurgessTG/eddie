@@ -23,6 +23,7 @@ pub fn paint(
     playhead: f64,
     texture: Option<&TextureHandle>,
     audio_peaks: Option<(&[f32], f64)>,
+    canvas: (u32, u32),
 ) {
     let video = timeline.active_video(playhead);
     let audio = timeline
@@ -31,17 +32,8 @@ pub fn paint(
         .filter(|c| c.kind == ClipKind::Audio && c.contains(playhead))
         .min_by_key(|c| c.track);
 
-    let aspect = texture
-        .map(|t| {
-            let s = t.size_vec2();
-            if s.y > 0.0 {
-                s.x / s.y
-            } else {
-                16.0 / 9.0
-            }
-        })
-        .unwrap_or(16.0 / 9.0);
-    let frame = fit(area, aspect);
+    // The export canvas, so pillarboxing and titles preview as exported.
+    let frame = fit(area, canvas.0 as f32 / canvas.1.max(1) as f32);
     let painter = ui.painter().with_clip_rect(frame);
     painter.rect(
         frame,
@@ -55,7 +47,10 @@ pub fn paint(
         (Some(clip), Some(texture)) => {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             let tint = Color32::from_white_alpha((clip.opacity.clamp(0.0, 1.0) * 255.0) as u8);
-            painter.image(texture.id(), frame, uv, tint);
+            let size = texture.size_vec2();
+            let scale = (frame.width() / size.x).min(frame.height() / size.y);
+            let picture = Rect::from_center_size(frame.center(), size * scale);
+            painter.image(texture.id(), picture, uv, tint);
             let local = clip.source_in + (playhead - clip.start);
             painter.text(
                 frame.left_top() + Vec2::new(12.0, 8.0),

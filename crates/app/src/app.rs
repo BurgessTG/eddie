@@ -1518,9 +1518,7 @@ impl EditorApp {
             ScriptCommand::SetMusicBedMuted(on) => self.mute_music_beds = on,
             ScriptCommand::SetZoom(px) => self.timeline_view.px_per_sec = px.clamp(4.0, 600.0),
             ScriptCommand::CloseGaps => {
-                for track in 0..self.timeline.track_labels.len() {
-                    self.timeline.close_gaps(track);
-                }
+                self.timeline.close_gaps();
             }
         }
         Ok(None)
@@ -2412,6 +2410,14 @@ impl EditorApp {
                         .as_ref()
                         .filter(|_| self.preview_key == self.active_video_key()),
                     audio_peaks,
+                    openreel_media::export_canvas(
+                        self.timeline
+                            .clips
+                            .iter()
+                            .filter(|c| c.kind == ClipKind::Video)
+                            .filter_map(|c| self.asset(c.source.as_deref()?))
+                            .map(|a| (a.info.width, a.info.height)),
+                    ),
                 );
 
                 ui.add_space(8.0);

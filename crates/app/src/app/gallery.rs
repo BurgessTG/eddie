@@ -373,9 +373,10 @@ impl EditorApp {
                 let refs = self.curator_candidate_refs(scenes);
                 ui.label(
                     RichText::new(format!(
-                        "{} {}",
+                        "{} {}{}",
                         refs.len(),
-                        if scenes { "scenes" } else { "clips" }
+                        if scenes { "scene" } else { "clip" },
+                        if refs.len() == 1 { "" } else { "s" }
                     ))
                     .size(12.0)
                     .color(theme::MUTED_FG),
