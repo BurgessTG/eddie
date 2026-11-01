@@ -3199,6 +3199,10 @@ mod tests {
                     &paths[file],
                 );
             }
+            // Parking is off on 8+ cores; this tests the mechanism itself.
+            let stream = FrameStream::spawn_preview(|| {}).unwrap();
+            stream.set_parked_decoders(4);
+            app.stream = Some(stream);
             app.last_now = Some(0.0);
             app.set_playing(true);
             for (index, (_, _, blue)) in cuts.into_iter().enumerate() {

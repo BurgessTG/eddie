@@ -143,7 +143,7 @@ impl FrameStream {
     /// per clip. Two lanes each own at most one decoder: one serves the active
     /// request while the other prerolls `prefetch_preview`'s upcoming clip.
     /// A lane that switches files parks its decoder, position and undelivered
-    /// pictures (up to `PARKED_DECODERS`, least recently used first out), so
+    /// pictures (up to `parked_decoders()`, least recently used first out), so
     /// re-entering a file continues forward instead of decoding from its
     /// keyframe again. Cancelling releases every parked decoder.
     /// Native open/seek/decode cannot be preempted; superseded work is
@@ -156,6 +156,7 @@ impl FrameStream {
             get: Mutex::new(recycle_rx),
         });
         let preview = Arc::new(PreviewMailbox::default());
+        preview.state.lock().unwrap().parked_cap = parked_decoders();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let mut handles = Vec::with_capacity(PREVIEW_LANES);
         for lane in 0..PREVIEW_LANES {
@@ -278,6 +279,13 @@ impl FrameStream {
             })
     }
 
+    /// Override how many decoders are parked (tests on many-core machines).
+    pub fn set_parked_decoders(&self, cap: usize) {
+        if let Some(preview) = &self.preview {
+            preview.state.lock().unwrap().parked_cap = cap;
+        }
+    }
+
     /// Native decoders opened since the worker started.
     pub fn preview_opens(&self) -> u64 {
         self.preview
@@ -380,9 +388,19 @@ impl Drop for FrameStream {
 /// the current clip plays, without a decoder per timeline clip.
 const PREVIEW_LANES: usize = 2;
 /// Decoders kept open for files the lanes left, beyond the lanes' own two.
-/// Cycling through N files needs N - 2. Each holds about 100-190 MB at
-/// 1080p-1440p with frame threading on 16 cores.
-const PARKED_DECODERS: usize = 4;
+/// Cycling through N files needs N - 2. Only slow machines park: decoders
+/// use a frame thread per core, so memory grows with cores while the decode
+/// time parking saves shrinks. Ten 0.3 s cuts over five 1080p-1440p files:
+/// 2 cores save 1.45 s for 90 MB, 4 cores 0.7 s for 140 MB, 8 cores 0.04 s
+/// for 200 MB, 16 cores nothing for 300 MB.
+fn parked_decoders() -> usize {
+    let cores = thread::available_parallelism().map_or(1, |cores| cores.get());
+    if cores < 8 {
+        4
+    } else {
+        0
+    }
+}
 /// Recycled preview buffers; more are only allocated when this runs dry.
 const PREVIEW_POOL: usize = 8;
 /// Without a container index, decode forward rather than seek only this far.
@@ -433,6 +451,8 @@ struct PreviewState {
     retired: Vec<Lane>,
     /// False after a cancel: a lane leaving a file retires its decoder.
     keep_parked: bool,
+    /// How many left lanes to keep; zero drops a decoder when its lane leaves.
+    parked_cap: usize,
 }
 
 #[derive(Default)]
@@ -462,7 +482,7 @@ impl PreviewMailbox {
             })?;
             Some(state.parked.remove(index))
         });
-        while state.parked.len() > PARKED_DECODERS {
+        while state.parked.len() > state.parked_cap {
             let oldest = state.parked.remove(0);
             state.retired.push(oldest);
         }
