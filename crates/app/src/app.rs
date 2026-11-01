@@ -970,13 +970,20 @@ impl EditorApp {
                             }
                         }
                         if let Some(stream) = &self.stream {
+                            // A prerolled first picture is handed over, not
+                            // decoded. Holding the clock for its upload would
+                            // stall audio already rendered past the cut.
+                            let prerolled = stream.prefetch_ready(source, start, PREVIEW_W);
                             match stream.request_preview(
                                 source,
                                 start,
                                 PREVIEW_W,
                                 self.timeline.fps,
                             ) {
-                                Ok(generation) => self.stream_generation = generation,
+                                Ok(generation) => {
+                                    self.stream_generation = generation;
+                                    self.stream_ready = prerolled;
+                                }
                                 Err(error) => self.video_playback_failed(error),
                             }
                         }
@@ -3219,6 +3226,48 @@ mod tests {
                 3,
                 "re-entering A must reuse its parked decoder"
             );
+            app.set_playing(false);
+        }
+
+        #[test]
+        fn preview_prerolled_cut_keeps_the_audio_clock_running() {
+            let fixture = Fixture::new();
+            let other = fixture.dir.join("b.mp4");
+            std::fs::copy(&fixture.path, &other).unwrap();
+            let other = other.to_string_lossy().into_owned();
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            add_asset(&mut app, &fixture.path);
+            add_asset(&mut app, &other);
+            for (start, path) in [(0.0, &fixture.path), (0.2, &other)] {
+                app.timeline
+                    .add_media_clip("Cut", ClipKind::Video, 0, start, 0.2, 0.0, path);
+            }
+            app.last_now = Some(0.0);
+            app.set_playing(true);
+            await_picture(&mut app, &ctx);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app
+                .stream
+                .as_ref()
+                .unwrap()
+                .prefetch_ready(&other, 0.0, PREVIEW_W)
+            {
+                assert!(Instant::now() < deadline, "second cut was not prerolled");
+                thread::sleep(Duration::from_millis(5));
+            }
+            advance_to(&mut app, &ctx, 0.3);
+            assert_eq!(app.playhead, 0.2);
+            app.sync_playback(&ctx);
+            // The prerolled picture is handed over, not decoded: the audio
+            // clock must not stall a device block waiting for its upload.
+            assert!(
+                !app.waiting_for_video(),
+                "prerolled cut treated as buffering"
+            );
+            // Audio rendered on through the cut; the playhead rejoins it.
+            advance_to(&mut app, &ctx, 0.35);
+            assert!((app.playhead - 0.35).abs() < 1e-9, "{}", app.playhead);
             app.set_playing(false);
         }
 

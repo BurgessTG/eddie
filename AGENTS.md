@@ -418,7 +418,9 @@ a limit: the next visible cut, or the one after when its first picture is
 prerolled. Rendering never passes the limit, so a buffering cut holds sound
 and picture together instead of consuming an unseen short clip; the playhead
 still lands on each cut for one tick so the clip is requested at its first
-picture. A voice under the clock with no decoded data holds the clock too.
+picture. A request served from a ready preroll counts as ready at once;
+waiting for its upload stalled audio already rendered past the cut by one
+device block (a 43 ms dropout about 0.1 s into each prerolled cut). A voice under the clock with no decoded data holds the clock too.
 Without a device (headless, `SDL_AUDIODRIVER=dummy`) a paced null output
 keeps the same clock silently; app tests use the deterministic manual output.
 A PipeWire null-sink loopback measured audio reaching the sink 0.0-0.2 ms
