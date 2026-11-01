@@ -387,12 +387,31 @@ fn stream_video(
     Ok(())
 }
 
-/// The export canvas: the largest video source on the timeline (displayed
-/// size), capped at 1920 wide; 1280x720 without video. The program monitor
-/// uses the same canvas so titles and pillarboxing preview as exported.
+/// The export canvas: the orientation most video clips use (a tie follows
+/// the first clip; square counts as landscape), then the largest source of
+/// that orientation (displayed size, first on equal area), capped at 1920
+/// wide; 1280x720 without video. The program monitor uses the same canvas
+/// so titles and pillarboxing preview as exported.
 pub fn export_canvas(sources: impl Iterator<Item = (u32, u32)>) -> (u32, u32) {
+    let sources: Vec<(u32, u32)> = sources.collect();
+    let portrait = |&(w, h): &(u32, u32)| h > w;
+    let portraits = sources.iter().filter(|s| portrait(s)).count();
+    let landscapes = sources.len() - portraits;
+    let want_portrait = match portraits.cmp(&landscapes) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => sources.first().is_some_and(portrait),
+    };
     sources
-        .max_by_key(|&(w, h)| u64::from(w) * u64::from(h))
+        .into_iter()
+        .filter(|s| portrait(s) == want_portrait)
+        .fold(None, |best: Option<(u32, u32)>, s| {
+            let area = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
+            match best {
+                Some(b) if area(b) >= area(s) => Some(b),
+                _ => Some(s),
+            }
+        })
         .map(|(width, height)| {
             let w = width.min(1920) / 2 * 2;
             (w, scaled_height(width, height, w))
@@ -677,4 +696,35 @@ pub fn export_timeline(
     }
     let _ = progress.send(1.0);
     Ok(output.to_path_buf())
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::export_canvas;
+
+    const LANDSCAPE_4K: (u32, u32) = (3840, 2160);
+    const PORTRAIT_4K: (u32, u32) = (2160, 3840);
+
+    #[test]
+    fn most_common_orientation_wins_over_an_equal_size_rotated_clip() {
+        // Two landscape clips and one rotated phone clip of the same area.
+        let canvas = export_canvas([LANDSCAPE_4K, LANDSCAPE_4K, PORTRAIT_4K].into_iter());
+        assert_eq!(canvas, (1920, 1080));
+        // Order must not matter.
+        let canvas = export_canvas([PORTRAIT_4K, LANDSCAPE_4K, LANDSCAPE_4K].into_iter());
+        assert_eq!(canvas, (1920, 1080));
+        // A portrait majority stays portrait, even beside a larger landscape.
+        let canvas = export_canvas([(1080, 1920), (1080, 1920), LANDSCAPE_4K].into_iter());
+        assert_eq!(canvas, (1080, 1920));
+    }
+
+    #[test]
+    fn orientation_tie_follows_the_first_clip_and_size_picks_within_it() {
+        let canvas = export_canvas([PORTRAIT_4K, (1920, 1080)].into_iter());
+        assert_eq!(canvas, (1920, 3412));
+        let canvas =
+            export_canvas([(1280, 720), PORTRAIT_4K, LANDSCAPE_4K, (1080, 1920)].into_iter());
+        assert_eq!(canvas, (1920, 1080));
+        assert_eq!(export_canvas(std::iter::empty()), (1280, 720));
+    }
 }
