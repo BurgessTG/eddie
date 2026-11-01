@@ -515,13 +515,17 @@ impl EditorApp {
                                     Stroke::NONE
                                 };
                                 let painter = ui.painter().clone();
+                                let is_ready = asset.state == AssetState::Ready;
+                                // Placeholders read as a grey card until
+                                // their thumbnails or peaks arrive.
                                 painter.rect_filled(
                                     rect,
                                     CornerRadius::same(theme::R_MD),
-                                    theme::CARD,
+                                    if is_ready { theme::CARD } else { theme::SECONDARY },
                                 );
                                 let thumb_rect = rect;
-                                let is_ready = asset.state == AssetState::Ready;
+                                let has_preview =
+                                    !asset.thumb_textures.is_empty() || !asset.peaks.is_empty();
                                 if let Some((_, thumb)) = asset.thumb_textures.first() {
                                     let tint = if is_ready {
                                         egui::Color32::WHITE
@@ -534,29 +538,8 @@ impl EditorApp {
                                         .corner_radius(theme::R_MD)
                                         .paint_at(ui, thumb_rect);
                                 } else if !asset.peaks.is_empty() {
-                                    let mid = thumb_rect.center().y;
-                                    let max_amp = thumb_rect.height() * 0.38;
-                                    let mut x = thumb_rect.left() + 5.0;
-                                    while x < thumb_rect.right() - 5.0 {
-                                        let frac =
-                                            (x - thumb_rect.left()) / thumb_rect.width().max(1.0);
-                                        let idx = ((frac * asset.peaks.len() as f32) as usize)
-                                            .min(asset.peaks.len() - 1);
-                                        let amp = (asset.peaks[idx] * max_amp).max(1.0);
-                                        painter.line_segment(
-                                            [
-                                                egui::Pos2::new(x, mid - amp),
-                                                egui::Pos2::new(x, mid + amp),
-                                            ],
-                                            Stroke::new(
-                                                2.0_f32,
-                                                egui::Color32::from_rgb(0x4C, 0x9A, 0x68),
-                                            ),
-                                        );
-                                        x += 4.0;
-                                    }
-                                } else if asset.info.has_video || asset.state == AssetState::Probing
-                                {
+                                    paint_peaks(&painter, thumb_rect, &asset.peaks);
+                                } else if is_ready && asset.info.has_video {
                                     let c = thumb_rect.center();
                                     painter.add(Shape::convex_polygon(
                                         vec![
@@ -569,16 +552,29 @@ impl EditorApp {
                                     ));
                                 }
                                 if !is_ready {
-                                    painter.rect_filled(
-                                        thumb_rect,
-                                        CornerRadius::same(theme::R_MD),
-                                        egui::Color32::from_black_alpha(100),
-                                    );
+                                    if has_preview {
+                                        painter.rect_filled(
+                                            thumb_rect,
+                                            CornerRadius::same(theme::R_MD),
+                                            egui::Color32::from_black_alpha(100),
+                                        );
+                                    }
                                     let spinner_rect = egui::Rect::from_center_size(
                                         thumb_rect.center(),
                                         Vec2::splat(20.0),
                                     );
-                                    ui.put(spinner_rect, egui::Spinner::new().size(18.0));
+                                    egui::Spinner::new().paint_at(ui, spinner_rect);
+                                } else if asset.sweep.status == SweepStatus::Running {
+                                    // Curating: a corner spinner, so the
+                                    // thumbnail stays readable.
+                                    let c = rect.right_top() + Vec2::new(-13.0, 13.0);
+                                    painter.circle_filled(c, 11.0,
+                                        egui::Color32::from_black_alpha(170),
+                                    );
+                                    egui::Spinner::new().paint_at(
+                                        ui,
+                                        egui::Rect::from_center_size(c, Vec2::splat(18.0)),
+                                    );
                                 }
                                 if stroke != Stroke::NONE {
                                     painter.rect(
@@ -749,7 +745,26 @@ impl EditorApp {
                                 count(asset.sweep.scene_clips.len(), "scene")
                             ),
                         };
-                        ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            // The selected source, so the card reads at a glance.
+                            let (thumb_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(56.0, 32.0), Sense::hover());
+                            let painter = ui.painter();
+                            painter.rect_filled(
+                                thumb_rect,
+                                CornerRadius::same(theme::R_SM),
+                                theme::SECONDARY,
+                            );
+                            if let Some((_, thumb)) = asset.thumb_textures.first() {
+                                egui::Image::from_texture(thumb)
+                                    .uv(cover_uv(thumb.size_vec2(), thumb_rect.size()))
+                                    .corner_radius(theme::R_SM)
+                                    .paint_at(ui, thumb_rect);
+                            } else if !asset.peaks.is_empty() {
+                                paint_peaks(ui.painter(), thumb_rect, &asset.peaks);
+                            }
+                            ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             ui.add(
                                 egui::Label::new(
@@ -765,6 +780,7 @@ impl EditorApp {
                             };
                             ui.add(egui::Label::new(theme::caption(summary)).truncate())
                                 .on_hover_text(note);
+                            });
                         });
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -839,6 +855,37 @@ impl EditorApp {
             self.curate_all_new(ctx);
         }
         action
+    }
+}
+
+/// Whole-file waveform on an audio-tinted tile, in the timeline's audio
+/// colours. Linear scale: a whole-file overview of loud music would fill
+/// the tile solid under the timeline's square-root scale.
+fn paint_peaks(painter: &egui::Painter, rect: egui::Rect, peaks: &[f32]) {
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(theme::R_MD),
+        theme::CLIP_AUDIO.gamma_multiply(0.55),
+    );
+    let inner = rect.shrink2(Vec2::new(10.0, rect.height() * 0.22));
+    let color = theme::CLIP_AUDIO.gamma_multiply(2.6);
+    let mut x = inner.left();
+    while x <= inner.right() {
+        // Each bar shows the loudest peak in its slice of the file.
+        let slice =
+            |x: f32| (((x - inner.left()) / inner.width().max(1.0)) * peaks.len() as f32) as usize;
+        let start = slice(x).min(peaks.len() - 1);
+        let end = slice(x + 3.0).clamp(start + 1, peaks.len());
+        let peak = peaks[start..end].iter().copied().fold(0.0_f32, f32::max);
+        let amp = (peak.clamp(0.0, 1.0) * inner.height() / 2.0).max(1.0);
+        painter.line_segment(
+            [
+                egui::Pos2::new(x, inner.center().y - amp),
+                egui::Pos2::new(x, inner.center().y + amp),
+            ],
+            Stroke::new(1.5_f32, color),
+        );
+        x += 3.0;
     }
 }
 
