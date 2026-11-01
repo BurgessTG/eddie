@@ -1,8 +1,8 @@
 # Eddie
 
 A fast desktop video editor with an AI clip curator. Rust end to end:
-`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for decoding,
-and the FFmpeg CLI tools for probing, export, and audio.
+`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for video and
+audio playback, and the FFmpeg CLI tools for probing and export.
 
 Import footage, let the curator break it into every shot and the moments
 worth using, then cut those ranges together on a free-form timeline and
@@ -24,6 +24,8 @@ JavaScript console.
   trims and splits with it, or unlink it for J/L cuts.
 - Program monitor with frame stepping. The preview prefetches the next
   cut's first picture so short clips play through with fewer stalls.
+  Audio is mixed in process and drives the playhead, so a stalled picture
+  holds sound with it.
 - Titles and generated captions in four styles, the same in preview and
   export. Remove silence tightens pauses out of speech.
 - Export to H.264/AAC MP4, converted to limited-range BT.709 colour.
@@ -68,9 +70,11 @@ Select a video and press **Curate**. Curation never runs on import.
 ## Requirements
 
 - Rust, pinned in `mise.toml` (use [mise](https://mise.jdx.dev)).
-- Build: FFmpeg 9 development libraries, `pkg-config`, `clang` (for
-  bindgen), `cmake` and a C++ compiler (for whisper.cpp).
-- Runtime: `ffmpeg`, `ffprobe`, and `ffplay` on `PATH`.
+- Build: FFmpeg 9 development libraries, ALSA development headers,
+  `pkg-config`, `clang` (for bindgen), `cmake` and a C++ compiler (for
+  whisper.cpp).
+- Runtime: `ffmpeg` and `ffprobe` on `PATH`; ALSA (or PipeWire/Pulse through
+  ALSA) for sound.
 - Optional: a Meta Model API key for model review, transcription, and SAM.
 - Optional: whisper.cpp's multilingual base model (`ggml-base.bin`) at
   `~/.config/openreel/whisper/ggml-base.bin` or `EDDIE_WHISPER_MODEL`. It
@@ -122,8 +126,8 @@ detailed curator contract.
 
 ## Limitations
 
-- Audio playback still shells out to `ffplay`; there is no real A/V sync
-  clock yet.
+- Audio is the playback clock, but sync is not loopback-measured, and the
+  device delay is estimated where the sound server does not report it.
 - Meta's ASR returns speaker turns only. Word timing comes from a local
   whisper model when installed; without it, speech edges are turn-level,
   and noisy audio can still fail to align.

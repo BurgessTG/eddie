@@ -9,7 +9,7 @@ use eframe::egui::{
     Ui, Vec2,
 };
 use openreel_engine::{format_timecode, ClipId, ClipKind, Timeline, TitleStyle};
-use openreel_media::{AudioPlayer, FrameStream, MediaInfo, RawFrame, StillDecoder};
+use openreel_media::{AudioEngine, AudioSegment, FrameStream, MediaInfo, RawFrame, StillDecoder};
 
 use crate::preview;
 use crate::scripting::{ScriptCommand, ScriptEngine};
@@ -104,8 +104,12 @@ pub struct EditorApp {
     stream_generation: u64,
     stream_ready: bool,
     stream_failed: bool,
-    audio_players: HashMap<ClipId, AudioPlayer>,
+    /// Mixer and master playback clock, opened on first play.
+    audio: Option<AudioEngine>,
     audio_failed: bool,
+    /// The playhead the audio clock last produced; any other value means
+    /// something moved the playhead and the clock must follow it.
+    clock_playhead: Option<f64>,
     last_sync_playhead: f64,
     last_sync_time: f64,
 
@@ -184,8 +188,9 @@ impl EditorApp {
             stream_generation: 0,
             stream_ready: false,
             stream_failed: false,
-            audio_players: HashMap::new(),
+            audio: None,
             audio_failed: false,
+            clock_playhead: None,
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
             export_rx: None,
@@ -262,8 +267,9 @@ impl EditorApp {
             stream_generation: 0,
             stream_ready: false,
             stream_failed: false,
-            audio_players: HashMap::new(),
+            audio: None,
             audio_failed: false,
+            clock_playhead: None,
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
             export_rx: None,
@@ -622,8 +628,29 @@ impl EditorApp {
         self.still_gen = self.still_gen.wrapping_add(1);
         self.still_pending = false;
         self.still_key = None;
-        self.audio_players.clear();
         self.audio_failed = false;
+        self.clock_playhead = None;
+        if let Some(audio) = &mut self.audio {
+            audio.seek(self.playhead);
+            audio.set_running(false);
+        }
+    }
+
+    fn audio_engine(&mut self) -> &mut AudioEngine {
+        if self.audio.is_none() {
+            // Tests render deterministically from their synthetic UI clock.
+            let engine = if cfg!(test) {
+                AudioEngine::manual()
+            } else {
+                AudioEngine::open()
+            };
+            eprintln!("audio output: {}", engine.description);
+            if engine.description.starts_with("no audio device") {
+                self.status = "No audio device; playing silently.".to_owned();
+            }
+            self.audio = Some(engine);
+        }
+        self.audio.as_mut().unwrap()
     }
 
     fn set_playing(&mut self, playing: bool) {
@@ -668,20 +695,18 @@ impl EditorApp {
         ))
     }
 
-    /// Source and source time at the next change of visible video after the
-    /// playhead, computed like `sync_playback` will at that edge.
-    fn next_video_source(&self) -> Option<(&str, f64)> {
-        let current = self
-            .timeline
-            .active_video(self.playhead)
-            .map(|clip| clip.id);
+    /// The next edge after `after` where a different clip becomes visible,
+    /// with its source and source time there, as `sync_playback` computes
+    /// them at that edge. Edges into a video gap need no picture.
+    fn next_video_change(&self, after: f64) -> Option<(f64, Option<(&str, f64)>)> {
+        let current = self.timeline.active_video(after).map(|clip| clip.id);
         let mut next: Option<(f64, &openreel_engine::Clip)> = None;
         for clip in &self.timeline.clips {
             if clip.kind != ClipKind::Video {
                 continue;
             }
             for edge in [clip.start, clip.end()] {
-                if edge <= self.playhead || next.is_some_and(|(best, _)| edge >= best) {
+                if edge <= after || next.is_some_and(|(best, _)| edge >= best) {
                     continue;
                 }
                 if let Some(visible) = self.timeline.active_video(edge) {
@@ -692,10 +717,33 @@ impl EditorApp {
             }
         }
         let (edge, clip) = next?;
-        Some((
-            clip.source.as_deref()?,
-            clip.source_in + (edge - clip.start),
-        ))
+        let source = clip
+            .source
+            .as_deref()
+            .map(|source| (source, clip.source_in + (edge - clip.start)));
+        Some((edge, source))
+    }
+
+    /// How far the audio clock may run before a picture must be ready: the
+    /// next visible cut, or the one after it when the preview worker has
+    /// already prerolled that cut's first picture.
+    fn clock_limit(&self) -> f64 {
+        let end = self.timeline.end();
+        if self.waiting_for_video() {
+            return self.playhead;
+        }
+        let Some((edge, source)) = self.next_video_change(self.playhead) else {
+            return end;
+        };
+        let prerolled = source
+            .zip(self.stream.as_ref())
+            .is_some_and(|((path, time), stream)| stream.prefetch_ready(path, time, PREVIEW_W));
+        if !prerolled {
+            return edge.min(end);
+        }
+        self.next_video_change(edge)
+            .map_or(end, |(after, _)| after)
+            .min(end)
     }
 
     fn waiting_for_video(&self) -> bool {
@@ -708,7 +756,9 @@ impl EditorApp {
     fn video_playback_failed(&mut self, error: String) {
         self.playing = false;
         self.stream_failed = true;
-        self.audio_players.clear();
+        if let Some(audio) = &self.audio {
+            audio.set_running(false);
+        }
         self.status = format!("Video playback failed: {error}");
     }
 
@@ -868,7 +918,7 @@ impl EditorApp {
         // While scrubbing/dragging, never (re)spawn playback processes —
         // still frames carry the picture until the pointer settles.
         if self.timeline_view.is_interacting() {
-            if self.stream_key.is_some() || !self.audio_players.is_empty() {
+            if self.stream_key.is_some() || self.audio_running() {
                 self.stop_sources();
             }
             self.request_still_if_needed(ctx);
@@ -881,7 +931,7 @@ impl EditorApp {
             if self.stream_failed && self.stream_key == self.active_video_key() {
                 return;
             }
-            if self.stream_key.is_some() || !self.audio_players.is_empty() {
+            if self.stream_key.is_some() || self.audio_running() {
                 self.stop_sources();
             }
             self.request_still_if_needed(ctx);
@@ -942,56 +992,65 @@ impl EditorApp {
         }
         // Preroll the next visible clip while this one plays or buffers, so
         // its first picture is ready when the playhead lands on the cut.
-        if let (Some(stream), Some((source, time))) = (&self.stream, self.next_video_source()) {
+        if let (Some(stream), Some((_, Some((source, time))))) =
+            (&self.stream, self.next_video_change(self.playhead))
+        {
             let _ = stream.prefetch_preview(source, time, PREVIEW_W);
         }
+        self.sync_audio();
         if self.waiting_for_video() {
-            // Preroll can exceed a short excerpt. Hold the shared transport
-            // until its first picture, rather than letting audio consume it.
-            // Existing players resume from the held timeline position below.
-            self.audio_players.clear();
+            // Preroll can exceed a short excerpt. The clock limit holds the
+            // shared transport and its audio until the first picture.
             self.status = "Buffering video.".to_owned();
             // A held clock is not a seek, even if the next UI tick is late.
             self.last_sync_time = 0.0;
             return;
         }
+    }
 
-        // Audio players follow every audible clip under the playhead.
-        let audible: Vec<openreel_engine::Clip> = self
+    fn audio_running(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(|audio| !audio.voice_ids().is_empty())
+    }
+
+    /// Give the mixer every audible clip under the playhead or starting
+    /// within the look-ahead, so it starts decoding before their edges.
+    fn sync_audio(&mut self) {
+        const LOOK_AHEAD: f64 = 0.75;
+        let horizon = self.playhead + LOOK_AHEAD;
+        let segments: Vec<(u64, AudioSegment)> = self
             .timeline
             .clips
             .iter()
             .filter(|c| {
-                c.contains(self.playhead)
+                c.start < horizon
+                    && c.end() > self.playhead
                     && (c.kind == ClipKind::Audio
                         || (c.kind == ClipKind::Video && c.embedded_audio))
             })
-            .filter(|c| {
-                c.source
-                    .as_ref()
-                    .and_then(|s| self.asset(s))
-                    .map(|a| a.info.has_audio)
-                    .unwrap_or(false)
+            .filter_map(|c| {
+                let source = c.source.as_ref()?;
+                self.asset(source)?.info.has_audio.then(|| {
+                    (
+                        c.id,
+                        AudioSegment {
+                            path: source.clone(),
+                            start: c.start,
+                            duration: c.duration,
+                            source_in: c.source_in,
+                            volume: c.volume,
+                        },
+                    )
+                })
             })
-            .cloned()
             .collect();
-        self.audio_players
-            .retain(|id, player| audible.iter().any(|c| c.id == *id) && !player.is_finished());
-        for clip in &audible {
-            if self.audio_players.contains_key(&clip.id) || self.audio_failed {
-                continue;
-            }
-            let Some(source) = &clip.source else { continue };
-            let start = clip.source_in + (self.playhead - clip.start);
-            let remaining = (clip.end() - self.playhead).max(0.0);
-            match AudioPlayer::play_segment(source, start, remaining, clip.volume) {
-                Ok(player) => {
-                    self.audio_players.insert(clip.id, player);
-                }
-                Err(e) => {
-                    self.audio_failed = true;
-                    self.status = format!("Audio playback failed: {e}");
-                }
+        let audio = self.audio_engine();
+        audio.set_voices(&segments);
+        if let Some(error) = audio.take_error() {
+            if !self.audio_failed {
+                self.audio_failed = true;
+                self.status = format!("Audio playback failed: {error}");
             }
         }
     }
@@ -1650,30 +1709,28 @@ impl EditorApp {
         let dt = self.last_now.map_or(0.0, |last| now - last);
         self.last_now = Some(now);
         if self.playing {
-            if !self.waiting_for_video() {
-                let active_id = self
-                    .timeline
-                    .active_video(self.playhead)
-                    .map(|clip| clip.id);
-                let mut next = self.playhead + dt.max(0.0);
-                // Land at each change of visible video. A late UI tick must
-                // not jump over a whole short clip before it can even request
-                // its first picture. Titles/audio-only gaps keep their clock.
-                for clip in &self.timeline.clips {
-                    if clip.kind != ClipKind::Video {
-                        continue;
-                    }
-                    for edge in [clip.start, clip.end()] {
-                        if edge > self.playhead
-                            && edge < next
-                            && self.timeline.active_video(edge).map(|clip| clip.id) != active_id
-                        {
-                            next = edge;
-                        }
-                    }
-                }
-                self.playhead = next;
+            // The audio clock is the transport. It may run to the next cut
+            // whose picture is not ready, so a late UI tick cannot jump over
+            // a short clip and audio is never heard ahead of its picture.
+            let limit = self.clock_limit();
+            let playhead = self.playhead;
+            let moved = self.clock_playhead != Some(playhead);
+            let audio = self.audio_engine();
+            if moved {
+                audio.seek(playhead);
             }
+            audio.set_limit(limit);
+            audio.set_running(true);
+            // Only the manual (test) output renders here; devices pace themselves.
+            audio.advance(dt.max(0.0));
+            let clock = audio.clock().min(limit);
+            // The playhead still lands on each cut for one tick, so the clip
+            // is requested at its first picture, which may be prerolled.
+            let cut = self
+                .next_video_change(playhead)
+                .map_or(f64::INFINITY, |(edge, _)| edge);
+            self.playhead = playhead.max(clock.min(cut));
+            self.clock_playhead = Some(self.playhead);
             if self.playhead >= self.timeline.end() {
                 self.playhead = self.timeline.end();
                 self.set_playing(false);
@@ -3073,7 +3130,7 @@ mod tests {
                     blue,
                     "cut {index}: {picture:?}"
                 );
-                let Some((source, time)) = app.next_video_source() else {
+                let Some((_, Some((source, time)))) = app.next_video_change(app.playhead) else {
                     break;
                 };
                 let source = source.to_owned();
@@ -3143,31 +3200,33 @@ mod tests {
             advance_to(&mut app, &ctx, 0.1);
             assert_eq!(app.playhead, 0.1);
             app.sync_playback(&ctx);
-            assert!(app.audio_players.contains_key(&bed));
+            // The look-ahead starts the video's audio before its edge.
+            let voices = |app: &EditorApp| app.audio.as_ref().unwrap().voice_ids();
+            assert_eq!(voices(&app), vec![video, bed]);
 
             advance_to(&mut app, &ctx, 0.3);
             assert_eq!(app.playhead, 0.2);
             app.poll_frames(&ctx);
             app.sync_playback(&ctx);
-            assert!(
-                app.audio_players.is_empty(),
-                "audio must not run ahead during preroll"
-            );
             advance_to(&mut app, &ctx, 0.5);
             assert_eq!(app.playhead, 0.2);
+            assert_eq!(
+                app.audio.as_ref().unwrap().clock(),
+                0.2,
+                "audio must not run ahead during preroll"
+            );
             let picture = await_picture(&mut app, &ctx);
             assert!(picture.r() > 240 && picture.b() < 10);
-            assert!(app.audio_players.contains_key(&video));
-            assert!(app.audio_players.contains_key(&bed));
+            assert_eq!(voices(&app), vec![video, bed]);
 
+            // The picture ends at 0.4; the audio-only gap keeps the clock.
             advance_to(&mut app, &ctx, 0.8);
-            assert_eq!(app.playhead, 0.4);
+            assert!((app.playhead - 0.5).abs() < 1e-9, "{}", app.playhead);
             app.poll_frames(&ctx);
             app.sync_playback(&ctx);
-            assert!(!app.audio_players.contains_key(&video));
-            assert!(app.audio_players.contains_key(&bed));
+            assert_eq!(voices(&app), vec![bed]);
             advance_to(&mut app, &ctx, 0.9);
-            assert!((app.playhead - 0.5).abs() < 1e-9);
+            assert!((app.playhead - 0.6).abs() < 1e-9, "{}", app.playhead);
             app.set_playing(false);
         }
 

@@ -1,8 +1,6 @@
-//! Realtime playback helpers: an in-process paced video decoder stream
-//! and fire-and-kill audio segment players (ffplay, pending the same
-//! in-process treatment for audio).
+//! Realtime video playback: an in-process paced decoder stream and the
+//! two-lane preview worker. Audio lives in `audio.rs`.
 
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -746,46 +744,5 @@ fn preview_decode(
                 }
             }
         }
-    }
-}
-
-/// One audio segment played through ffplay. Dropping kills playback.
-pub struct AudioPlayer {
-    child: Child,
-}
-
-impl AudioPlayer {
-    pub fn play_segment(path: &str, start: f64, duration: f64, volume: f32) -> MediaResult<Self> {
-        let child = Command::new("ffplay")
-            .args([
-                "-nodisp",
-                "-autoexit",
-                "-v",
-                "error",
-                "-ss",
-                &format!("{start:.3}"),
-                "-t",
-                &format!("{duration:.3}"),
-                "-af",
-                &format!("volume={volume:.3}"),
-                path,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("failed to launch ffplay: {e}"))?;
-        Ok(Self { child })
-    }
-
-    pub fn is_finished(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
-    }
-}
-
-impl Drop for AudioPlayer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }

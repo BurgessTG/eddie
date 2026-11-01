@@ -10,8 +10,9 @@ Update it when a decision changes.
 - FFmpeg 9 is the target. In-process decode uses `ffmpeg-next` 9.
 - Builds need FFmpeg dev libraries, `pkg-config`, and `clang` for bindgen,
   plus `cmake` and a C++ compiler for whisper.cpp (`whisper-rs`).
-- Runtime needs `ffmpeg`, `ffprobe`, and `ffplay` on `PATH` until probe,
-  export, and audio also move in-process.
+- Runtime needs `ffmpeg` and `ffprobe` on `PATH` until probe and export
+  also move in-process. Audio playback uses cpal (ALSA on Linux, so builds
+  need the ALSA dev library) and libswresample.
 
 ## Commands
 
@@ -54,11 +55,6 @@ The poteto pstack skills are installed in Muse user scope
   Code. Skip it here.
 - Skills installed mid-session do not hot-load. Restart the session to get
   slash invocation.
-
-Known audit findings not yet fixed:
-
-- Audio still shells out to `ffplay`. It needs the in-process treatment
-  video got, plus a real A/V sync clock.
 
 The media bin and import pipeline live in `crates/app/src/app/media.rs`.
 Chat editing lives in `crates/app/src/app/chat.rs`. Its HTTP call runs on
@@ -403,11 +399,24 @@ on 16 cores); pausing releases the idle lane's. Preroll remains CPU-bound:
 on two cores, ten 0.3 s cuts still buffer about 3 s. Clip switches and seeks
 do not wait for native open/seek/decode; obsolete frames and errors are ignored.
 Decode completes a captured clock target before chasing a newer one, preventing
-moving-clock starvation. Transport waits for each visible clip's first picture
-and pauses audio with it instead of consuming an unseen short clip. Buffering
-remains visible and extends wall-clock playback; this is not a real A/V sync
-clock or a guarantee of smooth real-time playback. Decode failure pauses with
-an error, not an automatic retry loop. Native calls themselves are not preemptible.
+moving-clock starvation. Audio plays in process (`crates/media/src/audio.rs`):
+one mixer at 48 kHz stereo, one ffmpeg-next decode/swresample thread per
+audible clip, with clips starting within 0.75 s prerolled. The samples the
+mixer renders are the transport clock; the playhead reads it less the device
+queue (PipeWire's ALSA plugin reports no delay, so the queue is estimated as
+buffer minus the requested period, about 57 ms here). Silent held blocks do
+not restart that interpolation, so a held clock reaches its limit (and the
+timeline end) once the queue drains; between seeks it never steps back. The app gives the mixer
+a limit: the next visible cut, or the one after when its first picture is
+prerolled. Rendering never passes the limit, so a buffering cut holds sound
+and picture together instead of consuming an unseen short clip; the playhead
+still lands on each cut for one tick so the clip is requested at its first
+picture. A voice under the clock with no decoded data holds the clock too.
+Without a device (headless, `SDL_AUDIODRIVER=dummy`) a paced null output
+keeps the same clock silently; app tests use the deterministic manual output.
+This is not loopback-measured sync, and it does not make CPU-bound preroll
+smooth. Decode failure pauses with an error, not an automatic retry loop.
+Native calls themselves are not preemptible.
 `addCaptionsForClip` and the inspector generate readable caption
 clips from a placed clip's transcript, using word timing when
 present and turn-proportional estimates otherwise.
