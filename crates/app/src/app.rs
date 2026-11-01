@@ -112,6 +112,8 @@ pub struct EditorApp {
     clock_playhead: Option<f64>,
     last_sync_playhead: f64,
     last_sync_time: f64,
+    /// The monitor's scrubber is held; previews like a ruler scrub.
+    transport_scrubbing: bool,
 
     export_rx: Option<Receiver<ExportMsg>>,
     export_progress: Option<f64>,
@@ -193,6 +195,7 @@ impl EditorApp {
             clock_playhead: None,
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
+            transport_scrubbing: false,
             export_rx: None,
             export_progress: None,
             show_media: true,
@@ -272,6 +275,7 @@ impl EditorApp {
             clock_playhead: None,
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
+            transport_scrubbing: false,
             export_rx: None,
             export_progress: None,
             show_media: true,
@@ -681,6 +685,12 @@ impl EditorApp {
         self.preview_key = None;
     }
 
+    /// Ruler, clip drag or monitor scrubber held: preview from low-res
+    /// stills instead of restarting playback on every move.
+    fn scrubbing(&self) -> bool {
+        self.timeline_view.is_interacting() || self.transport_scrubbing
+    }
+
     fn active_video_clip(&self) -> Option<openreel_engine::Clip> {
         self.timeline.active_video(self.playhead).cloned()
     }
@@ -787,7 +797,7 @@ impl EditorApp {
         let source_time = active
             .as_ref()
             .map(|clip| clip.source_in + (self.playhead - clip.start));
-        let wants_still = !self.playing || self.timeline_view.is_interacting();
+        let wants_still = !self.playing || self.scrubbing();
         let mut latest_still: Option<((ClipId, i64, u32), RawFrame)> = None;
         while let Ok((gen, result)) = self.still_rx.try_recv() {
             if gen == self.still_gen {
@@ -855,11 +865,7 @@ impl EditorApp {
         let (w, h) = (asset.info.width, asset.info.height);
         let source_time = clip.source_in + (self.playhead - clip.start);
         // Two tiers: fast small frames while interacting, full quality when idle.
-        let width = if self.timeline_view.is_interacting() {
-            SCRUB_W
-        } else {
-            PREVIEW_W
-        };
+        let width = if self.scrubbing() { SCRUB_W } else { PREVIEW_W };
         let key = (
             clip.id,
             (source_time * self.timeline.fps).round() as i64,
@@ -917,7 +923,7 @@ impl EditorApp {
 
         // While scrubbing/dragging, never (re)spawn playback processes —
         // still frames carry the picture until the pointer settles.
-        if self.timeline_view.is_interacting() {
+        if self.scrubbing() {
             if self.stream_key.is_some() || self.audio_running() {
                 self.stop_sources();
             }
@@ -2480,7 +2486,7 @@ impl EditorApp {
 
                 let avail = ui.available_size();
                 let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(avail.x, (avail.y - 58.0).clamp(0.0, avail.y)),
+                    Vec2::new(avail.x, (avail.y - 72.0).clamp(0.0, avail.y)),
                     Sense::hover(),
                 );
                 let audio_peaks = self
@@ -2511,13 +2517,18 @@ impl EditorApp {
                     !self.assets.is_empty(),
                 );
 
-                ui.add_space(8.0);
+                ui.add_space(4.0);
                 let row = ui.available_rect_before_wrap();
                 let bar_w = 520.0_f32.min(row.width());
                 // Below this the length readout would overlap the controls.
                 let show_length = bar_w >= 470.0;
+                let scrub = egui::Rect::from_center_size(
+                    egui::pos2(row.center().x, row.top() + 7.0),
+                    Vec2::new(bar_w - 16.0, 14.0),
+                );
+                self.transport_scrubber(ui, scrub);
                 let bar = egui::Rect::from_center_size(
-                    egui::pos2(row.center().x, row.top() + 22.0),
+                    egui::pos2(row.center().x, row.top() + 14.0 + 22.0),
                     Vec2::new(bar_w, 44.0),
                 );
                 ui.painter().rect(
@@ -2533,12 +2544,10 @@ impl EditorApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.label(
-                            RichText::new(format_timecode(self.playhead, self.timeline.fps))
-                                .monospace()
-                                .size(13.0)
-                                .color(theme::FOREGROUND),
-                        )
+                        ui.label(timecode_job(
+                            &format_timecode(self.playhead, self.timeline.fps),
+                            theme::FOREGROUND,
+                        ))
                         .on_hover_text("Playhead position");
                         let controls_w = 38.0 * 5.0 + 2.0 * 4.0;
                         let readout_w = ui.min_rect().width();
@@ -2583,15 +2592,10 @@ impl EditorApp {
                             return;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format_timecode(
-                                    self.timeline.end(),
-                                    self.timeline.fps,
-                                ))
-                                .monospace()
-                                .size(13.0)
-                                .color(theme::SUBTLE_FG),
-                            )
+                            ui.label(timecode_job(
+                                &format_timecode(self.timeline.end(), self.timeline.fps),
+                                theme::MUTED_FG,
+                            ))
                             .on_hover_text("Timeline length");
                         });
                     },
@@ -2601,6 +2605,62 @@ impl EditorApp {
 }
 
 impl EditorApp {
+    /// Thin whole-edit position track above the transport. Click or drag
+    /// to move the playhead; while held it previews like a ruler scrub.
+    fn transport_scrubber(&mut self, ui: &mut Ui, rect: egui::Rect) {
+        let end = self.timeline.end();
+        let mut response = ui.interact(
+            rect,
+            ui.id().with("transport_scrub"),
+            Sense::click_and_drag(),
+        );
+        if !response.is_pointer_button_down_on() {
+            // No tooltip over the readout while dragging.
+            response = response.on_hover_text("Click or drag to move the playhead");
+        }
+        if end > 0.0 {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if response.is_pointer_button_down_on() || response.clicked() {
+                    let fraction = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                    self.playhead = self.timeline.snap(fraction as f64 * end);
+                }
+            }
+        }
+        let held = response.is_pointer_button_down_on();
+        if self.transport_scrubbing && !held {
+            // Settle at full preview quality where the pointer let go.
+            self.preview_texture = None;
+            self.preview_key = None;
+        }
+        self.transport_scrubbing = held;
+        let active = held || response.hovered();
+        let track = egui::Rect::from_center_size(
+            rect.center(),
+            Vec2::new(rect.width(), if active { 5.0 } else { 3.0 }),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(track, CornerRadius::same(3), theme::SECONDARY);
+        let fraction = if end > 0.0 {
+            (self.playhead / end).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let x = track.left() + track.width() * fraction;
+        painter.rect_filled(
+            egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y)),
+            CornerRadius::same(3),
+            if active {
+                theme::FOREGROUND
+            } else {
+                theme::MUTED_FG
+            },
+        );
+        if active {
+            painter.circle_filled(egui::pos2(x, track.center().y), 6.0, theme::FOREGROUND);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+
     /// Post-panel work for one frame: playback sync, then the
     /// deferred UI action. Split out of `eframe::App::update` so
     /// tests can drive the real seam. Gap closing lives at the edit
@@ -2806,6 +2866,33 @@ fn button_row(ui: &mut Ui, buttons: Vec<(&str, &str, &mut bool)>, destructive_la
             });
         }
     });
+}
+
+/// Monospace timecode with its leading zero groups dimmed, so the moving digits
+/// stand out, as in most editors' transport readouts.
+fn timecode_job(timecode: &str, bright: egui::Color32) -> egui::text::LayoutJob {
+    // Dim whole leading `00:` groups; seconds and frames always stay bright.
+    let mut dim = 0;
+    while timecode[dim..].starts_with("00:") && dim + 3 + 5 <= timecode.len() {
+        dim += 3;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::FontId::monospace(13.0);
+    for (text, color) in [
+        (&timecode[..dim], theme::SUBTLE_FG),
+        (&timecode[dim..], bright),
+    ] {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job
 }
 
 /// Thin vertical rule separating toolbar groups.
@@ -4205,6 +4292,62 @@ mod tests {
         app.spawn_import(&ctx, vec![second.clone()]);
         assert_eq!(app.import_queue, vec![second]);
         assert_eq!(app.assets.len(), 2, "both files show as placeholders");
+    }
+
+    /// The monitor scrubber spans the whole edit: a click a quarter of the
+    /// way along moves the playhead a quarter of the way through it.
+    #[test]
+    fn transport_scrubber_click_seeks_proportionally() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.timeline
+            .add_clip("Intro", ClipKind::Title, 0, 0.0, 8.0, 0.0);
+        let mut time = 0.0;
+        let mut render = |app: &mut EditorApp, events| {
+            time += 0.05;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(900.0, 600.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.central(ctx),
+            )
+        };
+        render(&mut app, Vec::new());
+        let output = render(&mut app, Vec::new());
+        let text_rect = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("transport readout {label}"))
+        };
+        let position = text_rect(&format_timecode(0.0, app.timeline.fps));
+        let length = text_rect(&format_timecode(8.0, app.timeline.fps));
+        // The track runs from 6 px left of the position readout to 6 px
+        // right of the length readout, 29 px above their centre line.
+        let (left, right) = (position.left() - 6.0, length.right() + 6.0);
+        let target = egui::pos2(left + (right - left) * 0.25, position.center().y - 29.0);
+        render(&mut app, vec![egui::Event::PointerMoved(target)]);
+        for pressed in [true, false] {
+            render(&mut app, vec![pointer_button(target.x, target.y, pressed)]);
+        }
+        assert!(
+            (app.playhead - 2.0).abs() < 0.1,
+            "a click at 25% of the scrubber seeks to 2 s, got {}",
+            app.playhead
+        );
+        assert!(!app.transport_scrubbing, "release ends the scrub");
     }
 
     /// A finished import selects itself only when nothing is selected, so

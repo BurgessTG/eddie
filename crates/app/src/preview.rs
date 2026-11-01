@@ -5,7 +5,7 @@
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2,
 };
-use openreel_engine::{ClipKind, Timeline, TitleStyle};
+use openreel_engine::{ClipKind, Timeline};
 
 use crate::theme;
 
@@ -36,13 +36,7 @@ pub fn paint(
     // The export canvas, so pillarboxing and titles preview as exported.
     let frame = fit(area, canvas.0 as f32 / canvas.1.max(1) as f32);
     let painter = ui.painter().with_clip_rect(frame);
-    painter.rect(
-        frame,
-        CornerRadius::same(theme::R_LG),
-        Color32::BLACK,
-        Stroke::new(1.0_f32, theme::BORDER_STRONG),
-        eframe::egui::StrokeKind::Outside,
-    );
+    painter.rect_filled(frame, CornerRadius::same(theme::R_LG), Color32::BLACK);
 
     match (video, texture) {
         (Some(clip), Some(texture)) => {
@@ -51,7 +45,14 @@ pub fn paint(
             let size = texture.size_vec2();
             let scale = (frame.width() / size.x).min(frame.height() / size.y);
             let picture = Rect::from_center_size(frame.center(), size * scale);
-            painter.image(texture.id(), picture, uv, tint);
+            // A picture that fills the canvas takes its rounded corners.
+            let fills = (picture.width() - frame.width()).abs() < 1.5
+                && (picture.height() - frame.height()).abs() < 1.5;
+            let radius = if fills { theme::R_LG } else { 0 };
+            painter.add(
+                eframe::egui::epaint::RectShape::filled(picture, radius, tint)
+                    .with_texture(texture.id(), uv),
+            );
         }
         (Some(_), None) => {
             painter.text(
@@ -84,78 +85,51 @@ pub fn paint(
         }
     }
 
-    // Title/caption overlay, positioned like export for its style.
+    // Title/caption overlay from export's own table, scaled from canvas
+    // pixels to the monitor so it previews at its exported size and place.
     if let Some(title) = timeline.active_title(playhead) {
-        let alpha = (title.opacity.clamp(0.0, 1.0) * 255.0) as u8;
-        match title.title_style {
-            TitleStyle::LowerThird => {
-                let card = Rect::from_min_size(
-                    frame.left_bottom() + Vec2::new(28.0, -72.0),
-                    Vec2::new((frame.width() - 56.0).clamp(120.0, 420.0), 48.0),
-                );
+        let alpha = title.opacity.clamp(0.0, 1.0);
+        let look = openreel_media::title_look(title.title_style);
+        let scale = frame.height() / canvas.1.max(1) as f32;
+        let (r, g, b) = look.color;
+        let color = Color32::from_rgba_unmultiplied(r, g, b, (alpha * 255.0) as u8);
+        let galley = painter.layout_no_wrap(
+            title.name.clone(),
+            FontId::proportional((look.font_size as f32 * scale).max(1.0)),
+            color,
+        );
+        let size = galley.size();
+        let x = match look.left {
+            Some(left) => frame.left() + left as f32 * scale,
+            None => frame.center().x - size.x / 2.0,
+        };
+        let top_left = Pos2::new(x, frame.bottom() - look.bottom as f32 * scale);
+        let border = look.border as f32 * scale;
+        match look.box_alpha {
+            Some(box_alpha) => {
                 painter.rect_filled(
-                    card,
-                    6,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, (alpha as f32 * 0.55) as u8),
-                );
-                painter.text(
-                    card.left_center() + Vec2::new(14.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    &title.name,
-                    FontId::proportional(17.0),
-                    Color32::from_white_alpha(alpha),
+                    Rect::from_min_size(top_left, size).expand(border),
+                    0,
+                    Color32::from_black_alpha((box_alpha * alpha * 255.0) as u8),
                 );
             }
-            TitleStyle::Caption | TitleStyle::PopCaption => {
-                let pop = title.title_style == TitleStyle::PopCaption;
-                let font_size = if pop { 21.0 } else { 17.0 };
-                let estimated_width = title.name.chars().count() as f32 * font_size * 0.56 + 28.0;
-                let width = estimated_width.clamp(140.0, (frame.width() - 40.0).max(140.0));
-                let card = Rect::from_center_size(
-                    Pos2::new(frame.center().x, frame.bottom() - 38.0),
-                    Vec2::new(width, 42.0),
-                );
-                painter.rect_filled(
-                    card,
-                    6,
-                    Color32::from_rgba_unmultiplied(
-                        0,
-                        0,
-                        0,
-                        (alpha as f32 * if pop { 0.75 } else { 0.65 }) as u8,
-                    ),
-                );
-                let color = if pop {
-                    Color32::from_rgba_unmultiplied(255, 214, 64, alpha)
-                } else {
-                    Color32::from_white_alpha(alpha)
-                };
-                painter.text(
-                    card.center(),
-                    Align2::CENTER_CENTER,
-                    &title.name,
-                    FontId::proportional(font_size),
-                    color,
-                );
-            }
-            TitleStyle::MinimalCaption => {
-                let center = Pos2::new(frame.center().x, frame.bottom() - 34.0);
-                painter.text(
-                    center + Vec2::new(1.0, 1.0),
-                    Align2::CENTER_CENTER,
-                    &title.name,
-                    FontId::proportional(16.0),
-                    Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
-                );
-                painter.text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    &title.name,
-                    FontId::proportional(16.0),
-                    Color32::from_white_alpha(alpha),
-                );
+            None => {
+                let outline = Color32::from_black_alpha((0.8 * alpha * 255.0) as u8);
+                for offset in [
+                    Vec2::new(-border, 0.0),
+                    Vec2::new(border, 0.0),
+                    Vec2::new(0.0, -border),
+                    Vec2::new(0.0, border),
+                ] {
+                    painter.galley_with_override_text_color(
+                        top_left + offset,
+                        galley.clone(),
+                        outline,
+                    );
+                }
             }
         }
+        painter.galley(top_left, galley, color);
     }
 }
 

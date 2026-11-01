@@ -357,7 +357,9 @@ Video audio can be detached into a linked audio clip. The picture's
 linked pairs move, trim, split, and close gaps together until
 explicitly unlinked for J/L cuts or replacement sound. Titles and
 generated captions share `TitleStyle` (`lower-third`, `caption`,
-`pop-caption`, `minimal-caption`) across preview and export.
+`pop-caption`, `minimal-caption`) across preview and export. One table,
+`openreel_media::title_look`, holds each style's size, colour, box and
+placement in export-canvas pixels; the monitor scales it to its frame.
 Preview and export share `export_canvas` (the monitor pillarboxes like
 export). Its orientation is the one most video clips use; a tie follows the
 first clip in insertion order, square counts as landscape, and the largest

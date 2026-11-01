@@ -392,6 +392,61 @@ fn stream_video(
 /// that orientation (displayed size, first on equal area), capped at 1920
 /// wide; 1280x720 without video. The program monitor uses the same canvas
 /// so titles and pillarboxing preview as exported.
+/// How export draws one title style, in output-canvas pixels. The program
+/// monitor reads the same table and scales it to its frame, so titles
+/// preview at the size and place they export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TitleLook {
+    pub font_size: u32,
+    pub color: (u8, u8, u8),
+    /// Black box opacity behind the text; `None` draws a black outline.
+    pub box_alpha: Option<f32>,
+    /// Box padding, or outline width when there is no box.
+    pub border: u32,
+    /// Text left edge; `None` centers the text.
+    pub left: Option<u32>,
+    /// Distance from the canvas bottom to the text top.
+    pub bottom: u32,
+}
+
+pub fn title_look(style: TitleStyle) -> TitleLook {
+    let white = (255, 255, 255);
+    match style {
+        TitleStyle::LowerThird => TitleLook {
+            font_size: 44,
+            color: white,
+            box_alpha: Some(0.55),
+            border: 14,
+            left: Some(42),
+            bottom: 110,
+        },
+        TitleStyle::Caption => TitleLook {
+            font_size: 38,
+            color: white,
+            box_alpha: Some(0.65),
+            border: 12,
+            left: None,
+            bottom: 90,
+        },
+        TitleStyle::PopCaption => TitleLook {
+            font_size: 48,
+            color: (255, 255, 0),
+            box_alpha: Some(0.75),
+            border: 14,
+            left: None,
+            bottom: 100,
+        },
+        TitleStyle::MinimalCaption => TitleLook {
+            font_size: 34,
+            color: white,
+            box_alpha: None,
+            border: 2,
+            left: None,
+            bottom: 70,
+        },
+    }
+}
+
 pub fn export_canvas(sources: impl Iterator<Item = (u32, u32)>) -> (u32, u32) {
     let sources: Vec<(u32, u32)> = sources.collect();
     let portrait = |&(w, h): &(u32, u32)| h > w;
@@ -477,36 +532,20 @@ pub fn export_timeline(
                 continue;
             }
             let enable = enabled_frames(ranges);
-            let (font_size, font_color, box_options, x, y) = match clip.title_style {
-                TitleStyle::LowerThird => (
-                    44,
-                    "white",
-                    "box=1:boxcolor=black@0.55:boxborderw=14",
-                    "42",
-                    "h-110",
-                ),
-                TitleStyle::Caption => (
-                    38,
-                    "white",
-                    "box=1:boxcolor=black@0.65:boxborderw=12",
-                    "(w-text_w)/2",
-                    "h-90",
-                ),
-                TitleStyle::PopCaption => (
-                    48,
-                    "yellow",
-                    "box=1:boxcolor=black@0.75:boxborderw=14",
-                    "(w-text_w)/2",
-                    "h-100",
-                ),
-                TitleStyle::MinimalCaption => (
-                    34,
-                    "white",
-                    "box=0:borderw=2:bordercolor=black@0.8",
-                    "(w-text_w)/2",
-                    "h-70",
-                ),
+            let look = title_look(clip.title_style);
+            let (r, g, b) = look.color;
+            let font_size = look.font_size;
+            let font_color = format!("0x{r:02X}{g:02X}{b:02X}");
+            let box_options = match look.box_alpha {
+                Some(alpha) => {
+                    format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={}", look.border)
+                }
+                None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
             };
+            let x = look
+                .left
+                .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
+            let y = format!("h-{}", look.bottom);
             filters.push(format!(
                 "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{:.2}:\
                  fontsize={font_size}:{box_options}:x={x}:y={y}:\
