@@ -256,64 +256,47 @@ impl EditorApp {
     }
 
     pub(super) fn gallery_content(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if let Some(view) = theme::segmented(ui, self.curator.view, &[
-                (GalleryView::Clips, "Clips", "Search and sort usable ranges and ranges needing review"),
-                (GalleryView::Scenes, "All scenes", "Every source shot, including rejected material; ignores Clip filters and stays in source order"),
-            ]) {
-                self.curator.view = view;
-            }
-            let source = self.selected_asset.as_deref().and_then(|path| self.asset(path))
-                .map(|asset| asset.info.name.as_str()).unwrap_or("All sources");
-            egui::ComboBox::from_id_salt("gallery_source")
-                .width(180.0)
-                .truncate()
-                .selected_text(source)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.selected_asset, None, "All sources")
-                        .on_hover_text("Browse ranges from every imported source");
-                    for asset in &self.assets {
-                        ui.selectable_value(&mut self.selected_asset, Some(asset.info.path.clone()), &asset.info.name)
-                            .on_hover_text(&asset.info.path);
-                    }
-                }).response.on_hover_text("Choose one source or search across every source");
-        });
         let scenes = self.curator.view == GalleryView::Scenes;
-        ui.add_space(8.0);
-        ui.add_enabled_ui(!scenes, |ui| {
-            ui.horizontal(|ui| {
-                let search_width = (ui.available_width() - 145.0).max(80.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.curator.filters.search)
-                        .hint_text("Search clips…")
-                        .margin(egui::Margin::symmetric(8, 6))
-                        .desired_width(search_width),
-                )
-                .on_hover_text(
-                    "Match words in source names, categories, tags, review notes and transcripts",
-                );
-                egui::ComboBox::from_id_salt("gallery_sort")
-                    .width(125.0)
-                    .selected_text(if scenes {
-                        "Source order"
-                    } else {
-                        self.curator.filters.sort.label()
-                    })
+        // Row one picks what to browse: view and source, then search and
+        // order beside them when they fit, or on their own row when not.
+        let inline = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if let Some(view) = theme::segmented(ui, self.curator.view, &[
+                    (GalleryView::Clips, "Clips", "Search and sort usable ranges and ranges needing review"),
+                    (GalleryView::Scenes, "All scenes", "Every source shot, including rejected material; ignores Clip filters and stays in source order"),
+                ]) {
+                    self.curator.view = view;
+                }
+                let source = self.selected_asset.as_deref().and_then(|path| self.asset(path))
+                    .map(|asset| asset.info.name.as_str()).unwrap_or("All sources");
+                egui::ComboBox::from_id_salt("gallery_source")
+                    .width(160.0)
+                    .truncate()
+                    .selected_text(source)
                     .show_ui(ui, |ui| {
-                        for sort in [
-                            GallerySort::Score,
-                            GallerySort::Source,
-                            GallerySort::Shortest,
-                            GallerySort::Longest,
-                        ] {
-                            ui.selectable_value(&mut self.curator.filters.sort, sort, sort.label())
-                                .on_hover_text("Add shown uses this same order");
+                        ui.selectable_value(&mut self.selected_asset, None, "All sources")
+                            .on_hover_text("Browse ranges from every imported source");
+                        for asset in &self.assets {
+                            ui.selectable_value(&mut self.selected_asset, Some(asset.info.path.clone()), &asset.info.name)
+                                .on_hover_text(&asset.info.path);
                         }
-                    })
-                    .response
-                    .on_hover_text("Sort the visible clips; ties keep source order");
+                    }).response.on_hover_text("Choose one source or search across every source");
+                let inline = ui.available_width() >= SEARCH_MIN + SORT_RESERVE;
+                if inline {
+                    search_and_sort(ui, &mut self.curator.filters, scenes);
+                }
+                inline
+            })
+            .inner;
+        if !inline {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                search_and_sort(ui, &mut self.curator.filters, scenes);
             });
-        });
+        }
+        ui.add_space(8.0);
 
         let compact = ui.available_width() < 720.0;
         let running = self.assets.iter().any(|asset| {
@@ -324,71 +307,85 @@ impl EditorApp {
                     .is_none_or(|path| *path == asset.info.path)
         });
         let mut add_all = false;
-        let refs = ui
-            .horizontal_wrapped(|ui| {
-                ui.add_enabled_ui(!scenes, |ui| {
-                    if compact {
-                        let active = [
-                            self.curator.filters.category.is_some(),
-                            self.curator.filters.quality != GalleryQuality::All,
-                            self.curator.filters.duration != GalleryDuration::All,
-                        ]
-                        .into_iter()
-                        .filter(|active| *active)
-                        .count();
-                        let label = if active == 0 {
-                            "Filters".to_owned()
-                        } else {
-                            format!("Filters ({active})")
-                        };
-                        ui.menu_button(label, |ui| {
-                            self.curator.filters.controls(ui);
-                        })
+        // Row two narrows and acts: filters on the left; the count, music
+        // policy and the one primary action on the right.
+        let refs = self.curator_candidate_refs(scenes);
+        let count = format!(
+            "{} {}{}",
+            refs.len(),
+            if scenes { "scene" } else { "clip" },
+            if refs.len() == 1 { "" } else { "s" }
+        );
+        let mut actions = |ui: &mut egui::Ui, mute: &mut bool| {
+            add_all = theme::primary_button(
+                ui,
+                if scenes {
+                    "Add all scenes"
+                } else {
+                    "Add shown"
+                },
+            )
+            .on_hover_text(if scenes {
+                "Append every source scene in source order"
+            } else {
+                "Append exactly the matching clips in the displayed order"
+            })
+            .clicked();
+            ui.checkbox(mute, "Mute music beds").on_hover_text(
+                "Add ranges with baked-in music muted; turn off to keep their original score",
+            );
+            ui.label(RichText::new(&count).size(12.0).color(theme::MUTED_FG))
+                .on_hover_text("Matching ranges only; filtering does not remove source material");
+            if running {
+                let (spot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                egui::Spinner::new().paint_at(ui, spot);
+                ui.label(RichText::new("Curating…").size(12.0).color(theme::MUTED_FG));
+            }
+        };
+        let filters = &mut self.curator.filters;
+        let mute = &mut self.mute_music_beds;
+        let filter_ui = |ui: &mut egui::Ui, filters: &mut GalleryFilters| {
+            ui.add_enabled_ui(!scenes, |ui| {
+                if compact {
+                    let active = [
+                        filters.category.is_some(),
+                        filters.quality != GalleryQuality::All,
+                        filters.duration != GalleryDuration::All,
+                    ]
+                    .into_iter()
+                    .filter(|active| *active)
+                    .count();
+                    let label = if active == 0 {
+                        "Filters".to_owned()
+                    } else {
+                        format!("Filters ({active})")
+                    };
+                    ui.menu_button(label, |ui| filters.controls(ui))
                         .response
                         .on_hover_text(
                             "Combine content type, quality, review status and duration filters",
                         );
-                    } else {
-                        self.curator.filters.controls(ui);
-                    }
-                });
-                add_all = theme::secondary_button(
-                    ui,
-                    if scenes {
-                        "Add all scenes"
-                    } else {
-                        "Add shown"
-                    },
-                )
-                .on_hover_text(if scenes {
-                    "Append every source scene in source order"
                 } else {
-                    "Append exactly the matching clips in the displayed order"
-                })
-                .clicked();
-                ui.checkbox(&mut self.mute_music_beds, "Mute music beds")
-                    .on_hover_text(
-                    "Add ranges with baked-in music muted; turn off to keep their original score",
-                );
-                let refs = self.curator_candidate_refs(scenes);
-                ui.label(
-                    RichText::new(format!(
-                        "{} {}{}",
-                        refs.len(),
-                        if scenes { "scene" } else { "clip" },
-                        if refs.len() == 1 { "" } else { "s" }
-                    ))
-                    .size(12.0)
-                    .color(theme::MUTED_FG),
-                )
-                .on_hover_text("Matching ranges only; filtering does not remove source material");
-                if running {
-                    ui.add(egui::Spinner::new().size(12.0));
-                    ui.label(RichText::new("Curating…").size(12.0).color(theme::MUTED_FG));
+                    filters.controls(ui);
                 }
-                refs
-            })
-            .inner;
+            });
+        };
+        if compact {
+            // Too narrow to split the row; wrap in reading order instead.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                filter_ui(ui, filters);
+                actions(ui, mute);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                filter_ui(ui, filters);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    actions(ui, mute);
+                });
+            });
+        }
         ui.add_space(6.0);
         if add_all {
             if scenes {
@@ -432,11 +429,11 @@ impl EditorApp {
         let columns = ((width + GAP) / (MIN_CARD_WIDTH + GAP)).floor().max(1.0) as usize;
         // A whole card, actions included, must fit the viewport height, so
         // a wide but short gallery shrinks its cards instead of cutting them.
-        let fit_height = ((ui.available_height() - 88.0) * 16.0 / 9.0).max(120.0);
+        let fit_height = ((ui.available_height() - 108.0) * 16.0 / 9.0).max(120.0);
         let card_width = ((width - GAP * (columns - 1) as f32) / columns as f32)
             .min(280.0)
             .min(fit_height);
-        let card_height = card_width * 9.0 / 16.0 + 84.0;
+        let card_height = card_width * 9.0 / 16.0 + 104.0;
         let thumbnails = self
             .curator
             .thumbnails
@@ -491,6 +488,46 @@ impl EditorApp {
     }
 }
 
+/// Sort menu width; the reserve adds its arrow and padding.
+const SORT_WIDTH: f32 = 120.0;
+const SORT_RESERVE: f32 = SORT_WIDTH + 48.0;
+const SEARCH_MIN: f32 = 180.0;
+
+/// Search field filling the row, then the sort menu at its end.
+fn search_and_sort(ui: &mut egui::Ui, filters: &mut GalleryFilters, scenes: bool) {
+    let width = (ui.available_width() - SORT_RESERVE).max(80.0);
+    ui.add_enabled(
+        !scenes,
+        egui::TextEdit::singleline(&mut filters.search)
+            .hint_text("Search clips…")
+            .margin(egui::Margin::symmetric(8, 6))
+            .desired_width(width),
+    )
+    .on_hover_text("Match words in source names, categories, tags, review notes and transcripts");
+    ui.add_enabled_ui(!scenes, |ui| {
+        egui::ComboBox::from_id_salt("gallery_sort")
+            .width(SORT_WIDTH)
+            .selected_text(if scenes {
+                "Source order"
+            } else {
+                filters.sort.label()
+            })
+            .show_ui(ui, |ui| {
+                for sort in [
+                    GallerySort::Score,
+                    GallerySort::Source,
+                    GallerySort::Shortest,
+                    GallerySort::Longest,
+                ] {
+                    ui.selectable_value(&mut filters.sort, sort, sort.label())
+                        .on_hover_text("Add shown uses this same order");
+                }
+            })
+            .response
+            .on_hover_text("Sort the visible clips; ties keep source order");
+    });
+}
+
 fn filter_choice(
     ui: &mut egui::Ui,
     id: &'static str,
@@ -508,6 +545,12 @@ fn filter_choice(
             .show_ui(ui, choices)
             .response
     }
+}
+
+/// `M:SS.s` source position for card captions.
+fn clock(seconds: f64) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as u64;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
 fn category_label(category: &str) -> &str {
@@ -602,6 +645,8 @@ fn gallery_card(
                 }
             }
         } else {
+            ui.painter()
+                .rect_filled(rect, thumb_radius, theme::CLIP_AUDIO.gamma_multiply(0.55));
             let mut x = rect.left() + 5.0;
             while x < rect.right() - 5.0 {
                 let fraction = (x - rect.left()) / rect.width();
@@ -614,9 +659,9 @@ fn gallery_card(
                         egui::pos2(x, rect.center().y - amplitude),
                         egui::pos2(x, rect.center().y + amplitude),
                     ],
-                    Stroke::new(2.0_f32, theme::CLIP_AUDIO),
+                    Stroke::new(1.5_f32, theme::CLIP_AUDIO.gamma_multiply(2.6)),
                 );
-                x += 4.0;
+                x += 3.0;
             }
         }
         // Duration sits on the picture, like a player's time chip.
@@ -657,7 +702,8 @@ fn gallery_card(
                         ui.label(
                             RichText::new(format!("{:.0}", clip.score))
                                 .size(11.0)
-                                .color(theme::SUBTLE_FG),
+                                .monospace()
+                                .color(theme::MUTED_FG),
                         )
                         .on_hover_text(format!(
                             "Score {:.0} · source {:.3} to {:.3} seconds",
@@ -667,6 +713,18 @@ fn gallery_card(
                         ));
                     });
                 });
+                // Where the range comes from, so mixed-source grids read
+                // without hovering.
+                ui.add(
+                    egui::Label::new(theme::caption(format!(
+                        "{} · {}–{}",
+                        clip.asset_name,
+                        clock(clip.source_in),
+                        clock(clip.end())
+                    )))
+                    .truncate(),
+                )
+                .on_hover_text(&details);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     add = theme::secondary_button(ui, "Add")
