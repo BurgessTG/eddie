@@ -2196,172 +2196,155 @@ impl EditorApp {
             .on_hover_text("Clip name");
             ui.add_space(10.0);
             let is_audio = clip.kind == ClipKind::Audio;
-            theme::card_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                theme::panel_title(ui, "Properties");
-                ui.add_space(4.0);
-                egui::Grid::new("clip_props")
-                    .num_columns(2)
-                    .spacing([12.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Start (s)").color(theme::MUTED_FG));
-                        start_changed = ui
-                            .add(
-                                egui::DragValue::new(&mut edited_start)
-                                    .speed(0.05)
-                                    .range(0.0..=86400.0)
-                                    .clamp_existing_to_range(false),
-                            )
-                            .changed();
-                        ui.end_row();
-                        ui.label(RichText::new("Duration (s)").color(theme::MUTED_FG));
-                        ui.add(
-                            egui::DragValue::new(&mut clip.duration)
-                                .speed(0.05)
-                                .range(0.1..=86400.0)
-                                .clamp_existing_to_range(false),
-                        );
-                        ui.end_row();
-                        if clip.source.is_some() {
-                            ui.label(RichText::new("Source in (s)").color(theme::MUTED_FG));
-                            ui.add(
-                                egui::DragValue::new(&mut clip.source_in)
-                                    .speed(0.05)
-                                    .range(0.0..=86400.0)
-                                    .clamp_existing_to_range(false),
-                            );
-                            ui.end_row();
-                        }
-                        if !is_audio {
-                            ui.label(RichText::new("Opacity").color(theme::MUTED_FG));
-                            ui.add(egui::Slider::new(&mut clip.opacity, 0.0..=1.0));
-                            ui.end_row();
-                        }
-                        if clip.source.is_some() {
-                            ui.label(RichText::new("Volume").color(theme::MUTED_FG));
-                            ui.add(egui::Slider::new(&mut clip.volume, 0.0..=1.5));
-                            ui.end_row();
-                        }
-                    });
+            let has_source = clip.source.is_some();
+            inspector_section(ui, "Timing", |ui| {
+                start_changed =
+                    prop_row(ui, "Start", |ui| seconds_field(ui, &mut edited_start, 0.0))
+                        .on_hover_text("Where the clip starts on the timeline")
+                        .changed();
+                prop_row(ui, "Duration", |ui| {
+                    seconds_field(ui, &mut clip.duration, 0.1)
+                })
+                .on_hover_text("How long the clip plays");
+                if has_source {
+                    prop_row(ui, "Source in", |ui| {
+                        seconds_field(ui, &mut clip.source_in, 0.0)
+                    })
+                    .on_hover_text("Where playback starts inside the source file");
+                }
             });
-            ui.add_space(10.0);
-            theme::card_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            theme::panel_title(ui, "Actions");
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let look_title = match clip.kind {
+                ClipKind::Video => "Picture & sound",
+                ClipKind::Audio => "Sound",
+                ClipKind::Title => "Look",
+            };
+            inspector_section(ui, look_title, |ui| {
+                if !is_audio {
+                    prop_row(ui, "Opacity", |ui| {
+                        percent_slider(ui, &mut clip.opacity, 1.0)
+                    })
+                    .on_hover_text("Fades the picture against black");
+                }
+                if has_source {
+                    prop_row(ui, "Volume", |ui| percent_slider(ui, &mut clip.volume, 1.5))
+                        .on_hover_text("Clip gain; 100% is unity");
+                }
+                if clip.kind == ClipKind::Title {
+                    prop_row(ui, "Style", |ui| {
+                        egui::ComboBox::from_id_salt("title_style")
+                            .width(ui.available_width())
+                            .selected_text(clip.title_style.label())
+                            .show_ui(ui, |ui| {
+                                for style in TitleStyle::ALL {
+                                    ui.selectable_value(
+                                        &mut clip.title_style,
+                                        style,
+                                        style.label(),
+                                    );
+                                }
+                            })
+                            .response
+                    })
+                    .on_hover_text("Choose how this title or caption is drawn");
+                }
+            });
             if let Some(snapshot) = &clip_snapshot {
-                if snapshot.kind == ClipKind::Video && source_has_audio {
-                    ui.add_enabled(
-                        snapshot.linked_clip.is_none(),
-                        egui::Checkbox::new(&mut clip.embedded_audio, "Embedded audio"),
-                    )
-                    .on_hover_text(
-                        "Play this video clip's own sound. Disabled while its audio is detached",
-                    );
-                    ui.add_space(6.0);
-                    if snapshot.embedded_audio && snapshot.linked_clip.is_none() {
-                        if theme::secondary_button_wide(ui, "Detach audio")
-                            .on_hover_text(
-                                "Move this clip's sound to a linked audio clip you can edit separately",
+                let video_audio = snapshot.kind == ClipKind::Video && source_has_audio;
+                let can_detach =
+                    video_audio && snapshot.embedded_audio && snapshot.linked_clip.is_none();
+                let can_tighten = source_has_audio && snapshot.kind != ClipKind::Title;
+                if video_audio || can_tighten || linked_snapshot.is_some() {
+                    ui.add_space(8.0);
+                    inspector_section(ui, "Audio", |ui| {
+                        if video_audio {
+                            ui.add_enabled(
+                                snapshot.linked_clip.is_none(),
+                                egui::Checkbox::new(&mut clip.embedded_audio, "Embedded audio"),
                             )
-                            .clicked()
-                        {
-                            do_detach = true;
+                            .on_hover_text(
+                                "Play this video clip's own sound. Disabled while its audio is detached",
+                            );
                         }
-                        ui.add_space(6.0);
-                    }
+                        if let Some(linked) = &linked_snapshot {
+                            ui.add(
+                                egui::Label::new(theme::caption(format!(
+                                    "Linked to {}",
+                                    linked.name
+                                )))
+                                .truncate(),
+                            )
+                            .on_hover_text("Picture and sound move, trim and split together");
+                        }
+                        let mut buttons: Vec<(&str, &str, &mut bool)> = Vec::new();
+                        if can_detach {
+                            buttons.push((
+                                "Detach",
+                                "Move this clip's sound to a linked audio clip you can edit separately",
+                                &mut do_detach,
+                            ));
+                        }
+                        if linked_snapshot.is_some() {
+                            buttons.push((
+                                "Unlink",
+                                "Let picture and sound move independently for J/L cuts or replacement audio",
+                                &mut do_unlink,
+                            ));
+                        }
+                        if can_tighten {
+                            buttons.push((
+                                "Remove silence",
+                                "Cut waveform pauses from this speech clip and ripple later clips left",
+                                &mut do_tighten,
+                            ));
+                        }
+                        button_row(ui, buttons, false);
+                    });
                 }
-                if source_has_audio && snapshot.kind != ClipKind::Title {
-                    if theme::secondary_button_wide(ui, "Remove silence")
-                        .on_hover_text(
-                            "Cut waveform pauses from this speech clip and ripple later clips left",
-                        )
-                        .clicked()
-                    {
-                        do_tighten = true;
-                    }
-                    ui.add_space(6.0);
-                }
-                if snapshot.kind == ClipKind::Title {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Style").color(theme::MUTED_FG));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::ComboBox::from_id_salt("title_style")
-                                .width(ui.available_width().min(180.0))
-                                .selected_text(clip.title_style.label())
+                if snapshot.kind != ClipKind::Title && has_transcript {
+                    ui.add_space(8.0);
+                    inspector_section(ui, "Captions", |ui| {
+                        prop_row(ui, "Style", |ui| {
+                            egui::ComboBox::from_id_salt("caption_style")
+                                .width(ui.available_width())
+                                .selected_text(caption_style.label())
                                 .show_ui(ui, |ui| {
                                     for style in TitleStyle::ALL {
                                         ui.selectable_value(
-                                            &mut clip.title_style,
+                                            &mut caption_style,
                                             style,
                                             style.label(),
                                         );
                                     }
                                 })
                                 .response
-                                .on_hover_text("Choose how this title or caption is drawn");
-                        });
+                        })
+                        .on_hover_text("Choose the style for generated captions");
+                        button_row(
+                            ui,
+                            vec![(
+                                "Add captions",
+                                "Generate caption clips from this clip's transcript in the chosen style",
+                                &mut do_captions,
+                            )],
+                            false,
+                        );
                     });
-                    ui.add_space(6.0);
-                } else if has_transcript {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Captions").color(theme::MUTED_FG));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::ComboBox::from_id_salt("caption_style")
-                                .width(ui.available_width().min(180.0))
-                                .selected_text(caption_style.label())
-                                .show_ui(ui, |ui| {
-                                    for style in TitleStyle::ALL {
-                                        ui.selectable_value(&mut caption_style, style, style.label());
-                                    }
-                                })
-                                .response
-                                .on_hover_text("Choose the style for generated captions");
-                        });
-                    });
-                    ui.add_space(6.0);
-                    if theme::secondary_button_wide(ui, "Add captions")
-                        .on_hover_text(
-                            "Generate caption clips from this clip's transcript in the chosen style",
-                        )
-                        .clicked()
-                    {
-                        do_captions = true;
-                    }
-                    ui.add_space(6.0);
-                }
-                if let Some(linked) = &linked_snapshot {
-                    ui.label(
-                        RichText::new(format!("Linked: {}", linked.name))
-                            .size(11.0)
-                            .color(theme::MUTED_FG),
-                    );
-                    ui.add_space(4.0);
-                    if theme::secondary_button_wide(ui, "Unlink audio")
-                        .on_hover_text(
-                            "Let picture and sound move independently for J/L cuts or replacement audio",
-                        )
-                        .clicked()
-                    {
-                        do_unlink = true;
-                    }
-                    ui.add_space(6.0);
                 }
             }
-            if theme::secondary_button_wide(ui, "Split at playhead")
-                .on_hover_text("Split this clip at the playhead (S)")
-                .clicked()
-            {
-                do_split = true;
-            }
-            ui.add_space(6.0);
-            if theme::destructive_button_wide(ui, "Delete clip")
-                .on_hover_text("Delete this clip (Del)")
-                .clicked()
-            {
-                do_delete = true;
-            }
-            });
+            ui.add_space(12.0);
+            button_row(
+                ui,
+                vec![
+                    (
+                        "Split at playhead",
+                        "Split this clip at the playhead (S)",
+                        &mut do_split,
+                    ),
+                    ("Delete", "Delete this clip (Del)", &mut do_delete),
+                ],
+                true,
+            );
         }
 
         self.caption_style = caption_style;
@@ -2726,6 +2709,103 @@ fn brand_mark(ui: &mut Ui) {
         theme::BACKGROUND,
         Stroke::NONE,
     ));
+}
+
+/// Titled card grouping related inspector controls.
+fn inspector_section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    theme::card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 8.0;
+        theme::panel_title(ui, title);
+        add(ui);
+    });
+}
+
+/// Muted label in a fixed column, control filling the rest of the row.
+fn prop_row(
+    ui: &mut Ui,
+    label: &str,
+    add: impl FnOnce(&mut Ui) -> egui::Response,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(78.0, 26.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(78.0);
+                ui.label(RichText::new(label).color(theme::MUTED_FG));
+            },
+        );
+        add(ui)
+    })
+    .inner
+}
+
+/// Seconds at a fixed two decimals; the exact value is in its tooltip.
+fn seconds_field(ui: &mut Ui, value: &mut f64, min: f64) -> egui::Response {
+    let exact = format!("{:.3} s", *value);
+    ui.add_sized(
+        [ui.available_width(), 24.0],
+        egui::DragValue::new(value)
+            .speed(0.05)
+            .range(min..=86400.0)
+            .clamp_existing_to_range(false)
+            .fixed_decimals(2)
+            .suffix(" s"),
+    )
+    .on_hover_text(exact)
+}
+
+/// 0..=max gain or opacity as a slider plus a fixed-width percentage
+/// field, so the row never asks the dock for more width than it has.
+fn percent_slider(ui: &mut Ui, value: &mut f32, max: f32) -> egui::Response {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let field = ui.add_sized(
+            [56.0, 24.0],
+            egui::DragValue::new(value)
+                .speed(0.01)
+                .range(0.0..=max)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                .custom_parser(|text| {
+                    text.trim()
+                        .trim_end_matches('%')
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 100.0)
+                }),
+        );
+        ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+        let slider = ui.add(egui::Slider::new(value, 0.0..=max).show_value(false));
+        slider.union(field)
+    })
+    .inner
+}
+
+/// Equal-width buttons sharing one row; with `destructive_last` the final
+/// button is the destructive variant.
+fn button_row(ui: &mut Ui, buttons: Vec<(&str, &str, &mut bool)>, destructive_last: bool) {
+    if buttons.is_empty() {
+        return;
+    }
+    let count = buttons.len();
+    let gap = 6.0;
+    let width = ((ui.available_width() - gap * (count - 1) as f32) / count as f32).floor();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (index, (label, tooltip, flag)) in buttons.into_iter().enumerate() {
+            ui.allocate_ui(Vec2::new(width, 30.0), |ui| {
+                let response = if destructive_last && index + 1 == count {
+                    theme::destructive_button_wide(ui, label)
+                } else {
+                    theme::secondary_button_wide(ui, label)
+                };
+                if response.on_hover_text(tooltip).clicked() {
+                    *flag = true;
+                }
+            });
+        }
+    });
 }
 
 /// Thin vertical rule separating toolbar groups.
@@ -3934,7 +4014,15 @@ mod tests {
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    Shape::Text(text) if text.galley.text().parse::<f64>().ok() == Some(0.0) => {
+                    Shape::Text(text)
+                        if text
+                            .galley
+                            .text()
+                            .trim_end_matches(" s")
+                            .parse::<f64>()
+                            .ok()
+                            == Some(0.0) =>
+                    {
                         Some(text.visual_bounding_rect().center())
                     }
                     _ => None,
