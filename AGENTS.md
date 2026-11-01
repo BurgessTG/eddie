@@ -397,11 +397,12 @@ on the active decoder and decodes forward when no keyframe seek would start
 later. Each lane holds one native decoder (about 100-190 MB at 1080p-1440p
 on 16 cores). A lane that switches files parks its decoder with its position
 and undelivered pictures (at most four, least recently used evicted), so a
-re-entered file decodes forward instead of from its keyframe. Pause and seek
+re-entered file decodes forward instead of from its keyframe. Only machines
+with fewer than eight cores park: decoder memory grows with frame threads. Pause and seek
 release the idle lane's and every parked decoder on a lane thread. On ten
 0.3 s cuts across five 1080p-1440p files, parking cut buffering from 2.8 s
 to 1.35 s on two cores (+90 MB RSS) and 1.1 s to 0.42 s on four (+140 MB);
-on 16 cores it saves nothing and costs about 300 MB. Preroll remains
+on eight cores it saved 0.04 s for 200 MB and on 16 nothing for 300 MB. Preroll remains
 CPU-bound. Clip switches and seeks
 do not wait for native open/seek/decode; obsolete frames and errors are ignored.
 Decode completes a captured clock target before chasing a newer one, preventing
