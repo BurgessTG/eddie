@@ -17,7 +17,7 @@ pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
-pub use export::{export_canvas, export_timeline};
+pub use export::{export_canvas, export_timeline, title_look, TitleLook};
 pub use playback::FrameStream;
 pub use samples::generate_samples;
 pub use sweep::{
