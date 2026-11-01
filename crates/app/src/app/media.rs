@@ -728,6 +728,9 @@ impl EditorApp {
                             .filter(|clip| clip.review.status == ReviewStatus::NeedsReview)
                             .count();
                         let summary = match asset.sweep.status {
+                            SweepStatus::NotStarted if asset.state != AssetState::Ready => {
+                                "Importing…".to_owned()
+                            }
                             SweepStatus::NotStarted => "Not curated yet".to_owned(),
                             SweepStatus::Running if self.sweep_queue.contains(&asset.info.path) => {
                                 "Queued".to_owned()
@@ -803,14 +806,22 @@ impl EditorApp {
                             let gallery_w = if curate.is_some() { half } else { half * 2.0 + 6.0 };
                             if let Some((label, primary, tooltip)) = curate {
                                 ui.allocate_ui(egui::vec2(half, 30.0), |ui| {
-                                    let response = if primary {
-                                        theme::primary_button_wide(ui, label)
-                                    } else {
-                                        theme::secondary_button_wide(ui, label)
-                                    };
-                                    if response.on_hover_text(tooltip).clicked() {
-                                        curate_selected = Some(asset.info.path.clone());
-                                    }
+                                    // curate_asset ignores unready assets;
+                                    // show that instead of a silent click.
+                                    ui.add_enabled_ui(asset.state == AssetState::Ready, |ui| {
+                                        let response = if primary {
+                                            theme::primary_button_wide(ui, label)
+                                        } else {
+                                            theme::secondary_button_wide(ui, label)
+                                        };
+                                        if response
+                                            .on_hover_text(tooltip)
+                                            .on_disabled_hover_text("Available once import finishes")
+                                            .clicked()
+                                        {
+                                            curate_selected = Some(asset.info.path.clone());
+                                        }
+                                    });
                                 });
                             }
                             ui.allocate_ui(egui::vec2(gallery_w, 30.0), |ui| {
