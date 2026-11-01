@@ -1064,7 +1064,7 @@ impl EditorApp {
         }
     }
 
-    fn undo_chat_edit(&mut self) {
+    pub(super) fn undo_chat_edit(&mut self) {
         let Some(snapshot) = self.chat_undo.take() else {
             return;
         };
@@ -1388,47 +1388,27 @@ impl EditorApp {
         let mut submitted: Option<String> = None;
         let mut clicked_intent: Option<&'static str> = None;
         let mut cancel_clicked = false;
-        let mut undo_clicked = false;
         {
-            ui.horizontal(|ui| {
-                if let Some(pending) = &self.chat_pending {
+            if let Some(pending) = &self.chat_pending {
+                ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0));
-                    ui.label(RichText::new(pending.progress_label()).color(theme::MUTED_FG));
-                    if theme::ghost_button(ui, "Cancel")
-                        .on_hover_text("Cancel the in-flight model call")
-                        .clicked()
-                    {
-                        cancel_clicked = true;
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::ghost_button(ui, "Settings")
-                        .on_hover_text("Meta Model API settings")
-                        .clicked()
-                    {
-                        self.show_chat_settings = !self.show_chat_settings;
-                    }
-                    let debug = if self.show_chat_debug {
-                        theme::outline_button(ui, "Debug")
-                    } else {
-                        theme::ghost_button(ui, "Debug")
-                    };
-                    if debug
-                        .on_hover_text("Show the last generated JavaScript")
-                        .clicked()
-                    {
-                        self.show_chat_debug = !self.show_chat_debug;
-                    }
-                    if self.chat_undo.is_some()
-                        && theme::ghost_button(ui, "Undo edit")
-                            .on_hover_text("Restore the timeline from before the last AI edit")
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(pending.progress_label()).color(theme::MUTED_FG),
+                        )
+                        .truncate(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::ghost_button(ui, "Cancel")
+                            .on_hover_text("Cancel the in-flight model call")
                             .clicked()
-                    {
-                        undo_clicked = true;
-                    }
+                        {
+                            cancel_clicked = true;
+                        }
+                    });
                 });
-            });
-            ui.add_space(4.0);
+                ui.add_space(6.0);
+            }
 
             // Button intents: one registry, local first. New
             // buttons are declared in `intents.rs`.
@@ -1466,7 +1446,7 @@ impl EditorApp {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     if self.chat_session.messages.is_empty() {
-                        ui.add_space(16.0);
+                        ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
                             ui.label(
                                 RichText::new("Ask for an edit in plain words.")
@@ -1511,7 +1491,20 @@ impl EditorApp {
             // Pin the composer to the bottom of the dock.
             ui.add_space((ui.available_height() - 38.0).max(0.0));
             ui.horizontal(|ui| {
-                let input_width = (ui.available_width() - 80.0).max(80.0);
+                // TextEdit adds its margin outside the desired width; the
+                // row must fit exactly or the dock grows every frame.
+                let send_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        "Send".to_owned(),
+                        egui::FontId::proportional(13.0),
+                        theme::FOREGROUND,
+                    )
+                    .size()
+                    .x
+                    + 24.0;
+                let input_width =
+                    (ui.available_width() - send_w - ui.spacing().item_spacing.x - 20.0).max(80.0);
                 let response = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.chat_input)
@@ -1538,9 +1531,6 @@ impl EditorApp {
         if cancel_clicked {
             self.cancel_chat();
         }
-        if undo_clicked {
-            self.undo_chat_edit();
-        }
         if let Some(intent_id) = clicked_intent {
             self.dispatch_intent(ctx, intent_id);
         }
@@ -1556,21 +1546,60 @@ impl EditorApp {
         let mut open = true;
         let mut dirty = false;
         let mut check_connection = false;
+        let mut close_clicked = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Settings")
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .fixed_size(egui::vec2(420.0, 0.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::CARD)
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .corner_radius(egui::CornerRadius::same(theme::R_LG))
+                    .inner_margin(egui::Margin::same(20))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 28,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(140),
+                    }),
+            )
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Settings")
+                            .family(theme::semibold())
+                            .size(15.0)
+                            .color(theme::FOREGROUND),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::ghost_button(ui, "Close")
+                            .on_hover_text("Close settings (Esc)")
+                            .clicked()
+                        {
+                            close_clicked = true;
+                        }
+                    });
+                });
+                ui.label(theme::caption("Meta Model API for chat edits and curation."));
+                ui.add_space(14.0);
+                let field_w = 300.0;
                 egui::Grid::new("chat_settings")
                     .num_columns(2)
-                    .spacing([12.0, 8.0])
+                    .spacing([16.0, 10.0])
+                    .min_col_width(84.0)
                     .show(ui, |ui| {
-                        ui.label("API key");
+                        ui.label(RichText::new("API key").color(theme::MUTED_FG));
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.chat_settings.api_key)
                                     .password(true)
-                                    .desired_width(280.0),
+                                    .hint_text("Not set")
+                                    .margin(egui::Margin::symmetric(8, 6))
+                                    .desired_width(field_w),
                             )
                             .on_hover_text(
                                 "Meta Model API key. Stored only in the local app config.",
@@ -1581,11 +1610,12 @@ impl EditorApp {
                         }
                         ui.end_row();
 
-                        ui.label("Base URL");
+                        ui.label(RichText::new("Base URL").color(theme::MUTED_FG));
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.chat_settings.base_url)
-                                    .desired_width(280.0),
+                                    .margin(egui::Margin::symmetric(8, 6))
+                                    .desired_width(field_w),
                             )
                             .on_hover_text("OpenAI-compatible API base URL")
                             .changed()
@@ -1594,9 +1624,10 @@ impl EditorApp {
                         }
                         ui.end_row();
 
-                        ui.label("Model");
+                        ui.label(RichText::new("Model").color(theme::MUTED_FG));
                         let before = self.chat_settings.model.clone();
                         egui::ComboBox::from_id_salt("chat_model")
+                            .width(field_w + 16.0)
                             .selected_text(model_label(&self.chat_settings.model).to_owned())
                             .show_ui(ui, |ui| {
                                 for model in [MODEL_SPARK, MODEL_WONDER] {
@@ -1608,46 +1639,43 @@ impl EditorApp {
                                 }
                             })
                             .response
-                            .on_hover_text("Model used for chat editing");
+                            .on_hover_text("Model used for chat editing and curation");
                         if self.chat_settings.model != before {
                             dirty = true;
                         }
                         ui.end_row();
 
-                        ui.label("Contributor");
+                        ui.label(RichText::new("Training").color(theme::MUTED_FG));
                         let before = self.chat_settings.contributor_opt_in;
                         ui.checkbox(
                             &mut self.chat_settings.contributor_opt_in,
                             "Contributor models",
                         )
                         .on_hover_text(
-                            "Contributor models let Meta train on your prompts and content. Standard models do not.",
+                            "Contributor models let Meta train on your prompts and content. Off by default; Standard models do not.",
                         );
                         if self.chat_settings.contributor_opt_in != before {
                             dirty = true;
                         }
                         ui.end_row();
                     });
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(
-                        "Contributor models let Meta train on prompts and content. Off by default; Standard is used otherwise.",
-                    )
-                    .size(11.5)
-                    .color(theme::MUTED_FG),
-                );
-                ui.add_space(6.0);
-                check_connection = ui
-                    .add_enabled_ui(self.connection_check.is_none(), |ui| {
-                        theme::ghost_button(ui, "Check connection")
-                            .on_hover_text(
-                                "Check authentication and model availability without running inference",
-                            )
-                            .clicked()
-                    })
-                    .inner;
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    check_connection = ui
+                        .add_enabled_ui(self.connection_check.is_none(), |ui| {
+                            theme::secondary_button(ui, "Check connection")
+                                .on_hover_text(
+                                    "Check authentication and model availability without running inference",
+                                )
+                                .clicked()
+                        })
+                        .inner;
+                    if self.connection_check.is_some() {
+                        ui.add(egui::Spinner::new().size(14.0));
+                    }
+                });
             });
-        self.show_chat_settings = open;
+        self.show_chat_settings = open && !close_clicked;
         if dirty {
             self.connection_check = None;
             if let Err(error) = self.chat_settings.save() {

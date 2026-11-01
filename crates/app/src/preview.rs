@@ -5,7 +5,7 @@
 use eframe::egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2,
 };
-use openreel_engine::{format_timecode, ClipKind, Timeline, TitleStyle};
+use openreel_engine::{ClipKind, Timeline, TitleStyle};
 
 use crate::theme;
 
@@ -24,6 +24,7 @@ pub fn paint(
     texture: Option<&TextureHandle>,
     audio_peaks: Option<(&[f32], f64)>,
     canvas: (u32, u32),
+    has_media: bool,
 ) {
     let video = timeline.active_video(playhead);
     let audio = timeline
@@ -51,18 +52,6 @@ pub fn paint(
             let scale = (frame.width() / size.x).min(frame.height() / size.y);
             let picture = Rect::from_center_size(frame.center(), size * scale);
             painter.image(texture.id(), picture, uv, tint);
-            let local = clip.source_in + (playhead - clip.start);
-            painter.text(
-                frame.left_top() + Vec2::new(12.0, 8.0),
-                Align2::LEFT_TOP,
-                format!(
-                    "{}  ·  src {}",
-                    clip.name,
-                    format_timecode(local, timeline.fps)
-                ),
-                FontId::monospace(11.0),
-                Color32::from_white_alpha(170),
-            );
         }
         (Some(_), None) => {
             painter.text(
@@ -76,15 +65,10 @@ pub fn paint(
         (None, _) => {
             if let (Some(clip), Some((peaks, duration))) = (audio, audio_peaks) {
                 paint_audio_waveform(&painter, frame, clip, peaks, duration, playhead);
-                painter.text(
-                    frame.left_top() + Vec2::new(12.0, 8.0),
-                    Align2::LEFT_TOP,
-                    format!("{}  ·  audio only", clip.name),
-                    FontId::monospace(11.0),
-                    Color32::from_white_alpha(170),
-                );
             } else {
-                let message = if timeline.clips.is_empty() {
+                let message = if timeline.clips.is_empty() && has_media {
+                    "Drag media onto the timeline"
+                } else if timeline.clips.is_empty() {
                     "Import media to start"
                 } else {
                     "No clip at playhead"
@@ -173,14 +157,6 @@ pub fn paint(
             }
         }
     }
-
-    painter.text(
-        frame.right_bottom() + Vec2::new(-12.0, -10.0),
-        Align2::RIGHT_BOTTOM,
-        format_timecode(playhead, timeline.fps),
-        FontId::monospace(11.0),
-        Color32::from_white_alpha(130),
-    );
 }
 
 fn paint_audio_waveform(
