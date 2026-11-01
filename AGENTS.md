@@ -448,7 +448,8 @@ present and turn-proportional estimates otherwise.
 - Importing shows a placeholder card immediately with the file name and
   known metadata. The thumbnail area stays greyed with a spinner until
   probe, waveform, and thumbnails finish. Placeholders cannot be added
-  to the timeline.
+  to the timeline or curated. A finished import selects itself only when
+  no asset is selected; it never replaces the user's selection.
 - Buttons are borderless at rest. Hover and pressed fills carry the
   affordance. Do not reintroduce hard outlines.
 - Surfaces: `BACKGROUND` is the stage (program monitor, gallery, lanes);

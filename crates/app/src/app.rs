@@ -4119,6 +4119,60 @@ mod tests {
         assert_eq!(app.assets.len(), 2, "both files show as placeholders");
     }
 
+    /// A finished import selects itself only when nothing is selected, so
+    /// a background batch never takes the curator card from the user.
+    #[test]
+    fn finished_import_keeps_the_users_selection() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let music = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/sample_music.mp3"
+        );
+        let import = |app: &mut EditorApp| {
+            app.spawn_import(&ctx, vec![PathBuf::from(music)]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while app.import_rx.is_some() {
+                app.poll_imports(&ctx);
+                assert!(std::time::Instant::now() < deadline, "import timed out");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        import(&mut app);
+        assert_eq!(
+            app.selected_asset.as_deref(),
+            Some(music),
+            "an import fills an empty selection"
+        );
+
+        app.assets.retain(|asset| asset.info.path != music);
+        app.assets.push(media::BinAsset {
+            info: MediaInfo {
+                path: "/media/picked.mp4".to_owned(),
+                name: "picked.mp4".to_owned(),
+                duration: 10.0,
+                width: 640,
+                height: 360,
+                fps: 30.0,
+                has_video: true,
+                has_audio: false,
+            },
+            size_bytes: 0,
+            state: media::AssetState::Ready,
+            peaks: Vec::new(),
+            thumb_textures: Vec::new(),
+            sweep: sweep::SweepData::default(),
+        });
+        app.selected_asset = Some("/media/picked.mp4".to_owned());
+        import(&mut app);
+        assert_eq!(
+            app.selected_asset.as_deref(),
+            Some("/media/picked.mp4"),
+            "a finished import must not replace the user's selection"
+        );
+    }
+
     /// Full JS surface end to end, offline: queued imports of real
     /// downloads, local curator sweep, console JS building fast
     /// cuts (the same eval + ScriptCommand path chat output uses),
