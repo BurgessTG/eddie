@@ -1952,6 +1952,7 @@ impl EditorApp {
                     {
                         self.timeline_view.magnet = !self.timeline_view.magnet;
                     }
+                    toolbar_divider(ui);
                     if tool_icon_button(
                         ui,
                         ToolIcon::Title,
@@ -2010,13 +2011,6 @@ impl EditorApp {
                             self.timeline_view.px_per_sec =
                                 (self.timeline_view.px_per_sec / 1.5).max(4.0);
                         }
-                        ui.add_space(12.0);
-                        ui.label(
-                            RichText::new(format!("{} clips", self.timeline.clips.len()))
-                                .size(11.5)
-                                .color(theme::SUBTLE_FG),
-                        )
-                        .on_hover_text("Clips on the timeline");
                     });
                 });
                 ui.add_space(8.0);
@@ -2732,6 +2726,16 @@ fn brand_mark(ui: &mut Ui) {
         theme::BACKGROUND,
         Stroke::NONE,
     ));
+}
+
+/// Thin vertical rule separating toolbar groups.
+fn toolbar_divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 18.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0_f32, theme::BORDER_STRONG),
+    );
 }
 
 /// Timeline tool glyphs drawn as shapes, like the transport icons.
