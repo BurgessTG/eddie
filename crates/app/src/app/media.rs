@@ -210,7 +210,15 @@ impl EditorApp {
                         .collect();
                     self.status = format!("Imported {}", info.name);
                     let ready_path = info.path.clone();
-                    self.selected_asset = Some(ready_path.clone());
+                    // Fill an empty selection only; a background batch
+                    // must not take the curator card from the user.
+                    let keep_selection = self
+                        .selected_asset
+                        .as_deref()
+                        .is_some_and(|path| self.assets.iter().any(|a| a.info.path == path));
+                    if !keep_selection {
+                        self.selected_asset = Some(ready_path.clone());
+                    }
                     let size_bytes = std::fs::metadata(&info.path).map(|m| m.len()).unwrap_or(0);
                     if let Some(existing) =
                         self.assets.iter_mut().find(|a| a.info.path == info.path)
