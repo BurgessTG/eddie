@@ -45,6 +45,13 @@ pub struct VideoDecoder {
     eof_sent: bool,
 }
 
+// SAFETY: every field is exclusively owned. ffmpeg-next marks the demuxer,
+// codec context and frames `Send` but not the scaler, which holds a raw
+// SwsContext pointer; libswscale contexts have no thread affinity and are
+// only used through `&mut self`. Preview lanes move a parked decoder between
+// threads; it is never shared.
+unsafe impl Send for VideoDecoder {}
+
 impl VideoDecoder {
     pub fn open(path: &str, target_w: u32, fast: bool) -> MediaResult<Self> {
         ensure_init();

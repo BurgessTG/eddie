@@ -3159,6 +3159,70 @@ mod tests {
         }
 
         #[test]
+        fn preview_reentering_a_file_reuses_its_parked_decoder() {
+            let fixture = Fixture::new();
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut paths = vec![fixture.path.clone()];
+            for name in ["b.mp4", "c.mp4"] {
+                let copy = fixture.dir.join(name);
+                std::fs::copy(&fixture.path, &copy).unwrap();
+                paths.push(copy.to_string_lossy().into_owned());
+            }
+            for path in &paths {
+                add_asset(&mut app, path);
+            }
+            // A, B, C, then back to A. Both lanes have moved on from A by
+            // then, so only a parked decoder avoids opening it again.
+            let cuts = [
+                (0, 0.0, false),
+                (1, 0.0, false),
+                (2, 0.0, false),
+                (0, 1.2, true),
+            ];
+            for (file, source_in, _) in cuts {
+                let start = app.timeline.end();
+                app.timeline.add_media_clip(
+                    "Cut",
+                    ClipKind::Video,
+                    0,
+                    start,
+                    0.2,
+                    source_in,
+                    &paths[file],
+                );
+            }
+            app.last_now = Some(0.0);
+            app.set_playing(true);
+            for (index, (_, _, blue)) in cuts.into_iter().enumerate() {
+                let picture = await_picture(&mut app, &ctx);
+                assert_eq!(
+                    picture.b() > 240 && picture.r() < 10,
+                    blue,
+                    "cut {index}: {picture:?}"
+                );
+                let Some((_, Some((source, time)))) = app.next_video_change(app.playhead) else {
+                    break;
+                };
+                let source = source.to_owned();
+                let stream = app.stream.as_ref().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !stream.prefetch_ready(&source, time, PREVIEW_W) {
+                    assert!(Instant::now() < deadline, "cut {} not prerolled", index + 1);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                advance_to(&mut app, &ctx, index as f64 + 1.0);
+                assert_eq!(app.playhead, app.timeline.clips[index + 1].start);
+            }
+            assert_eq!(
+                app.stream.as_ref().unwrap().preview_opens(),
+                3,
+                "re-entering A must reuse its parked decoder"
+            );
+            app.set_playing(false);
+        }
+
+        #[test]
         fn preview_buffers_audio_with_video_but_keeps_audio_only_gaps_moving() {
             let fixture = Fixture::new();
             let path = fixture.dir.join("with-audio.mp4");

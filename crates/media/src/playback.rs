@@ -142,6 +142,10 @@ impl FrameStream {
     /// There is one pending request and one latest result, not a decoder/thread
     /// per clip. Two lanes each own at most one decoder: one serves the active
     /// request while the other prerolls `prefetch_preview`'s upcoming clip.
+    /// A lane that switches files parks its decoder, position and undelivered
+    /// pictures (up to `PARKED_DECODERS`, least recently used first out), so
+    /// re-entering a file continues forward instead of decoding from its
+    /// keyframe again. Cancelling releases every parked decoder.
     /// Native open/seek/decode cannot be preempted; superseded work is
     /// discarded at the next native-operation boundary.
     pub fn spawn_preview(wake: impl Fn() + Send + Sync + 'static) -> MediaResult<Self> {
@@ -198,6 +202,7 @@ impl FrameStream {
         state.generation = state.generation.wrapping_add(1);
         state.time = source_time;
         state.result = None;
+        state.keep_parked = true;
         let other = 1 - state.active;
         if state.lanes[other].prefetch.as_ref().is_some_and(|target| {
             target.path == path && target.target_w == target_w && target.time <= source_time
@@ -273,6 +278,13 @@ impl FrameStream {
             })
     }
 
+    /// Native decoders opened since the worker started.
+    pub fn preview_opens(&self) -> u64 {
+        self.preview
+            .as_ref()
+            .map_or(0, |preview| preview.state.lock().unwrap().opens)
+    }
+
     /// Requests served by the prefetch lane since the worker started.
     pub fn prefetch_handoffs(&self) -> u64 {
         self.preview
@@ -319,6 +331,10 @@ impl FrameStream {
             state.generation = state.generation.wrapping_add(1);
             state.result = None;
             state.active_source = None;
+            // Lane threads drop parked decoders; native teardown is slow.
+            state.keep_parked = false;
+            let parked = std::mem::take(&mut state.parked);
+            state.retired.extend(parked);
             for lane in &mut state.lanes {
                 lane.request = None;
                 if lane.prefetch.take().is_some() {
@@ -363,6 +379,10 @@ impl Drop for FrameStream {
 /// Active lane plus one prefetch lane: enough to preroll the next cut while
 /// the current clip plays, without a decoder per timeline clip.
 const PREVIEW_LANES: usize = 2;
+/// Decoders kept open for files the lanes left, beyond the lanes' own two.
+/// Cycling through N files needs N - 2. Each holds about 100-190 MB at
+/// 1080p-1440p with frame threading on 16 cores.
+const PARKED_DECODERS: usize = 4;
 /// Recycled preview buffers; more are only allocated when this runs dry.
 const PREVIEW_POOL: usize = 8;
 /// Without a container index, decode forward rather than seek only this far.
@@ -404,8 +424,15 @@ struct PreviewState {
     /// File, width and start of the latest request.
     active_source: Option<(String, u32, f64)>,
     handoffs: u64,
+    opens: u64,
     result: Option<MediaResult<Picture>>,
     closed: bool,
+    /// Lanes left by a lane that switched files, oldest first.
+    parked: Vec<Lane>,
+    /// Lanes waiting for a lane thread to drop them.
+    retired: Vec<Lane>,
+    /// False after a cancel: a lane leaving a file retires its decoder.
+    keep_parked: bool,
 }
 
 #[derive(Default)]
@@ -415,6 +442,38 @@ struct PreviewMailbox {
 }
 
 impl PreviewMailbox {
+    /// Park `lane`, then take the parked lane for `wanted`, if any. Evicted
+    /// and retired decoders are dropped here, off the UI thread.
+    fn exchange(&self, lane: Lane, wanted: Option<(&str, u32)>, pool: &BufferPool) -> Lane {
+        let mut state = self.state.lock().unwrap();
+        if lane.decoder.is_some() {
+            if state.keep_parked {
+                state.parked.push(lane);
+            } else {
+                state.retired.push(lane);
+            }
+        }
+        let found = wanted.and_then(|(path, width)| {
+            let index = state.parked.iter().position(|parked| {
+                parked
+                    .decoder
+                    .as_ref()
+                    .is_some_and(|((open, w), _)| open == path && *w == width)
+            })?;
+            Some(state.parked.remove(index))
+        });
+        while state.parked.len() > PARKED_DECODERS {
+            let oldest = state.parked.remove(0);
+            state.retired.push(oldest);
+        }
+        let retired = std::mem::take(&mut state.retired);
+        drop(state);
+        for mut lane in retired {
+            lane.reset(pool);
+        }
+        found.unwrap_or_default()
+    }
+
     fn time(&self, generation: u64) -> Option<f64> {
         let state = self.state.lock().unwrap();
         (!state.closed && state.generation == generation).then_some(state.time)
@@ -491,9 +550,11 @@ impl Lane {
 
     /// Leave `held` as the picture covering `time` on `path`. Continues
     /// forward through already-decoded pictures when no keyframe seek would
-    /// start later; otherwise seeks. Reuses the open decoder for its file.
+    /// start later; otherwise seeks. Reuses this lane's or a parked decoder
+    /// for the file, parking the one it leaves.
     fn prepare(
         &mut self,
+        mailbox: &PreviewMailbox,
         path: &str,
         target_w: u32,
         time: f64,
@@ -504,10 +565,13 @@ impl Lane {
             .as_ref()
             .is_none_or(|((open, width), _)| open != path || *width != target_w)
         {
-            // Release the previous native context before opening another.
-            self.reset(pool);
-            let decoder = VideoDecoder::open(path, target_w, true)?;
-            self.decoder = Some(((path.to_owned(), target_w), decoder));
+            let left = std::mem::take(self);
+            *self = mailbox.exchange(left, Some((path, target_w)), pool);
+            if self.decoder.is_none() {
+                let decoder = VideoDecoder::open(path, target_w, true)?;
+                self.decoder = Some(((path.to_owned(), target_w), decoder));
+                mailbox.state.lock().unwrap().opens += 1;
+            }
         }
         let decoder = &mut self.decoder.as_mut().unwrap().1;
         if self.held.is_none() {
@@ -576,6 +640,15 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                 if state.closed {
                     return;
                 }
+                if !state.retired.is_empty() {
+                    let retired = std::mem::take(&mut state.retired);
+                    drop(state);
+                    for mut lane in retired {
+                        lane.reset(pool);
+                    }
+                    state = mailbox.state.lock().unwrap();
+                    continue;
+                }
                 let slot = &mut state.lanes[index];
                 if let Some(request) = slot.request.take() {
                     break LaneWork::Show(request);
@@ -585,11 +658,11 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                     if let Some(target) = slot.prefetch.clone() {
                         break LaneWork::Prefetch(target, done_serial);
                     }
-                    // A cancelled prefetch frees the idle lane's native
-                    // decoder, so pausing holds no more than one.
+                    // The idle lane parks its decoder for a later cut. After a
+                    // cancel it is dropped, so pausing holds no more than one.
                     if state.active != index {
                         drop(state);
-                        lane.reset(pool);
+                        lane = mailbox.exchange(std::mem::take(&mut lane), None, pool);
                         state = mailbox.state.lock().unwrap();
                     }
                     continue;
@@ -599,7 +672,8 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
         };
         match work {
             LaneWork::Prefetch(target, serial) => {
-                let result = lane.prepare(&target.path, target.target_w, target.time, pool);
+                let result =
+                    lane.prepare(mailbox, &target.path, target.target_w, target.time, pool);
                 if result.is_err() {
                     // The real request reopens and reports the error.
                     lane.reset(pool);
@@ -614,7 +688,7 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                     let Some(start) = mailbox.time(request.generation) else {
                         return Ok(());
                     };
-                    lane.prepare(&request.path, request.target_w, start, pool)?;
+                    lane.prepare(mailbox, &request.path, request.target_w, start, pool)?;
                     let first = lane.held.take().unwrap();
                     let Lane {
                         decoder,
