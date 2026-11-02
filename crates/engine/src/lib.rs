@@ -78,6 +78,10 @@ pub struct Clip {
     /// source. Detaching moves that sound to an `Audio` clip and
     /// clears this flag so playback/export never double it.
     pub embedded_audio: bool,
+    /// Linear audio fade lengths in seconds at the clip's head and tail.
+    /// `fade_lengths` fits them inside the clip; picture is unaffected.
+    pub fade_in: f64,
+    pub fade_out: f64,
     /// Detached picture/sound partner. Linked clips move, trim, and
     /// split together until explicitly unlinked.
     pub linked_clip: Option<ClipId>,
@@ -92,6 +96,44 @@ impl Clip {
     pub fn contains(&self, time: f64) -> bool {
         time >= self.start && time < self.end()
     }
+
+    /// Fades that fit the clip: each at most its length, and when
+    /// together they exceed it, both scale down to meet.
+    pub fn fade_lengths(&self) -> (f64, f64) {
+        fit_fades(self.duration, self.fade_in, self.fade_out)
+    }
+}
+
+pub fn fit_fades(duration: f64, fade_in: f64, fade_out: f64) -> (f64, f64) {
+    let duration = duration.max(0.0);
+    // Scaling the requested lengths keeps their ratio; each then fits.
+    let clean = |f: f64| {
+        if f.is_finite() {
+            f.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    let (fade_in, fade_out) = (clean(fade_in), clean(fade_out));
+    let total = fade_in + fade_out;
+    if total > duration && total > 0.0 {
+        (fade_in * duration / total, fade_out * duration / total)
+    } else {
+        (fade_in, fade_out)
+    }
+}
+
+/// Gain of a fade envelope `offset` seconds into a clip of `duration`.
+pub fn fade_gain(offset: f64, duration: f64, fade_in: f64, fade_out: f64) -> f32 {
+    let (fade_in, fade_out) = fit_fades(duration, fade_in, fade_out);
+    let mut gain = 1.0_f64;
+    if fade_in > 0.0 {
+        gain = gain.min(offset / fade_in);
+    }
+    if fade_out > 0.0 {
+        gain = gain.min((duration - offset) / fade_out);
+    }
+    gain.clamp(0.0, 1.0) as f32
 }
 
 /// Project picture format. The canvas never follows the footage: video
@@ -273,6 +315,8 @@ impl Timeline {
             opacity: 1.0,
             volume: 1.0,
             embedded_audio: kind == ClipKind::Video && source.is_some(),
+            fade_in: 0.0,
+            fade_out: 0.0,
             linked_clip: None,
             title_style: TitleStyle::default(),
         });
@@ -584,6 +628,8 @@ impl Timeline {
         let left_duration = at - clip.start;
         if let Some(left) = self.clip_mut(id) {
             left.duration = left_duration;
+            // The head fade stays left, the tail fade moves right.
+            left.fade_out = 0.0;
         }
         let right = self.add_clip_inner(
             &clip.name,
@@ -598,6 +644,7 @@ impl Timeline {
             right_clip.opacity = clip.opacity;
             right_clip.volume = clip.volume;
             right_clip.embedded_audio = clip.embedded_audio;
+            right_clip.fade_out = clip.fade_out;
             right_clip.linked_clip = None;
             right_clip.title_style = clip.title_style;
         }
@@ -1080,6 +1127,20 @@ mod tests {
         assert_eq!(start(over_b) - start(b), 0.5);
         assert!((start(over_c) - start(c) - 0.2).abs() < 1e-9);
         assert_eq!(start(in_gap), 6.0);
+    }
+
+    #[test]
+    fn split_keeps_each_fade_on_its_own_edge() {
+        let mut tl = Timeline::empty_project();
+        let id = tl.add_media_clip("m", ClipKind::Audio, 0, 0.0, 4.0, 0.0, "m.mp3");
+        let clip = tl.clip_mut(id).unwrap();
+        (clip.fade_in, clip.fade_out) = (1.0, 2.0);
+        let right = tl.split_at(id, 1.5).unwrap();
+        let (left, right) = (tl.clip(id).unwrap(), tl.clip(right).unwrap());
+        assert_eq!((left.fade_in, left.fade_out), (1.0, 0.0));
+        assert_eq!((right.fade_in, right.fade_out), (0.0, 2.0));
+        assert_eq!(fit_fades(2.0, 3.0, 1.0), (1.5, 0.5));
+        assert_eq!(fit_fades(2.0, f64::NAN, -1.0), (0.0, 0.0));
     }
 
     #[test]

@@ -804,6 +804,16 @@ impl HeadlessEditor {
                         c.volume = value.clamp(0.0, 2.0);
                     }
                 }
+                ScriptCommand::SetFade {
+                    clip,
+                    fade_in,
+                    fade_out,
+                } => {
+                    if let Some(c) = self.timeline.clip_mut(clip) {
+                        c.fade_in = fade_in.max(0.0);
+                        c.fade_out = fade_out.max(0.0);
+                    }
+                }
                 ScriptCommand::DetachAudio { clip } => {
                     let has_audio = self
                         .timeline

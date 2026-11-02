@@ -938,6 +938,11 @@ fn transparent_first_title_hides_its_box_and_blocks_later_titles() {
 }
 
 fn tone_amplitude(path: &Path, frequency: f64) -> f64 {
+    tone_window(path, frequency, 0.1, 0.9)
+}
+
+/// Amplitude of `frequency` over output seconds `[from, to)`.
+fn tone_window(path: &Path, frequency: f64, from: f64, to: f64) -> f64 {
     let out = run(Command::new("ffmpeg").args([
         "-v",
         "error",
@@ -957,7 +962,7 @@ fn tone_amplitude(path: &Path, frequency: f64) -> f64 {
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()) as f64)
         .collect();
-    let window = &samples[4800..43200];
+    let window = &samples[(from * 48000.0) as usize..(to * 48000.0) as usize];
     let (mut sin, mut cos) = (0.0, 0.0);
     for (i, sample) in window.iter().enumerate() {
         let angle = std::f64::consts::TAU * frequency * i as f64 / 48000.0;
@@ -1038,6 +1043,47 @@ fn audio_coalescing_preserves_overlaps_and_gain_changes() {
             "do not merge overlaps or differing gains"
         );
     }
+}
+
+#[test]
+fn exported_fades_ramp_the_clip_sound() {
+    let fixture = Fixture::new();
+    let source = fixture.color("tone.mp4", "red", Some(440));
+    // Full 0.25 gain measures about 0.0625 (see the coalescing test). A
+    // fade-out across the whole second averages half of that over the
+    // measured 0.1-0.9 s window; a no-op or reversed fade would not.
+    let mut levels = Vec::new();
+    for (fade_in, fade_out) in [(0.0, 0.0), (0.0, 1.0), (5.0, 0.0)] {
+        let mut timeline = Timeline::new(30.0);
+        let picture = video(&mut timeline, &source, 0, 0.0, 1.0, 0.0);
+        let clip = timeline.clip_mut(picture).unwrap();
+        clip.fade_in = fade_in;
+        clip.fade_out = fade_out;
+        let exported = fixture.export(&format!("fade-{fade_in}-{fade_out}.mp4"), &timeline);
+        let early = tone_window(&exported, 440.0, 0.1, 0.3);
+        let late = tone_window(&exported, 440.0, 0.7, 0.9);
+        eprintln!("fade {fade_in}/{fade_out}: early={early} late={late}");
+        levels.push((early, late));
+    }
+    let (full, out, overlong_in) = (levels[0], levels[1], levels[2]);
+    assert!((full.0 - full.1).abs() < 0.1 * full.0, "unfaded is steady");
+    // Fade-out: 0.8 of full early, 0.2 late (linear, centered windows).
+    assert!(
+        (out.0 / full.0 - 0.8).abs() < 0.08,
+        "fade-out early {:?}",
+        out
+    );
+    assert!(
+        (out.1 / full.0 - 0.2).abs() < 0.08,
+        "fade-out late {:?}",
+        out
+    );
+    // A 5 s fade-in on a 1 s clip is fitted to 1 s: 0.2 early, 0.8 late.
+    let r = (overlong_in.0 / full.0, overlong_in.1 / full.0);
+    assert!(
+        (r.0 - 0.2).abs() < 0.08 && (r.1 - 0.8).abs() < 0.08,
+        "{r:?}"
+    );
 }
 
 #[test]

@@ -312,7 +312,7 @@ Reply with a single JSON object {\"code\": \"...\", \"explanation\": \"...\"} an
 Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
 selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
-setVolume(id, v), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
+setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
 setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
 state() returns {playhead, playing, selected, duration, fps, tool, magnet, musicBedMuted, format, clips, assets, sweepCandidates, sceneClips, transcriptSegments}. \

@@ -1058,6 +1058,8 @@ impl EditorApp {
                             duration: c.duration,
                             source_in: c.source_in,
                             volume: c.volume,
+                            fade_in: c.fade_in,
+                            fade_out: c.fade_out,
                         },
                     )
                 })
@@ -1225,6 +1227,8 @@ impl EditorApp {
                     "source": c.source,
                     "opacity": c.opacity,
                     "volume": c.volume,
+                    "fadeIn": c.fade_in,
+                    "fadeOut": c.fade_out,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
@@ -1419,6 +1423,7 @@ impl EditorApp {
             | ScriptCommand::RenameClip { clip, .. }
             | ScriptCommand::SetOpacity { clip, .. }
             | ScriptCommand::SetVolume { clip, .. }
+            | ScriptCommand::SetFade { clip, .. }
             | ScriptCommand::DetachAudio { clip }
             | ScriptCommand::UnlinkClip { clip }
             | ScriptCommand::SetEmbeddedAudio { clip, .. }
@@ -1483,6 +1488,16 @@ impl EditorApp {
             ScriptCommand::SetVolume { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.volume = value.clamp(0.0, 2.0);
+                }
+            }
+            ScriptCommand::SetFade {
+                clip,
+                fade_in,
+                fade_out,
+            } => {
+                if let Some(c) = self.timeline.clip_mut(clip) {
+                    c.fade_in = fade_in.max(0.0);
+                    c.fade_out = fade_out.max(0.0);
                 }
             }
             ScriptCommand::DetachAudio { clip } => {
@@ -2305,6 +2320,27 @@ impl EditorApp {
                 if has_source {
                     prop_row(ui, "Volume", |ui| percent_slider(ui, &mut clip.volume, 1.5))
                         .on_hover_text("Clip gain; 100% is unity");
+                }
+                // Audio clips only, so a video clip's card keeps its height;
+                // scripts can fade any clip's sound with setFade.
+                if is_audio && has_source {
+                    prop_row(ui, "Fades", |ui| {
+                        let half = ((ui.available_width() - 6.0) / 2.0).max(40.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let fade_in = ui
+                            .allocate_ui(Vec2::new(half, 24.0), |ui| {
+                                seconds_field(ui, &mut clip.fade_in, 0.0)
+                            })
+                            .inner
+                            .on_hover_text("Fade in: seconds to rise from silence");
+                        let fade_out = ui
+                            .allocate_ui(Vec2::new(half, 24.0), |ui| {
+                                seconds_field(ui, &mut clip.fade_out, 0.0)
+                            })
+                            .inner
+                            .on_hover_text("Fade out: seconds to fall to silence");
+                        fade_in.union(fade_out)
+                    });
                 }
                 if kind == ClipKind::Title {
                     prop_row(ui, "Style", |ui| {

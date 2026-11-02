@@ -586,6 +586,8 @@ pub fn export_timeline(
         if let Some(last) = audio_runs.last_mut().filter(|last| {
             last.source == clip.source
                 && last.volume == clip.volume
+                && last.fade_lengths() == (0.0, 0.0)
+                && clip.fade_lengths() == (0.0, 0.0)
                 && same_time(last.end(), clip.start)
                 && same_time(last.source_in + last.duration, clip.source_in)
         }) {
@@ -610,9 +612,22 @@ pub fn export_timeline(
         };
         let label = format!("a{}", labels.len());
         let delay_ms = (clip.start * 1000.0).round() as i64;
+        // afade's default curve is linear, matching the preview mixer.
+        let (fade_in, fade_out) = clip.fade_lengths();
+        let mut fades = String::new();
+        if fade_in > 0.0 {
+            fades.push_str(&format!(",afade=t=in:st=0:d={}", f(fade_in)));
+        }
+        if fade_out > 0.0 {
+            fades.push_str(&format!(
+                ",afade=t=out:st={}:d={}",
+                f(clip.duration - fade_out),
+                f(fade_out)
+            ));
+        }
         filters.push(format!(
             "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000,\
-             volume={:.3},adelay={delay_ms}|{delay_ms}[{label}]",
+             volume={:.3}{fades},adelay={delay_ms}|{delay_ms}[{label}]",
             f(clip.source_in),
             f(clip.source_in + clip.duration),
             clip.volume,
