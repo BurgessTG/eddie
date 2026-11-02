@@ -2179,27 +2179,24 @@ impl EditorApp {
                 ClipKind::Audio => ("Audio", theme::CLIP_AUDIO),
                 ClipKind::Title => ("Title", theme::CLIP_TITLE),
             };
+            // One header row: kind dot, then the editable name. The kind
+            // and source file live in the tooltips.
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                 ui.painter()
                     .circle_filled(dot.center(), 4.0, kind_color.gamma_multiply(1.6));
-                ui.label(theme::caption(kind_label));
-                if let Some(path) = &clip.source {
-                    let file = std::path::Path::new(path)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.clone());
-                    ui.add(egui::Label::new(theme::caption(format!("· {file}"))).truncate())
-                        .on_hover_text(path);
-                }
+                let hover = match &clip.source {
+                    Some(path) => format!("{kind_label} clip name\nSource: {path}"),
+                    None => format!("{kind_label} clip name"),
+                };
+                ui.add(
+                    egui::TextEdit::singleline(&mut clip.name)
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin::symmetric(8, 6)),
+                )
+                .on_hover_text(hover);
             });
-            ui.add_space(4.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut clip.name)
-                    .desired_width(f32::INFINITY)
-                    .margin(egui::Margin::symmetric(8, 6)),
-            )
-            .on_hover_text("Clip name");
             ui.add_space(10.0);
             let is_audio = clip.kind == ClipKind::Audio;
             let has_source = clip.source.is_some();
@@ -2225,6 +2222,13 @@ impl EditorApp {
                 ClipKind::Audio => "Sound",
                 ClipKind::Title => "Look",
             };
+            let kind = clip.kind;
+            let video_audio = kind == ClipKind::Video && source_has_audio;
+            let linked = clip.linked_clip.is_some();
+            let can_detach = video_audio && clip.embedded_audio && !linked;
+            let can_tighten = source_has_audio && kind != ClipKind::Title;
+            // Sound controls share the card with picture controls, so a video
+            // clip's whole inspector fits without scrolling.
             inspector_section(ui, look_title, |ui| {
                 if !is_audio {
                     prop_row(ui, "Opacity", |ui| {
@@ -2236,7 +2240,7 @@ impl EditorApp {
                     prop_row(ui, "Volume", |ui| percent_slider(ui, &mut clip.volume, 1.5))
                         .on_hover_text("Clip gain; 100% is unity");
                 }
-                if clip.kind == ClipKind::Title {
+                if kind == ClipKind::Title {
                     prop_row(ui, "Style", |ui| {
                         egui::ComboBox::from_id_salt("title_style")
                             .width(ui.available_width())
@@ -2254,59 +2258,44 @@ impl EditorApp {
                     })
                     .on_hover_text("Choose how this title or caption is drawn");
                 }
+                // Detached sound plays from the linked clip; the line below
+                // says so, so the checkbox only shows while it applies.
+                if video_audio && !linked {
+                    ui.checkbox(&mut clip.embedded_audio, "Embedded audio")
+                        .on_hover_text("Play this video clip's own sound");
+                }
+                if let Some(partner) = &linked_snapshot {
+                    ui.add(
+                        egui::Label::new(theme::caption(format!("Linked to {}", partner.name)))
+                            .truncate(),
+                    )
+                    .on_hover_text("Picture and sound move, trim and split together");
+                }
+                let mut buttons: Vec<(&str, &str, &mut bool)> = Vec::new();
+                if can_detach {
+                    buttons.push((
+                        "Detach audio",
+                        "Move this clip's sound to a linked audio clip you can edit separately",
+                        &mut do_detach,
+                    ));
+                }
+                if linked_snapshot.is_some() {
+                    buttons.push((
+                        "Unlink",
+                        "Let picture and sound move independently for J/L cuts or replacement audio",
+                        &mut do_unlink,
+                    ));
+                }
+                if can_tighten {
+                    buttons.push((
+                        "Remove silence",
+                        "Cut waveform pauses from this speech clip and ripple later clips left",
+                        &mut do_tighten,
+                    ));
+                }
+                button_row(ui, buttons, false);
             });
             if let Some(snapshot) = &clip_snapshot {
-                let video_audio = snapshot.kind == ClipKind::Video && source_has_audio;
-                let can_detach =
-                    video_audio && snapshot.embedded_audio && snapshot.linked_clip.is_none();
-                let can_tighten = source_has_audio && snapshot.kind != ClipKind::Title;
-                if video_audio || can_tighten || linked_snapshot.is_some() {
-                    ui.add_space(8.0);
-                    inspector_section(ui, "Audio", |ui| {
-                        if video_audio {
-                            ui.add_enabled(
-                                snapshot.linked_clip.is_none(),
-                                egui::Checkbox::new(&mut clip.embedded_audio, "Embedded audio"),
-                            )
-                            .on_hover_text(
-                                "Play this video clip's own sound. Disabled while its audio is detached",
-                            );
-                        }
-                        if let Some(linked) = &linked_snapshot {
-                            ui.add(
-                                egui::Label::new(theme::caption(format!(
-                                    "Linked to {}",
-                                    linked.name
-                                )))
-                                .truncate(),
-                            )
-                            .on_hover_text("Picture and sound move, trim and split together");
-                        }
-                        let mut buttons: Vec<(&str, &str, &mut bool)> = Vec::new();
-                        if can_detach {
-                            buttons.push((
-                                "Detach",
-                                "Move this clip's sound to a linked audio clip you can edit separately",
-                                &mut do_detach,
-                            ));
-                        }
-                        if linked_snapshot.is_some() {
-                            buttons.push((
-                                "Unlink",
-                                "Let picture and sound move independently for J/L cuts or replacement audio",
-                                &mut do_unlink,
-                            ));
-                        }
-                        if can_tighten {
-                            buttons.push((
-                                "Remove silence",
-                                "Cut waveform pauses from this speech clip and ripple later clips left",
-                                &mut do_tighten,
-                            ));
-                        }
-                        button_row(ui, buttons, false);
-                    });
-                }
                 if snapshot.kind != ClipKind::Title && has_transcript {
                     ui.add_space(8.0);
                     inspector_section(ui, "Captions", |ui| {
