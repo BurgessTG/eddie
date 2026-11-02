@@ -5931,12 +5931,13 @@ mod tests {
         for (sort, expected) in [
             (
                 GallerySort::Score,
+                // The Needs review range sorts after every usable one.
                 vec![
                     (10.0, 2.0),
                     (40.0, 30.0),
-                    (20.0, 7.5),
                     (0.25, 1.5),
                     (80.0, 8.0),
+                    (20.0, 7.5),
                 ],
             ),
             (

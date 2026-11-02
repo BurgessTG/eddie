@@ -105,7 +105,25 @@ impl GallerySort {
 
     fn compare(self, a: &SweepCandidate, b: &SweepCandidate) -> Ordering {
         match self {
-            Self::Score => b.score.total_cmp(&a.score),
+            // Usable picture first: burned-in text and unreviewed ranges
+            // sink below it however high the model scored them.
+            Self::Score => {
+                let rank = |clip: &SweepCandidate| {
+                    if matches!(
+                        clip.review.status,
+                        ReviewStatus::NeedsReview | ReviewStatus::Rejected
+                    ) {
+                        2
+                    } else if clip.tags.iter().any(|tag| tag == "on-screen-text") {
+                        1
+                    } else {
+                        0
+                    }
+                };
+                rank(a)
+                    .cmp(&rank(b))
+                    .then_with(|| b.score.total_cmp(&a.score))
+            }
             Self::Source => Ordering::Equal,
             Self::Shortest => a.duration.total_cmp(&b.duration),
             Self::Longest => b.duration.total_cmp(&a.duration),
@@ -751,4 +769,52 @@ fn gallery_card(
             });
     });
     (add, dismiss)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(score: f32, status: ReviewStatus, tags: &[&str]) -> SweepCandidate {
+        SweepCandidate {
+            id: format!("{score}"),
+            asset_path: "a.mp4".to_owned(),
+            asset_name: "a.mp4".to_owned(),
+            title: "a.mp4".to_owned(),
+            source_in: 0.0,
+            duration: 1.0,
+            score,
+            reason: String::new(),
+            stability: 0.9,
+            audio_energy: 0.1,
+            audio_peak: 0.1,
+            category: "broll".to_owned(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            motion_score: 0.3,
+            audio_score: 0.1,
+            music_bed: false,
+            visual: None,
+            has_video: true,
+            transcript: Vec::new(),
+            review: super::super::sweep::ClipReview {
+                status,
+                ..Default::default()
+            },
+            dismissed: false,
+        }
+    }
+
+    #[test]
+    fn best_first_puts_usable_picture_above_text_and_unreviewed_ranges() {
+        // The highest scores belong to the ranges that must sink.
+        let mut clips = vec![
+            clip(100.0, ReviewStatus::NeedsReview, &[]),
+            clip(95.0, ReviewStatus::Reviewed, &["on-screen-text"]),
+            clip(60.0, ReviewStatus::Reviewed, &[]),
+            clip(70.0, ReviewStatus::Local, &[]),
+        ];
+        clips.sort_by(|a, b| GallerySort::Score.compare(a, b));
+        let order: Vec<_> = clips.iter().map(|c| c.score).collect();
+        assert_eq!(order, vec![70.0, 60.0, 95.0, 100.0]);
+    }
 }

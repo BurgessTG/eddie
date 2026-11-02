@@ -95,8 +95,8 @@ mise exec -- cargo run -p openreel-media --example generate_samples -- samples
 ```
 
 Settings (Chat → Settings) take the API key, base URL
-(`https://api.meta.ai/v1` by default), and model (`muse-spark-1.3` or
-`muse-wonder-1.0`). The key is stored only in the local config file.
+(`https://api.meta.ai/v1` by default), and model (`muse-wonder-1.0`, the
+default, or `muse-spark-1.3`). The key is stored only in the local config file.
 **Check connection** validates the key and model without running inference.
 
 ## Shortcuts
@@ -136,6 +136,12 @@ detailed curator contract.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.
 - No project save/load or general undo yet (AI edits have one-step undo).
+  Curation results live in memory and are lost when the app closes.
+- Model curation is thorough but slow: one window at a time, several
+  passes each. Eleven expo videos (about 8 minutes) took 105 minutes on
+  Wonder and 85 on Spark.
+- Burned-in text (title cards, news bars) is tagged by the model, not
+  detected locally; local-only curation cannot exclude it.
 
 ## License
 
