@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{run_sweep, ChatSettings, ReviewStatus, SweepData};
-use crate::app::chat::MODEL_SPARK;
+use crate::app::chat::MODEL_WONDER;
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -305,7 +305,7 @@ fn read_fixture_request(stream: &mut std::net::TcpStream) -> Option<Request> {
 }
 
 fn catalog() -> (u16, String) {
-    (200, json!({"data":[{"id":MODEL_SPARK}]}).to_string())
+    (200, json!({"data":[{"id":MODEL_WONDER}]}).to_string())
 }
 
 fn input_windows(body: &Value) -> Vec<Value> {
@@ -2189,7 +2189,7 @@ fn visual_review_selects_interior_ranges_and_joins_a_long_usable_moment() {
     assert_eq!(data.usage.cached_tokens, posted.len() as u64 * 20);
     for request in posted {
         let body = request.json();
-        assert_eq!(body["model"], MODEL_SPARK);
+        assert_eq!(body["model"], MODEL_WONDER);
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         let content = body["messages"][1]["content"].as_array().unwrap();
         let images = content
