@@ -44,6 +44,17 @@ pub struct AudioSegment {
     /// Source time at `start`, seconds from the container origin.
     pub source_in: f64,
     pub volume: f32,
+    /// Linear fade lengths, seconds; fitted with `openreel_engine::fit_fades`.
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// Fitted fade lengths in samples, packed in/out so a fade change
+/// applies without restarting the voice's decoder.
+fn pack_fades(segment: &AudioSegment) -> u64 {
+    let (fade_in, fade_out) =
+        openreel_engine::fit_fades(segment.duration, segment.fade_in, segment.fade_out);
+    (sample(fade_in).min(u64::from(u32::MAX)) << 32) | sample(fade_out).min(u64::from(u32::MAX))
 }
 
 fn sample(seconds: f64) -> u64 {
@@ -62,6 +73,7 @@ struct Voice {
     start: u64,
     end: u64,
     volume: Arc<AtomicU32>,
+    fades: Arc<AtomicU64>,
     chunks: Receiver<MediaResult<Chunk>>,
     recycle: SyncSender<Vec<f32>>,
     current: Option<Chunk>,
@@ -118,6 +130,20 @@ impl Voice {
         errors: &Mutex<Option<String>>,
     ) {
         let volume = f32::from_bits(self.volume.load(Ordering::Relaxed));
+        let fades = self.fades.load(Ordering::Relaxed);
+        let (fade_in, fade_out) = (fades >> 32, fades & u64::from(u32::MAX));
+        let (start, clip_end) = (self.start, self.end);
+        // Linear ramps over the fitted fades; unity in between.
+        let gain = |at: u64| -> f32 {
+            let mut gain = 1.0_f32;
+            if fade_in > 0 && at < start + fade_in {
+                gain = gain.min((at - start) as f32 / fade_in as f32);
+            }
+            if fade_out > 0 && at + fade_out > clip_end {
+                gain = gain.min(clip_end.saturating_sub(at) as f32 / fade_out as f32);
+            }
+            gain * volume
+        };
         let end = (from + frames as u64).min(self.end);
         let mut at = from.max(self.start);
         while at < end {
@@ -135,11 +161,23 @@ impl Voice {
                     let offset = (at - chunk.at) as usize * 2;
                     let target = (at - from) as usize * 2;
                     let count = (stop - at) as usize * 2;
-                    for (dst, src) in out[target..target + count]
-                        .iter_mut()
-                        .zip(&chunk.data[offset..offset + count])
-                    {
-                        *dst += src * volume;
+                    if fade_in == 0 && fade_out == 0 {
+                        for (dst, src) in out[target..target + count]
+                            .iter_mut()
+                            .zip(&chunk.data[offset..offset + count])
+                        {
+                            *dst += src * volume;
+                        }
+                    } else {
+                        for (index, (dst, src)) in out[target..target + count]
+                            .chunks_exact_mut(2)
+                            .zip(chunk.data[offset..offset + count].chunks_exact(2))
+                            .enumerate()
+                        {
+                            let g = gain(at + index as u64);
+                            dst[0] += src[0] * g;
+                            dst[1] += src[1] * g;
+                        }
                     }
                     at = stop;
                 }
@@ -295,6 +333,7 @@ enum Output {
 struct VoiceHandle {
     segment: AudioSegment,
     volume: Arc<AtomicU32>,
+    fades: Arc<AtomicU64>,
 }
 
 /// The audio mixer and playback clock.
@@ -496,6 +535,7 @@ impl AudioEngine {
                     .volume
                     .store(segment.volume.to_bits(), Ordering::Relaxed);
                 handle.segment.volume = segment.volume;
+                handle.fades.store(pack_fades(segment), Ordering::Relaxed);
                 continue;
             }
             let start = sample(segment.start);
@@ -504,6 +544,7 @@ impl AudioEngine {
                 continue;
             }
             let volume = Arc::new(AtomicU32::new(segment.volume.to_bits()));
+            let fades = Arc::new(AtomicU64::new(pack_fades(segment)));
             let (chunks_tx, chunks) = sync_channel(QUEUE_CHUNKS);
             let (recycle, recycle_rx) = sync_channel(QUEUE_CHUNKS + 2);
             let job = segment.clone();
@@ -521,6 +562,7 @@ impl AudioEngine {
                 start,
                 end,
                 volume: Arc::clone(&volume),
+                fades: Arc::clone(&fades),
                 chunks,
                 recycle,
                 current: None,
@@ -532,6 +574,7 @@ impl AudioEngine {
                 VoiceHandle {
                     segment: segment.clone(),
                     volume,
+                    fades,
                 },
             );
         }

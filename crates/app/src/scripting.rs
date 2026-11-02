@@ -51,6 +51,11 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    SetFade {
+        clip: u64,
+        fade_in: f64,
+        fade_out: f64,
+    },
     DetachAudio {
         clip: u64,
     },
@@ -110,6 +115,9 @@ impl ScriptCommand {
             | Self::SplitClip { at: value, .. }
             | Self::MoveClip { start: value, .. }
             | Self::AddAsset { at: value, .. } => value.is_finite(),
+            Self::SetFade {
+                fade_in, fade_out, ..
+            } => fade_in.is_finite() && fade_out.is_finite(),
             Self::TrimClip { left, right, .. } => {
                 left.iter().chain(right).all(|value| value.is_finite())
             }
@@ -251,7 +259,7 @@ function help() {
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) trimClip(id, left, right)  // -1 keeps an edge",
-    "renameClip(id, name) setOpacity(id, v) setVolume(id, v)",
+    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec)",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
     "importMedia(path) exportTo(path) clearTimeline()",
@@ -385,6 +393,14 @@ impl ScriptEngine {
                 reg!("setVolume", move |clip: u64, value: f32| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetVolume { clip, value }));
+                let q = Rc::clone(&queue);
+                reg!("setFade", move |clip: u64, fade_in: f64, fade_out: f64| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::SetFade {
+                        clip,
+                        fade_in,
+                        fade_out
+                    }));
                 let q = Rc::clone(&queue);
                 reg!("detachAudio", move |clip: u64| q
                     .borrow_mut()

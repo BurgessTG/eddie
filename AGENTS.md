@@ -357,6 +357,11 @@ refused while one runs. Dragging from the bin carries a grid-size
 thumbnail ghost at the cursor plus a drop-lane highlight.
 Music-bed muting on curator adds is user-selectable (Curator checkbox,
 `state().musicBedMuted`, `setMusicBedMuted(bool)`); it defaults on.
+Clips carry linear audio fades (`fade_in`/`fade_out` seconds, `setFade`,
+and a Fades row on audio clips in Details). `fit_fades` scales fades
+that together exceed the clip by their requested ratio. The preview mixer
+and export's `afade` share that rule; split keeps the head fade left and
+the tail fade right, and faded clips never coalesce in export.
 Video audio can be detached into a linked audio clip. The picture's
 `embeddedAudio` turns off so preview/export never double the source;
 linked pairs move, trim, split, and close gaps together until

@@ -664,6 +664,8 @@ mod tests {
                 duration: 1.0,
                 source_in: 4.0,
                 volume: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
             },
         )]);
         let mut mix = Vec::new();

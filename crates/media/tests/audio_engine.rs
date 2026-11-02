@@ -39,6 +39,8 @@ fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) 
         duration,
         source_in,
         volume,
+        fade_in: 0.0,
+        fade_out: 0.0,
     }
 }
 
@@ -131,6 +133,45 @@ fn volume_scales_and_voices_mix() {
     ]);
     let summed = peak(&render(&mut both, 1.0), 0.1, 0.9);
     assert!((summed - 0.5).abs() < 0.01, "{summed}");
+}
+
+#[test]
+fn fades_ramp_linearly_and_overlong_fades_meet_in_proportion() {
+    let path = tone_file("tone.wav", 0.0, &["-c:a", "pcm_s16le"]);
+    let faded = |fade_in: f64, fade_out: f64| {
+        let mut clip = segment(&path, 1.0, 2.0, 0.0, 1.0);
+        (clip.fade_in, clip.fade_out) = (fade_in, fade_out);
+        let mut engine = playing(&[(1, clip)]);
+        render(&mut engine, 3.0)
+    };
+    // 0.5 s in, 1 s out on a 2 s clip at timeline 1 s: the ramps are
+    // measured on the timeline, not from the source's start.
+    let mix = faded(0.5, 1.0);
+    let at = |t: f64| peak(&mix, t - 0.005, t + 0.005);
+    assert!(at(1.002) < 0.01, "starts silent: {}", at(1.002));
+    assert!((at(1.25) - 0.25).abs() < 0.02, "mid fade-in: {}", at(1.25));
+    assert!((at(1.75) - 0.5).abs() < 0.01, "full level: {}", at(1.75));
+    assert!((at(2.5) - 0.25).abs() < 0.02, "mid fade-out: {}", at(2.5));
+    assert!(at(2.995) < 0.01, "ends silent: {}", at(2.995));
+
+    // 3 s + 1 s of fades on a 2 s clip scale to 1.5 s + 0.5 s.
+    let mix = faded(3.0, 1.0);
+    let at = |t: f64| peak(&mix, t - 0.005, t + 0.005);
+    assert!(
+        (at(1.75) - 0.25).abs() < 0.02,
+        "scaled fade-in: {}",
+        at(1.75)
+    );
+    assert!(
+        (at(2.5) - 0.5).abs() < 0.02,
+        "fades meet at 1.5 s: {}",
+        at(2.5)
+    );
+    assert!(
+        (at(2.75) - 0.25).abs() < 0.02,
+        "scaled fade-out: {}",
+        at(2.75)
+    );
 }
 
 #[test]
