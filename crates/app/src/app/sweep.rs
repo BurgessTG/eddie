@@ -36,7 +36,7 @@ pub(super) const CURATOR_CATEGORIES: [&str; 5] =
 /// Controlled tag vocabulary. Local classification derives these
 /// from measured signals; model tags are validated against the
 /// same list so chat prompts can filter on stable words.
-pub(super) const CURATOR_TAGS: [&str; 26] = [
+pub(super) const CURATOR_TAGS: [&str; 27] = [
     "prime",
     "speech",
     "quiet",
@@ -63,6 +63,7 @@ pub(super) const CURATOR_TAGS: [&str; 26] = [
     "occluded",
     "camera-move",
     "expressive",
+    "on-screen-text",
 ];
 
 fn is_model_tag(tag: &str) -> bool {

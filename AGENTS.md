@@ -94,7 +94,9 @@ over the estimated context budget after history compaction fail before
 dispatch rather than silently dropping clips.
 The model replies with a structured `{code, explanation}` envelope
 (free-text parsing is a fallback). Only 429/500/503 are retried.
-Built-in Meta choices use `muse-spark-1.3` and `muse-wonder-1.0`.
+Built-in Meta choices use `muse-spark-1.3` and `muse-wonder-1.0`;
+Wonder is the default (Spark's curation missed burned-in text and ran
+about 85 minutes on 11 expo videos).
 Settings load maps the old unversioned names to these API IDs, preserving
 explicit versioned/custom IDs. The Contributor checkbox is disclosure
 only; it does not automatically select a Contributor model ID.
@@ -178,7 +180,11 @@ category: top 20% of candidates per asset at score 75+, assigned by the
 app after ranking, never by the model or to Needs review material.
 General-production tags include `detail`, `wide-shot`, `demonstration`,
 `interaction`, `reveal`, `subject-entering`, `subject-exiting`, `occluded`,
-`camera-move`, and `expressive`. These describe observed content, not
+`camera-move`, `expressive`, and `on-screen-text`. The reviewer tags
+burned-in titles, day cards, lower thirds, news bars, subtitles and end
+cards from an earlier edit (not small logos filmed in the scene) and
+splits them from clean picture. Local montage buttons skip those ranges,
+and chat is told not to place them unless the user asks for the text. These describe observed content, not
 guaranteed emotion, action completion, or subject identity.
 Reaction filtering uses the category, not reason substrings or soundtrack peaks.
 Local classification derives categories and tags from measured signals.

@@ -69,7 +69,7 @@ impl Default for ChatSettings {
         Self {
             api_key: String::new(),
             base_url: DEFAULT_BASE_URL.to_owned(),
-            model: MODEL_SPARK.to_owned(),
+            model: MODEL_WONDER.to_owned(),
             contributor_opt_in: false,
             format: Orientation::Landscape,
         }
@@ -320,7 +320,7 @@ state() returns {playhead, playing, selected, duration, fps, tool, magnet, music
 format is the project orientation; each asset has an orientation, and video whose orientation differs from format cannot be added, so never use it. \
 Sweep candidates contain all curated workable ranges, not a top-N selection; they can include multiple useful moments inside one long shot. sceneClips are the complete contiguous physical-shot inventory, including rejected material, in source order. To deconstruct or rebuild an edited video shot by shot, use sceneClips grouped by asset and sorted by sourceIn. Use sweepCandidates for editorial ranges, optionally filtered by category or quality. Both inventories have no clip-count cap. Fields: id, asset, assetName, title, sourceIn, duration, score, reason, category, tags, musicBed, quality {stability, audio, motion}, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript, talkingScore, visual, review. review.status is local, reviewed, needs-review or rejected. Local ranges are measured suggestions, not semantic review; needs-review means missing or failed review, not unusable footage. Model review uses sampled images and transcript, not exhaustive frame understanding; its score is an editorial judgment. \
 This request carries compact records without repeated candidate transcripts, low-level visual measurements or review frame arrays. transcriptSegments contains speech once. Sandbox queries still return the complete request-time snapshot, including those omitted fields. review.subjectEvidence summarizes source-timed SAM checks used by the visual curator before its final decision: concept, status, checked range, sampled/observed frames and first/last observations. Tracking is sampled, detection gaps are uncertain, IDs are request-local, and boxes are not masks, emotion or proof of lip sync. visual includes representative box/face measurements at samFrameTime. SAM can check objects besides people; use the concept, not a box alone, to interpret the evidence. Local subject-centered, subject-large and subject-moving tags are measured proxies; face-visible requires SAM face evidence. \
-category is one of reaction, talking, action, broll, establishing. prime is a scarce quality tag, not a category. musicBed true marks suspected baked-in montage music: judge it on visuals, not soundtrack peaks. When state().musicBedMuted is true the app adds such video clips muted so old soundtracks never stack (audio-only music tracks always stay audible); call setMusicBedMuted(false) only when the user explicitly wants the baked-in score kept, and setMusicBedMuted(true) when building a new soundtrack. \
+category is one of reaction, talking, action, broll, establishing. Ranges tagged on-screen-text contain burned-in titles, captions, news bars or graphics from an earlier edit; never place them unless the user explicitly asks for that text. Small logos filmed in the scene are not tagged and are fine. prime is a scarce quality tag, not a category. musicBed true marks suspected baked-in montage music: judge it on visuals, not soundtrack peaks. When state().musicBedMuted is true the app adds such video clips muted so old soundtracks never stack (audio-only music tracks always stay audible); call setMusicBedMuted(false) only when the user explicitly wants the baked-in score kept, and setMusicBedMuted(true) when building a new soundtrack. \
 Transcript segment fields: id, asset, assetName, start, end, speaker, text, timingPrecision ('turn'|'word'), words [{start,end,text,confidence}], asrSession {id,sourceStart,sourceEnd}. Speaker labels are scoped to that source/session, not identities across uploads. Full sandbox review.speech records identify retained fragments of source turns; completeAvailableTurn means the reported turn is retained, not verified sentence completion. Only timingPrecision 'word' supports exact word/filler boundaries; turn timings locate the spoken passage, not each word. \
 Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from local waveform DSP. Audio-only music assets with a steady beat also have tempo (BPM) and beats (source seconds, null when none was found); to cut to the beat, place each music-relative cut on a beat. tightenSilence(id) removes pauses at least 0.35s from a speech clip, keeps 0.08s around phrases, ripples later clips left, rebuilds linked detached audio in matching phrases, and rejects mostly music-bed clips. Waveforms locate silence only; use transcript text/meaning for filler-word decisions, and do not claim exact filler boundaries from turn timestamps. \
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
@@ -1247,7 +1247,10 @@ impl EditorApp {
                         .iter()
                         .filter(|asset| !self.clashes_with_format(&asset.info))
                         .flat_map(|asset| asset.sweep.candidates.iter())
-                        .filter(|candidate| !candidate.dismissed)
+                        .filter(|candidate| {
+                            !candidate.dismissed
+                                && !candidate.tags.iter().any(|tag| tag == "on-screen-text")
+                        })
                         .map(CandidateView::from)
                         .collect::<Vec<_>>(),
                     sort,
@@ -2080,7 +2083,7 @@ mod tests {
 
     #[test]
     fn connection_check_allows_keyless_local_mock() {
-        let (mut settings, server) = fake_model_api(|_| (200, catalog(&[MODEL_SPARK])));
+        let (mut settings, server) = fake_model_api(|_| (200, catalog(&[MODEL_WONDER])));
         settings.api_key.clear();
         assert_eq!(check_model_connection(&settings), Ok(()));
         let request = server.join().unwrap();
@@ -2115,12 +2118,12 @@ mod tests {
     fn connection_check_does_not_substitute_contributor_or_other_models() {
         for contributor in [false, true] {
             let (mut settings, server) =
-                fake_model_api(|_| (200, catalog(&[MODEL_WONDER, "muse-spark-1.3-contributor"])));
+                fake_model_api(|_| (200, catalog(&[MODEL_SPARK, "muse-wonder-1.0-contributor"])));
             settings.contributor_opt_in = contributor;
             let error = check_model_connection(&settings).unwrap_err();
             server.join().unwrap();
             assert!(error.contains("Selected model"));
-            assert_eq!(settings.model, MODEL_SPARK);
+            assert_eq!(settings.model, MODEL_WONDER);
         }
         let (mut settings, server) =
             fake_model_api(|_| (200, catalog(&["muse-spark-1.3-contributor"])));
@@ -2218,7 +2221,7 @@ mod tests {
                 release_rx
                     .recv_timeout(Duration::from_secs(5))
                     .expect("the UI must return before the HTTP reply");
-                (status, catalog(&[MODEL_SPARK]))
+                (status, catalog(&[MODEL_WONDER]))
             });
             let ctx = egui::Context::default();
             let mut app = EditorApp::headless_for_test(&ctx);
@@ -2268,7 +2271,7 @@ mod tests {
                 match field {
                     "key" => app.chat_settings.api_key = "new-fixture-key".to_owned(),
                     "base" => app.chat_settings.base_url = "http://localhost:8000/v1".to_owned(),
-                    "model" => app.chat_settings.model = MODEL_WONDER.to_owned(),
+                    "model" => app.chat_settings.model = MODEL_SPARK.to_owned(),
                     _ => app.chat_settings.contributor_opt_in = true,
                 }
                 app.status = "Newer status.".to_owned();
@@ -2291,7 +2294,7 @@ mod tests {
                 std::fs::hard_link(&path, &previous).unwrap();
                 let settings = ChatSettings::default();
                 let _ = settings.save();
-                assert_eq!(ChatSettings::load().model, MODEL_SPARK);
+                assert_eq!(ChatSettings::load().model, MODEL_WONDER);
                 assert_eq!(
                     std::fs::read_to_string(previous).unwrap(),
                     original,
@@ -2387,7 +2390,7 @@ mod tests {
                 app.show_chat_settings = true;
                 click_settings_label(&ctx, &mut app, "Contributor models");
                 assert!(app.chat_settings.contributor_opt_in);
-                assert_eq!(app.chat_settings.model, MODEL_SPARK);
+                assert_eq!(app.chat_settings.model, MODEL_WONDER);
                 assert_eq!(app.status, error);
                 assert_eq!(std::fs::read_to_string(previous).unwrap(), "keep this file");
                 assert_eq!(
@@ -2584,6 +2587,64 @@ mod tests {
             }),
         ));
         app.poll_chat(ctx);
+    }
+
+    #[test]
+    fn local_montage_skips_ranges_with_burned_in_text() {
+        use super::super::sweep;
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let candidate = |source_in: f64, score: f32, tags: &[&str]| sweep::SweepCandidate {
+            id: format!("ready.mp4#{source_in}"),
+            asset_path: "ready.mp4".to_owned(),
+            asset_name: "ready.mp4".to_owned(),
+            title: "ready.mp4".to_owned(),
+            source_in,
+            duration: 2.0,
+            score,
+            reason: "test".to_owned(),
+            stability: 0.9,
+            audio_energy: 0.1,
+            audio_peak: 0.1,
+            category: "broll".to_owned(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            motion_score: 0.3,
+            audio_score: 0.1,
+            music_bed: false,
+            visual: None,
+            has_video: true,
+            transcript: Vec::new(),
+            review: sweep::ClipReview::default(),
+            dismissed: false,
+        };
+        app.assets.push(super::super::media::BinAsset {
+            info: openreel_media::MediaInfo {
+                path: "ready.mp4".to_owned(),
+                name: "ready.mp4".to_owned(),
+                duration: 10.0,
+                width: 320,
+                height: 180,
+                fps: 30.0,
+                has_video: true,
+                has_audio: false,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: sweep::SweepData {
+                // The title card outranks the clean shot, so a missing filter places it first.
+                candidates: vec![
+                    candidate(0.0, 95.0, &["on-screen-text"]),
+                    candidate(4.0, 60.0, &[]),
+                ],
+                ..Default::default()
+            },
+        });
+        app.dispatch_intent(&ctx, "by-score");
+        let placed: Vec<_> = app.timeline.clips.iter().map(|c| c.source_in).collect();
+        assert_eq!(placed, vec![4.0]);
     }
 
     #[test]
@@ -2897,9 +2958,9 @@ mod tests {
             "{\"clips\":[]}",
             Some(("bad()", "ReferenceError")),
         );
-        assert_eq!(body["model"], "muse-spark-1.3");
+        assert_eq!(body["model"], "muse-wonder-1.0");
         let wonder_settings = ChatSettings {
-            model: MODEL_WONDER.to_owned(),
+            model: MODEL_SPARK.to_owned(),
             contributor_opt_in: true,
             ..settings.clone()
         };
@@ -2911,7 +2972,7 @@ mod tests {
             "{\"clips\":[]}",
             None,
         );
-        assert_eq!(wonder_body["model"], "muse-wonder-1.0");
+        assert_eq!(wonder_body["model"], "muse-spark-1.3");
         assert_eq!(body["prompt_cache_key"], "proj-cache-1");
         assert_eq!(body["prompt_cache_retention"], "24h");
         assert_eq!(body["response_format"]["type"], "json_schema");
