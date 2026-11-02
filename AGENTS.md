@@ -59,7 +59,11 @@ The poteto pstack skills are installed in Muse user scope
 The media bin and import pipeline live in `crates/app/src/app/media.rs`.
 Chat editing lives in `crates/app/src/app/chat.rs`. Its HTTP call runs on
 a worker thread in app code. Generated JavaScript still goes through
-`scripting.rs` and mutates state only as `ScriptCommand`s. Checked chat
+`scripting.rs` and mutates state only as `ScriptCommand`s. `addAsset`,
+`addAssetRange` and `addTitle` return a handle (from `CLIP_HANDLE_BASE`,
+never reused within one engine); each applied batch maps handles to the
+clips it created, so later commands in the same run can target new clips
+without guessing IDs. A handle from an earlier run is an error. Checked chat
 evals use a fresh QuickJS runtime/context, so a retry can reuse
 declarations without inheriting changed globals; the interactive REPL
 still persists vars. Each eval can enqueue at most 2,048 commands and

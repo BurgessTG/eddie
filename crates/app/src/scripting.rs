@@ -77,6 +77,7 @@ pub enum ScriptCommand {
         at: f64,
         duration: f64,
         style: String,
+        handle: Option<u64>,
     },
     SetTitleStyle {
         clip: u64,
@@ -89,12 +90,14 @@ pub enum ScriptCommand {
     AddAsset {
         asset: String,
         at: f64,
+        handle: Option<u64>,
     },
     AddAssetRange {
         asset: String,
         at: f64,
         source_in: f64,
         duration: f64,
+        handle: Option<u64>,
     },
     Import(String),
     Export(String),
@@ -107,7 +110,47 @@ pub enum ScriptCommand {
     Log(String),
 }
 
+/// First handle that `addAsset`, `addAssetRange` and `addTitle` return.
+/// Handles stand for clips a batch has not created yet; real clip IDs
+/// never reach this range.
+pub const CLIP_HANDLE_BASE: u64 = 1 << 40;
+
 impl ScriptCommand {
+    /// The clip this command targets, if any.
+    pub(crate) fn target_mut(&mut self) -> Option<&mut u64> {
+        match self {
+            Self::SelectClip(id) | Self::DeleteClip(id) => Some(id),
+            Self::SplitClip { clip, .. }
+            | Self::MoveClip { clip, .. }
+            | Self::TrimClip { clip, .. }
+            | Self::RenameClip { clip, .. }
+            | Self::SetOpacity { clip, .. }
+            | Self::SetVolume { clip, .. }
+            | Self::SetFade { clip, .. }
+            | Self::DetachAudio { clip }
+            | Self::UnlinkClip { clip }
+            | Self::SetEmbeddedAudio { clip, .. }
+            | Self::TightenSilence { clip, .. }
+            | Self::SetTitleStyle { clip, .. }
+            | Self::AddCaptionsForClip { clip, .. } => Some(clip),
+            _ => None,
+        }
+    }
+
+    /// Replace a handle returned earlier in this batch with the clip its
+    /// addition created. `created` maps handles to clip IDs.
+    pub(crate) fn resolve_handle(
+        &mut self,
+        created: &std::collections::HashMap<u64, u64>,
+    ) -> Result<(), String> {
+        if let Some(id) = self.target_mut().filter(|id| **id >= CLIP_HANDLE_BASE) {
+            *id = *created
+                .get(id)
+                .ok_or("that clip handle is not from an earlier addition in this run")?;
+        }
+        Ok(())
+    }
+
     /// Validate numeric inputs without changing finite values or clamping policy.
     pub(crate) fn validate(&self) -> Result<(), String> {
         let finite = match self {
@@ -176,6 +219,9 @@ struct CommandQueue {
     string_bytes: usize,
     error: Option<String>,
     deadline: Option<Instant>,
+    /// Never reused within one engine, so a REPL variable holding an old
+    /// handle cannot alias a later batch's addition.
+    next_handle: u64,
 }
 
 impl CommandQueue {
@@ -231,6 +277,18 @@ impl CommandQueue {
         Ok(())
     }
 
+    /// Queue an addition and return the handle later commands can target.
+    fn push_addition(
+        &mut self,
+        string_bytes: usize,
+        command: impl FnOnce(Option<u64>) -> ScriptCommand,
+    ) -> rquickjs::Result<f64> {
+        let handle = CLIP_HANDLE_BASE.max(self.next_handle);
+        self.push(string_bytes, || command(Some(handle)))?;
+        self.next_handle = handle + 1;
+        Ok(handle as f64)
+    }
+
     fn reject(&mut self, error: String) -> rquickjs::Error {
         self.commands.clear();
         // Sticky until the eval ends, even if JavaScript catches the exception.
@@ -244,6 +302,7 @@ type Queue = Rc<RefCell<CommandQueue>>;
 pub struct ScriptEngine {
     context: Context,
     queue: Queue,
+    next_handle: u64,
 }
 
 const PRELUDE: &str = r#"
@@ -262,6 +321,7 @@ function help() {
     "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec)",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
+    "  // adds return a handle for the new clip; pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
     "console.log(...) works. Variables persist between lines."
@@ -278,16 +338,16 @@ function deleteClip(id) {
   __delete_clip(id === undefined ? (state().selected ?? -1) : id);
 }
 function addTitle(text, at, dur, style) {
-  __add_title(String(text), at === undefined ? state().playhead : at, dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
+  return __add_title(String(text), at === undefined ? state().playhead : at, dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
 }
 function addCaptionsForClip(id, style) {
   __add_captions_for_clip(id, style === undefined ? "caption" : String(style));
 }
 function addAsset(nameOrPath, at) {
-  __add_asset(String(nameOrPath), at === undefined ? state().playhead : at);
+  return __add_asset(String(nameOrPath), at === undefined ? state().playhead : at);
 }
 function addAssetRange(nameOrPath, at, sourceIn, dur) {
-  __add_asset_range(String(nameOrPath), at, sourceIn, dur);
+  return __add_asset_range(String(nameOrPath), at, sourceIn, dur);
 }
 function tightenSilence(id, threshold, minSilence, padding) {
   __tighten_silence(
@@ -433,12 +493,13 @@ impl ScriptEngine {
                     "__add_title",
                     move |text: CString<'_>, at: f64, duration: f64, style: CString<'_>| q
                         .borrow_mut()
-                        .push(text.len().saturating_add(style.len()), || {
+                        .push_addition(text.len().saturating_add(style.len()), |handle| {
                             ScriptCommand::AddTitle {
                                 text: text.as_str().to_owned(),
                                 at,
                                 duration,
                                 style: style.as_str().to_owned(),
+                                handle,
                             }
                         })
                 );
@@ -462,20 +523,24 @@ impl ScriptEngine {
                 let q = Rc::clone(&queue);
                 reg!("__add_asset", move |asset: CString<'_>, at: f64| q
                     .borrow_mut()
-                    .push(asset.len(), || ScriptCommand::AddAsset {
-                        asset: asset.as_str().to_owned(),
-                        at,
+                    .push_addition(asset.len(), |handle| {
+                        ScriptCommand::AddAsset {
+                            asset: asset.as_str().to_owned(),
+                            at,
+                            handle,
+                        }
                     }));
                 let q = Rc::clone(&queue);
                 reg!(
                     "__add_asset_range",
                     move |asset: CString<'_>, at: f64, source_in: f64, duration: f64| q
                         .borrow_mut()
-                        .push(asset.len(), || ScriptCommand::AddAssetRange {
+                        .push_addition(asset.len(), |handle| ScriptCommand::AddAssetRange {
                             asset: asset.as_str().to_owned(),
                             at,
                             source_in,
                             duration,
+                            handle,
                         })
                 );
                 let q = Rc::clone(&queue);
@@ -523,7 +588,11 @@ impl ScriptEngine {
             })
             .map_err(|e: rquickjs::Error| e.to_string())?;
 
-        Ok(Self { context, queue })
+        Ok(Self {
+            context,
+            queue,
+            next_handle: CLIP_HANDLE_BASE,
+        })
     }
 
     /// Evaluate one REPL line. Returns display text and queued commands.
@@ -555,6 +624,7 @@ impl ScriptEngine {
     fn eval_inner(&mut self, code: &str, state_json: &str) -> (String, Vec<ScriptCommand>, bool) {
         *self.queue.borrow_mut() = CommandQueue {
             deadline: Some(Instant::now() + EVAL_TIMEOUT),
+            next_handle: self.next_handle,
             ..CommandQueue::default()
         };
         let state_json = state_json.to_owned();
@@ -591,6 +661,7 @@ impl ScriptEngine {
         // Reject an expired eval before exposing commands, even without a final callback.
         let _ = self.queue.borrow_mut().check_active();
         let queue = std::mem::take(&mut *self.queue.borrow_mut());
+        self.next_handle = queue.next_handle;
         if let Some(error) = queue.error {
             (format!("error: {error}"), Vec::new(), false)
         } else {
@@ -636,6 +707,7 @@ mod tests {
                 at: 12.0,
                 source_in: 3.5,
                 duration: 4.0,
+                handle: Some(CLIP_HANDLE_BASE),
             }]
         );
     }
@@ -708,6 +780,7 @@ mod tests {
                     at: 1.0,
                     duration: 2.0,
                     style: "pop-caption".to_owned(),
+                    handle: Some(CLIP_HANDLE_BASE),
                 },
                 ScriptCommand::SetTitleStyle {
                     clip: 8,
@@ -737,6 +810,27 @@ mod tests {
     }
 
     #[test]
+    fn repl_handles_are_never_reused_across_runs() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        let (first, _) = engine.eval("var a = addTitle('A', 0, 1); a", "{}");
+        let (_, mut commands) = engine.eval("addTitle('B', 0, 1); setFade(a, 0, 1)", "{}");
+        assert_eq!(first, CLIP_HANDLE_BASE.to_string());
+        assert_eq!(
+            commands[0],
+            ScriptCommand::AddTitle {
+                text: "B".to_owned(),
+                at: 0.0,
+                duration: 1.0,
+                style: "lower-third".to_owned(),
+                handle: Some(CLIP_HANDLE_BASE + 1),
+            }
+        );
+        // The second run created only handle BASE + 1, so `a` cannot alias it.
+        let created = std::collections::HashMap::from([(CLIP_HANDLE_BASE + 1, 5)]);
+        assert!(commands[1].resolve_handle(&created).is_err());
+    }
+
+    #[test]
     fn transcript_segments_reads_state() {
         let mut engine = ScriptEngine::new().expect("quickjs engine");
         let (out, commands) = engine.eval(
@@ -751,6 +845,7 @@ mod tests {
                 at: 0.0,
                 source_in: 4.0,
                 duration: 3.5,
+                handle: Some(CLIP_HANDLE_BASE),
             }]
         );
     }
@@ -1076,34 +1171,40 @@ mod tests {
                     at: value,
                     duration: 1.0,
                     style: String::new(),
+                    handle: None,
                 },
                 ScriptCommand::AddTitle {
                     text: String::new(),
                     at: 0.0,
                     duration: value,
                     style: String::new(),
+                    handle: None,
                 },
                 ScriptCommand::AddAsset {
                     asset: String::new(),
                     at: value,
+                    handle: None,
                 },
                 ScriptCommand::AddAssetRange {
                     asset: String::new(),
                     at: value,
                     source_in: 0.0,
                     duration: 1.0,
+                    handle: None,
                 },
                 ScriptCommand::AddAssetRange {
                     asset: String::new(),
                     at: 0.0,
                     source_in: value,
                     duration: 1.0,
+                    handle: None,
                 },
                 ScriptCommand::AddAssetRange {
                     asset: String::new(),
                     at: 0.0,
                     source_in: 0.0,
                     duration: value,
+                    handle: None,
                 },
             ] {
                 assert!(command.validate().is_err(), "{command:?}");
@@ -1201,17 +1302,20 @@ mod tests {
                     text: "title".to_owned(),
                     at: -1.0,
                     duration: -2.0,
-                    style: "lower-third".to_owned()
+                    style: "lower-third".to_owned(),
+                    handle: Some(CLIP_HANDLE_BASE),
                 },
                 ScriptCommand::AddAsset {
                     asset: "asset".to_owned(),
-                    at: -1.0
+                    at: -1.0,
+                    handle: Some(CLIP_HANDLE_BASE + 1),
                 },
                 ScriptCommand::AddAssetRange {
                     asset: "asset".to_owned(),
                     at: -1.0,
                     source_in: -2.0,
-                    duration: -3.0
+                    duration: -3.0,
+                    handle: Some(CLIP_HANDLE_BASE + 2),
                 },
             ]
         );
@@ -1296,6 +1400,7 @@ mod tests {
                 at: index as f64,
                 duration: 1.0,
                 style: "lower-third".to_owned(),
+                handle: Some(CLIP_HANDLE_BASE + index as u64),
             }))
             .collect::<Vec<_>>();
         assert_eq!(commands, expected);
@@ -1317,22 +1422,26 @@ mod tests {
                     text: "explicit".to_owned(),
                     at: 2.0,
                     duration: 1.0,
-                    style: "lower-third".to_owned()
+                    style: "lower-third".to_owned(),
+                    handle: Some(CLIP_HANDLE_BASE),
                 },
                 ScriptCommand::AddAsset {
                     asset: "a.mp4".to_owned(),
-                    at: 3.0
+                    at: 3.0,
+                    handle: Some(CLIP_HANDLE_BASE + 1),
                 },
                 ScriptCommand::DeleteClip(7),
                 ScriptCommand::AddTitle {
                     text: "default".to_owned(),
                     at: 6.5,
                     duration: 4.0,
-                    style: "lower-third".to_owned()
+                    style: "lower-third".to_owned(),
+                    handle: Some(CLIP_HANDLE_BASE + 2),
                 },
                 ScriptCommand::AddAsset {
                     asset: "a.mp4".to_owned(),
-                    at: 6.5
+                    at: 6.5,
+                    handle: Some(CLIP_HANDLE_BASE + 3),
                 },
                 ScriptCommand::DeleteClip(9),
                 ScriptCommand::SplitClip { clip: 9, at: 4.0 },

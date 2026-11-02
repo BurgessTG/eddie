@@ -1392,13 +1392,14 @@ impl EditorApp {
         commands: Vec<ScriptCommand>,
     ) -> Vec<String> {
         let mut notes = Vec::new();
+        let mut created = HashMap::new();
         for command in commands {
             // Explicit console clears cancel old model replies even when
             // the replacement timeline happens to reuse identical IDs.
             if matches!(command, ScriptCommand::ClearTimeline) {
                 self.cancel_chat();
             }
-            match self.apply_script_command(ctx, command) {
+            match self.apply_script_command(ctx, command, &mut created) {
                 Ok(Some(note)) => notes.push(note),
                 Ok(None) => {}
                 Err(error) => notes.push(format!("error: {error}")),
@@ -1409,30 +1410,16 @@ impl EditorApp {
 
     /// One executor for console commands and transactional generated edits.
     /// Failures are typed; a console log is never an application error.
+    /// `created` maps this batch's addition handles to the clips they made.
     fn apply_script_command(
         &mut self,
         ctx: &egui::Context,
-        command: ScriptCommand,
+        mut command: ScriptCommand,
+        created: &mut HashMap<u64, ClipId>,
     ) -> Result<Option<String>, String> {
         command.validate()?;
-        let target = match &command {
-            ScriptCommand::SelectClip(id) | ScriptCommand::DeleteClip(id) => Some(*id),
-            ScriptCommand::SplitClip { clip, .. }
-            | ScriptCommand::MoveClip { clip, .. }
-            | ScriptCommand::TrimClip { clip, .. }
-            | ScriptCommand::RenameClip { clip, .. }
-            | ScriptCommand::SetOpacity { clip, .. }
-            | ScriptCommand::SetVolume { clip, .. }
-            | ScriptCommand::SetFade { clip, .. }
-            | ScriptCommand::DetachAudio { clip }
-            | ScriptCommand::UnlinkClip { clip }
-            | ScriptCommand::SetEmbeddedAudio { clip, .. }
-            | ScriptCommand::TightenSilence { clip, .. }
-            | ScriptCommand::SetTitleStyle { clip, .. }
-            | ScriptCommand::AddCaptionsForClip { clip, .. } => Some(*clip),
-            _ => None,
-        };
-        if let Some(id) = target {
+        command.resolve_handle(created)?;
+        if let Some(&mut id) = command.target_mut() {
             if self.timeline.clip(id).is_none() {
                 return Err(format!("no clip {id}"));
             }
@@ -1551,6 +1538,7 @@ impl EditorApp {
                 at,
                 duration,
                 style,
+                handle,
             } => {
                 let style = TitleStyle::from_name(&style)
                     .ok_or_else(|| format!("unknown title style '{style}'"))?;
@@ -1562,6 +1550,7 @@ impl EditorApp {
                     clip.title_style = style;
                 }
                 self.selected = Some(id);
+                created.extend(handle.map(|handle| (handle, id)));
             }
             ScriptCommand::SetTitleStyle { clip, style } => {
                 let style = TitleStyle::from_name(&style)
@@ -1578,20 +1567,23 @@ impl EditorApp {
                     .ok_or_else(|| format!("unknown title style '{style}'"))?;
                 self.add_captions_for_clip(clip, style)?;
             }
-            ScriptCommand::AddAsset { asset, at } => {
+            ScriptCommand::AddAsset { asset, at, handle } => {
                 let (path, name, duration) = self
                     .assets
                     .iter()
                     .find(|a| a.info.path == asset || a.info.name == asset)
                     .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration))
                     .ok_or_else(|| format!("no asset '{asset}'"))?;
-                self.try_add_asset_range_to_timeline(&path, &name, None, at, 0.0, duration)?;
+                let id =
+                    self.try_add_asset_range_to_timeline(&path, &name, None, at, 0.0, duration)?;
+                created.extend(handle.map(|handle| (handle, id)));
             }
             ScriptCommand::AddAssetRange {
                 asset,
                 at,
                 source_in,
                 duration,
+                handle,
             } => {
                 let (path, name) = self
                     .assets
@@ -1599,7 +1591,9 @@ impl EditorApp {
                     .find(|a| a.info.path == asset || a.info.name == asset)
                     .map(|a| (a.info.path.clone(), a.info.name.clone()))
                     .ok_or_else(|| format!("no asset '{asset}'"))?;
-                self.try_add_asset_range_to_timeline(&path, &name, None, at, source_in, duration)?;
+                let id = self
+                    .try_add_asset_range_to_timeline(&path, &name, None, at, source_in, duration)?;
+                created.extend(handle.map(|handle| (handle, id)));
             }
             ScriptCommand::Import(path) => self.spawn_import(ctx, vec![PathBuf::from(path)]),
             ScriptCommand::Export(path) => self.start_export(ctx, PathBuf::from(path)),

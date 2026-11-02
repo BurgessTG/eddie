@@ -197,6 +197,7 @@ pub(crate) fn local_commands(
             at: cursor,
             source_in: candidate.source_in,
             duration: candidate.duration,
+            handle: None,
         });
         cursor += candidate.duration;
     }
@@ -292,12 +293,14 @@ mod tests {
                     at: 0.0,
                     source_in: 12.0,
                     duration: 4.0,
+                    handle: None,
                 },
                 ScriptCommand::AddAssetRange {
                     asset: "/m/rushes.mp4".to_owned(),
                     at: 4.0,
                     source_in: 40.0,
                     duration: 5.0,
+                    handle: None,
                 },
                 ScriptCommand::Log("Done — arranged 2 sweep clips (no model call).".to_owned()),
             ]
