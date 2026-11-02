@@ -5403,6 +5403,21 @@ mod tests {
             0.0,
             "unreviewed portions retain the scene evidence"
         );
+
+        // A curated audio-only track is the new soundtrack, not baked-in score.
+        let mut song = asset(true);
+        song.info.path = "/media/song.mp3".to_owned();
+        song.info.name = "song.mp3".to_owned();
+        song.info.has_video = false;
+        song.sweep.candidates[0].has_video = false;
+        song.sweep.candidates[0].asset_path = song.info.path.clone();
+        app.assets.push(song);
+        app.add_asset_range_to_timeline("/media/song.mp3", "song", None, 0.0, 0.0, 6.0);
+        assert_eq!(
+            app.timeline.clips.last().unwrap().volume,
+            1.0,
+            "an added music track is never muted as a music bed"
+        );
     }
 
     #[test]
