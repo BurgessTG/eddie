@@ -718,11 +718,17 @@ impl HeadlessEditor {
         self.timeline.append_track()
     }
 
-    fn add_asset_range(&mut self, asset: &FakeAsset, at: f64, source_in: f64, duration: f64) {
+    fn add_asset_range(
+        &mut self,
+        asset: &FakeAsset,
+        at: f64,
+        source_in: f64,
+        duration: f64,
+    ) -> Option<u64> {
         let source_in = source_in.clamp(0.0, asset.duration.max(0.0));
         let duration = duration.min((asset.duration - source_in).max(0.0));
         if duration <= 0.0 {
-            return;
+            return None;
         }
         let kind = if asset.has_video {
             ClipKind::Video
@@ -740,11 +746,17 @@ impl HeadlessEditor {
             &asset.path,
         );
         self.selected = Some(id);
+        Some(id)
     }
 
     fn apply(&mut self, commands: Vec<ScriptCommand>) -> Vec<String> {
         let mut notes = Vec::new();
-        for command in commands {
+        let mut created = std::collections::HashMap::new();
+        for mut command in commands {
+            if let Err(error) = command.resolve_handle(&created) {
+                notes.push(format!("error: {error}"));
+                continue;
+            }
             match command {
                 ScriptCommand::Log(msg) => notes.push(msg),
                 ScriptCommand::Play => self.playing = true,
@@ -864,6 +876,7 @@ impl HeadlessEditor {
                     at,
                     duration,
                     style,
+                    handle,
                 } => match TitleStyle::from_name(&style) {
                     Some(style) => {
                         let track = self.first_free_track(at, duration);
@@ -879,6 +892,7 @@ impl HeadlessEditor {
                             clip.title_style = style;
                         }
                         self.selected = Some(id);
+                        created.extend(handle.map(|handle| (handle, id)));
                     }
                     None => notes.push(format!("error: unknown title style '{style}'")),
                 },
@@ -1003,11 +1017,12 @@ impl HeadlessEditor {
                         None => notes.push(format!("error: unknown title style '{style}'")),
                     }
                 }
-                ScriptCommand::AddAsset { asset, at } => {
+                ScriptCommand::AddAsset { asset, at, handle } => {
                     match self.asset_by_name_or_path(&asset).cloned() {
                         Some(found) => {
                             let duration = found.duration;
-                            self.add_asset_range(&found, at, 0.0, duration);
+                            let id = self.add_asset_range(&found, at, 0.0, duration);
+                            created.extend(handle.zip(id));
                         }
                         None => notes.push(format!("error: no asset '{asset}'")),
                     }
@@ -1017,8 +1032,12 @@ impl HeadlessEditor {
                     at,
                     source_in,
                     duration,
+                    handle,
                 } => match self.asset_by_name_or_path(&asset).cloned() {
-                    Some(found) => self.add_asset_range(&found, at, source_in, duration),
+                    Some(found) => {
+                        let id = self.add_asset_range(&found, at, source_in, duration);
+                        created.extend(handle.zip(id));
+                    }
                     None => notes.push(format!("error: no asset '{asset}'")),
                 },
                 ScriptCommand::Import(path) => notes.push(format!(

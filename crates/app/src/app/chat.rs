@@ -315,6 +315,7 @@ trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpaci
 setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
 setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
+closeGaps() runs when it is reached in the queue. It removes only time that no video or audio clip covers on any lane (titles do not count) and shifts later clips on every lane left by the same amount, so music still spanning a gap keeps it open. To close a picture gap under longer music, shorten the music first or move the later clips yourself with moveClip. \
 state() returns {playhead, playing, selected, duration, fps, tool, magnet, musicBedMuted, format, clips, assets, sweepCandidates, sceneClips, transcriptSegments}. \
 format is the project orientation; each asset has an orientation, and video whose orientation differs from format cannot be added, so never use it. \
 Sweep candidates contain all curated workable ranges, not a top-N selection; they can include multiple useful moments inside one long shot. sceneClips are the complete contiguous physical-shot inventory, including rejected material, in source order. To deconstruct or rebuild an edited video shot by shot, use sceneClips grouped by asset and sorted by sourceIn. Use sweepCandidates for editorial ranges, optionally filtered by category or quality. Both inventories have no clip-count cap. Fields: id, asset, assetName, title, sourceIn, duration, score, reason, category, tags, musicBed, quality {stability, audio, motion}, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript, talkingScore, visual, review. review.status is local, reviewed, needs-review or rejected. Local ranges are measured suggestions, not semantic review; needs-review means missing or failed review, not unusable footage. Model review uses sampled images and transcript, not exhaustive frame understanding; its score is an editorial judgment. \
@@ -325,7 +326,7 @@ Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from lo
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
-Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot; edits are queued, so additions do not return IDs and newly placed clips cannot be queried or captioned until a subsequent edit. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
+Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
 Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Times are seconds. \
 For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
 Refer to clips, sweep candidates, and transcript segments by the ids in state(). Do not invent ids or asset names. \
@@ -1051,8 +1052,9 @@ impl EditorApp {
         let started = Instant::now();
         let result = (|| {
             let mut notes = Vec::new();
+            let mut created = std::collections::HashMap::new();
             for command in commands {
-                if let Some(note) = self.apply_script_command(ctx, command)? {
+                if let Some(note) = self.apply_script_command(ctx, command, &mut created)? {
                     notes.push(note);
                 }
                 // Finite input can still overflow frame-grid arithmetic.
@@ -2578,6 +2580,63 @@ mod tests {
             }),
         ));
         app.poll_chat(ctx);
+    }
+
+    #[test]
+    fn generated_additions_return_handles_for_later_commands() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.assets.push(super::super::media::BinAsset {
+            info: openreel_media::MediaInfo {
+                path: "ready.mp4".to_owned(),
+                name: "ready.mp4".to_owned(),
+                duration: 10.0,
+                width: 320,
+                height: 180,
+                fps: 30.0,
+                has_video: true,
+                has_audio: true,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: super::super::sweep::SweepData::default(),
+        });
+        let keep = app
+            .timeline
+            .add_clip("Keep", ClipKind::Title, 0, 0.0, 1.0, 0.0);
+        // A deleted clip makes "highest ID + 1" a wrong guess.
+        let gone = app
+            .timeline
+            .add_clip("Gone", ClipKind::Title, 0, 1.0, 1.0, 0.0);
+        app.timeline.remove_clip(gone);
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "var shot = addAssetRange('ready.mp4', 2, 0, 4); setFade(shot, 0, 1.5); \
+             var card = addTitle('Card', 0, 1); moveClip(card, 6); \
+             console.log('Done — placed.');",
+        );
+        assert_eq!(app.status, "Edited the timeline.");
+        let shot = app
+            .timeline
+            .clips
+            .iter()
+            .find(|c| c.name == "ready.mp4")
+            .unwrap();
+        assert_eq!((shot.start, shot.fade_out), (2.0, 1.5));
+        let card = app
+            .timeline
+            .clips
+            .iter()
+            .find(|c| c.name == "Card")
+            .unwrap();
+        assert_eq!(card.start, 6.0);
+        assert_eq!(app.timeline.clip(keep).unwrap().start, 0.0);
     }
 
     #[test]
