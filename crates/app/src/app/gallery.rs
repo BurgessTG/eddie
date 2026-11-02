@@ -337,9 +337,10 @@ impl EditorApp {
             ui.label(RichText::new(&count).size(12.0).color(theme::MUTED_FG))
                 .on_hover_text("Matching ranges only; filtering does not remove source material");
             if running {
-                let (spot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                // Spinner only: a text label here overflowed into Reset.
+                let (spot, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 egui::Spinner::new().paint_at(ui, spot);
-                ui.label(RichText::new("Curating…").size(12.0).color(theme::MUTED_FG));
+                response.on_hover_text("Curating; results appear when it finishes");
             }
         };
         let filters = &mut self.curator.filters;
