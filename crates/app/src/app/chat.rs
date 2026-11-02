@@ -885,8 +885,12 @@ pub(super) fn post_chat_completion_cancellable(
     cancel: Option<&AtomicBool>,
     progress: Option<&Mutex<String>>,
 ) -> Result<serde_json::Value, String> {
+    // Editing a large curated project can take the model over two minutes
+    // (a 262k-token Spark request took 129 s). The user can cancel a chat
+    // edit, so it gets a long limit; uncancellable callers keep 120 s.
+    let timeout = if cancel.is_some() { 600 } else { 120 };
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
+        .timeout_global(Some(Duration::from_secs(timeout)))
         .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(config);
