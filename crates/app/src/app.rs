@@ -2337,14 +2337,20 @@ impl EditorApp {
                     ));
                 }
                 button_row(ui, buttons, false);
-            });
-            if let Some(snapshot) = &clip_snapshot {
-                if snapshot.kind != ClipKind::Title && has_transcript {
-                    ui.add_space(8.0);
-                    inspector_section(ui, "Captions", |ui| {
-                        prop_row(ui, "Style", |ui| {
+                // Captions come from this clip's sound, so they share its card:
+                // one row with the style and the action.
+                if kind != ClipKind::Title && has_transcript {
+                    prop_row(ui, "Captions", |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let add = theme::secondary_button(ui, "Add").on_hover_text(
+                                "Generate caption clips from this clip's transcript in the chosen style",
+                            );
+                            if add.clicked() {
+                                do_captions = true;
+                            }
                             egui::ComboBox::from_id_salt("caption_style")
-                                .width(ui.available_width())
+                                .width(ui.available_width() - 20.0)
+                                .truncate()
                                 .selected_text(caption_style.label())
                                 .show_ui(ui, |ui| {
                                     for style in TitleStyle::ALL {
@@ -2356,20 +2362,13 @@ impl EditorApp {
                                     }
                                 })
                                 .response
+                                .on_hover_text("Choose the style for generated captions");
+                            add
                         })
-                        .on_hover_text("Choose the style for generated captions");
-                        button_row(
-                            ui,
-                            vec![(
-                                "Add captions",
-                                "Generate caption clips from this clip's transcript in the chosen style",
-                                &mut do_captions,
-                            )],
-                            false,
-                        );
+                        .inner
                     });
                 }
-            }
+            });
             ui.add_space(12.0);
             button_row(
                 ui,
