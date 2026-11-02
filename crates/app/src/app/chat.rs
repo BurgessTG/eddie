@@ -749,6 +749,21 @@ pub(super) fn api_endpoint(settings: &ChatSettings, endpoint: &str) -> String {
     format!("{base}/{}", endpoint.trim_start_matches('/'))
 }
 
+/// A connection error as shown inside the Settings dialog. The status bar
+/// keeps the original text, which points to Settings from outside it.
+fn in_settings_wording(error: &str) -> &str {
+    match error {
+        "Add your API key in Settings first." => "Enter an API key first.",
+        "Choose a model in Settings." => "Choose a model first.",
+        "Check your API key in Settings." => "The API key was not accepted.",
+        "That model was not found. Check the model in Settings." => "That model was not found.",
+        "The model request was rejected. Check Settings and try again." => {
+            "The request was rejected."
+        }
+        other => other,
+    }
+}
+
 /// Validates authentication and catalog availability, not inference capability.
 pub(super) fn check_model_connection(settings: &ChatSettings) -> Result<(), String> {
     if !settings.can_call_model() {
@@ -1711,7 +1726,9 @@ impl EditorApp {
                             } else if let Some(result) = &self.connection_result {
                                 let (text, color) = match result {
                                     Ok(()) => ("Connected".to_owned(), theme::FOREGROUND),
-                                    Err(error) => (error.clone(), theme::DESTRUCTIVE),
+                                    Err(error) => {
+                                        (in_settings_wording(error).to_owned(), theme::DESTRUCTIVE)
+                                    }
                                 };
                                 ui.add(
                                     egui::Label::new(RichText::new(&text).size(12.0).color(color))
@@ -2392,6 +2409,46 @@ mod tests {
                 app.poll_chat(&ctx);
                 assert_eq!(app.status, "Settings saved.");
             },
+        );
+    }
+
+    /// Inside Settings, a failed check must not tell the user to go to
+    /// Settings; the status bar keeps that pointer for after it closes.
+    #[test]
+    fn missing_key_check_reads_right_inside_settings() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.chat_settings.api_key.clear();
+        app.show_chat_settings = true;
+        click_settings_label(&ctx, &mut app, "Check connection");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.connection_check.is_some() {
+            app.poll_chat(&ctx);
+            assert!(Instant::now() < deadline, "check must finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.status, "Add your API key in Settings first.");
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                app.chat_settings_window(ctx);
+            });
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(
+            texts.iter().any(|t| t == "Enter an API key first."),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("in Settings")),
+            "{texts:?}"
         );
     }
 
