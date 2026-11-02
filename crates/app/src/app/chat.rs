@@ -1252,6 +1252,7 @@ impl EditorApp {
             settings: settings.clone(),
             rx,
         });
+        self.connection_result = None;
         self.status = "Checking connection…".to_owned();
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -1279,10 +1280,11 @@ impl EditorApp {
             }
         };
         self.connection_check = None;
-        self.status = match result {
+        self.status = match &result {
             Ok(()) => "Connection checked; selected model is listed.".to_owned(),
-            Err(error) => error,
+            Err(error) => error.clone(),
         };
+        self.connection_result = Some(result);
     }
 
     pub(super) fn poll_chat(&mut self, ctx: &egui::Context) {
@@ -1600,16 +1602,13 @@ impl EditorApp {
                             .color(theme::FOREGROUND),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::ghost_button(ui, "Close")
-                            .on_hover_text("Close settings (Esc)")
-                            .clicked()
-                        {
+                        if close_icon_button(ui).on_hover_text("Close settings (Esc)").clicked() {
                             close_clicked = true;
                         }
                     });
                 });
                 ui.label(theme::caption("Meta Model API for chat edits and curation."));
-                ui.add_space(14.0);
+                ui.add_space(16.0);
                 let field_w = 300.0;
                 egui::Grid::new("chat_settings")
                     .num_columns(2)
@@ -1683,8 +1682,11 @@ impl EditorApp {
                         }
                         ui.end_row();
                     });
-                ui.add_space(16.0);
+                ui.add_space(18.0);
+                theme::divider(ui);
+                ui.add_space(14.0);
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
                     check_connection = ui
                         .add_enabled_ui(self.connection_check.is_none(), |ui| {
                             theme::secondary_button(ui, "Check connection")
@@ -1694,14 +1696,37 @@ impl EditorApp {
                                 .clicked()
                         })
                         .inner;
-                    if self.connection_check.is_some() {
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::primary_button(ui, "Done")
+                            .on_hover_text("Close settings; changes save as you edit")
+                            .clicked()
+                        {
+                            close_clicked = true;
+                        }
+                        // The result sits beside the button that produced it.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            if self.connection_check.is_some() {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                ui.label(theme::caption("Checking…"));
+                            } else if let Some(result) = &self.connection_result {
+                                let (text, color) = match result {
+                                    Ok(()) => ("Connected".to_owned(), theme::FOREGROUND),
+                                    Err(error) => (error.clone(), theme::DESTRUCTIVE),
+                                };
+                                ui.add(
+                                    egui::Label::new(RichText::new(&text).size(12.0).color(color))
+                                        .truncate(),
+                                )
+                                .on_hover_text(text);
+                            }
+                        });
+                    });
                 });
             });
         self.show_chat_settings = open && !close_clicked;
         if dirty {
             self.connection_check = None;
+            self.connection_result = None;
             if let Err(error) = self.chat_settings.save() {
                 self.status = error;
                 return;
@@ -1712,6 +1737,32 @@ impl EditorApp {
             self.start_connection_check(ctx);
         }
     }
+}
+
+/// Borderless square close button with an X glyph.
+fn close_icon_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, egui::CornerRadius::same(theme::R_MD), theme::ACCENT);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fg = if response.hovered() {
+        theme::FOREGROUND
+    } else {
+        theme::MUTED_FG
+    };
+    let c = rect.center();
+    let stroke = egui::Stroke::new(1.6_f32, fg);
+    painter.line_segment(
+        [c + egui::vec2(-5.0, -5.0), c + egui::vec2(5.0, 5.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [c + egui::vec2(5.0, -5.0), c + egui::vec2(-5.0, 5.0)],
+        stroke,
+    );
+    response
 }
 
 /// Round send button with an up arrow; bright once there is text to send.

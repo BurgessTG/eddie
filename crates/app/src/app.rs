@@ -130,6 +130,8 @@ pub struct EditorApp {
 
     chat_settings: ChatSettings,
     connection_check: Option<chat::PendingConnectionCheck>,
+    /// Last connection check for the current settings, shown in the dialog.
+    connection_result: Option<Result<(), String>>,
     chat_session: ChatSession,
     persist_session: bool,
     chat_input: String,
@@ -208,6 +210,7 @@ impl EditorApp {
             console_history_idx: None,
             chat_settings: ChatSettings::load(),
             connection_check: None,
+            connection_result: None,
             chat_session: ChatSession::load(),
             persist_session: true,
             chat_input: String::new(),
@@ -288,6 +291,7 @@ impl EditorApp {
             console_history_idx: None,
             chat_settings: ChatSettings::default(),
             connection_check: None,
+            connection_result: None,
             chat_session: ChatSession::new("screenshot"),
             persist_session: false,
             chat_input: String::new(),
@@ -1799,65 +1803,82 @@ impl EditorApp {
                     ui.label(RichText::new("Eddie").family(theme::semibold()).size(15.0));
                     ui.add_space(10.0);
                     ui.menu_button("File", |ui| {
-                        if ui.button("Import media…").clicked() {
+                        if menu_item(ui, "Import media…", "", "Import video or audio files", true)
+                        {
                             action = Some(UiAction::Import);
-                            ui.close();
                         }
-                        ui.separator();
-                        if ui.button("Export MP4…").clicked() {
+                        if menu_item(ui, "Export MP4…", "", "Export the timeline as an MP4", true)
+                        {
                             action = Some(UiAction::Export);
-                            ui.close();
                         }
                         ui.separator();
-                        if ui.button("Clear timeline").clicked() {
+                        if menu_item_destructive(
+                            ui,
+                            "Clear timeline",
+                            "Remove every clip from the timeline; imported media stays",
+                        ) {
                             action = Some(UiAction::ClearTimeline);
-                            ui.close();
                         }
                     });
                     ui.menu_button("Edit", |ui| {
                         let has_selection = self.selected.is_some();
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("Split at playhead"))
-                            .clicked()
-                        {
+                        if menu_item(
+                            ui,
+                            "Split at playhead",
+                            "S",
+                            "Split the selected clip at the playhead",
+                            has_selection,
+                        ) {
                             action = Some(UiAction::SplitSelected);
-                            ui.close();
                         }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("Delete clip"))
-                            .clicked()
-                        {
+                        if menu_item(
+                            ui,
+                            "Delete clip",
+                            "Del",
+                            "Delete the selected clip",
+                            has_selection,
+                        ) {
                             action = Some(UiAction::DeleteSelected);
-                            ui.close();
                         }
                         ui.separator();
-                        if ui.button("Add title at playhead").clicked() {
+                        if menu_item(
+                            ui,
+                            "Add title",
+                            "",
+                            "Add a title clip at the playhead",
+                            true,
+                        ) {
                             action = Some(UiAction::AddTitle);
-                            ui.close();
                         }
                     });
                     ui.menu_button("View", |ui| {
-                        ui.checkbox(&mut self.show_media, "Media bin");
-                        ui.checkbox(&mut self.show_inspector, "Inspector");
-                        ui.checkbox(&mut self.show_chat, "Chat");
-                        ui.checkbox(&mut self.show_console, "JS console (debug)");
+                        ui.checkbox(&mut self.show_media, "Media bin")
+                            .on_hover_text("Show the media bin and curator card");
+                        ui.checkbox(&mut self.show_chat, "Chat")
+                            .on_hover_text("Show the chat tab in the right dock (Ctrl+K)");
+                        ui.checkbox(&mut self.show_inspector, "Details")
+                            .on_hover_text("Show the selected clip's details in the right dock");
+                        ui.checkbox(&mut self.show_console, "JS console")
+                            .on_hover_text("Debug console for the editing script API");
                         ui.separator();
-                        if ui.button("Zoom timeline in").clicked() {
+                        if menu_item(ui, "Zoom in", "Ctrl+Scroll", "Zoom the timeline in", true) {
                             action = Some(UiAction::ZoomIn);
-                            ui.close();
                         }
-                        if ui.button("Zoom timeline out").clicked() {
+                        if menu_item(ui, "Zoom out", "Ctrl+Scroll", "Zoom the timeline out", true) {
                             action = Some(UiAction::ZoomOut);
-                            ui.close();
                         }
                         ui.separator();
-                        if ui.button("Go to start").clicked() {
+                        if menu_item(
+                            ui,
+                            "Go to start",
+                            "Home",
+                            "Move the playhead to the start",
+                            true,
+                        ) {
                             action = Some(UiAction::GoStart);
-                            ui.close();
                         }
-                        if ui.button("Go to end").clicked() {
+                        if menu_item(ui, "Go to end", "End", "Move the playhead to the end", true) {
                             action = Some(UiAction::GoEnd);
-                            ui.close();
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1884,17 +1905,24 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     let busy = self.import_rx.is_some()
                         || self.export_rx.is_some()
-                        || self.chat_pending.is_some();
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                    ui.painter().circle_filled(
-                        rect.center(),
-                        3.0,
-                        if busy { theme::BRAND } else { theme::SUBTLE_FG },
-                    );
-                    ui.label(
-                        RichText::new(&self.status)
-                            .size(12.0)
-                            .color(theme::MUTED_FG),
+                        || self.chat_pending.is_some()
+                        || self.sweep_rx.is_some();
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    if busy {
+                        egui::Spinner::new()
+                            .color(theme::MUTED_FG)
+                            .paint_at(ui, rect.expand(1.0));
+                    } else {
+                        ui.painter()
+                            .circle_filled(rect.center(), 3.0, theme::SUBTLE_FG);
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&self.status)
+                                .size(12.0)
+                                .color(theme::MUTED_FG),
+                        )
+                        .truncate(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(p) = self.export_progress {
@@ -1902,23 +1930,38 @@ impl EditorApp {
                                 egui::ProgressBar::new(p as f32)
                                     .desired_width(180.0)
                                     .show_percentage(),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{:.0} fps   {}   UI {:.2} ms   RSS {} MB",
-                                    self.timeline.fps,
-                                    format_timecode(self.timeline.end(), self.timeline.fps),
-                                    self.frame_ms_ema,
-                                    self.rss_mb
-                                ))
-                                .monospace()
-                                .size(11.0)
-                                .color(theme::SUBTLE_FG),
                             )
-                            .on_hover_text(
-                                "Project frame rate, timeline length, UI frame time and memory",
-                            );
+                            .on_hover_text("Export progress");
+                            ui.label(RichText::new("Exporting").size(12.0).color(theme::MUTED_FG));
+                            return;
+                        }
+                        // Right to left: memory, UI frame time, length, rate.
+                        let segments = [
+                            (format!("{} MB", self.rss_mb), "Memory in use"),
+                            (format!("{:.1} ms", self.frame_ms_ema), "UI frame time"),
+                            (
+                                format_timecode(self.timeline.end(), self.timeline.fps),
+                                "Timeline length",
+                            ),
+                            (
+                                format!("{:.0} fps", self.timeline.fps),
+                                "Project frame rate",
+                            ),
+                        ];
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (index, (text, tip)) in segments.into_iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("·").size(11.0).color(theme::SUBTLE_FG));
+                                ui.add_space(8.0);
+                            }
+                            ui.label(
+                                RichText::new(text)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(theme::SUBTLE_FG),
+                            )
+                            .on_hover_text(tip);
                         }
                     });
                 });
@@ -2882,6 +2925,40 @@ fn timecode_job(timecode: &str, bright: egui::Color32) -> egui::text::LayoutJob 
         );
     }
     job
+}
+
+/// Menu entries share one width so shortcut hints line up.
+const MENU_WIDTH: f32 = 210.0;
+
+/// Menu entry with a right-aligned shortcut hint; closes the menu on click.
+fn menu_item(ui: &mut Ui, label: &str, shortcut: &str, tooltip: &str, enabled: bool) -> bool {
+    let response = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(label)
+                .shortcut_text(RichText::new(shortcut).color(theme::SUBTLE_FG))
+                .min_size(Vec2::new(MENU_WIDTH, 26.0)),
+        )
+        .on_hover_text(tooltip)
+        .on_disabled_hover_text(format!("{tooltip}. Select a clip first"));
+    if response.clicked() {
+        ui.close();
+    }
+    response.clicked()
+}
+
+/// Menu entry for an action that discards work, in the destructive colour.
+fn menu_item_destructive(ui: &mut Ui, label: &str, tooltip: &str) -> bool {
+    let response = ui
+        .add(
+            egui::Button::new(RichText::new(label).color(theme::DESTRUCTIVE))
+                .min_size(Vec2::new(MENU_WIDTH, 26.0)),
+        )
+        .on_hover_text(tooltip);
+    if response.clicked() {
+        ui.close();
+    }
+    response.clicked()
 }
 
 /// Thin vertical rule separating toolbar groups.
