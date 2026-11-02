@@ -154,8 +154,9 @@ override a manual return to Program. Gallery lives in `app/gallery.rs`.
 Gallery uses a smaller default timeline height and remembers its resize
 separately from Program so browsing leaves room for complete clip cards.
 Its Clips grid combines text search, source, category, quality/review and
-duration filters. Best first is the default; source order, shortest and
-longest are alternatives. Search matches words across names, titles,
+duration filters. Best first is the default and ranks usable picture above `on-screen-text`
+ranges, then Needs review or rejected ranges, each by score; source order,
+shortest and longest are alternatives. Search matches words across names, titles,
 categories, tags, review notes and transcripts. Add shown uses exactly
 the displayed ranges and order. All scenes ignores Clip filters and stays
 complete and source-ordered, including rejected material. Reset clears
