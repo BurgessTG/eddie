@@ -277,6 +277,11 @@ an utterance: it neither blocks edges nor counts as missing timing, so a
 talking range over it is cut on the picture. Adjacent selected beats without a source-picture
 edge between their turns join rather than inventing word cuts; explicitly
 omitted gaps do not join. Missing transcription is uncertainty, not silence.
+Audio-only imports get a steady-tempo `BeatGrid` (`crates/media/src/beats.rs`)
+from those peaks: comb search over 70–180 BPM, a weak 120 BPM octave prior,
+then a line fit through onset-snapped beats so long tracks do not drift.
+It requires comb contrast 3x the mean onset and onsets near 75% of beats;
+otherwise `tempo`/`beats` are null. Tempo changes are not followed.
 Waveform peaks are imported at
 50/sec and are never stretched to container duration. Model-enabled
 curation transcribes with `muse-voice-transcribe-1.0`; continuous music
@@ -360,11 +365,15 @@ generated captions share `TitleStyle` (`lower-third`, `caption`,
 `pop-caption`, `minimal-caption`) across preview and export. One table,
 `openreel_media::title_look`, holds each style's size, colour, box and
 placement in export-canvas pixels; the monitor scales it to its frame.
-Preview and export share `export_canvas` (the monitor pillarboxes like
-export). Its orientation is the one most video clips use; a tie follows the
-first clip in insertion order, square counts as landscape, and the largest
-source of that orientation sets the size, so one rotated phone clip in a
-landscape edit is pillarboxed rather than turning the edit portrait and `Timeline::active_video`/`active_title`: the
+Formats never mix. `Timeline::orientation` (Settings Format, default
+landscape, saved as `format` in config; cleared projects keep it) fixes
+the canvas. Video of the other displayed orientation (square counts as
+landscape) is refused by every add path, skipped by bulk adds with a
+count in the status, dimmed in the bin and disabled in the gallery;
+audio-only media fits either. Changing the format leaves placed clips and
+reports how many clash. Preview and export share `export_canvas`: the
+largest source of the project orientation sets the size (width capped at
+1920), else 1280×720 or 720×1280. `Timeline::active_video`/`active_title`: the
 lowest video lane wins (insertion order breaks ties), its opacity fades
 against black rather than revealing another lane, and the first active
 title wins. All audible clips still mix independently of picture visibility.

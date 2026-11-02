@@ -619,6 +619,7 @@ fn speech_fragments_expose_their_source_turn_and_asr_session() {
         size_bytes: 0,
         state: crate::app::media::AssetState::Ready,
         peaks: source.peaks.clone(),
+        beats: None,
         thumb_textures: Vec::new(),
         sweep: data,
     });

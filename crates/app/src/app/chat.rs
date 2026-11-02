@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
-use openreel_engine::{ClipId, ClipKind, Timeline};
+use openreel_engine::{ClipId, ClipKind, Orientation, Timeline};
 
 use super::intents::{intent_by_id, CandidateView, IntentKind, INTENTS};
 use super::media::AssetState;
@@ -59,6 +59,9 @@ pub(super) struct ChatSettings {
     /// a disclosure gate only: off by default, no request changes
     /// unless a contributor model is deliberately selected later.
     pub(super) contributor_opt_in: bool,
+    /// Picture format for new and cleared projects; Settings also
+    /// applies it to the open project.
+    pub(super) format: Orientation,
 }
 
 impl Default for ChatSettings {
@@ -68,6 +71,7 @@ impl Default for ChatSettings {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: MODEL_SPARK.to_owned(),
             contributor_opt_in: false,
+            format: Orientation::Landscape,
         }
     }
 }
@@ -217,6 +221,9 @@ impl ChatSettings {
         if let Some(v) = value["contributor_opt_in"].as_bool() {
             settings.contributor_opt_in = v;
         }
+        if let Some(v) = value["format"].as_str().and_then(Orientation::from_name) {
+            settings.format = v;
+        }
         settings
     }
 
@@ -230,6 +237,7 @@ impl ChatSettings {
             "base_url": self.base_url,
             "model": self.model,
             "contributor_opt_in": self.contributor_opt_in,
+            "format": self.format.as_str(),
         });
         static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
         let (temporary, mut file) = loop {
@@ -261,6 +269,17 @@ impl ChatSettings {
             let _ = std::fs::remove_file(temporary);
         }
         result.map_err(|_| save_error())
+    }
+
+    /// Every setting except the project format: a changed one
+    /// discards a pending connection result.
+    fn connection(&self) -> (&str, &str, &str, bool) {
+        (
+            &self.api_key,
+            &self.base_url,
+            &self.model,
+            self.contributor_opt_in,
+        )
     }
 
     pub(super) fn can_call_model(&self) -> bool {
@@ -296,12 +315,13 @@ trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpaci
 setVolume(id, v), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
 setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
-state() returns {playhead, playing, selected, duration, fps, tool, magnet, musicBedMuted, clips, assets, sweepCandidates, sceneClips, transcriptSegments}. \
+state() returns {playhead, playing, selected, duration, fps, tool, magnet, musicBedMuted, format, clips, assets, sweepCandidates, sceneClips, transcriptSegments}. \
+format is the project orientation; each asset has an orientation, and video whose orientation differs from format cannot be added, so never use it. \
 Sweep candidates contain all curated workable ranges, not a top-N selection; they can include multiple useful moments inside one long shot. sceneClips are the complete contiguous physical-shot inventory, including rejected material, in source order. To deconstruct or rebuild an edited video shot by shot, use sceneClips grouped by asset and sorted by sourceIn. Use sweepCandidates for editorial ranges, optionally filtered by category or quality. Both inventories have no clip-count cap. Fields: id, asset, assetName, title, sourceIn, duration, score, reason, category, tags, musicBed, quality {stability, audio, motion}, stability, audioEnergy, audioPeak, isReaction, reactionScore, hasVideo, transcript, talkingScore, visual, review. review.status is local, reviewed, needs-review or rejected. Local ranges are measured suggestions, not semantic review; needs-review means missing or failed review, not unusable footage. Model review uses sampled images and transcript, not exhaustive frame understanding; its score is an editorial judgment. \
 This request carries compact records without repeated candidate transcripts, low-level visual measurements or review frame arrays. transcriptSegments contains speech once. Sandbox queries still return the complete request-time snapshot, including those omitted fields. review.subjectEvidence summarizes source-timed SAM checks used by the visual curator before its final decision: concept, status, checked range, sampled/observed frames and first/last observations. Tracking is sampled, detection gaps are uncertain, IDs are request-local, and boxes are not masks, emotion or proof of lip sync. visual includes representative box/face measurements at samFrameTime. SAM can check objects besides people; use the concept, not a box alone, to interpret the evidence. Local subject-centered, subject-large and subject-moving tags are measured proxies; face-visible requires SAM face evidence. \
 category is one of reaction, talking, action, broll, establishing. prime is a scarce quality tag, not a category. musicBed true marks suspected baked-in montage music: judge it on visuals, not soundtrack peaks. When state().musicBedMuted is true the app adds such clips muted so old soundtracks never stack; call setMusicBedMuted(false) only when the user explicitly wants the baked-in score kept, and setMusicBedMuted(true) when building a new soundtrack. \
 Transcript segment fields: id, asset, assetName, start, end, speaker, text, timingPrecision ('turn'|'word'), words [{start,end,text,confidence}], asrSession {id,sourceStart,sourceEnd}. Speaker labels are scoped to that source/session, not identities across uploads. Full sandbox review.speech records identify retained fragments of source turns; completeAvailableTurn means the reported turn is retained, not verified sentence completion. Only timingPrecision 'word' supports exact word/filler boundaries; turn timings locate the spoken passage, not each word. \
-Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from local waveform DSP. tightenSilence(id) removes pauses at least 0.35s from a speech clip, keeps 0.08s around phrases, ripples later clips left, rebuilds linked detached audio in matching phrases, and rejects mostly music-bed clips. Waveforms locate silence only; use transcript text/meaning for filler-word decisions, and do not claim exact filler boundaries from turn timestamps. \
+Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from local waveform DSP. Audio-only music assets with a steady beat also have tempo (BPM) and beats (source seconds, null when none was found); to cut to the beat, place each music-relative cut on a beat. tightenSilence(id) removes pauses at least 0.35s from a speech clip, keeps 0.08s around phrases, ripples later clips left, rebuilds linked detached audio in matching phrases, and rejects mostly music-bed clips. Waveforms locate silence only; use transcript text/meaning for filler-word decisions, and do not claim exact filler boundaries from turn timestamps. \
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
@@ -1219,6 +1239,7 @@ impl EditorApp {
                     &self
                         .assets
                         .iter()
+                        .filter(|asset| !self.clashes_with_format(&asset.info))
                         .flat_map(|asset| asset.sweep.candidates.iter())
                         .filter(|candidate| !candidate.dismissed)
                         .map(CandidateView::from)
@@ -1280,7 +1301,7 @@ impl EditorApp {
         let Some(pending) = self.connection_check.as_ref() else {
             return;
         };
-        if pending.settings != self.chat_settings {
+        if pending.settings.connection() != self.chat_settings.connection() {
             self.connection_check = None;
             return;
         }
@@ -1587,6 +1608,7 @@ impl EditorApp {
         let mut open = true;
         let mut dirty = false;
         let mut check_connection = false;
+        let mut format_choice = None;
         let mut close_clicked = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Settings")
             .open(&mut open)
@@ -1696,6 +1718,25 @@ impl EditorApp {
                             dirty = true;
                         }
                         ui.end_row();
+
+                        ui.label(RichText::new("Format").color(theme::MUTED_FG));
+                        format_choice = theme::segmented(
+                            ui,
+                            self.chat_settings.format,
+                            &[
+                                (
+                                    Orientation::Landscape,
+                                    "Landscape",
+                                    "Wide project; portrait video is not added",
+                                ),
+                                (
+                                    Orientation::Portrait,
+                                    "Portrait",
+                                    "Tall project; landscape video is not added",
+                                ),
+                            ],
+                        );
+                        ui.end_row();
                     });
                 ui.add_space(18.0);
                 theme::divider(ui);
@@ -1741,6 +1782,14 @@ impl EditorApp {
                 });
             });
         self.show_chat_settings = open && !close_clicked;
+        if let Some(format) = format_choice.filter(|f| *f != self.chat_settings.format) {
+            // Not a connection setting: keep any check result.
+            self.chat_settings.format = format;
+            self.set_format(format);
+            if let Err(error) = self.chat_settings.save() {
+                self.status = error;
+            }
+        }
         if dirty {
             self.connection_check = None;
             self.connection_result = None;
@@ -2256,14 +2305,19 @@ mod tests {
                     model: MODEL_WONDER.to_owned(),
                     ..ChatSettings::default()
                 };
-                for contributor in [false, true] {
+                for (contributor, format) in [
+                    (false, Orientation::Landscape),
+                    (true, Orientation::Portrait),
+                ] {
                     settings.contributor_opt_in = contributor;
+                    settings.format = format;
                     settings.save().unwrap();
                     assert!(ChatSettings::load() == settings, "settings round-trip");
                     let value: serde_json::Value =
                         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                    assert_eq!(value.as_object().unwrap().len(), 4);
+                    assert_eq!(value.as_object().unwrap().len(), 5);
                     assert_eq!(value["model"], "muse-wonder-1.0");
+                    assert_eq!(value["format"], settings.format.as_str());
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
@@ -2558,6 +2612,7 @@ mod tests {
                 size_bytes: 0,
                 state,
                 peaks: Vec::new(),
+                beats: None,
                 thumb_textures: Vec::new(),
                 sweep: super::super::sweep::SweepData::default(),
             });

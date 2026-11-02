@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 
 use eframe::egui::{self, CornerRadius, RichText, Sense, Stroke, Vec2};
+use openreel_engine::Orientation;
 
 use super::media::{cover_uv, BinAsset};
 use super::sweep::{ReviewStatus, SweepCandidate, SweepStatus, CURATOR_CATEGORIES};
@@ -460,12 +461,16 @@ impl EditorApp {
                             } else {
                                 &asset.sweep.candidates[clip]
                             };
+                            let clashes = asset.info.has_video
+                                && Orientation::of(asset.info.width, asset.info.height)
+                                    != self.timeline.orientation;
                             ui.push_id(&clip.id, |ui| {
                                 let (add_clip, dismiss_clip) = gallery_card(
                                     ui,
                                     asset,
                                     clip,
                                     scenes,
+                                    clashes,
                                     Vec2::new(card_width, card_height),
                                     thumbnails,
                                 );
@@ -574,6 +579,7 @@ fn gallery_card(
     asset: &BinAsset,
     clip: &SweepCandidate,
     scenes: bool,
+    clashes: bool,
     size: Vec2,
     thumbnails: &mut GalleryThumbnails,
 ) -> (bool, bool) {
@@ -728,8 +734,13 @@ fn gallery_card(
                 .on_hover_text(&details);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    add = theme::secondary_button(ui, "Add")
+                    add = ui
+                        .add_enabled_ui(!clashes, |ui| theme::secondary_button(ui, "Add"))
+                        .inner
                         .on_hover_text("Append this exact source range to the timeline")
+                        .on_disabled_hover_text(
+                            "This video's orientation doesn't match the project format",
+                        )
                         .clicked();
                     if !scenes {
                         dismiss = theme::ghost_button(ui, "Dismiss")

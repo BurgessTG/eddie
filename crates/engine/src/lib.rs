@@ -94,9 +94,43 @@ impl Clip {
     }
 }
 
+/// Project picture format. The canvas never follows the footage: video
+/// of the other orientation is not added rather than pillarboxed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Orientation {
+    #[default]
+    Landscape,
+    Portrait,
+}
+
+impl Orientation {
+    /// Displayed (rotation-applied) size; square counts as landscape.
+    pub fn of(width: u32, height: u32) -> Self {
+        if height > width {
+            Self::Portrait
+        } else {
+            Self::Landscape
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Landscape => "landscape",
+            Self::Portrait => "portrait",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Landscape, Self::Portrait]
+            .into_iter()
+            .find(|orientation| orientation.as_str() == name)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Timeline {
     pub fps: f64,
+    pub orientation: Orientation,
     pub track_labels: Vec<String>,
     pub clips: Vec<Clip>,
     next_id: ClipId,
@@ -106,6 +140,7 @@ impl Timeline {
     pub fn new(fps: f64) -> Self {
         Self {
             fps,
+            orientation: Orientation::default(),
             track_labels: Vec::new(),
             clips: Vec::new(),
             next_id: 1,
@@ -643,6 +678,11 @@ impl Timeline {
         let mut tl = Self::new(30.0);
         tl.add_track("Track 1");
         tl
+    }
+
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
+        self
     }
 
     /// Fictional project kept for model tests.

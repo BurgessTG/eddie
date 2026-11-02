@@ -9,8 +9,8 @@ use eframe::egui::{
     self, ColorImage, CornerRadius, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions,
     Vec2,
 };
-use openreel_engine::{format_timecode, ClipKind};
-use openreel_media::{MediaInfo, RawFrame};
+use openreel_engine::{format_timecode, ClipKind, Orientation};
+use openreel_media::{BeatGrid, MediaInfo, RawFrame};
 
 use super::sweep::{ReviewStatus, SweepData, SweepStatus};
 use super::{EditorApp, UiAction};
@@ -28,6 +28,8 @@ pub(super) struct BinAsset {
     pub(super) size_bytes: u64,
     pub(super) state: AssetState,
     pub(super) peaks: Vec<f32>,
+    /// Music only: the steady beat of an audio-only file, if it has one.
+    pub(super) beats: Option<BeatGrid>,
     pub(super) thumb_textures: Vec<(f64, TextureHandle)>,
     pub(super) sweep: SweepData,
 }
@@ -35,6 +37,7 @@ pub(super) struct BinAsset {
 pub(super) struct ImportedAsset {
     pub(super) info: MediaInfo,
     pub(super) peaks: Vec<f32>,
+    beats: Option<BeatGrid>,
     thumbs: Vec<(f64, RawFrame)>,
 }
 
@@ -77,6 +80,7 @@ impl EditorApp {
             size_bytes,
             state: AssetState::Probing,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: SweepData::default(),
         });
@@ -135,9 +139,18 @@ impl EditorApp {
                         } else {
                             Vec::new()
                         };
+                        let beats = (!info.has_video)
+                            .then(|| {
+                                openreel_media::beat_grid(
+                                    &peaks,
+                                    f64::from(openreel_media::WAVEFORM_PEAKS_PER_SEC),
+                                )
+                            })
+                            .flatten();
                         ImportMsg::Ready(Box::new(ImportedAsset {
                             info,
                             peaks,
+                            beats,
                             thumbs,
                         }))
                     }
@@ -181,6 +194,7 @@ impl EditorApp {
                             size_bytes,
                             state: AssetState::Processing,
                             peaks: Vec::new(),
+                            beats: None,
                             thumb_textures: Vec::new(),
                             sweep: SweepData::default(),
                         });
@@ -190,6 +204,7 @@ impl EditorApp {
                     let ImportedAsset {
                         info,
                         peaks,
+                        beats,
                         thumbs,
                     } = *imported;
                     let thumb_textures = thumbs
@@ -228,6 +243,7 @@ impl EditorApp {
                             size_bytes,
                             state: AssetState::Ready,
                             peaks,
+                            beats,
                             thumb_textures,
                             sweep: SweepData::default(),
                         };
@@ -237,6 +253,7 @@ impl EditorApp {
                             size_bytes,
                             state: AssetState::Ready,
                             peaks,
+                            beats,
                             thumb_textures,
                             sweep: SweepData::default(),
                         });
@@ -280,6 +297,29 @@ impl EditorApp {
         self.timeline.append_track()
     }
 
+    /// Video of the other orientation never mixes into the project.
+    /// Audio-only media fits any format.
+    pub(super) fn clashes_with_format(&self, info: &MediaInfo) -> bool {
+        info.has_video && Orientation::of(info.width, info.height) != self.timeline.orientation
+    }
+
+    pub(super) fn set_format(&mut self, format: Orientation) {
+        self.timeline.orientation = format;
+        let clashing = self
+            .timeline
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Video)
+            .filter_map(|clip| self.asset(clip.source.as_deref()?))
+            .filter(|asset| self.clashes_with_format(&asset.info))
+            .count();
+        self.status = match clashing {
+            0 => format!("Format set to {}.", format.as_str()),
+            1 => "1 clip doesn't match the new format.".to_owned(),
+            n => format!("{n} clips don't match the new format."),
+        };
+    }
+
     pub(super) fn add_asset_to_timeline(&mut self, path: &str, track: Option<usize>, at: f64) {
         let Some(asset) = self.asset(path) else {
             return;
@@ -320,6 +360,15 @@ impl EditorApp {
         };
         if asset.state != AssetState::Ready {
             return Err(format!("Still importing {}", asset.info.name));
+        }
+        if self.clashes_with_format(&asset.info) {
+            let other = Orientation::of(asset.info.width, asset.info.height);
+            return Err(format!(
+                "{} is {}; the project is {}.",
+                asset.info.name,
+                other.as_str(),
+                self.timeline.orientation.as_str()
+            ));
         }
         let asset_name = asset.info.name.clone();
         let source_duration = asset.info.duration;
@@ -524,6 +573,7 @@ impl EditorApp {
                                 };
                                 let painter = ui.painter().clone();
                                 let is_ready = asset.state == AssetState::Ready;
+                                let clashes = self.clashes_with_format(&asset.info);
                                 // Placeholders read as a grey card until
                                 // their thumbnails or peaks arrive.
                                 painter.rect_filled(
@@ -535,7 +585,8 @@ impl EditorApp {
                                 let has_preview =
                                     !asset.thumb_textures.is_empty() || !asset.peaks.is_empty();
                                 if let Some((_, thumb)) = asset.thumb_textures.first() {
-                                    let tint = if is_ready {
+                                    // Dimmed: importing, or the other format.
+                                    let tint = if is_ready && !clashes {
                                         egui::Color32::WHITE
                                     } else {
                                         egui::Color32::from_rgb(105, 105, 105)
@@ -668,7 +719,15 @@ impl EditorApp {
                                         }
                                     }
                                 }
-                                let hover = if asset.state == AssetState::Ready {
+                                let hover = if clashes {
+                                    format!(
+                                        "{}\n{}\n{}\nIts orientation doesn't match the {} project, so it isn't added.",
+                                        asset.info.name,
+                                        asset_meta(asset),
+                                        asset.info.path,
+                                        self.timeline.orientation.as_str()
+                                    )
+                                } else if asset.state == AssetState::Ready {
                                     format!(
                                 "{}\n{}\n{}\nDouble-click or drag onto the timeline to add.",
                                 asset.info.name,

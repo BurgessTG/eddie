@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use openreel_engine::{Clip, ClipId, ClipKind, Timeline, TitleStyle};
+use openreel_engine::{Clip, ClipId, ClipKind, Orientation, Timeline, TitleStyle};
 
 use crate::{scaled_height, MediaInfo, MediaResult};
 
@@ -447,19 +447,15 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
     }
 }
 
-pub fn export_canvas(sources: impl Iterator<Item = (u32, u32)>) -> (u32, u32) {
-    let sources: Vec<(u32, u32)> = sources.collect();
-    let portrait = |&(w, h): &(u32, u32)| h > w;
-    let portraits = sources.iter().filter(|s| portrait(s)).count();
-    let landscapes = sources.len() - portraits;
-    let want_portrait = match portraits.cmp(&landscapes) {
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => sources.first().is_some_and(portrait),
-    };
+/// Canvas for the project format: the largest source of that orientation
+/// (width capped at 1920), or 1280×720 / 720×1280 without one. Sources of
+/// the other orientation never set the size.
+pub fn export_canvas(
+    orientation: Orientation,
+    sources: impl Iterator<Item = (u32, u32)>,
+) -> (u32, u32) {
     sources
-        .into_iter()
-        .filter(|s| portrait(s) == want_portrait)
+        .filter(|&(w, h)| Orientation::of(w, h) == orientation)
         .fold(None, |best: Option<(u32, u32)>, s| {
             let area = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
             match best {
@@ -471,7 +467,10 @@ pub fn export_canvas(sources: impl Iterator<Item = (u32, u32)>) -> (u32, u32) {
             let w = width.min(1920) / 2 * 2;
             (w, scaled_height(width, height, w))
         })
-        .unwrap_or((1280, 720))
+        .unwrap_or(match orientation {
+            Orientation::Landscape => (1280, 720),
+            Orientation::Portrait => (720, 1280),
+        })
 }
 
 /// Export `timeline` to `output` (H.264/AAC MP4). Sends 0..=1 progress on
@@ -511,6 +510,7 @@ pub fn export_timeline(
         .collect();
 
     let (canvas_w, canvas_h) = export_canvas(
+        timeline.orientation,
         video_clips
             .iter()
             .filter_map(|c| infos.get(c.source.as_ref()?))
@@ -740,30 +740,39 @@ pub fn export_timeline(
 #[cfg(test)]
 mod canvas_tests {
     use super::export_canvas;
+    use openreel_engine::Orientation::{Landscape, Portrait};
 
     const LANDSCAPE_4K: (u32, u32) = (3840, 2160);
     const PORTRAIT_4K: (u32, u32) = (2160, 3840);
 
     #[test]
-    fn most_common_orientation_wins_over_an_equal_size_rotated_clip() {
-        // Two landscape clips and one rotated phone clip of the same area.
-        let canvas = export_canvas([LANDSCAPE_4K, LANDSCAPE_4K, PORTRAIT_4K].into_iter());
+    fn the_project_format_sets_the_canvas_not_the_clip_count() {
+        // A portrait majority does not turn a landscape project portrait.
+        let canvas = export_canvas(
+            Landscape,
+            [PORTRAIT_4K, PORTRAIT_4K, (1280, 720)].into_iter(),
+        );
+        assert_eq!(canvas, (1280, 720));
+        // The largest source of the format sets the size, in any order.
+        let canvas = export_canvas(
+            Landscape,
+            [(1280, 720), PORTRAIT_4K, LANDSCAPE_4K].into_iter(),
+        );
         assert_eq!(canvas, (1920, 1080));
-        // Order must not matter.
-        let canvas = export_canvas([PORTRAIT_4K, LANDSCAPE_4K, LANDSCAPE_4K].into_iter());
-        assert_eq!(canvas, (1920, 1080));
-        // A portrait majority stays portrait, even beside a larger landscape.
-        let canvas = export_canvas([(1080, 1920), (1080, 1920), LANDSCAPE_4K].into_iter());
+        let canvas = export_canvas(Portrait, [LANDSCAPE_4K, (1080, 1920)].into_iter());
         assert_eq!(canvas, (1080, 1920));
     }
 
     #[test]
-    fn orientation_tie_follows_the_first_clip_and_size_picks_within_it() {
-        let canvas = export_canvas([PORTRAIT_4K, (1920, 1080)].into_iter());
-        assert_eq!(canvas, (1920, 3412));
-        let canvas =
-            export_canvas([(1280, 720), PORTRAIT_4K, LANDSCAPE_4K, (1080, 1920)].into_iter());
-        assert_eq!(canvas, (1920, 1080));
-        assert_eq!(export_canvas(std::iter::empty()), (1280, 720));
+    fn a_format_without_matching_sources_uses_its_default_size() {
+        assert_eq!(
+            export_canvas(Landscape, [PORTRAIT_4K].into_iter()),
+            (1280, 720)
+        );
+        assert_eq!(
+            export_canvas(Portrait, [LANDSCAPE_4K].into_iter()),
+            (720, 1280)
+        );
+        assert_eq!(export_canvas(Landscape, std::iter::empty()), (1280, 720));
     }
 }

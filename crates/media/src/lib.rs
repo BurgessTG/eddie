@@ -6,6 +6,7 @@
 //! probe and export can move in process too.
 
 mod audio;
+mod beats;
 mod decode;
 mod evidence;
 mod export;
@@ -14,6 +15,7 @@ mod samples;
 mod sweep;
 
 pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
+pub use beats::{beat_grid, BeatGrid};
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};

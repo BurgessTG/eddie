@@ -8,7 +8,7 @@ use eframe::egui::{
     self, ColorImage, CornerRadius, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions,
     Ui, Vec2,
 };
-use openreel_engine::{format_timecode, ClipId, ClipKind, Timeline, TitleStyle};
+use openreel_engine::{format_timecode, ClipId, ClipKind, Orientation, Timeline, TitleStyle};
 use openreel_media::{AudioEngine, AudioSegment, FrameStream, MediaInfo, RawFrame, StillDecoder};
 
 use crate::preview;
@@ -160,8 +160,9 @@ impl EditorApp {
             Ok(engine) => (Some(engine), vec!["Eddie JS. help()".to_owned()]),
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
+        let chat_settings = ChatSettings::load();
         Self {
-            timeline: Timeline::empty_project(),
+            timeline: Timeline::empty_project().with_orientation(chat_settings.format),
             timeline_view: TimelineView::default(),
             playhead: 0.0,
             playing: false,
@@ -208,7 +209,7 @@ impl EditorApp {
             console_output,
             console_history: Vec::new(),
             console_history_idx: None,
-            chat_settings: ChatSettings::load(),
+            chat_settings,
             connection_check: None,
             connection_result: None,
             chat_session: ChatSession::load(),
@@ -1162,7 +1163,8 @@ impl EditorApp {
             UiAction::ClearTimeline => {
                 self.cancel_chat();
                 self.set_playing(false);
-                self.timeline = Timeline::empty_project();
+                self.timeline =
+                    Timeline::empty_project().with_orientation(self.timeline.orientation);
                 self.selected = None;
                 self.playhead = 0.0;
                 self.still_key = None;
@@ -1259,9 +1261,17 @@ impl EditorApp {
                     "height": a.info.height,
                     "hasVideo": a.info.has_video,
                     "hasAudio": a.info.has_audio,
+                    "orientation": Orientation::of(a.info.width, a.info.height).as_str(),
                     "ready": a.state == AssetState::Ready,
                     "waveformPeaksPerSec": peaks_per_sec,
                     "silenceRanges": silence_ranges,
+                    "tempo": a.beats.as_ref().map(|grid| (grid.bpm * 10.0).round() / 10.0),
+                    "beats": a.beats.as_ref().map(|grid| {
+                        grid.beats
+                            .iter()
+                            .map(|t| (t * 1000.0).round() / 1000.0)
+                            .collect::<Vec<_>>()
+                    }),
                     "curationUsage": a.sweep.usage.json(),
                 })
             })
@@ -1362,6 +1372,7 @@ impl EditorApp {
             "tool": "select",
             "magnet": self.timeline_view.magnet,
             "musicBedMuted": self.mute_music_beds,
+            "format": self.timeline.orientation.as_str(),
             "clips": clips,
             "assets": assets,
             "sweepCandidates": sweep_candidates,
@@ -1579,7 +1590,8 @@ impl EditorApp {
             ScriptCommand::Export(path) => self.start_export(ctx, PathBuf::from(path)),
             ScriptCommand::ClearTimeline => {
                 self.set_playing(false);
-                self.timeline = Timeline::empty_project();
+                self.timeline =
+                    Timeline::empty_project().with_orientation(self.timeline.orientation);
                 self.selected = None;
                 self.playhead = 0.0;
                 self.still_key = None;
@@ -1916,14 +1928,21 @@ impl EditorApp {
                         ui.painter()
                             .circle_filled(rect.center(), 3.0, theme::SUBTLE_FG);
                     }
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&self.status)
-                                .size(12.0)
-                                .color(theme::MUTED_FG),
-                        )
-                        .truncate(),
-                    );
+                    // The readout lays out first; the message truncates into
+                    // what is left, so a long error never runs under it.
+                    let status = |ui: &mut egui::Ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&self.status)
+                                        .size(12.0)
+                                        .color(theme::MUTED_FG),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&self.status);
+                        });
+                    };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(p) = self.export_progress {
                             ui.add(
@@ -1933,6 +1952,8 @@ impl EditorApp {
                             )
                             .on_hover_text("Export progress");
                             ui.label(RichText::new("Exporting").size(12.0).color(theme::MUTED_FG));
+                            ui.add_space(12.0);
+                            status(ui);
                             return;
                         }
                         // Right to left: memory, UI frame time, length, rate.
@@ -1963,6 +1984,8 @@ impl EditorApp {
                             )
                             .on_hover_text(tip);
                         }
+                        ui.add_space(12.0);
+                        status(ui);
                     });
                 });
             });
@@ -2538,6 +2561,7 @@ impl EditorApp {
                         .filter(|_| self.preview_key == self.active_video_key()),
                     audio_peaks,
                     openreel_media::export_canvas(
+                        self.timeline.orientation,
                         self.timeline
                             .clips
                             .iter()
@@ -3320,6 +3344,7 @@ mod tests {
                 size_bytes: 0,
                 state: AssetState::Ready,
                 peaks: Vec::new(),
+                beats: None,
                 thumb_textures: Vec::new(),
                 sweep: sweep::SweepData::default(),
             });
@@ -4457,6 +4482,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData::default(),
         });
@@ -4988,6 +5014,94 @@ mod tests {
     }
 
     #[test]
+    fn video_of_the_other_orientation_is_never_added_to_the_project() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        // Displayed sizes: a rotated phone clip probes as portrait.
+        for (name, width, height) in [("wide.mp4", 1920, 1080), ("phone.mov", 1080, 1920)] {
+            let path = format!("/media/{name}");
+            let scene = sweep::SweepCandidate {
+                id: format!("{path}#scene-0"),
+                asset_path: path.clone(),
+                asset_name: name.to_owned(),
+                title: name.to_owned(),
+                source_in: 1.0,
+                duration: 2.0,
+                score: 80.0,
+                reason: "Detected shot.".to_owned(),
+                stability: 0.9,
+                audio_energy: 0.4,
+                audio_peak: 0.7,
+                category: "broll".to_owned(),
+                tags: Vec::new(),
+                motion_score: 0.3,
+                audio_score: 0.5,
+                music_bed: false,
+                visual: None,
+                has_video: true,
+                transcript: Vec::new(),
+                review: sweep::ClipReview::default(),
+                dismissed: false,
+            };
+            app.assets.push(media::BinAsset {
+                info: MediaInfo {
+                    path,
+                    name: name.to_owned(),
+                    duration: 10.0,
+                    width,
+                    height,
+                    fps: 30.0,
+                    has_video: true,
+                    has_audio: true,
+                },
+                size_bytes: 0,
+                state: media::AssetState::Ready,
+                peaks: Vec::new(),
+                beats: None,
+                thumb_textures: Vec::new(),
+                sweep: sweep::SweepData {
+                    candidates: vec![scene.clone()],
+                    scene_clips: vec![scene],
+                    ..Default::default()
+                },
+            });
+        }
+
+        // Bulk adds skip the clashing source instead of leaving its slot.
+        app.add_all_scene_clips();
+        let sources: Vec<_> = app
+            .timeline
+            .clips
+            .iter()
+            .map(|c| c.source.clone())
+            .collect();
+        assert_eq!(sources, vec![Some("/media/wide.mp4".to_owned())]);
+        assert_eq!(app.timeline.end(), 2.0);
+        assert!(app.status.contains("skipped 1"), "{}", app.status);
+
+        // Every single-add path, scripts included, shares the refusal.
+        let refused =
+            app.try_add_asset_range_to_timeline("/media/phone.mov", "", None, 5.0, 0.0, 1.0);
+        assert_eq!(
+            refused,
+            Err("phone.mov is portrait; the project is landscape.".to_owned())
+        );
+        assert_eq!(app.timeline.clips.len(), 1);
+
+        // A portrait project accepts it, and the canvas stays portrait.
+        app.set_format(Orientation::Portrait);
+        assert!(
+            app.status.contains("1 clip doesn't match"),
+            "{}",
+            app.status
+        );
+        app.try_add_asset_range_to_timeline("/media/phone.mov", "", None, 5.0, 0.0, 1.0)
+            .expect("portrait video fits a portrait project");
+        app.handle_action(&ctx, UiAction::ClearTimeline);
+        assert_eq!(app.timeline.orientation, Orientation::Portrait);
+    }
+
+    #[test]
     fn adding_all_scene_clips_reconstructs_the_source_in_order() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::headless_for_test(&ctx);
@@ -5029,6 +5143,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData {
                 candidates: vec![scene(99, 8.0, 2.0, 99.0)],
@@ -5205,6 +5320,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData {
                 candidates: vec![candidate(music_bed)],
@@ -5296,6 +5412,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData {
                 transcript: vec![sweep::TranscriptSegment {
@@ -5366,6 +5483,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks,
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData::default(),
         });
@@ -5431,6 +5549,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks,
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData::default(),
         });
@@ -5543,6 +5662,7 @@ mod tests {
                 size_bytes: 0,
                 state: media::AssetState::Ready,
                 peaks: Vec::new(),
+                beats: None,
                 thumb_textures: Vec::new(),
                 sweep: sweep::SweepData {
                     candidates,
@@ -5684,6 +5804,7 @@ mod tests {
                 size_bytes: 0,
                 state: media::AssetState::Ready,
                 peaks: Vec::new(),
+                beats: None,
                 thumb_textures: Vec::new(),
                 sweep: sweep::SweepData {
                     status: sweep::SweepStatus::Ready,
@@ -6043,6 +6164,7 @@ mod tests {
             size_bytes: 0,
             state: media::AssetState::Ready,
             peaks: Vec::new(),
+            beats: None,
             thumb_textures: Vec::new(),
             sweep: sweep::SweepData::default(),
         });
