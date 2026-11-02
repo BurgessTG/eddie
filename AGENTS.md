@@ -361,6 +361,8 @@ refused while one runs. Dragging from the bin carries a grid-size
 thumbnail ghost at the cursor plus a drop-lane highlight.
 Music-bed muting on curator adds is user-selectable (Curator checkbox,
 `state().musicBedMuted`, `setMusicBedMuted(bool)`); it defaults on.
+It mutes only video ranges; a curated audio-only track is the new
+soundtrack and always adds audible.
 Clips carry linear audio fades (`fade_in`/`fade_out` seconds, `setFade`,
 and a Fades row on audio clips in Details). `fit_fades` scales fades
 that together exceed the clip by their requested ratio. The preview mixer

@@ -373,14 +373,14 @@ impl EditorApp {
         let asset_name = asset.info.name.clone();
         let source_duration = asset.info.duration;
         let has_video = asset.info.has_video;
-        // Baked-in montage music must not ride into a new edit.
-        // JS cannot mute a clip it just added (its id exists only
-        // after apply), so the add path does it: if most of the
-        // added range is curator-flagged music bed, start muted.
-        // The volume slider in Details brings it back.
+        // Baked-in montage music must not ride into a new edit, so the
+        // add path mutes video whose added range is mostly curator-flagged
+        // music bed. Audio-only media is the new soundtrack itself and is
+        // never muted. The volume slider in Details brings it back.
         let range_end = source_in + duration;
         let bed_overlap = asset.sweep.music_bed_overlap(source_in, range_end);
-        let starts_muted = self.mute_music_beds && duration > 0.0 && bed_overlap >= duration * 0.5;
+        let starts_muted =
+            self.mute_music_beds && has_video && duration > 0.0 && bed_overlap >= duration * 0.5;
         let source_in = source_in.clamp(0.0, source_duration.max(0.0));
         let duration = duration.min((source_duration - source_in).max(0.0));
         if duration <= 0.0 {
