@@ -1,5 +1,7 @@
 # Eddie
 
+[![CI](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml/badge.svg)](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml)
+
 A fast desktop video editor with an AI clip curator. Rust end to end:
 `egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for video and
 audio playback, and the FFmpeg CLI tools for probing and export.
@@ -139,9 +141,13 @@ detailed curator contract.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.
 - Projects (File → Save/Open, `.eddie`) store the timeline and media
-  paths by absolute path; moved media opens as missing and is not
-  relinked yet. Curation results are saved per file and come back when
-  the same, unchanged file is imported again. Undo history is not saved.
+  paths. Footage moved together with its project is found automatically;
+  anything else is relinked with File → Locate missing media. Closing or
+  opening another project asks before dropping unsaved timeline edits.
+  Curation results are saved per file and come back when the same,
+  unchanged file is imported again. Undo history is not saved.
+- CI checks formatting and the engine tests only; the media and app
+  suites need FFmpeg 9 and run locally.
 - Model curation is thorough but slow: several passes per review window.
   Eleven expo videos (about 8 minutes) took 105 minutes on Wonder and 85
   on Spark when files were curated one at a time. Up to three files now

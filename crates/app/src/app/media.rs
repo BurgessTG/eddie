@@ -287,6 +287,14 @@ impl EditorApp {
         if finished {
             self.assets.retain(|a| a.state != AssetState::Probing);
             self.import_rx = None;
+            // Imports overwrite the open message; keep the missing count seen.
+            if !self.missing_media.is_empty() {
+                let count = self.missing_media.len();
+                self.status = format!(
+                    "{count} project media file{} missing. Use File → Locate missing media.",
+                    if count == 1 { " is" } else { "s are" }
+                );
+            }
             if !self.import_queue.is_empty() {
                 let next = std::mem::take(&mut self.import_queue);
                 self.start_import_batch(ctx, next);
