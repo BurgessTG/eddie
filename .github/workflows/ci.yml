@@ -1,0 +1,21 @@
+# Formatting and the timeline engine's tests. The media and app crates need
+# FFmpeg 9 development libraries, which GitHub's Ubuntu images do not ship;
+# run their suites locally (see AGENTS.md).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo test --locked -p openreel-engine

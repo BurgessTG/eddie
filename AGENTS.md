@@ -119,7 +119,13 @@ Projects (`app/project.rs`, `.eddie` JSON, version 1) hold the timeline,
 media paths and music-bed muting. Opening replaces the timeline and
 history, keeps the bin, imports listed media and reports missing files;
 saved IDs are never reused. Ctrl+S/Ctrl+O work in text fields; split's
-S/B shortcut ignores Ctrl.
+S/B shortcut ignores Ctrl. Projects also store their own folder: a
+missing file is retried at the same relative place beside the moved
+project (not an edit), then File → Locate missing media relinks by hand,
+including same-named files in the picked folder. Close and Open ask
+"Save changes?" when the timeline differs from the last save or open;
+Clear timeline does not ask because it is undoable. CI
+(`.github/workflows/ci.yml`) runs fmt and engine tests only.
 The import QC sweep is the curator. It lives in
 `crates/app/src/app/sweep.rs`, with motion sampling and segmentation in
 `crates/media/src/sweep.rs`. Import only imports; curation never runs

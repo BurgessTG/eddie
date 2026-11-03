@@ -55,6 +55,7 @@ enum UiAction {
     OpenProject,
     SaveProject,
     SaveProjectAs,
+    LocateMedia,
     Undo,
     Redo,
     ClearTimeline,
@@ -154,6 +155,13 @@ pub struct EditorApp {
     history: history::History,
     /// Where Save writes; set by Save as or Open.
     project_path: Option<PathBuf>,
+    /// The timeline as last saved or opened; a difference is unsaved.
+    saved_timeline: Timeline,
+    /// Project media not found on open, in the order Locate asks for it.
+    missing_media: Vec<String>,
+    pending_discard: Option<project::Discard>,
+    /// Set once the user chose to close without (or after) saving.
+    allow_close: bool,
     show_chat: bool,
     right_tab: RightTab,
     prev_selected: Option<ClipId>,
@@ -177,6 +185,7 @@ impl EditorApp {
         };
         let chat_settings = ChatSettings::load();
         let timeline = Timeline::empty_project().with_orientation(chat_settings.format);
+        let saved_timeline = timeline.clone();
         Self {
             history: history::History::new(&timeline),
             timeline,
@@ -240,6 +249,10 @@ impl EditorApp {
             chat_generation: 0,
             chat_undo: None,
             project_path: None,
+            saved_timeline,
+            missing_media: Vec::new(),
+            pending_discard: None,
+            allow_close: false,
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
@@ -326,6 +339,10 @@ impl EditorApp {
             chat_undo: None,
             history: history::History::new(&Timeline::empty_project()),
             project_path: None,
+            saved_timeline: Timeline::empty_project(),
+            missing_media: Vec::new(),
+            pending_discard: None,
+            allow_close: false,
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
@@ -1215,32 +1232,14 @@ impl EditorApp {
                     self.start_export(ctx, output);
                 }
             }
-            UiAction::OpenProject => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Eddie project", &[project::EXTENSION])
-                    .set_title("Open project")
-                    .pick_file()
-                {
-                    if let Err(error) = self.open_project(ctx, &path) {
-                        self.status = error;
-                    }
-                }
+            UiAction::OpenProject => self.request_discard(ctx, project::Discard::Open),
+            UiAction::SaveProject => {
+                self.save_project(false);
             }
-            UiAction::SaveProject | UiAction::SaveProjectAs => {
-                let path = match (&self.project_path, action) {
-                    (Some(path), UiAction::SaveProject) => Some(path.clone()),
-                    _ => rfd::FileDialog::new()
-                        .add_filter("Eddie project", &[project::EXTENSION])
-                        .set_file_name("project.eddie")
-                        .set_title("Save project")
-                        .save_file(),
-                };
-                if let Some(path) = path {
-                    if let Err(error) = self.save_project_to(&path) {
-                        self.status = error;
-                    }
-                }
+            UiAction::SaveProjectAs => {
+                self.save_project(true);
             }
+            UiAction::LocateMedia => self.pick_missing_media(ctx),
             UiAction::Undo => self.step_history(false),
             UiAction::Redo => self.step_history(true),
             UiAction::ClearTimeline => {
@@ -1933,6 +1932,20 @@ impl EditorApp {
                             true,
                         ) {
                             action = Some(UiAction::SaveProjectAs);
+                        }
+                        let missing = self.missing_media.len();
+                        if menu_item(
+                            ui,
+                            &if missing > 0 {
+                                format!("Locate missing media ({missing})…")
+                            } else {
+                                "Locate missing media…".to_owned()
+                            },
+                            "",
+                            "Find a project's moved media files",
+                            missing > 0,
+                        ) {
+                            action = Some(UiAction::LocateMedia);
                         }
                         ui.separator();
                         if menu_item(ui, "Import media…", "", "Import video or audio files", true)
@@ -2909,6 +2922,7 @@ impl eframe::App for EditorApp {
             self.spawn_import(ctx, dropped);
         }
 
+        self.guard_close(ctx);
         let mut action = self.menu_bar(ctx);
         self.status_bar(ctx);
         self.console_panel(ctx);
@@ -2919,7 +2933,8 @@ impl eframe::App for EditorApp {
         }
         self.right_dock(ctx);
         self.central(ctx);
-        if action.is_none() {
+        self.unsaved_dialog(ctx);
+        if action.is_none() && self.pending_discard.is_none() {
             action = shortcut_action(ctx);
         }
         self.finish_frame(ctx, action);
@@ -6564,18 +6579,73 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), 3, "a new clip never reuses a saved ID");
 
-        std::fs::remove_file(&media).unwrap();
-        let mut missing = EditorApp::headless_for_test(&ctx);
-        missing.open_project(&ctx, &dir.join("expo.eddie")).unwrap();
+        assert!(
+            !app.has_unsaved_changes(),
+            "saving clears the unsaved state"
+        );
+        assert!(reopened.has_unsaved_changes());
+        reopened.handle_action(&ctx, UiAction::OpenProject);
+        assert_eq!(reopened.pending_discard, Some(project::Discard::Open));
         assert_eq!(
-            missing.status,
-            "Opened expo.eddie; 1 media file is missing."
+            reopened.timeline.clips.len(),
+            3,
+            "nothing is dropped before an answer"
+        );
+
+        // The project and its footage move together: nothing goes missing.
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        let mut relocated = EditorApp::headless_for_test(&ctx);
+        relocated
+            .open_project(&ctx, &moved.join("expo.eddie"))
+            .unwrap();
+        assert_eq!(relocated.status, "Opened expo.eddie.");
+        settle(&mut relocated, &ctx);
+        let moved_media = moved.join("shot.mp4").to_string_lossy().into_owned();
+        assert_eq!(
+            relocated.timeline.clips[0].source.as_deref(),
+            Some(moved_media.as_str())
+        );
+        assert!(relocated.assets[0].info.path == moved_media);
+        assert!(
+            !relocated.has_unsaved_changes(),
+            "an automatic relink is not an edit"
+        );
+
+        // Footage moved elsewhere is located by hand.
+        let elsewhere = moved.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::rename(moved.join("shot.mp4"), elsewhere.join("shot.mp4")).unwrap();
+        let mut missing = EditorApp::headless_for_test(&ctx);
+        missing
+            .open_project(&ctx, &moved.join("expo.eddie"))
+            .unwrap();
+        assert_eq!(missing.missing_media.len(), 1);
+        assert!(
+            missing.status.contains("1 media file is missing"),
+            "{}",
+            missing.status
         );
         assert_eq!(missing.timeline, app.timeline, "clips stay for relinking");
-        std::fs::write(dir.join("bad.eddie"), "{}").unwrap();
-        assert!(missing.open_project(&ctx, &dir.join("bad.eddie")).is_err());
-        assert_eq!(missing.timeline, app.timeline, "a bad file changes nothing");
-        let _ = std::fs::remove_dir_all(&dir);
+        missing.locate_missing_media(&ctx, &elsewhere.join("shot.mp4"));
+        assert_eq!(missing.status, "Relinked 1 media file.");
+        settle(&mut missing, &ctx);
+        assert!(missing.missing_media.is_empty());
+        let located = elsewhere.join("shot.mp4").to_string_lossy().into_owned();
+        assert_eq!(
+            missing.timeline.clips[0].source.as_deref(),
+            Some(located.as_str())
+        );
+        assert!(missing.assets[0].state == media::AssetState::Ready);
+
+        let before = missing.timeline.clone();
+        std::fs::write(moved.join("bad.eddie"), "{}").unwrap();
+        assert!(missing
+            .open_project(&ctx, &moved.join("bad.eddie"))
+            .is_err());
+        assert_eq!(missing.timeline, before, "a bad file changes nothing");
+        let _ = std::fs::remove_dir_all(&moved);
     }
 
     #[test]
