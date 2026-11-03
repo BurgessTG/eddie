@@ -273,7 +273,7 @@ fn stream_video(
             "-v",
             "error",
             "-filter_complex_threads",
-            "2",
+            "4",
             "-filter_buffered_frames",
             "128",
         ]);
@@ -295,9 +295,13 @@ fn stream_video(
                 .map(|info| (info.duration - 1.0).max(0.0))
                 .unwrap_or(source_time);
             let seek = source_time.min(last_seek).max(0.0).floor() as i64;
+            // Slice threads split each picture: frame threading on four 4K
+            // inputs pushed export to about 2.8 GB RSS.
             cmd.args([
+                "-thread_type:v",
+                "slice",
                 "-threads:v",
-                "2",
+                "0",
                 "-an",
                 "-ss",
                 &seek.to_string(),
@@ -306,7 +310,11 @@ fn stream_video(
                 layer.source,
             ]);
             let offset = layer.source_offset + (start + first) * frame_ticks - seek * tick_rate;
-            let layer_frames = count - first;
+            // Stop decoding at this input's last visible frame; overlay
+            // stops drawing it there anyway (enable), so the 4K decode of
+            // the rest of the batch was wasted.
+            let last = ranges.iter().map(|range| range.1).max().unwrap();
+            let layer_frames = last - first;
             let alpha = if layer.opacity < 0.999 {
                 format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
             } else {
@@ -690,7 +698,7 @@ pub fn export_timeline(
             "-c:v",
             "libx264",
             "-threads:v",
-            "2",
+            "0",
             "-preset",
             "veryfast",
             "-crf",
