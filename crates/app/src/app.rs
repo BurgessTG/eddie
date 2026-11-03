@@ -17,8 +17,10 @@ use crate::theme;
 
 pub(crate) mod chat;
 mod gallery;
+mod history;
 pub(crate) mod intents;
 mod media;
+mod project;
 #[cfg(test)]
 mod screenshot;
 pub(crate) mod session;
@@ -50,6 +52,11 @@ enum ExportMsg {
 enum UiAction {
     Import,
     Export,
+    OpenProject,
+    SaveProject,
+    SaveProjectAs,
+    Undo,
+    Redo,
     ClearTimeline,
     SplitSelected,
     DeleteSelected,
@@ -144,6 +151,9 @@ pub struct EditorApp {
     chat_pending: Option<PendingChat>,
     chat_generation: u64,
     chat_undo: Option<TimelineSnapshot>,
+    history: history::History,
+    /// Where Save writes; set by Save as or Open.
+    project_path: Option<PathBuf>,
     show_chat: bool,
     right_tab: RightTab,
     prev_selected: Option<ClipId>,
@@ -166,8 +176,10 @@ impl EditorApp {
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
         let chat_settings = ChatSettings::load();
+        let timeline = Timeline::empty_project().with_orientation(chat_settings.format);
         Self {
-            timeline: Timeline::empty_project().with_orientation(chat_settings.format),
+            history: history::History::new(&timeline),
+            timeline,
             timeline_view: TimelineView::default(),
             playhead: 0.0,
             playing: false,
@@ -227,6 +239,7 @@ impl EditorApp {
             chat_pending: None,
             chat_generation: 0,
             chat_undo: None,
+            project_path: None,
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
@@ -311,6 +324,8 @@ impl EditorApp {
             chat_pending: None,
             chat_generation: 0,
             chat_undo: None,
+            history: history::History::new(&Timeline::empty_project()),
+            project_path: None,
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
@@ -1152,6 +1167,33 @@ impl EditorApp {
         });
     }
 
+    fn step_history(&mut self, redo: bool) {
+        let stepped = if redo {
+            self.history.redo(&mut self.timeline, &mut self.selected)
+        } else {
+            self.history.undo(&mut self.timeline, &mut self.selected)
+        };
+        if !stepped {
+            self.status = if redo {
+                "Nothing to redo."
+            } else {
+                "Nothing to undo."
+            }
+            .to_owned();
+            return;
+        }
+        self.set_playing(false);
+        self.playhead = self.playhead.min(self.timeline.end());
+        self.still_key = None;
+        self.still_cache.clear();
+        self.status = if redo {
+            "Redid the edit."
+        } else {
+            "Undid the last edit."
+        }
+        .to_owned();
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: UiAction) {
         match action {
             UiAction::Import => {
@@ -1173,6 +1215,34 @@ impl EditorApp {
                     self.start_export(ctx, output);
                 }
             }
+            UiAction::OpenProject => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Eddie project", &[project::EXTENSION])
+                    .set_title("Open project")
+                    .pick_file()
+                {
+                    if let Err(error) = self.open_project(ctx, &path) {
+                        self.status = error;
+                    }
+                }
+            }
+            UiAction::SaveProject | UiAction::SaveProjectAs => {
+                let path = match (&self.project_path, action) {
+                    (Some(path), UiAction::SaveProject) => Some(path.clone()),
+                    _ => rfd::FileDialog::new()
+                        .add_filter("Eddie project", &[project::EXTENSION])
+                        .set_file_name("project.eddie")
+                        .set_title("Save project")
+                        .save_file(),
+                };
+                if let Some(path) = path {
+                    if let Err(error) = self.save_project_to(&path) {
+                        self.status = error;
+                    }
+                }
+            }
+            UiAction::Undo => self.step_history(false),
+            UiAction::Redo => self.step_history(true),
             UiAction::ClearTimeline => {
                 self.cancel_chat();
                 self.set_playing(false);
@@ -1812,7 +1882,9 @@ impl EditorApp {
             if ctx.input(|i| i.key_pressed(egui::Key::End)) {
                 self.seek(self.timeline.end());
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::S) || i.key_pressed(egui::Key::B)) {
+            if ctx.input(|i| {
+                !i.modifiers.command && (i.key_pressed(egui::Key::S) || i.key_pressed(egui::Key::B))
+            }) {
                 self.split_at_playhead();
             }
             if ctx.input(|i| i.key_pressed(egui::Key::M)) {
@@ -1835,6 +1907,34 @@ impl EditorApp {
                     ui.label(RichText::new("Eddie").family(theme::semibold()).size(15.0));
                     ui.add_space(10.0);
                     ui.menu_button("File", |ui| {
+                        if menu_item(
+                            ui,
+                            "Open project…",
+                            "Ctrl+O",
+                            "Open a saved timeline and its media",
+                            true,
+                        ) {
+                            action = Some(UiAction::OpenProject);
+                        }
+                        if menu_item(
+                            ui,
+                            "Save project",
+                            "Ctrl+S",
+                            "Save the timeline and its media list",
+                            true,
+                        ) {
+                            action = Some(UiAction::SaveProject);
+                        }
+                        if menu_item(
+                            ui,
+                            "Save project as…",
+                            "Ctrl+Shift+S",
+                            "Save the project to a new file",
+                            true,
+                        ) {
+                            action = Some(UiAction::SaveProjectAs);
+                        }
+                        ui.separator();
                         if menu_item(ui, "Import media…", "", "Import video or audio files", true)
                         {
                             action = Some(UiAction::Import);
@@ -1853,6 +1953,19 @@ impl EditorApp {
                         }
                     });
                     ui.menu_button("Edit", |ui| {
+                        if menu_item(ui, "Undo", "Ctrl+Z", "Undo the last timeline edit", true) {
+                            action = Some(UiAction::Undo);
+                        }
+                        if menu_item(
+                            ui,
+                            "Redo",
+                            "Ctrl+Shift+Z",
+                            "Redo the edit you undid (also Ctrl+Y)",
+                            true,
+                        ) {
+                            action = Some(UiAction::Redo);
+                        }
+                        ui.separator();
                         let has_selection = self.selected.is_some();
                         if menu_item(
                             ui,
@@ -2806,7 +2919,18 @@ impl eframe::App for EditorApp {
         }
         self.right_dock(ctx);
         self.central(ctx);
+        if action.is_none() {
+            action = shortcut_action(ctx);
+        }
         self.finish_frame(ctx, action);
+        let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if self
+            .history
+            .track(&self.timeline, self.selected, now, pointer_down, typing)
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         if self.import_rx.is_some() || self.export_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -2822,6 +2946,33 @@ impl eframe::App for EditorApp {
             self.rss_mb = read_rss_mb();
         }
     }
+}
+
+/// Project and history shortcuts. Undo/redo leave a focused text field
+/// its own text undo.
+fn shortcut_action(ctx: &egui::Context) -> Option<UiAction> {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let typing = ctx.memory(|m| m.focused().is_some());
+    ctx.input_mut(|i| {
+        let shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        if i.consume_shortcut(&KeyboardShortcut::new(shift, Key::S)) {
+            Some(UiAction::SaveProjectAs)
+        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)) {
+            Some(UiAction::SaveProject)
+        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)) {
+            Some(UiAction::OpenProject)
+        } else if typing {
+            None
+        } else if i.consume_shortcut(&KeyboardShortcut::new(shift, Key::Z))
+            || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y))
+        {
+            Some(UiAction::Redo)
+        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)) {
+            Some(UiAction::Undo)
+        } else {
+            None
+        }
+    })
 }
 
 /// Resident set size from `/proc` (Linux). Returns 0 elsewhere.
@@ -6353,6 +6504,115 @@ mod tests {
         );
         assert_eq!(candidates, serde_json::json!([]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
+        let dir = std::env::temp_dir().join(format!("eddie-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("shot.mp4");
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x36:r=10:d=3",
+            ])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1"])
+            .arg(&media)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let settle = |app: &mut EditorApp, ctx: &egui::Context| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while app.import_rx.is_some() || !app.import_queue.is_empty() {
+                app.poll_imports(ctx);
+                assert!(Instant::now() < deadline, "import timed out");
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.spawn_import(&ctx, vec![media.clone()]);
+        settle(&mut app, &ctx);
+        app.run_console(
+            &ctx,
+            "addAssetRange('shot.mp4', 0.5, 1.25, 1.5); addTitle('Booth', 3, 2);".to_owned(),
+        );
+        app.mute_music_beds = false;
+        assert_eq!(app.timeline.clips.len(), 2, "{}", app.status);
+        app.save_project_to(&dir.join("expo")).unwrap();
+        assert!(dir.join("expo.eddie").exists(), "the extension is added");
+
+        let mut reopened = EditorApp::headless_for_test(&ctx);
+        reopened
+            .open_project(&ctx, &dir.join("expo.eddie"))
+            .unwrap();
+        settle(&mut reopened, &ctx);
+        assert_eq!(reopened.timeline, app.timeline);
+        assert!(!reopened.mute_music_beds);
+        assert_eq!(reopened.assets.len(), 1);
+        assert!(reopened.assets[0].state == media::AssetState::Ready);
+        reopened.run_console(&ctx, "addTitle('Next', 6, 1);".to_owned());
+        let mut ids: Vec<_> = reopened.timeline.clips.iter().map(|clip| clip.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "a new clip never reuses a saved ID");
+
+        std::fs::remove_file(&media).unwrap();
+        let mut missing = EditorApp::headless_for_test(&ctx);
+        missing.open_project(&ctx, &dir.join("expo.eddie")).unwrap();
+        assert_eq!(
+            missing.status,
+            "Opened expo.eddie; 1 media file is missing."
+        );
+        assert_eq!(missing.timeline, app.timeline, "clips stay for relinking");
+        std::fs::write(dir.join("bad.eddie"), "{}").unwrap();
+        assert!(missing.open_project(&ctx, &dir.join("bad.eddie")).is_err());
+        assert_eq!(missing.timeline, app.timeline, "a bad file changes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_and_redo_step_through_console_edits() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let track = |app: &mut EditorApp| {
+            app.history
+                .track(&app.timeline, app.selected, 0.0, false, false);
+        };
+        app.run_console(&ctx, "addTitle('One', 0, 1);".to_owned());
+        track(&mut app);
+        app.run_console(
+            &ctx,
+            "addTitle('Two', 2, 1); addTitle('Three', 4, 1);".to_owned(),
+        );
+        track(&mut app);
+        assert_eq!(app.timeline.clips.len(), 3);
+
+        app.handle_action(&ctx, UiAction::Undo);
+        assert_eq!(app.timeline.clips.len(), 1, "one console run is one step");
+        assert_eq!(app.status, "Undid the last edit.");
+        app.handle_action(&ctx, UiAction::Undo);
+        assert!(app.timeline.clips.is_empty());
+        app.handle_action(&ctx, UiAction::Undo);
+        assert_eq!(app.status, "Nothing to undo.");
+        app.handle_action(&ctx, UiAction::Redo);
+        app.handle_action(&ctx, UiAction::Redo);
+        assert_eq!(app.timeline.clips.len(), 3);
+        app.handle_action(&ctx, UiAction::ClearTimeline);
+        track(&mut app);
+        app.handle_action(&ctx, UiAction::Undo);
+        assert_eq!(
+            app.timeline.clips.len(),
+            3,
+            "clearing the timeline is undoable"
+        );
     }
 
     #[test]

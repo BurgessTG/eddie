@@ -7,3 +7,4 @@ rust-version.workspace = true
 description = "UI-independent timeline and playback model for OpenReel"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }

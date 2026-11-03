@@ -61,6 +61,9 @@ Select a video and press **Curate**. Curation never runs on import.
   intents such as *Reactions first* or *Tighten the intro* run locally or
   through the model. Every AI edit can be undone in one click, and a
   failed batch rolls back completely.
+- Undo/redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y) covers every timeline edit,
+  whether made by hand, in Details, in the console or by chat. A drag or
+  a burst of typing is one step.
 - The JS console (View → JS console) runs QuickJS with memory and time
   limits and no filesystem or OS access. Scripts enqueue editor commands;
   they never mutate state directly. Run `help()` for the API:
@@ -135,9 +138,10 @@ detailed curator contract.
 - SAM mask payloads are not decoded; subject evidence uses boxes only.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.
-- No project save/load or general undo yet (AI edits have one-step undo).
-  Curation results are saved per file and come back when the same,
-  unchanged file is imported again; the timeline itself is not saved.
+- Projects (File → Save/Open, `.eddie`) store the timeline and media
+  paths by absolute path; moved media opens as missing and is not
+  relinked yet. Curation results are saved per file and come back when
+  the same, unchanged file is imported again. Undo history is not saved.
 - Model curation is thorough but slow: several passes per review window.
   Eleven expo videos (about 8 minutes) took 105 minutes on Wonder and 85
   on Spark when files were curated one at a time. Up to three files now

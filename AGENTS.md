@@ -111,6 +111,15 @@ intents arrange sweep candidates offline through the same
 `ScriptCommand` batch path; model intents are fixed prompts through
 the chat loop. AI edits snapshot the timeline first for one-click
 undo, and in-flight calls can be cancelled.
+General undo (`app/history.rs`) compares the timeline each frame and
+commits a step when the pointer is up and no field has focus, or 0.75 s
+after typing stops, so every edit path is covered without per-path
+hooks. Selection-only changes are not steps; 200 steps are kept.
+Projects (`app/project.rs`, `.eddie` JSON, version 1) hold the timeline,
+media paths and music-bed muting. Opening replaces the timeline and
+history, keeps the bin, imports listed media and reports missing files;
+saved IDs are never reused. Ctrl+S/Ctrl+O work in text fields; split's
+S/B shortcut ignores Ctrl.
 The import QC sweep is the curator. It lives in
 `crates/app/src/app/sweep.rs`, with motion sampling and segmentation in
 `crates/media/src/sweep.rs`. Import only imports; curation never runs

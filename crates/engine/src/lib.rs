@@ -5,7 +5,7 @@
 
 pub type ClipId = u64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClipKind {
     Video,
     Audio,
@@ -15,7 +15,7 @@ pub enum ClipKind {
 /// Presentation style for title/caption clips. Preview and export
 /// interpret the same value so generated captions do not change
 /// appearance when rendered.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TitleStyle {
     #[default]
     LowerThird,
@@ -57,7 +57,7 @@ impl TitleStyle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Clip {
     pub id: ClipId,
     pub name: String,
@@ -138,7 +138,7 @@ pub fn fade_gain(offset: f64, duration: f64, fade_in: f64, fade_out: f64) -> f32
 
 /// Project picture format. The canvas never follows the footage: video
 /// of the other orientation is not added rather than pillarboxed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Orientation {
     #[default]
     Landscape,
@@ -169,7 +169,7 @@ impl Orientation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Timeline {
     pub fps: f64,
     pub orientation: Orientation,
@@ -187,6 +187,12 @@ impl Timeline {
             clips: Vec::new(),
             next_id: 1,
         }
+    }
+
+    /// After loading a saved project: new clips never reuse a saved ID.
+    pub fn ensure_fresh_ids(&mut self) {
+        let next = self.clips.iter().map(|clip| clip.id + 1).max().unwrap_or(1);
+        self.next_id = self.next_id.max(next);
     }
 
     /// Snap a time to the nearest frame boundary.
