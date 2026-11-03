@@ -132,7 +132,12 @@ The import QC sweep is the curator. It lives in
 automatically. The user selects a ready asset and presses Curate
 (Curate all new covers a batch; Re-curate replaces prior results).
 Up to cores/4 files (at most three) curate at once; review mostly waits
-on the provider. The app peaked near 1.5 GB RSS while three local 4K
+on the provider. Within a file, three review batches, then three scenes'
+seam/timing passes, are in flight at once (`REVIEW_CONCURRENCY`); source
+pictures for review batches decode in order on one sampler, each edge
+worker has its own, and results apply in source order. Offline, with
+250 ms of fake provider latency, a 120 s clip went from 32.6 s to 12.6 s
+with the same 121 requests. The app peaked near 1.5 GB RSS while three local 4K
 analyses ran on 16 cores. Each finished curation is saved, private, under `curation/`
 beside the settings file and restored when the same path, size and
 modification time is imported again. Restoring is not curating.
@@ -267,7 +272,8 @@ Physical shots remain available even when the model rejects their content.
 The editorial review allows 8,192 completion tokens per batched window plus
 one more allowance, capped at 32,768; hidden reasoning counts against it.
 Missing or invalid reviews preserve Needs review ranges. A provider failure
-stops later requests while retaining completed reviews. Sparse image
+stops new requests while retaining completed reviews; requests already in
+flight still finish. Sparse image
 sampling and model scores are not proof of every meaningful moment.
 Candidates are suggestions only; the source asset stays whole.
 Voice Transcribe returns speaker turns, never word timings (Meta's docs
@@ -419,7 +425,11 @@ Export streams raw video batches into one H.264/AAC encoder rather
 than sharing decoded frames across clips on different source clocks.
 Batches use at most four independent video inputs and eight seconds;
 decoder, filter, and final encoder parallelism are bounded. A branch
-starts at its first visible output frame, not at batch time zero.
+starts at its first visible output frame, not at batch time zero, and
+stops at its last one (decoding to the batch end was most of the 4K
+work). Inputs use slice threads: frame threads on four 4K inputs reached
+about 2.8 GB RSS. A 60 s, 29-cut montage from 4K sources exported in
+46.6 s (was 103.6 s).
 Titles and audio remain on the whole timeline clock. Existing export
 resolution, CRF, and audio settings are unchanged. Batch bytes and
 child exits are checked before export can report success.
@@ -495,7 +505,10 @@ present and turn-proportional estimates otherwise.
   shortcut if it has one.
 - Feedback lives in the status bar. Keep messages to one short sentence.
 - Importing shows a placeholder card immediately with the file name and
-  known metadata. The thumbnail area stays greyed with a spinner until
+  known metadata. Up to four files import at once. Filmstrip thumbnails
+  are keyframe stills from one slice-threaded native decoder (exact
+  pictures only when a keyframe is over one interval away); 13 expo files
+  imported in 6.8 s, down from 72.4 s. The thumbnail area stays greyed with a spinner until
   probe, waveform, and thumbnails finish. Placeholders cannot be added
   to the timeline or curated. A finished import selects itself only when
   no asset is selected; it never replaces the user's selection.

@@ -6,7 +6,9 @@ mod seams;
 mod timing;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 use openreel_media::{EvidenceSampler, MotionSample};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,10 @@ const MAX_BATCH_IMAGES: usize = 40;
 const MAX_BATCH_WINDOWS: usize = 8;
 const EVIDENCE_WIDTH: u32 = 384;
 const TIME_TOLERANCE: f64 = 1e-6;
+/// Review batches, and later scenes' edge passes, in flight at once per
+/// file. Requests mostly wait on the provider; results apply in source
+/// order, so concurrency changes wall time, not the curation.
+const REVIEW_CONCURRENCY: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::app) enum ReviewStatus {
@@ -114,6 +120,28 @@ pub(in crate::app) struct ReviewUsage {
 }
 
 impl ReviewUsage {
+    fn absorb(&mut self, other: ReviewUsage) {
+        self.batches += other.batches;
+        self.images += other.images;
+        self.metered_batches += other.metered_batches;
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(other.cached_tokens);
+        self.refinements += other.refinements;
+        self.timing_batches += other.timing_batches;
+        self.timing_boundaries += other.timing_boundaries;
+        self.sam.absorb(other.sam);
+        for (name, stage) in other.stages {
+            let total = self.stages.entry(name).or_default();
+            total.requests += stage.requests;
+            total.images += stage.images;
+            total.metered += stage.metered;
+            total.input = total.input.saturating_add(stage.input);
+            total.output = total.output.saturating_add(stage.output);
+            total.cached = total.cached.saturating_add(stage.cached);
+        }
+    }
+
     fn record(&mut self, stage: &str, response: &Value) {
         let usage = &response["usage"];
         if let (Some(input), Some(output)) = (
@@ -578,6 +606,128 @@ fn preserve_unreviewed(source: &Source<'_>, window: &Window, selections: &mut Ve
     });
 }
 
+/// One prepared batch's provider work: orientation, subject checks and the
+/// bounded review requests, each group paired with its rows.
+struct BatchOutcome {
+    usage: ReviewUsage,
+    failure: Option<String>,
+    groups: Vec<(Vec<PendingReview>, Result<Vec<Value>, String>)>,
+}
+
+/// Runs on a worker thread. `halted` is shared: once any request fails, no
+/// new request starts, though requests already in flight finish.
+fn review_batch(
+    settings: &ChatSettings,
+    info: &MediaInfo,
+    motion: &[MotionSample],
+    mode: subjects::Mode,
+    batch: Vec<PreparedWindow>,
+    halted: &AtomicBool,
+) -> BatchOutcome {
+    let mut usage = ReviewUsage::default();
+    let mut failure = None;
+    let rows = if halted.load(Ordering::Relaxed) {
+        Err("Review unavailable after a model failure".to_owned())
+    } else if info.has_video {
+        orientation::request(settings, &batch, &mut usage)
+    } else {
+        Ok(batch
+            .iter()
+            .map(|prepared| {
+                json!({"window":prepared.window.id,
+                "description":"Audio-only source.","subjectChecks":[]})
+            })
+            .collect())
+    };
+    if let Err(error) = &rows {
+        // Do not multiply a bad key, unavailable model or failed service
+        // by the number of remaining windows. Completed work is retained.
+        halted.store(true, Ordering::Relaxed);
+        failure.get_or_insert(error.clone());
+    }
+    let mut analyzer = subjects::Analyzer::new(settings, info);
+    let mut pending = Vec::new();
+    for mut prepared in batch {
+        let mut evidence = Vec::new();
+        let result = (|| {
+            let row = window_review(rows.as_ref().map_err(Clone::clone)?, prepared.window.id)?;
+            let checks = orientation::checks(&prepared, row)?;
+            let mut metadata = prepared.metadata();
+            metadata["orientation"] = row["description"].clone();
+            if !checks.is_empty() && mode == subjects::Mode::Automatic {
+                if !info.has_video {
+                    return Err("Subject check requires video".to_owned());
+                }
+                for check in checks {
+                    match analyzer.check(&check, motion, &mut usage.sam) {
+                        Ok(analysis) => {
+                            evidence.push(analysis.evidence);
+                            prepared.content.extend(analysis.images);
+                        }
+                        Err(error) => evidence.push(subjects::Evidence::failed(check, error)),
+                    }
+                }
+            }
+            metadata["subjectEvidence"] = json!(evidence
+                .iter()
+                .map(|e| e.json(prepared.window.start, prepared.window.end))
+                .collect::<Vec<_>>());
+            prepared.content[0]["text"] = json!(metadata.to_string());
+            if evidence.iter().any(|e| !e.is_ready()) {
+                return Err(
+                    "Subject evidence was incomplete; kept this window for review".to_owned(),
+                );
+            }
+            Ok(())
+        })();
+        pending.push(PendingReview {
+            prepared,
+            evidence,
+            error: result.err(),
+        });
+    }
+    // Extra detail images make more bounded review requests, never dropped
+    // overview pictures or fewer source windows.
+    let mut groups = Vec::new();
+    let mut pending = pending.into_iter().peekable();
+    while pending.peek().is_some() {
+        let mut group = Vec::new();
+        let mut images = 0;
+        while let Some(next) = pending.peek() {
+            let count = next
+                .prepared
+                .content
+                .iter()
+                .filter(|part| part["type"] == "image_url")
+                .count();
+            if !group.is_empty() && images + count > MAX_BATCH_IMAGES {
+                break;
+            }
+            images += count;
+            group.push(pending.next().expect("peeked review"));
+        }
+        let ready: Vec<_> = group
+            .iter()
+            .filter(|review| review.error.is_none())
+            .map(|review| &review.prepared)
+            .collect();
+        let rows = if ready.is_empty() {
+            Ok(Vec::new())
+        } else if halted.load(Ordering::Relaxed) {
+            Err("Review unavailable after a model failure".to_owned())
+        } else {
+            request_reviews(settings, &ready, &mut usage)
+                .inspect_err(|_| halted.store(true, Ordering::Relaxed))
+        };
+        groups.push((group, rows));
+    }
+    BatchOutcome {
+        usage,
+        failure,
+        groups,
+    }
+}
+
 fn request_reviews(
     settings: &ChatSettings,
     batch: &[&PreparedWindow],
@@ -784,240 +934,175 @@ pub(super) fn review(
     let mut reviewed = 0;
     let mut failed = 0;
     let mut failure = None;
-    let mut halted = false;
+    let halted = AtomicBool::new(false);
     let mut scene_failures = vec![false; scenes.len()];
     let mut scene_accepted = vec![false; scenes.len()];
-    let mut analyzer = subjects::Analyzer::new(settings, info);
     while remaining.peek().is_some() {
         progress(&format!(
             "Reviewing {}/{} windows…",
             reviewed + failed,
             total
         ));
-        let mut batch = Vec::new();
-        let mut images = 0;
-        while let Some(next) = remaining.peek() {
-            if !batch.is_empty()
-                && (batch.len() == MAX_BATCH_WINDOWS
-                    || images + next.samples.len() > MAX_BATCH_IMAGES)
-            {
-                break;
-            }
-            let window = remaining.next().expect("peeked window");
-            if halted {
-                scene_failures[window.scene] = true;
-                preserve_unreviewed(&source, &window, &mut selections);
-                failed += 1;
-                continue;
-            }
-            // A failed image preparation must preserve this entire window.
-            let fallback = Window {
-                id: window.id,
-                scene: window.scene,
-                start: window.start,
-                end: window.end,
-                samples: Vec::new(),
-            };
-            let prepared = match sampler.as_mut() {
-                Ok(sampler) => prepare(&source, window, sampler),
-                Err(error) => Err(error.clone()),
-            };
-            match prepared {
-                Ok(prepared) => {
-                    images += prepared.frame_times.len();
-                    batch.push(prepared);
-                }
-                Err(error) => {
-                    scene_failures[fallback.scene] = true;
-                    preserve_unreviewed(&source, &fallback, &mut selections);
-                    failed += 1;
-                    failure.get_or_insert(error);
-                }
-            }
-        }
-        if batch.is_empty() {
-            continue;
-        }
-        progress("Orienting visual checks…");
-        let rows = if info.has_video {
-            orientation::request(settings, &batch, &mut usage)
-        } else {
-            Ok(batch
-                .iter()
-                .map(|prepared| {
-                    json!({"window":prepared.window.id,
-                "description":"Audio-only source.","subjectChecks":[]})
-                })
-                .collect())
-        };
-        if let Err(error) = &rows {
-            // Do not multiply a bad key, unavailable model or failed service
-            // by the number of remaining windows. Completed work is retained.
-            halted = true;
-            failure.get_or_insert(error.clone());
-        }
-        let mut pending = Vec::new();
-        for mut prepared in batch {
-            let mut evidence = Vec::new();
-            let result = (|| {
-                let row = window_review(rows.as_ref().map_err(Clone::clone)?, prepared.window.id)?;
-                let checks = orientation::checks(&prepared, row)?;
-                let mut metadata = prepared.metadata();
-                metadata["orientation"] = row["description"].clone();
-                if !checks.is_empty() && mode == subjects::Mode::Automatic {
-                    if !info.has_video {
-                        return Err("Subject check requires video".to_owned());
-                    }
-                    progress(&format!(
-                        "Checking subjects in window {}…",
-                        prepared.window.id + 1
-                    ));
-                    for check in checks {
-                        match analyzer.check(&check, motion, &mut usage.sam) {
-                            Ok(analysis) => {
-                                evidence.push(analysis.evidence);
-                                prepared.content.extend(analysis.images);
-                            }
-                            Err(error) => evidence.push(subjects::Evidence::failed(check, error)),
-                        }
-                    }
-                }
-                metadata["subjectEvidence"] = json!(evidence
-                    .iter()
-                    .map(|e| e.json(prepared.window.start, prepared.window.end))
-                    .collect::<Vec<_>>());
-                prepared.content[0]["text"] = json!(metadata.to_string());
-                if evidence.iter().any(|e| !e.is_ready()) {
-                    return Err(
-                        "Subject evidence was incomplete; kept this window for review".to_owned(),
-                    );
-                }
-                Ok(())
-            })();
-            pending.push(PendingReview {
-                prepared,
-                evidence,
-                error: result.err(),
-            });
-        }
-        // Extra detail images make more bounded review requests, never dropped
-        // overview pictures or fewer source windows.
-        let mut pending = pending.into_iter().peekable();
-        while pending.peek().is_some() {
-            let mut group = Vec::new();
+        // Source pictures decode here, in order, on one sampler; only the
+        // provider round trips run concurrently.
+        let mut batches = Vec::new();
+        while batches.len() < REVIEW_CONCURRENCY && remaining.peek().is_some() {
+            let mut batch = Vec::new();
             let mut images = 0;
-            while let Some(next) = pending.peek() {
-                let count = next
-                    .prepared
-                    .content
-                    .iter()
-                    .filter(|part| part["type"] == "image_url")
-                    .count();
-                if !group.is_empty() && images + count > MAX_BATCH_IMAGES {
+            while let Some(next) = remaining.peek() {
+                if !batch.is_empty()
+                    && (batch.len() == MAX_BATCH_WINDOWS
+                        || images + next.samples.len() > MAX_BATCH_IMAGES)
+                {
                     break;
                 }
-                images += count;
-                group.push(pending.next().expect("peeked review"));
-            }
-            let ready: Vec<_> = group
-                .iter()
-                .filter(|review| review.error.is_none())
-                .map(|review| &review.prepared)
-                .collect();
-            let rows = if ready.is_empty() {
-                Ok(Vec::new())
-            } else if halted {
-                Err("Review unavailable after a model failure".to_owned())
-            } else {
-                progress("Selecting usable moments…");
-                request_reviews(settings, &ready, &mut usage).inspect_err(|_| halted = true)
-            };
-            for PendingReview {
-                prepared,
-                evidence,
-                error,
-            } in group
-            {
-                let scene_index = prepared.window.scene;
-                let mut coverage = Vec::new();
-                let result = (|| {
-                    if let Some(error) = error {
-                        return Err(error);
-                    }
-                    let row =
-                        window_review(rows.as_ref().map_err(Clone::clone)?, prepared.window.id)?;
-                    let (ranges, reason, accounted) =
-                        justified_ranges(&source, settings, &prepared, row)?;
-                    coverage = accounted;
-                    Ok((ranges, reason))
-                })();
-                scenes[scene_index].review.subject_check |= !evidence.is_empty();
-                scenes[scene_index]
-                    .review
-                    .subject_evidence
-                    .extend(evidence.iter().cloned());
-                match result {
-                    Ok((mut ranges, reason)) => {
-                        for range in &mut ranges {
-                            range.candidate.review.subject_check |= !evidence.is_empty();
-                            range.candidate.review.subject_evidence = evidence.clone();
-                            range.candidate.review.coverage = coverage
-                                .iter()
-                                .filter(|span| {
-                                    span.start < range.candidate.end()
-                                        && span.end > range.candidate.source_in
-                                })
-                                .cloned()
-                                .collect();
-                        }
-                        reviewed += 1;
-                        let scene = &mut scenes[scene_index];
-                        scene_failures[scene_index] |= coverage
-                            .iter()
-                            .any(|span| span.status == ReviewStatus::NeedsReview);
-                        scene.review.coverage.extend(coverage);
-                        scene.review.model = Some(settings.model.clone());
-                        scene.review.frame_times.extend(prepared.frame_times);
-                        if let Some(best) = ranges
-                            .iter()
-                            .max_by(|a, b| a.candidate.score.total_cmp(&b.candidate.score))
-                        {
-                            let music_only = ranges.iter().all(|range| range.candidate.music_bed);
-                            scene.music_bed = if scene_accepted[scene_index] {
-                                scene.music_bed && music_only
-                            } else {
-                                music_only
-                            };
-                            if !scene_accepted[scene_index] || best.candidate.score > scene.score {
-                                scene.score = best.candidate.score;
-                                scene.category = best.candidate.category.clone();
-                                scene.tags = best.candidate.tags.clone();
-                                scene.reason = best.candidate.reason.clone();
-                            }
-                            scene_accepted[scene_index] = true;
-                        } else if !scene_accepted[scene_index] {
-                            scene.reason = reason.chars().take(512).collect();
-                        }
-                        selections.extend(ranges);
+                let window = remaining.next().expect("peeked window");
+                if halted.load(Ordering::Relaxed) {
+                    scene_failures[window.scene] = true;
+                    preserve_unreviewed(&source, &window, &mut selections);
+                    failed += 1;
+                    continue;
+                }
+                // A failed image preparation must preserve this entire window.
+                let fallback = Window {
+                    id: window.id,
+                    scene: window.scene,
+                    start: window.start,
+                    end: window.end,
+                    samples: Vec::new(),
+                };
+                let prepared = match sampler.as_mut() {
+                    Ok(sampler) => prepare(&source, window, sampler),
+                    Err(error) => Err(error.clone()),
+                };
+                match prepared {
+                    Ok(prepared) => {
+                        images += prepared.frame_times.len();
+                        batch.push(prepared);
                     }
                     Err(error) => {
+                        scene_failures[fallback.scene] = true;
+                        preserve_unreviewed(&source, &fallback, &mut selections);
                         failed += 1;
-                        scene_failures[scene_index] = true;
-                        failure.get_or_insert(error.clone());
-                        preserve_unreviewed(&source, &prepared.window, &mut selections);
-                        let fallback =
-                            &mut selections.last_mut().expect("preserved window").candidate;
-                        fallback.reason = format!("Needs review: {error}.");
-                        fallback.review.subject_check = !evidence.is_empty();
-                        fallback.review.subject_evidence = evidence;
-                        let span = Coverage {
-                            start: prepared.window.start,
-                            end: prepared.window.end,
-                            status: ReviewStatus::NeedsReview,
-                            reason: fallback.reason.clone(),
-                        };
-                        fallback.review.coverage = vec![span.clone()];
-                        scenes[scene_index].review.coverage.push(span);
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                batches.push(batch);
+            }
+        }
+        let outcomes: Vec<BatchOutcome> = thread::scope(|scope| {
+            let workers: Vec<_> = batches
+                .into_iter()
+                .map(|batch| {
+                    let halted = &halted;
+                    scope.spawn(move || review_batch(settings, info, motion, mode, batch, halted))
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("review batch worker"))
+                .collect()
+        });
+        for outcome in outcomes {
+            usage.absorb(outcome.usage);
+            if let Some(error) = outcome.failure {
+                failure.get_or_insert(error);
+            }
+            for (group, rows) in outcome.groups {
+                for PendingReview {
+                    prepared,
+                    evidence,
+                    error,
+                } in group
+                {
+                    let scene_index = prepared.window.scene;
+                    let mut coverage = Vec::new();
+                    let result = (|| {
+                        if let Some(error) = error {
+                            return Err(error);
+                        }
+                        let row = window_review(
+                            rows.as_ref().map_err(Clone::clone)?,
+                            prepared.window.id,
+                        )?;
+                        let (ranges, reason, accounted) =
+                            justified_ranges(&source, settings, &prepared, row)?;
+                        coverage = accounted;
+                        Ok((ranges, reason))
+                    })();
+                    scenes[scene_index].review.subject_check |= !evidence.is_empty();
+                    scenes[scene_index]
+                        .review
+                        .subject_evidence
+                        .extend(evidence.iter().cloned());
+                    match result {
+                        Ok((mut ranges, reason)) => {
+                            for range in &mut ranges {
+                                range.candidate.review.subject_check |= !evidence.is_empty();
+                                range.candidate.review.subject_evidence = evidence.clone();
+                                range.candidate.review.coverage = coverage
+                                    .iter()
+                                    .filter(|span| {
+                                        span.start < range.candidate.end()
+                                            && span.end > range.candidate.source_in
+                                    })
+                                    .cloned()
+                                    .collect();
+                            }
+                            reviewed += 1;
+                            let scene = &mut scenes[scene_index];
+                            scene_failures[scene_index] |= coverage
+                                .iter()
+                                .any(|span| span.status == ReviewStatus::NeedsReview);
+                            scene.review.coverage.extend(coverage);
+                            scene.review.model = Some(settings.model.clone());
+                            scene.review.frame_times.extend(prepared.frame_times);
+                            if let Some(best) = ranges
+                                .iter()
+                                .max_by(|a, b| a.candidate.score.total_cmp(&b.candidate.score))
+                            {
+                                let music_only =
+                                    ranges.iter().all(|range| range.candidate.music_bed);
+                                scene.music_bed = if scene_accepted[scene_index] {
+                                    scene.music_bed && music_only
+                                } else {
+                                    music_only
+                                };
+                                if !scene_accepted[scene_index]
+                                    || best.candidate.score > scene.score
+                                {
+                                    scene.score = best.candidate.score;
+                                    scene.category = best.candidate.category.clone();
+                                    scene.tags = best.candidate.tags.clone();
+                                    scene.reason = best.candidate.reason.clone();
+                                }
+                                scene_accepted[scene_index] = true;
+                            } else if !scene_accepted[scene_index] {
+                                scene.reason = reason.chars().take(512).collect();
+                            }
+                            selections.extend(ranges);
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            scene_failures[scene_index] = true;
+                            failure.get_or_insert(error.clone());
+                            preserve_unreviewed(&source, &prepared.window, &mut selections);
+                            let fallback =
+                                &mut selections.last_mut().expect("preserved window").candidate;
+                            fallback.reason = format!("Needs review: {error}.");
+                            fallback.review.subject_check = !evidence.is_empty();
+                            fallback.review.subject_evidence = evidence;
+                            let span = Coverage {
+                                start: prepared.window.start,
+                                end: prepared.window.end,
+                                status: ReviewStatus::NeedsReview,
+                                reason: fallback.reason.clone(),
+                            };
+                            fallback.review.coverage = vec![span.clone()];
+                            scenes[scene_index].review.coverage.push(span);
+                        }
                     }
                 }
             }
@@ -1029,8 +1114,8 @@ pub(super) fn review(
             .then_with(|| a.candidate.source_in.total_cmp(&b.candidate.source_in))
     });
     let mut remaining = selections.into_iter().peekable();
-    let mut joined = Vec::new();
-    for (index, scene) in scenes.iter_mut().enumerate() {
+    let mut scene_ranges: Vec<Vec<Selection>> = Vec::with_capacity(scenes.len());
+    for index in 0..scenes.len() {
         let mut ranges = Vec::new();
         while remaining
             .peek()
@@ -1038,71 +1123,74 @@ pub(super) fn review(
         {
             ranges.push(remaining.next().expect("peeked scene range"));
         }
-        let scene_window = Window {
-            id: index,
-            scene: index,
-            start: scene.source_in,
-            end: scene.end(),
-            samples: Vec::new(),
-        };
-        // Keep only range metadata between requests. Source pictures are decoded
-        // on demand; a long uncut take does not accumulate image buffers.
-        let mut prepared = prepare(&source, scene_window, &mut None).expect("metadata-only scene");
-        prepared.frame_times = scene.review.frame_times.clone();
-        let seam_times: Vec<_> = window_spans
-            .iter()
-            .filter(|(scene_id, start, _)| *scene_id == index && *start > scene.source_in)
-            .map(|(_, start, _)| *start)
-            .collect();
-        // Window reviews were already validated. Later passes can only improve
-        // their edges: a failed seam keeps both beats, and failed timing keeps
-        // the proposed edges under the host speech guarantee.
-        let (ranges, seam_error) = seams::reconcile(
-            &source,
-            settings,
-            scene,
-            &seam_times,
+        scene_ranges.push(ranges);
+    }
+    drop(sampler);
+    // Scenes refine independently; each worker decodes on its own sampler.
+    let refined = {
+        let scenes: &[SweepCandidate] = scenes;
+        let jobs: Vec<_> = scene_ranges.into_iter().enumerate().collect();
+        let count = jobs.len();
+        let jobs = std::sync::Mutex::new(jobs.into_iter());
+        let (tx, rx) = mpsc::channel();
+        let mut refined: Vec<Option<RefinedScene>> = (0..count).map(|_| None).collect();
+        thread::scope(|scope| {
+            for _ in 0..REVIEW_CONCURRENCY.min(count) {
+                let (tx, jobs, source, halted, window_spans) =
+                    (tx.clone(), &jobs, &source, &halted, &window_spans);
+                scope.spawn(move || {
+                    let mut sampler = None;
+                    loop {
+                        let Some((index, ranges)) = jobs.lock().expect("scene jobs").next() else {
+                            break;
+                        };
+                        if sampler.is_none() && info.has_video && !ranges.is_empty() {
+                            sampler = EvidenceSampler::open(&info.path, EVIDENCE_WIDTH).ok();
+                        }
+                        let seam_times: Vec<_> = window_spans
+                            .iter()
+                            .filter(|(scene_id, start, _)| {
+                                *scene_id == index && *start > scenes[index].source_in
+                            })
+                            .map(|(_, start, _)| *start)
+                            .collect();
+                        let result = refine_scene(
+                            source,
+                            settings,
+                            &scenes[index],
+                            index,
+                            &seam_times,
+                            ranges,
+                            sampler.as_mut(),
+                            halted,
+                        );
+                        if tx.send((index, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            for (done, (index, result)) in rx.iter().enumerate() {
+                progress(&format!("Verifying edges {}/{count} scenes…", done + 1));
+                refined[index] = Some(result);
+            }
+        });
+        refined
+    };
+    let mut joined = Vec::new();
+    for (scene, refined) in scenes.iter_mut().zip(refined) {
+        let RefinedScene {
             ranges,
-            sampler.as_mut().ok().and_then(Option::as_mut),
-            &mut usage,
-            &mut halted,
-            progress,
-        );
-        if let Some(error) = seam_error {
+            frame_times,
+            usage: scene_usage,
+            failure: scene_failure,
+        } = refined.expect("refined scene");
+        usage.absorb(scene_usage);
+        if let Some(error) = scene_failure {
             failure.get_or_insert(error);
         }
-        let proposed = ranges.clone();
-        let result = timing::refine(
-            &source,
-            settings,
-            &mut prepared,
-            ranges,
-            String::new(),
-            sampler.as_mut().ok().and_then(Option::as_mut),
-            &mut usage,
-            &mut halted,
-            progress,
-        );
-        let mut ranges = match result {
-            Ok((ranges, _)) => {
-                if let Some(issue) = ranges
-                    .iter()
-                    .find_map(|r| r.candidate.review.edge_issue.clone())
-                {
-                    failure.get_or_insert(issue.trim_end_matches('.').to_owned());
-                }
-                ranges
-            }
-            Err(error) => {
-                failure.get_or_insert(error.clone());
-                timing::keep_proposed(
-                    &source,
-                    &prepared,
-                    proposed,
-                    &format!("Edges were not frame-verified: {error}."),
-                )
-            }
-        };
+        let mut ranges = ranges;
         let mut original = scene.review.coverage.clone();
         original.push(Coverage {
             start: scene.source_in,
@@ -1144,7 +1232,7 @@ pub(super) fn review(
             scene.reason = best.candidate.reason.clone();
             scene.music_bed = ranges.iter().all(|s| s.candidate.music_bed);
         }
-        scene.review.frame_times = prepared.frame_times;
+        scene.review.frame_times = frame_times;
         scene.review.frame_times.sort_by(f64::total_cmp);
         scene.review.frame_times.dedup();
         joined.extend(ranges);
@@ -1181,6 +1269,100 @@ pub(super) fn review(
             .collect(),
         usage,
         note,
+    }
+}
+
+struct RefinedScene {
+    ranges: Vec<Selection>,
+    frame_times: Vec<f64>,
+    usage: ReviewUsage,
+    failure: Option<String>,
+}
+
+/// Seam reconciliation and frame timing for one scene, on a worker thread.
+/// Window reviews were already validated. Later passes can only improve
+/// their edges: a failed seam keeps both beats, and failed timing keeps the
+/// proposed edges under the host speech guarantee.
+#[allow(clippy::too_many_arguments)]
+fn refine_scene(
+    source: &Source<'_>,
+    settings: &ChatSettings,
+    scene: &SweepCandidate,
+    index: usize,
+    seam_times: &[f64],
+    ranges: Vec<Selection>,
+    mut sampler: Option<&mut EvidenceSampler>,
+    halted: &AtomicBool,
+) -> RefinedScene {
+    let mut usage = ReviewUsage::default();
+    let mut failure = None;
+    let mut stopped = halted.load(Ordering::Relaxed);
+    let scene_window = Window {
+        id: index,
+        scene: index,
+        start: scene.source_in,
+        end: scene.end(),
+        samples: Vec::new(),
+    };
+    // Keep only range metadata between requests. Source pictures are decoded
+    // on demand; a long uncut take does not accumulate image buffers.
+    let mut prepared = prepare(source, scene_window, &mut None).expect("metadata-only scene");
+    prepared.frame_times = scene.review.frame_times.clone();
+    let (ranges, seam_error) = seams::reconcile(
+        source,
+        settings,
+        scene,
+        seam_times,
+        ranges,
+        sampler.as_deref_mut(),
+        &mut usage,
+        &mut stopped,
+        &mut |_| {},
+    );
+    if let Some(error) = seam_error {
+        failure.get_or_insert(error);
+    }
+    stopped |= halted.load(Ordering::Relaxed);
+    let proposed = ranges.clone();
+    let result = timing::refine(
+        source,
+        settings,
+        &mut prepared,
+        ranges,
+        String::new(),
+        sampler,
+        &mut usage,
+        &mut stopped,
+        &mut |_| {},
+    );
+    if stopped {
+        halted.store(true, Ordering::Relaxed);
+    }
+    let ranges = match result {
+        Ok((ranges, _)) => {
+            if let Some(issue) = ranges
+                .iter()
+                .find_map(|r| r.candidate.review.edge_issue.clone())
+            {
+                failure.get_or_insert(issue.trim_end_matches('.').to_owned());
+            }
+            ranges
+        }
+        Err(error) => {
+            failure.get_or_insert(error.clone());
+            timing::keep_proposed(
+                source,
+                &prepared,
+                proposed,
+                &format!("Edges were not frame-verified: {error}."),
+            )
+        }
+    };
+    RefinedScene {
+        ranges,
+        frame_times: prepared.frame_times,
+        usage,
+        failure,
     }
 }
 
