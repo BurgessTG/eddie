@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openreel_media::{EvidenceSampler, MotionSample};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
@@ -28,7 +29,7 @@ const MAX_BATCH_WINDOWS: usize = 8;
 const EVIDENCE_WIDTH: u32 = 384;
 const TIME_TOLERANCE: f64 = 1e-6;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::app) enum ReviewStatus {
     #[default]
     Local,
@@ -48,7 +49,7 @@ impl ReviewStatus {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(in crate::app) struct ClipReview {
     pub status: ReviewStatus,
     pub model: Option<String>,
@@ -61,7 +62,7 @@ pub(in crate::app) struct ClipReview {
     pub edge_issue: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(in crate::app) struct Coverage {
     start: f64,
     end: f64,
@@ -87,7 +88,7 @@ impl ClipReview {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct StageUsage {
     requests: usize,
     images: usize,
@@ -97,7 +98,7 @@ struct StageUsage {
     cached: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(in crate::app) struct ReviewUsage {
     pub batches: usize,
     pub images: usize,

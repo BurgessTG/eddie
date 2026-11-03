@@ -116,6 +116,11 @@ The import QC sweep is the curator. It lives in
 `crates/media/src/sweep.rs`. Import only imports; curation never runs
 automatically. The user selects a ready asset and presses Curate
 (Curate all new covers a batch; Re-curate replaces prior results).
+Up to cores/4 files (at most three) curate at once; review mostly waits
+on the provider. The app peaked near 1.5 GB RSS while three local 4K
+analyses ran on 16 cores. Each finished curation is saved, private, under `curation/`
+beside the settings file and restored when the same path, size and
+modification time is imported again. Restoring is not curating.
 Scene boundaries are visual only: every frame is analyzed at 64 px
 wide with pixel motion kept separate from global and 4x4-block
 RGB-histogram scene scores. Histogram weights interpolate between

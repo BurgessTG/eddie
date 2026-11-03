@@ -14,6 +14,7 @@ use eframe::egui;
 use openreel_media::{
     MediaInfo, SegmentVisualEvidence, SubjectSegmentationStatus, SweepSegment, VisualEvidenceSource,
 };
+use serde::{Deserialize, Serialize};
 
 use super::chat::{api_endpoint, api_error_for_status, check_model_connection};
 use super::media::AssetState;
@@ -23,8 +24,10 @@ mod align;
 mod curation;
 #[cfg(test)]
 mod curation_tests;
+mod store;
 mod subjects;
 pub(super) use curation::{ClipReview, ReviewStatus, ReviewUsage};
+pub(super) use store::{default_dir as default_curation_dir, load as load_curation};
 
 const TRANSCRIBE_MODEL: &str = "muse-voice-transcribe-1.0";
 const SAM_MODEL: &str = "sam-3.1";
@@ -89,7 +92,13 @@ const ASR_CHUNK_SECONDS: f64 = 540.0;
 const ASR_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const SPEECH_HANDLE_SECONDS: f64 = 0.12;
 
-#[derive(Clone, Debug, PartialEq)]
+/// Files curated at once. Review mostly waits on the provider, but local
+/// shot analysis decodes every frame, so weak machines stay at one.
+fn parallel_sweeps() -> usize {
+    thread::available_parallelism().map_or(1, |cores| (cores.get() / 4).clamp(1, 3))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct TranscriptSession {
     id: String,
     start: f64,
@@ -107,7 +116,7 @@ pub(super) fn ends_sentence(text: &str) -> bool {
         && text.ends_with(['.', '?', '!', '\u{3002}', '\u{ff1f}', '\u{ff01}'])
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct TranscriptWord {
     pub(super) start: f64,
     pub(super) end: f64,
@@ -118,7 +127,7 @@ pub(super) struct TranscriptWord {
     pub(super) estimated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct TranscriptSegment {
     pub(super) start: f64,
     pub(super) end: f64,
@@ -316,7 +325,7 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SweepCandidate {
     pub(super) id: String,
     pub(super) asset_path: String,
@@ -543,7 +552,7 @@ pub(super) fn visual_evidence_json(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum SweepStatus {
     NotStarted,
     Running,
@@ -551,7 +560,7 @@ pub(super) enum SweepStatus {
     Failed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SweepData {
     pub(super) status: SweepStatus,
     pub(super) note: String,
@@ -660,105 +669,146 @@ impl EditorApp {
         }
     }
 
+    /// Start queued curations up to `parallel_sweeps()` at once. Model
+    /// review is mostly waiting on the provider, so files overlap.
     fn start_next_sweep(&mut self, ctx: &egui::Context) {
-        if self.sweep_rx.is_some() || self.sweep_queue.is_empty() {
-            return;
-        }
-        let path = self.sweep_queue.remove(0);
-        let Some(asset) = self.assets.iter().find(|asset| asset.info.path == path) else {
-            self.start_next_sweep(ctx);
-            return;
-        };
-        let info = asset.info.clone();
-        let peaks = asset.peaks.clone();
-        let settings = self.chat_settings.clone();
-        let (tx, rx) = channel::<SweepMsg>();
-        self.sweep_rx = Some(rx);
-        let ctx = ctx.clone();
-        thread::spawn(move || {
-            let progress = &mut |message: &str| {
-                let _ = tx.send(SweepMsg::Progress {
-                    path: info.path.clone(),
-                    message: message.to_owned(),
+        while self.sweep_running.len() < parallel_sweeps() && !self.sweep_queue.is_empty() {
+            let path = self.sweep_queue.remove(0);
+            let Some(asset) = self.assets.iter().find(|asset| asset.info.path == path) else {
+                continue;
+            };
+            let info = asset.info.clone();
+            let peaks = asset.peaks.clone();
+            let settings = self.chat_settings.clone();
+            let store_dir = self.curation_dir.clone();
+            let tx = match &self.sweep_tx {
+                Some(tx) => tx.clone(),
+                None => {
+                    let (tx, rx) = channel::<SweepMsg>();
+                    self.sweep_rx = Some(rx);
+                    self.sweep_tx = Some(tx.clone());
+                    tx
+                }
+            };
+            self.sweep_running.push(path);
+            let ctx = ctx.clone();
+            thread::spawn(move || {
+                let progress = &mut |message: &str| {
+                    let _ = tx.send(SweepMsg::Progress {
+                        path: info.path.clone(),
+                        message: message.to_owned(),
+                    });
+                    ctx.request_repaint();
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_sweep(&info, &peaks, &settings, progress)
+                }))
+                .unwrap_or_else(|_| {
+                    Err("Curation stopped unexpectedly; retry this video.".to_owned())
                 });
+                let msg = match result {
+                    Ok(data) => {
+                        if let Some(dir) = &store_dir {
+                            if let Err(error) = store::save(dir, &info.path, &data) {
+                                eprintln!("curation for {} was not saved: {error}", info.name);
+                            }
+                        }
+                        SweepMsg::Done {
+                            path: info.path.clone(),
+                            data,
+                        }
+                    }
+                    Err(message) => SweepMsg::Failed {
+                        path: info.path.clone(),
+                        message,
+                    },
+                };
+                let _ = tx.send(msg);
                 ctx.request_repaint();
-            };
-            let msg = match run_sweep(&info, &peaks, &settings, progress) {
-                Ok(data) => SweepMsg::Done {
-                    path: info.path.clone(),
-                    data,
-                },
-                Err(message) => SweepMsg::Failed {
-                    path: info.path.clone(),
-                    message,
-                },
-            };
-            let _ = tx.send(msg);
-            ctx.request_repaint();
-        });
+            });
+        }
     }
 
     pub(super) fn poll_sweeps(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.sweep_rx.as_ref() else {
-            return;
-        };
-        let msg = match receiver.try_recv() {
-            Ok(message) => message,
-            Err(TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(180));
+        let mut finished = false;
+        loop {
+            let Some(receiver) = self.sweep_rx.as_ref() else {
                 return;
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.sweep_rx = None;
-                for asset in &mut self.assets {
-                    if asset.sweep.status == SweepStatus::Running
-                        && !self.sweep_queue.contains(&asset.info.path)
+            };
+            let msg = match receiver.try_recv() {
+                Ok(message) => message,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    for asset in &mut self.assets {
+                        if asset.sweep.status == SweepStatus::Running
+                            && !self.sweep_queue.contains(&asset.info.path)
+                        {
+                            asset.sweep.status = SweepStatus::Failed;
+                            asset.sweep.note =
+                                "Curation worker stopped; retry this video.".to_owned();
+                        }
+                    }
+                    self.status = "Curation worker stopped; retry this video.".to_owned();
+                    self.sweep_running.clear();
+                    finished = true;
+                    break;
+                }
+            };
+            match msg {
+                SweepMsg::Progress { path, message } => {
+                    if let Some(asset) =
+                        self.assets.iter_mut().find(|asset| asset.info.path == path)
                     {
-                        asset.sweep.status = SweepStatus::Failed;
-                        asset.sweep.note = "Curation worker stopped; retry this video.".to_owned();
+                        asset.sweep.note = message.clone();
+                        self.status = message;
                     }
                 }
-                self.status = "Curation worker stopped; retry this video.".to_owned();
-                self.start_next_sweep(ctx);
-                return;
-            }
-        };
-        match msg {
-            SweepMsg::Progress { path, message } => {
-                if let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) {
-                    asset.sweep.note = message.clone();
-                    self.status = message;
+                SweepMsg::Done { path, data } => {
+                    self.sweep_running.retain(|running| *running != path);
+                    if let Some(asset) =
+                        self.assets.iter_mut().find(|asset| asset.info.path == path)
+                    {
+                        let pick_count = data.candidates.len();
+                        let scene_count = data.scene_clips.len();
+                        asset.sweep = data;
+                        self.status = format!(
+                            "Curator found {pick_count} clip{} and {scene_count} scene{} in {}.",
+                            if pick_count == 1 { "" } else { "s" },
+                            if scene_count == 1 { "" } else { "s" },
+                            asset.info.name
+                        );
+                    }
+                    finished = true;
                 }
-                ctx.request_repaint();
-                return;
-            }
-            SweepMsg::Done { path, data } => {
-                if let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) {
-                    let pick_count = data.candidates.len();
-                    let scene_count = data.scene_clips.len();
-                    asset.sweep = data;
-                    self.status = format!(
-                        "Curator found {pick_count} clip{} and {scene_count} scene{} in {}.",
-                        if pick_count == 1 { "" } else { "s" },
-                        if scene_count == 1 { "" } else { "s" },
-                        asset.info.name
-                    );
-                }
-            }
-            SweepMsg::Failed { path, message } => {
-                if let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) {
-                    asset.sweep.status = SweepStatus::Failed;
-                    asset.sweep.note = message.clone();
-                    self.status = message;
+                SweepMsg::Failed { path, message } => {
+                    self.sweep_running.retain(|running| *running != path);
+                    if let Some(asset) =
+                        self.assets.iter_mut().find(|asset| asset.info.path == path)
+                    {
+                        asset.sweep.status = SweepStatus::Failed;
+                        asset.sweep.note = message.clone();
+                        self.status = message;
+                    }
+                    finished = true;
                 }
             }
         }
-        self.sweep_rx = None;
+        if !finished {
+            ctx.request_repaint_after(Duration::from_millis(180));
+            return;
+        }
+        if self.sweep_running.is_empty() {
+            self.sweep_rx = None;
+            self.sweep_tx = None;
+        }
         release_freed_memory();
         // The sweep changed: this is a pinned-summary refresh point
         // (the only other one is chat submit, as a safety net).
         self.refresh_pinned_summary();
         self.start_next_sweep(ctx);
+        if self.sweep_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(180));
+        }
     }
 
     pub(super) fn visible_sweep_candidates(&self) -> Vec<(usize, usize)> {
@@ -1360,7 +1410,7 @@ pub(super) fn minute_second(seconds: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct SamBox {
     object_id: String,
     x1: i64,

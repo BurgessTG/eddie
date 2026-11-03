@@ -2593,6 +2593,7 @@ dependencies = [
  "openreel-media",
  "rfd",
  "rquickjs",
+ "serde",
  "serde_json",
  "ureq",
  "whisper-rs",
@@ -2609,6 +2610,7 @@ dependencies = [
  "cpal",
  "ffmpeg-next",
  "openreel-engine",
+ "serde",
  "serde_json",
 ]
 

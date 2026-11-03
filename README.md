@@ -136,10 +136,13 @@ detailed curator contract.
 - Model scores and sparse frame sampling are suggestions, not proof that
   every good moment was found.
 - No project save/load or general undo yet (AI edits have one-step undo).
-  Curation results live in memory and are lost when the app closes.
-- Model curation is thorough but slow: one window at a time, several
-  passes each. Eleven expo videos (about 8 minutes) took 105 minutes on
-  Wonder and 85 on Spark.
+  Curation results are saved per file and come back when the same,
+  unchanged file is imported again; the timeline itself is not saved.
+- Model curation is thorough but slow: several passes per review window.
+  Eleven expo videos (about 8 minutes) took 105 minutes on Wonder and 85
+  on Spark when files were curated one at a time. Up to three files now
+  curate at once on machines with 12 or more cores; that speed-up has
+  not been measured against the live API.
 - Burned-in text (title cards, news bars) is tagged by the model, not
   detected locally; local-only curation cannot exclude it.
 

@@ -12,7 +12,7 @@ use eframe::egui::{
 use openreel_engine::{format_timecode, ClipKind, Orientation};
 use openreel_media::{BeatGrid, MediaInfo, RawFrame};
 
-use super::sweep::{ReviewStatus, SweepData, SweepStatus};
+use super::sweep::{load_curation, ReviewStatus, SweepData, SweepStatus};
 use super::{EditorApp, UiAction};
 use crate::theme;
 
@@ -39,6 +39,8 @@ pub(super) struct ImportedAsset {
     pub(super) peaks: Vec<f32>,
     beats: Option<BeatGrid>,
     thumbs: Vec<(f64, RawFrame)>,
+    /// A saved curation of this exact file. Restoring it is not curating.
+    sweep: Option<SweepData>,
 }
 
 pub(super) enum ImportMsg {
@@ -109,6 +111,7 @@ impl EditorApp {
         let (tx, rx) = channel::<ImportMsg>();
         self.import_rx = Some(rx);
         let ctx = ctx.clone();
+        let store_dir = self.curation_dir.clone();
         thread::spawn(move || {
             for path in &paths {
                 let path_str = path.to_string_lossy().into_owned();
@@ -147,11 +150,15 @@ impl EditorApp {
                                 )
                             })
                             .flatten();
+                        let sweep = store_dir
+                            .as_deref()
+                            .and_then(|dir| load_curation(dir, &path_str));
                         ImportMsg::Ready(Box::new(ImportedAsset {
                             info,
                             peaks,
                             beats,
                             thumbs,
+                            sweep,
                         }))
                     }
                     Err(e) => ImportMsg::Failed(path_str, e),
@@ -206,7 +213,10 @@ impl EditorApp {
                         peaks,
                         beats,
                         thumbs,
+                        sweep,
                     } = *imported;
+                    let restored = sweep.is_some();
+                    let sweep = sweep.unwrap_or_default();
                     let thumb_textures = thumbs
                         .into_iter()
                         .enumerate()
@@ -223,7 +233,11 @@ impl EditorApp {
                             (t, handle)
                         })
                         .collect();
-                    self.status = format!("Imported {}", info.name);
+                    self.status = if restored {
+                        format!("Imported {} with its saved curation.", info.name)
+                    } else {
+                        format!("Imported {}", info.name)
+                    };
                     let ready_path = info.path.clone();
                     // Fill an empty selection only; a background batch
                     // must not take the curator card from the user.
@@ -245,7 +259,7 @@ impl EditorApp {
                             peaks,
                             beats,
                             thumb_textures,
-                            sweep: SweepData::default(),
+                            sweep,
                         };
                     } else {
                         self.assets.push(BinAsset {
@@ -255,7 +269,7 @@ impl EditorApp {
                             peaks,
                             beats,
                             thumb_textures,
-                            sweep: SweepData::default(),
+                            sweep,
                         });
                     }
                     // Import only makes the asset ready. Curation is
