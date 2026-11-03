@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openreel_media::{EvidenceSampler, MediaInfo, MotionSample};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
@@ -25,13 +26,13 @@ pub(super) enum Mode {
     Disabled,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Anchor {
     pub time: f64,
     pub bounds: [f32; 4],
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Check {
     pub concept: String,
     pub reason: String,
@@ -74,14 +75,14 @@ impl Check {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Observation {
     frame: usize,
     time: f64,
     bounds: SamBox,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Detail {
     time: f64,
     object: String,
@@ -90,7 +91,7 @@ struct Detail {
     clipped: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(in crate::app) struct Evidence {
     check: Check,
     times: Vec<f64>,
@@ -244,7 +245,7 @@ impl Evidence {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(in crate::app) struct Usage {
     pub requests: usize,
     pub completed: usize,

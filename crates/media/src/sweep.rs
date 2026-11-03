@@ -15,14 +15,14 @@ use crate::{run, MediaInfo, MediaResult, RawFrame};
 /// Where segment visual evidence came from. `LocalProxy` is real
 /// frame analysis, but it is not a person, face, expression, or SAM
 /// mask detector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualEvidenceSource {
     LocalProxy,
     Sam,
 }
 
 /// Availability of an actual subject-segmentation provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubjectSegmentationStatus {
     Unavailable,
     Ready,
@@ -93,7 +93,7 @@ pub struct FrameVisualEvidence {
 
 /// Segment-level visual evidence passed to the curator. Semantic
 /// fields stay `None` until a real model supplies them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SegmentVisualEvidence {
     pub source: VisualEvidenceSource,
     pub sam_status: SubjectSegmentationStatus,

@@ -22,6 +22,7 @@ openreel-engine = { path = "../engine" }
 openreel-media = { path = "../media" }
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 rquickjs = "0.14"
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 whisper-rs = "0.16"
 ureq = { version = "3", features = ["multipart"] }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
@@ -88,6 +88,9 @@ pub struct EditorApp {
     import_queue: Vec<PathBuf>,
     sweep_rx: Option<Receiver<SweepMsg>>,
     sweep_queue: Vec<String>,
+    /// Shared by every running curation worker; dropped when none run.
+    sweep_tx: Option<Sender<SweepMsg>>,
+    sweep_running: Vec<String>,
     initial_imports: Vec<PathBuf>,
 
     still_decoder: StillDecoder,
@@ -134,6 +137,8 @@ pub struct EditorApp {
     connection_result: Option<Result<(), String>>,
     chat_session: ChatSession,
     persist_session: bool,
+    /// Saved curations; `None` keeps tests away from the user's config.
+    curation_dir: Option<PathBuf>,
     chat_input: String,
     chat_rx: Option<Receiver<(u64, ChatWorkerResult)>>,
     chat_pending: Option<PendingChat>,
@@ -179,6 +184,8 @@ impl EditorApp {
             import_queue: Vec::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
+            sweep_tx: None,
+            sweep_running: Vec::new(),
             initial_imports,
             still_decoder,
             still_rx,
@@ -214,6 +221,7 @@ impl EditorApp {
             connection_result: None,
             chat_session: ChatSession::load(),
             persist_session: true,
+            curation_dir: sweep::default_curation_dir(),
             chat_input: String::new(),
             chat_rx: None,
             chat_pending: None,
@@ -260,6 +268,8 @@ impl EditorApp {
             import_queue: Vec::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
+            sweep_tx: None,
+            sweep_running: Vec::new(),
             initial_imports: Vec::new(),
             still_decoder,
             still_rx,
@@ -295,6 +305,7 @@ impl EditorApp {
             connection_result: None,
             chat_session: ChatSession::new("screenshot"),
             persist_session: false,
+            curation_dir: None,
             chat_input: String::new(),
             chat_rx: None,
             chat_pending: None,
@@ -6250,6 +6261,159 @@ mod tests {
         app.open_curator_gallery();
         app.set_playing(true);
         assert!(!app.curator.open, "playback returns to Program");
+    }
+
+    #[test]
+    fn saved_curation_returns_with_the_same_file_only() {
+        let dir = std::env::temp_dir().join(format!("eddie-saved-curation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two-shots.mp4");
+        let render = |second: &str| {
+            let output = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=64x36:r=10:d=2",
+                ])
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color={second}:s=64x36:r=10:d=2"),
+                ])
+                .args([
+                    "-filter_complex",
+                    "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                    "-map",
+                    "[v]",
+                ])
+                .args(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+        };
+        render("blue");
+        let media = path.to_string_lossy().into_owned();
+        let session = |curate: bool| {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            app.curation_dir = Some(dir.join("store"));
+            app.spawn_import(&ctx, vec![path.clone()]);
+            let deadline = Instant::now() + std::time::Duration::from_secs(120);
+            let mut curated = !curate;
+            loop {
+                app.poll_imports(&ctx);
+                app.poll_sweeps(&ctx);
+                let imported =
+                    app.import_rx.is_none() && app.assets[0].state == media::AssetState::Ready;
+                if imported && !curated {
+                    app.curate_asset(&ctx, media.clone());
+                    curated = true;
+                }
+                if imported && curated && app.sweep_rx.is_none() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "import or curation timed out");
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let state: serde_json::Value = serde_json::from_str(&app.script_state_json()).unwrap();
+            (
+                app.assets[0].sweep.status,
+                state["sweepCandidates"].clone(),
+                state["sceneClips"].clone(),
+            )
+        };
+
+        let (status, candidates, scenes) = session(true);
+        assert_eq!(status, sweep::SweepStatus::Ready);
+        assert!(scenes.as_array().unwrap().len() >= 2, "two shots: {scenes}");
+
+        let (status, restored_candidates, restored_scenes) = session(false);
+        assert_eq!(
+            status,
+            sweep::SweepStatus::Ready,
+            "a reopened file keeps its curation"
+        );
+        assert_eq!(restored_candidates, candidates);
+        assert_eq!(restored_scenes, scenes);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        render("green");
+        let (status, candidates, _) = session(false);
+        assert_eq!(
+            status,
+            sweep::SweepStatus::NotStarted,
+            "a replaced file is not matched"
+        );
+        assert_eq!(candidates, serde_json::json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curate_all_new_overlaps_files_and_finishes_every_one() {
+        let dir =
+            std::env::temp_dir().join(format!("eddie-parallel-curation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let colors = ["red", "green", "blue", "yellow"];
+        for color in colors {
+            let path = dir.join(format!("{color}.mp4"));
+            let output = std::process::Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+                .arg(format!("color={color}:s=64x36:r=10:d=2"))
+                .args(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            app.assets.push(media::BinAsset {
+                info: openreel_media::probe(path.to_str().unwrap()).unwrap(),
+                size_bytes: 0,
+                state: media::AssetState::Ready,
+                peaks: Vec::new(),
+                beats: None,
+                thumb_textures: Vec::new(),
+                sweep: sweep::SweepData::default(),
+            });
+        }
+
+        app.curate_all_new(&ctx);
+        let active = app
+            .assets
+            .iter()
+            .filter(|asset| {
+                asset.sweep.status == sweep::SweepStatus::Running
+                    && !app.sweep_queue.contains(&asset.info.path)
+            })
+            .count();
+        let expected =
+            std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, 3));
+        assert_eq!(active, expected, "several files curate at once");
+        assert_eq!(app.sweep_queue.len(), colors.len() - expected);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        while app.sweep_rx.is_some() || !app.sweep_queue.is_empty() {
+            app.poll_sweeps(&ctx);
+            assert!(Instant::now() < deadline, "curation timed out");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for asset in &app.assets {
+            assert_eq!(
+                asset.sweep.status,
+                sweep::SweepStatus::Ready,
+                "{}",
+                asset.info.name
+            );
+            assert!(!asset.sweep.scene_clips.is_empty(), "{}", asset.info.name);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
