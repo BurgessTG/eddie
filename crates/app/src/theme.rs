@@ -466,3 +466,111 @@ pub fn divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), Sense::hover());
     ui.painter().rect_filled(rect, 0, BORDER);
 }
+
+// -- logo ----------------------------------------------------------------------
+/// The Eddie mark: three timeline clips forming an E, crossed by a violet
+/// playhead whose tip points down. Units are a 1×1 box; the menu bar paints
+/// it and the window icon rasterizes the same shapes.
+pub const LOGO_CLIP: Color32 = Color32::from_rgb(0xFF, 0xEE, 0xEF);
+pub const LOGO_PLAYHEAD: Color32 = Color32::from_rgb(0x8B, 0x5C, 0xF6);
+/// Clip capsules as [x, y, width, height].
+const MARK_CLIPS: [[f32; 4]; 3] = [
+    [0.1027, 0.1724, 0.8477, 0.2126],
+    [0.0496, 0.4784, 0.6782, 0.2155],
+    [0.1027, 0.7845, 0.8477, 0.2155],
+];
+/// Playhead line [x, y, width, height] and its downward tip.
+const MARK_LINE: [f32; 4] = [0.2967, 0.0632, 0.0187, 0.9368];
+const MARK_TIP: [[f32; 2]; 3] = [[0.2364, 0.0], [0.3757, 0.0], [0.3060, 0.0776]];
+
+/// Paint the mark into `rect` (square), the brand slot in the menu bar.
+pub fn paint_mark(painter: &egui::Painter, rect: egui::Rect) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    for [x, y, w, h] in MARK_CLIPS {
+        let r = egui::Rect::from_min_max(at(x, y), at(x + w, y + h));
+        painter.rect_filled(r, CornerRadius::same((r.height() / 2.0) as u8), LOGO_CLIP);
+    }
+    // At menu-bar size the playhead keeps a visible width and tip.
+    let size = rect.width();
+    let [x, y, w, h] = MARK_LINE;
+    let (center, half) = (at(x + w / 2.0, 0.0).x, (w * size).max(1.6) / 2.0);
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(center - half, at(0.0, y).y),
+            egui::pos2(center + half, at(0.0, y + h).y),
+        ),
+        CornerRadius::ZERO,
+        LOGO_PLAYHEAD,
+    );
+    let tip = (0.0697 * size).max(3.2);
+    let top = rect.min.y - (tip * 1.11 - 0.0776 * size).max(0.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center - tip, top),
+            egui::pos2(center + tip, top),
+            egui::pos2(center, top + tip * 1.11),
+        ],
+        LOGO_PLAYHEAD,
+        Stroke::NONE,
+    ));
+}
+
+/// The window icon: the mark on a dark rounded tile, `size`² RGBA,
+/// 4×4 supersampled.
+pub fn icon_rgba(size: u32) -> Vec<u8> {
+    let inside_capsule = |px: f32, py: f32, [x, y, w, h]: [f32; 4]| {
+        let r = h / 2.0;
+        let cx = px.clamp(x + r, x + w - r);
+        (px - cx).powi(2) + (py - (y + r)).powi(2) <= r * r
+    };
+    let inside_rect =
+        |px: f32, py: f32, [x, y, w, h]: [f32; 4]| px >= x && px <= x + w && py >= y && py <= y + h;
+    let inside_tip = |px: f32, py: f32| {
+        let [a, b, c] = MARK_TIP;
+        let side =
+            |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0]);
+        let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+        !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+    };
+    // The mark sits inside the tile with padding; the tile has round corners.
+    let (pad, radius) = (0.17, 0.22);
+    let tile = SURFACE;
+    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let mut sum = [0.0_f32; 4];
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let u = (x as f32 + (sx as f32 + 0.5) / 4.0) / size as f32;
+                    let v = (y as f32 + (sy as f32 + 0.5) / 4.0) / size as f32;
+                    let (cu, cv) = (u.clamp(radius, 1.0 - radius), v.clamp(radius, 1.0 - radius));
+                    if (u - cu).powi(2) + (v - cv).powi(2) > radius * radius {
+                        continue;
+                    }
+                    let (mx, my) = ((u - pad) / (1.0 - 2.0 * pad), (v - pad) / (1.0 - 2.0 * pad));
+                    let color = if inside_rect(mx, my, MARK_LINE) || inside_tip(mx, my) {
+                        LOGO_PLAYHEAD
+                    } else if MARK_CLIPS.iter().any(|clip| inside_capsule(mx, my, *clip)) {
+                        LOGO_CLIP
+                    } else {
+                        tile
+                    };
+                    for (total, channel) in sum.iter_mut().zip(color.to_array()) {
+                        *total += f32::from(channel);
+                    }
+                }
+            }
+            // Accumulated colour is premultiplied by coverage; unpremultiply.
+            let alpha = sum[3] / 16.0;
+            for channel in &sum[..3] {
+                out.push(if alpha > 0.0 {
+                    (channel / sum[3] * 255.0).round() as u8
+                } else {
+                    0
+                });
+            }
+            out.push(alpha.round() as u8);
+        }
+    }
+    out
+}
