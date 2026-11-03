@@ -54,6 +54,17 @@ unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
     pub fn open(path: &str, target_w: u32, fast: bool) -> MediaResult<Self> {
+        Self::open_threaded(path, target_w, fast, ffmpeg::codec::threading::Type::Frame)
+    }
+
+    /// Frame threading pipelines consecutive pictures; slice threading
+    /// splits one picture, which is what isolated keyframes need.
+    fn open_threaded(
+        path: &str,
+        target_w: u32,
+        fast: bool,
+        threading: ffmpeg::codec::threading::Type,
+    ) -> MediaResult<Self> {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
         let (stream_index, time_base, stream_start, parameters, turns) = {
@@ -97,7 +108,7 @@ impl VideoDecoder {
         let mut context = ffmpeg::codec::context::Context::from_parameters(parameters)
             .map_err(|e| err("decoder parameters", e))?;
         context.set_threading(ffmpeg::codec::threading::Config {
-            kind: ffmpeg::codec::threading::Type::Frame,
+            kind: threading,
             count: 0, // libavcodec chooses based on CPU cores.
         });
         let decoder = context
@@ -367,6 +378,53 @@ pub(crate) fn clockwise_turns(degrees: f64) -> u8 {
     } else {
         0
     }
+}
+
+/// Filmstrip stills at `times` (ascending), keyed by each still's PTS.
+/// A sample within `tolerance` after its keyframe shows that keyframe,
+/// decoding keyframes only; a sample deep inside a long GOP (or without an
+/// index) decodes forward to its exact picture instead.
+pub(crate) fn filmstrip_stills(
+    path: &str,
+    times: &[f64],
+    target_w: u32,
+    tolerance: f64,
+) -> MediaResult<Vec<(f64, RawFrame)>> {
+    let mut decoder =
+        VideoDecoder::open_threaded(path, target_w, true, ffmpeg::codec::threading::Type::Slice)?;
+    let mut stills: Vec<(f64, RawFrame)> = Vec::new();
+    let mut position: Option<f64> = None;
+    for &time in times {
+        let key = decoder.keyframe_before(time);
+        let same_gop = matches!((position, key), (Some(at), Some(key)) if key <= at);
+        if key.is_some_and(|key| time - key <= tolerance) {
+            if same_gop {
+                continue; // The previous still is this time's keyframe.
+            }
+            decoder.decoder.skip_frame(ffmpeg::Discard::NonKey);
+            // The backward seek lands on the keyframe at or before `time`;
+            // take it without decoding the next one to bound its interval.
+            decoder.seek(time)?;
+            decoder.seek_target = None;
+        } else {
+            decoder.decoder.skip_frame(ffmpeg::Discard::Default);
+            if same_gop || (key.is_none() && position.is_some()) {
+                decoder.skip_to(time);
+            } else {
+                decoder.seek(time)?;
+            }
+        }
+        let Some(pts) = decoder.next_decoded()? else {
+            break;
+        };
+        position = Some(pts);
+        if stills.last().is_some_and(|(last, _)| *last >= pts) {
+            continue;
+        }
+        let frame = decoder.scale_decoded_into(Vec::new())?;
+        stills.push((pts, frame));
+    }
+    Ok(stills)
 }
 
 /// One-shot still frame through the in-process decoder.
