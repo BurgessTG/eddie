@@ -2,6 +2,7 @@
 //! thumbnail/waveform processing, and the image grid.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, TryRecvError};
 use std::thread;
 
@@ -113,61 +114,21 @@ impl EditorApp {
         let ctx = ctx.clone();
         let store_dir = self.curation_dir.clone();
         thread::spawn(move || {
-            for path in &paths {
-                let path_str = path.to_string_lossy().into_owned();
-                let msg = match openreel_media::probe(&path_str) {
-                    Ok(info) => {
-                        if tx.send(ImportMsg::Probed(Box::new(info.clone()))).is_err() {
-                            return;
+            // Files import concurrently; placeholders already hold bin
+            // order. Each 4K thumbnail pass uses several slice threads.
+            let next = AtomicUsize::new(0);
+            let workers = paths.len().min(4);
+            thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(|| {
+                        while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            if !import_one(path, &tx, &ctx, store_dir.as_deref()) {
+                                return;
+                            }
                         }
-                        ctx.request_repaint();
-                        let peaks = if info.has_audio {
-                            openreel_media::waveform_peaks(
-                                &path_str,
-                                info.duration,
-                                openreel_media::WAVEFORM_PEAKS_PER_SEC,
-                            )
-                            .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        let thumbs = if info.has_video {
-                            openreel_media::thumbnails(
-                                &path_str,
-                                info.width,
-                                info.height,
-                                info.duration,
-                            )
-                            .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        let beats = (!info.has_video)
-                            .then(|| {
-                                openreel_media::beat_grid(
-                                    &peaks,
-                                    f64::from(openreel_media::WAVEFORM_PEAKS_PER_SEC),
-                                )
-                            })
-                            .flatten();
-                        let sweep = store_dir
-                            .as_deref()
-                            .and_then(|dir| load_curation(dir, &path_str));
-                        ImportMsg::Ready(Box::new(ImportedAsset {
-                            info,
-                            peaks,
-                            beats,
-                            thumbs,
-                            sweep,
-                        }))
-                    }
-                    Err(e) => ImportMsg::Failed(path_str, e),
-                };
-                if tx.send(msg).is_err() {
-                    return;
+                    });
                 }
-                ctx.request_repaint();
-            }
+            });
             let _ = tx.send(ImportMsg::Finished);
             ctx.request_repaint();
         });
@@ -1054,4 +1015,59 @@ fn format_duration(seconds: f64) -> String {
 
 fn count(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Probe, waveform and thumbnails for one file. False once the app has
+/// dropped the receiver.
+fn import_one(
+    path: &PathBuf,
+    tx: &std::sync::mpsc::Sender<ImportMsg>,
+    ctx: &egui::Context,
+    store_dir: Option<&std::path::Path>,
+) -> bool {
+    let path_str = path.to_string_lossy().into_owned();
+    let msg = match openreel_media::probe(&path_str) {
+        Ok(info) => {
+            if tx.send(ImportMsg::Probed(Box::new(info.clone()))).is_err() {
+                return false;
+            }
+            ctx.request_repaint();
+            let peaks = if info.has_audio {
+                openreel_media::waveform_peaks(
+                    &path_str,
+                    info.duration,
+                    openreel_media::WAVEFORM_PEAKS_PER_SEC,
+                )
+                .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let thumbs = if info.has_video {
+                openreel_media::thumbnails(&path_str, info.width, info.height, info.duration)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let beats = (!info.has_video)
+                .then(|| {
+                    openreel_media::beat_grid(
+                        &peaks,
+                        f64::from(openreel_media::WAVEFORM_PEAKS_PER_SEC),
+                    )
+                })
+                .flatten();
+            let sweep = store_dir.and_then(|dir| load_curation(dir, &path_str));
+            ImportMsg::Ready(Box::new(ImportedAsset {
+                info,
+                peaks,
+                beats,
+                thumbs,
+                sweep,
+            }))
+        }
+        Err(e) => ImportMsg::Failed(path_str, e),
+    };
+    let sent = tx.send(msg).is_ok();
+    ctx.request_repaint();
+    sent
 }

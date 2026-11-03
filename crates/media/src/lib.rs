@@ -237,54 +237,14 @@ pub fn thumbnails(
     src_h: u32,
     duration: f64,
 ) -> MediaResult<Vec<(f64, RawFrame)>> {
-    let target_w = 144;
-    let target_h = scaled_height(src_w, src_h, target_w);
-    let interval = (duration / 90.0).max(2.0);
-    let frame_bytes = (target_w * target_h * 4) as usize;
-    if frame_bytes == 0 {
+    if scaled_height(src_w, src_h, 144) == 0 {
         return Ok(Vec::new());
     }
-    // Stream frames off the pipe instead of buffering the whole strip.
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-i",
-            path,
-            "-vf",
-            &format!("fps=1/{interval:.3},scale={target_w}:{target_h}:flags=fast_bilinear"),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ffmpeg stdout unavailable".to_owned())?;
-    let mut frames = Vec::new();
-    loop {
-        let mut rgba = vec![0_u8; frame_bytes];
-        if stdout.read_exact(&mut rgba).is_err() {
-            break;
-        }
-        frames.push((
-            frames.len() as f64 * interval,
-            RawFrame {
-                width: target_w,
-                height: target_h,
-                rgba,
-            },
-        ));
-    }
-    let status = child.wait().map_err(|e| format!("ffmpeg wait: {e}"))?;
-    if frames.is_empty() && !status.success() {
+    let interval = (duration / 90.0).max(2.0);
+    let count = (duration / interval).ceil().max(1.0) as usize;
+    let times: Vec<f64> = (0..count).map(|i| i as f64 * interval).collect();
+    let frames = decode::filmstrip_stills(path, &times, 144, interval)?;
+    if frames.is_empty() {
         return Err("thumbnail decode failed".to_owned());
     }
     Ok(frames)
@@ -638,6 +598,11 @@ mod tests {
         let thumbs =
             thumbnails(&video_path, video.width, video.height, video.duration).expect("thumbs");
         assert!(thumbs.len() >= 5, "{}", thumbs.len());
+        // Keyed by each still's own PTS: ascending, inside the source.
+        assert!(thumbs.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(thumbs
+            .iter()
+            .all(|(t, _)| (0.0..video.duration).contains(t)));
 
         // Realtime playback pieces: the paced frame stream must deliver
         // correctly sized frames, and the audio player must start (silently).
