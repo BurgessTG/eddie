@@ -732,7 +732,9 @@ fn textured_bt601_sources_keep_their_average_color_through_export() {
     for range in ["tv", "pc"] {
         let source = fixture.video(
             &format!("bt601-{range}.mp4"),
-            "gradients=s=320x180:r=10:d=0.3:seed=7",
+            // seed controls geometry, not the default random colors. Pin both
+            // endpoints so each run and both ranges exercise the same picture.
+            "gradients=s=320x180:r=10:d=0.3:seed=7:c0=0xD14C29:c1=0x2369BD",
             &format!(
                 "scale=out_color_matrix=bt601:out_range={range},format=yuv420p,\
                  setparams=colorspace=smpte170m:range={range}"
@@ -774,8 +776,8 @@ fn textured_bt601_sources_keep_their_average_color_through_export() {
             let bias = bias.map(|sum| sum / pixels);
             eprintln!("BT.601 {range} frame {index}: mean RGB bias {bias:?}");
             assert!(
-                // Run-to-run encoder noise reaches about ±0.55; the bug
-                // shifted green by 1.15-1.75.
+                // Allow lossy encode/round-trip error, but not the green shift
+                // from BT.601 to BT.709 without full chroma interpolation.
                 bias.iter().all(|value| value.abs() < 0.9),
                 "BT.601 {range} frame {index}: mean RGB bias {bias:?} (limit 0.9)"
             );
