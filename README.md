@@ -151,8 +151,9 @@ detailed curator contract.
 - Model curation is thorough but slow: several passes per review window.
   Eleven expo videos (about 8 minutes) took 105 minutes on Wonder and 85
   on Spark when files were curated one at a time. Up to three files now
-  curate at once on machines with 12 or more cores; that speed-up has
-  not been measured against the live API.
+  curate at once on machines with 12 or more cores, and each file keeps
+  three requests in flight (2.6x faster against a fixture with 250 ms of
+  latency). Neither speed-up has been measured against the live API.
 - Burned-in text (title cards, news bars) is tagged by the model, not
   detected locally; local-only curation cannot exclude it.
 

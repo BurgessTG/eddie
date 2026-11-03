@@ -2457,7 +2457,6 @@ fn provider_failure_stops_new_batches_without_discarding_completed_reviews() {
                 json!({"error":{"message":"private provider detail"}}).to_string(),
             );
         }
-        assert_eq!(calls, 1, "stop after a provider failure");
         completion(
             input_windows(&request.json())
                 .iter()
@@ -2476,8 +2475,15 @@ fn provider_failure_stops_new_batches_without_discarding_completed_reviews() {
                 && request.json()["response_format"]["json_schema"]["name"] == "curation"
         })
         .collect();
-    assert_eq!(posted.len(), 2);
-    let accepted = input_windows(&posted[0].json()).len();
+    // Ten batches of eight windows, three in flight at a time: the failure
+    // stops every later batch, while batches already in flight finish.
+    assert!((2..=3).contains(&posted.len()), "{}", posted.len());
+    let accepted: usize = posted
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 1)
+        .map(|(_, request)| input_windows(&request.json()).len())
+        .sum();
     assert_eq!(
         data.candidates
             .iter()

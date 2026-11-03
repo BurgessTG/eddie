@@ -257,6 +257,16 @@ pub(in crate::app) struct Usage {
 }
 
 impl Usage {
+    pub fn absorb(&mut self, other: Usage) {
+        self.requests += other.requests;
+        self.completed += other.completed;
+        self.failed += other.failed;
+        self.metered += other.metered;
+        self.requested_frames += other.requested_frames;
+        self.billed_frames = self.billed_frames.saturating_add(other.billed_frames);
+        self.billed_images = self.billed_images.saturating_add(other.billed_images);
+    }
+
     pub fn json(&self) -> Value {
         json!({"requests":self.requests, "completed":self.completed, "failed":self.failed,
             "meteredRequests":self.metered, "requestedFrames":self.requested_frames,
