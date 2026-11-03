@@ -1,5 +1,7 @@
 # Eddie
 
+*The editor that watches the footage for you.*
+
 [![CI](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml/badge.svg)](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml)
 
 A fast desktop video editor with an AI clip curator. Rust end to end:
