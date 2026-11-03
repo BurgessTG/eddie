@@ -1584,6 +1584,12 @@ impl EditorApp {
                         .ok_or_else(|| format!("clip {clip} audio is already detached"))?,
                 );
             }
+            ScriptCommand::SetClipLane { clip, lane } => {
+                if self.timeline.clip(clip).is_none() || lane > 64 {
+                    return Err(format!("cannot move clip {clip} to lane {lane}"));
+                }
+                self.timeline.set_clip_track(clip, lane as usize);
+            }
             ScriptCommand::UnlinkClip { clip } => {
                 if !self.timeline.unlink_clip(clip) {
                     return Err(format!("clip {clip} is not linked"));
