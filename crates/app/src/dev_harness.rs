@@ -845,6 +845,9 @@ impl HeadlessEditor {
                         }
                     }
                 }
+                ScriptCommand::SetClipLane { clip, lane } => {
+                    self.timeline.set_clip_track(clip, lane as usize);
+                }
                 ScriptCommand::UnlinkClip { clip } => {
                     if !self.timeline.unlink_clip(clip) {
                         notes.push(format!("error: clip {clip} is not linked"));

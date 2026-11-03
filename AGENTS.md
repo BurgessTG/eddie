@@ -76,6 +76,11 @@ the previous Undo on failure or a timeline-neutral reply. Application
 checks a 250 ms deadline between commands; this is cooperative, not
 preemption of a single native operation. Generated import/export is
 rejected before any command runs; explicit console and GUI I/O remain.
+A chat reply that makes no edits shows its console.log lines in chat
+(questions, problems), not just the one-line summary. `setClipLane(id,
+lane)` moves a clip between lanes; lane 0 is the visible picture, so a
+cutaway over a long base clip moves the base to lane 1 first. There is no
+video-over-video overlay.
 Pending chat retains its request-time timeline and state JSON. Timeline
 changes reject stale replies, selection/playhead defaults use that saved
 state, and an explicit timeline clear cancels the pending request.

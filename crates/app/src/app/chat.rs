@@ -309,8 +309,9 @@ You edit a video timeline inside Eddie by writing JavaScript. \
 Reply with a single JSON object {\"code\": \"...\", \"explanation\": \"...\"} and nothing else. \
 \"code\" is executable JavaScript only, with no markdown fences inside it, ending with exactly one console.log(\"Done — ...\") line. \
 \"explanation\" is one short plain-language summary for the user. \
+If you make no edits because you need the user's decision or cannot do part of the request, the code makes no edits and console.logs each problem or question as its own plain sentence before the Done line; the user sees those lines. \
 Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
-selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), \
+selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), setClipLane(id, lane), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
 setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
@@ -327,7 +328,7 @@ For “build the montage from the sweep”, replace the current timeline clips w
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
 Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
-Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Times are seconds. \
+Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Where video clips overlap, the lowest lane index is the picture shown (lane 0 wins), and a lower-opacity winner fades to black, never revealing another lane: there is no picture-in-picture or video overlay. To cut away from a long base clip (an interview, a monologue) and keep its sound, first setClipLane(baseId, 1), then add the cutaway, then setClipLane(cutawayHandle, 0) and setEmbeddedAudio(cutawayHandle, false) if its own sound is unwanted. Times are seconds. \
 For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
 Refer to clips, sweep candidates, and transcript segments by the ids in state(). Do not invent ids or asset names. \
 Top-level const/let are isolated per checked chat eval, so retries may reuse names. \
@@ -1388,6 +1389,11 @@ impl EditorApp {
                 };
                 match engine.eval_checked(&js, &state) {
                     Ok((_, commands)) => {
+                        // A reply without edits is a report or a question; its
+                        // details are in the script's log, not the summary.
+                        let reports = commands
+                            .iter()
+                            .all(|command| matches!(command, ScriptCommand::Log(_)));
                         let command_count = commands.len();
                         let result = self.apply_edit_commands(ctx, commands);
                         self.chat_pending = None;
@@ -1395,13 +1401,28 @@ impl EditorApp {
                             Err(error) => {
                                 format!("No changes made: {}.", error.trim_end_matches('.'))
                             }
-                            Ok(notes) => edit
-                                .explanation
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or_else(|| summarize_chat_result(&notes, command_count)),
+                            Ok(notes) => {
+                                let summary = edit
+                                    .explanation
+                                    .filter(|text| !text.trim().is_empty())
+                                    .unwrap_or_else(|| {
+                                        summarize_chat_result(&notes, command_count)
+                                    });
+                                let details = notes.iter().map(|note| note.trim()).filter(|note| {
+                                    reports
+                                        && !note.is_empty()
+                                        && !note.starts_with("Done")
+                                        && *note != summary
+                                });
+                                std::iter::once(summary.as_str())
+                                    .chain(details)
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            }
                         };
-                        self.push_chat(ChatRole::Assistant, message.clone());
-                        self.status = message;
+                        // The status bar keeps one line; chat keeps the report.
+                        self.status = message.lines().next().unwrap_or_default().to_owned();
+                        self.push_chat(ChatRole::Assistant, message);
                     }
                     Err(error) => {
                         let should_retry = self
@@ -2590,6 +2611,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_without_edits_shows_the_models_questions() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "console.log('The monologue has no transcript yet. Curate it first?'); \
+             console.log('Overlays over a picture are not supported; use full-screen cutaways?'); \
+             console.log('Done — waiting for your answers.');",
+        );
+        assert_eq!(app.status, "Edited the timeline.");
+        assert_eq!(
+            app.chat_session.messages.last().unwrap().text,
+            "Edited the timeline.\nThe monologue has no transcript yet. Curate it first?\n\
+             Overlays over a picture are not supported; use full-screen cutaways?"
+        );
+    }
+
+    #[test]
     fn local_montage_skips_ranges_with_burned_in_text() {
         use super::super::sweep;
         let ctx = egui::Context::default();
@@ -2645,6 +2687,52 @@ mod tests {
         app.dispatch_intent(&ctx, "by-score");
         let placed: Vec<_> = app.timeline.clips.iter().map(|c| c.source_in).collect();
         assert_eq!(placed, vec![4.0]);
+    }
+
+    #[test]
+    fn a_cutaway_moved_to_lane_zero_shows_over_the_base_clip() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        for name in ["talk.mp4", "broll.mp4"] {
+            app.assets.push(super::super::media::BinAsset {
+                info: openreel_media::MediaInfo {
+                    path: name.to_owned(),
+                    name: name.to_owned(),
+                    duration: 20.0,
+                    width: 320,
+                    height: 180,
+                    fps: 30.0,
+                    has_video: true,
+                    has_audio: true,
+                },
+                size_bytes: 0,
+                state: AssetState::Ready,
+                peaks: Vec::new(),
+                beats: None,
+                thumb_textures: Vec::new(),
+                sweep: super::super::sweep::SweepData::default(),
+            });
+        }
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "var talk = addAssetRange('talk.mp4', 0, 0, 12); setClipLane(talk, 1); \
+             var cut = addAssetRange('broll.mp4', 4, 2, 3); setClipLane(cut, 0); \
+             setEmbeddedAudio(cut, false); console.log('Done — cut away.');",
+        );
+        let shown = |t: f64| app.timeline.active_video(t).map(|c| c.name.clone());
+        assert_eq!(shown(2.0).as_deref(), Some("talk.mp4"));
+        assert_eq!(shown(5.0).as_deref(), Some("broll.mp4"));
+        assert_eq!(shown(8.0).as_deref(), Some("talk.mp4"));
+        let cut = app
+            .timeline
+            .clips
+            .iter()
+            .find(|c| c.name == "broll.mp4")
+            .unwrap();
+        assert!(!cut.embedded_audio);
     }
 
     #[test]

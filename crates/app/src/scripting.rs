@@ -62,6 +62,10 @@ pub enum ScriptCommand {
     UnlinkClip {
         clip: u64,
     },
+    SetClipLane {
+        clip: u64,
+        lane: u64,
+    },
     SetEmbeddedAudio {
         clip: u64,
         enabled: bool,
@@ -129,6 +133,7 @@ impl ScriptCommand {
             | Self::SetFade { clip, .. }
             | Self::DetachAudio { clip }
             | Self::UnlinkClip { clip }
+            | Self::SetClipLane { clip, .. }
             | Self::SetEmbeddedAudio { clip, .. }
             | Self::TightenSilence { clip, .. }
             | Self::SetTitleStyle { clip, .. }
@@ -189,6 +194,7 @@ impl ScriptCommand {
             | Self::RenameClip { .. }
             | Self::DetachAudio { .. }
             | Self::UnlinkClip { .. }
+            | Self::SetClipLane { .. }
             | Self::SetEmbeddedAudio { .. }
             | Self::SetTitleStyle { .. }
             | Self::AddCaptionsForClip { .. }
@@ -317,7 +323,7 @@ function help() {
     "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments()",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
-    "moveClip(id, start) trimClip(id, left, right)  // -1 keeps an edge",
+    "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",
     "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec)",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
@@ -469,6 +475,10 @@ impl ScriptEngine {
                 reg!("unlinkClip", move |clip: u64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::UnlinkClip { clip }));
+                let q = Rc::clone(&queue);
+                reg!("setClipLane", move |clip: u64, lane: u64| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::SetClipLane { clip, lane }));
                 let q = Rc::clone(&queue);
                 reg!("setEmbeddedAudio", move |clip: u64, enabled: bool| q
                     .borrow_mut()
