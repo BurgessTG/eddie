@@ -3016,21 +3016,10 @@ enum ToolIcon {
     Undo,
 }
 
-/// App mark: a rounded tile with a play notch, drawn as shapes.
+/// App mark (timeline-clip E with a playhead), drawn as shapes.
 fn brand_mark(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(6), theme::FOREGROUND);
-    let c = rect.center() + Vec2::new(1.0, 0.0);
-    painter.add(Shape::convex_polygon(
-        vec![
-            c + Vec2::new(-4.0, -5.5),
-            c + Vec2::new(5.5, 0.0),
-            c + Vec2::new(-4.0, 5.5),
-        ],
-        theme::BACKGROUND,
-        Stroke::NONE,
-    ));
+    theme::paint_mark(ui.painter(), rect);
 }
 
 /// Titled card grouping related inspector controls.
