@@ -455,7 +455,9 @@ hidden folder beside the output, removed on every return path. Batches in
 flight come from the CPU budget (cgroup quota included): one below 12
 CPUs, at most three. On a 4-CPU orb one batch saturates the CPUs; two
 or four were slower (54 s, 60 s vs 47 s) and used 1.5 GB and 3.0 GB, not
-0.9 GB. Speedup on 16 cores is not yet measured. x264 threads follow
+0.9 GB. On a 16-thread Ryzen 7 3700X the untagged 60 s, 29-cut montage
+took 32 s with one batch, 24.5 s with two (the default there), and about
+24 s with three or four at +0.8 GB peak RSS each. x264 threads follow
 that budget; its 16-core default raised peak RSS from 0.83 to 1.28 GB. A
 branch
 starts at its first visible output frame, not at batch time zero, and
