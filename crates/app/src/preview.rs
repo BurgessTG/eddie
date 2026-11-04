@@ -25,7 +25,7 @@ pub fn paint(
     audio_peaks: Option<(&[f32], f64)>,
     canvas: (u32, u32),
     has_media: bool,
-) {
+) -> Option<(openreel_engine::ClipId, Rect)> {
     let video = timeline.active_video(playhead);
     let audio = timeline
         .clips
@@ -130,7 +130,9 @@ pub fn paint(
             }
         }
         painter.galley(top_left, galley, color);
+        return Some((title.id, Rect::from_min_size(top_left, size).expand(border)));
     }
+    None
 }
 
 fn paint_audio_waveform(

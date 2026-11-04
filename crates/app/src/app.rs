@@ -166,6 +166,8 @@ pub struct EditorApp {
     show_chat: bool,
     right_tab: RightTab,
     prev_selected: Option<ClipId>,
+    /// Focus the Details text box next frame (monitor caption double-click).
+    focus_title_text: bool,
     show_chat_settings: bool,
     show_chat_debug: bool,
     last_generated_js: String,
@@ -257,6 +259,7 @@ impl EditorApp {
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
+            focus_title_text: false,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -347,6 +350,7 @@ impl EditorApp {
             show_chat: true,
             right_tab: RightTab::Chat,
             prev_selected: None,
+            focus_title_text: false,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -2480,12 +2484,33 @@ impl EditorApp {
                     Some(path) => format!("{kind_label} clip name\nSource: {path}"),
                     None => format!("{kind_label} clip name"),
                 };
-                ui.add(
-                    egui::TextEdit::singleline(&mut clip.name)
-                        .desired_width(f32::INFINITY)
-                        .margin(egui::Margin::symmetric(8, 6)),
-                )
-                .on_hover_text(hover);
+                if clip.kind == ClipKind::Title {
+                    // A title's name is its on-screen text: wrap it so long
+                    // captions are readable. Export renders one line, so
+                    // Enter and pasted line breaks become spaces.
+                    let text = ui
+                        .add(
+                            egui::TextEdit::multiline(&mut clip.name)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(2)
+                                .return_key(None)
+                                .margin(egui::Margin::symmetric(8, 6)),
+                        )
+                        .on_hover_text("On-screen text");
+                    if text.changed() && clip.name.contains(['\n', '\r']) {
+                        clip.name = clip.name.replace(['\r', '\n'], " ");
+                    }
+                    if std::mem::take(&mut self.focus_title_text) {
+                        text.request_focus();
+                    }
+                } else {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut clip.name)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 6)),
+                    )
+                    .on_hover_text(hover);
+                }
             });
             ui.add_space(10.0);
             let is_audio = clip.kind == ClipKind::Audio;
@@ -2798,7 +2823,7 @@ impl EditorApp {
                     .and_then(|c| c.source.as_ref())
                     .and_then(|s| self.asset(s))
                     .map(|a| (a.peaks.as_slice(), a.info.duration));
-                preview::paint(
+                let shown_title = preview::paint(
                     ui,
                     rect,
                     &self.timeline,
@@ -2818,6 +2843,17 @@ impl EditorApp {
                     ),
                     !self.assets.is_empty(),
                 );
+                if let Some((title_id, title_rect)) = shown_title {
+                    let title = ui
+                        .interact(title_rect, ui.id().with("monitor_title"), Sense::click())
+                        .on_hover_text("Double-click to edit this text");
+                    if title.double_clicked() {
+                        self.selected = Some(title_id);
+                        self.show_inspector = true;
+                        self.right_tab = RightTab::Details;
+                        self.focus_title_text = true;
+                    }
+                }
 
                 ui.add_space(4.0);
                 let row = ui.available_rect_before_wrap();
@@ -4301,6 +4337,68 @@ mod tests {
                     });
             });
         }
+    }
+
+    #[test]
+    fn double_clicking_a_monitor_caption_opens_its_text_for_editing() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let text = "A person talking stays a person talking";
+        let title = app
+            .timeline
+            .add_clip(text, ClipKind::Title, 0, 0.0, 4.0, 0.0);
+        app.playhead = 1.0;
+        let mut time = 0.0;
+        let mut render = |app: &mut EditorApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1280.0, 720.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.right_dock(ctx);
+                    app.central(ctx);
+                },
+            )
+        };
+        render(&mut app, Vec::new());
+        let output = render(&mut app, Vec::new());
+        let caption = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Text(t) if t.galley.text() == text => {
+                    Some(t.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("caption on the monitor");
+        assert_eq!(app.right_tab, RightTab::Chat);
+        let click = |pressed| pointer_button(caption.x, caption.y, pressed);
+        render(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(caption),
+                click(true),
+                click(false),
+            ],
+        );
+        render(&mut app, vec![click(true), click(false)]);
+        assert_eq!(app.selected, Some(title));
+        assert_eq!(app.right_tab, RightTab::Details);
+        render(&mut app, Vec::new());
+        render(&mut app, vec![egui::Event::Text(" now".into())]);
+        assert_eq!(
+            app.timeline.clip(title).unwrap().name,
+            format!("{text} now"),
+            "typing goes into the focused text box"
+        );
     }
 
     #[test]
