@@ -462,6 +462,67 @@ fn native_decoder_uses_the_source_color_matrix_and_range() {
     }
 }
 
+/// A contact sheet shows each cell's source picture at its time, darkens
+/// faded pictures, leaves pictureless cells black, and draws titles over
+/// the picture as export places them.
+#[test]
+fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
+    use openreel_media::{contact_sheet, SheetCell};
+    let fixture = make_color_segments_video();
+    let path = fixture.path.to_str().unwrap().to_owned();
+    let cell = |picture: Option<f64>, opacity: f32, title: Option<&str>| SheetCell {
+        picture: picture.map(|time| (path.clone(), time)),
+        opacity,
+        title: title.map(|text| (text.to_owned(), openreel_engine::TitleStyle::Caption, 1.0)),
+        label: "cell".to_owned(),
+    };
+    let cells = [
+        cell(Some(2.5), 1.0, None),         // blue, before red in source
+        cell(Some(0.5), 1.0, None),         // red
+        cell(Some(1.5), 0.5, None),         // lime at half opacity
+        cell(None, 1.0, None),              // gap
+        cell(Some(3.5), 1.0, Some("WWWW")), // white under a caption
+    ];
+    let jpeg = contact_sheet(&cells, (1920, 1080)).expect("contact sheet");
+    let sheet = fixture.dir.join("sheet.jpg");
+    std::fs::write(&sheet, &jpeg).unwrap();
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&sheet)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .expect("decode sheet");
+    // Four 384x216 cells per row, a 4 px gutter and a 26 px label strip.
+    let (width, cell_w, cell_h) = (4 * 384 + 5 * 4, 384, 216);
+    assert_eq!(out.stdout.len(), width * (2 * (cell_h + 26) + 3 * 4) * 3);
+    let at = |index: usize, fx: f64, fy: f64| {
+        let x = 4 + (index % 4) * (cell_w + 4) + (fx * cell_w as f64) as usize;
+        let y = 4 + (index / 4) * (cell_h + 26 + 4) + (fy * cell_h as f64) as usize;
+        let i = (y * width + x) * 3;
+        (
+            out.stdout[i] as f64,
+            out.stdout[i + 1] as f64,
+            out.stdout[i + 2] as f64,
+        )
+    };
+    assert_color(at(0, 0.5, 0.3), 2, "cell 0");
+    assert_color(at(1, 0.5, 0.3), 0, "cell 1");
+    let faded = at(2, 0.5, 0.3);
+    assert!(
+        (100.0..156.0).contains(&faded.1) && faded.0 < 24.0,
+        "half-opacity lime: {faded:?}"
+    );
+    let gap = at(3, 0.5, 0.3);
+    assert!(gap.0 + gap.1 + gap.2 < 24.0, "gap cell: {gap:?}");
+    assert_color(at(4, 0.5, 0.3), 3, "cell 4 picture");
+    // The caption's dark box sits near the bottom centre of a white picture.
+    let caption = (0..cell_w)
+        .map(|x| at(4, x as f64 / cell_w as f64, 1.0 - 90.0 / 1080.0 + 0.02))
+        .filter(|rgb| rgb.0 < 160.0)
+        .count();
+    assert!(caption > 20, "no caption box drawn ({caption} dark pixels)");
+}
+
 /// Scrubbing reuses one decoder: forward steps decode on, backward steps
 /// read recent pictures, other moves seek, and the width can change between
 /// requests. Every answer must equal a fresh seek-and-decode of that time.

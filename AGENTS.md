@@ -82,6 +82,17 @@ A chat reply that makes no edits shows its console.log lines in chat
 lane)` moves a clip between lanes; lane 0 is the visible picture, so a
 cutaway over a long base clip moves the base to lane 1 first. There is no
 video-over-video overlay.
+`app/inspect.rs` measures timeline problems (missing media, orientation,
+source range, fades longer than the clip, placed on-screen-text, untitled
+black gaps, pictures visible under two frames, clips hidden by a lower
+lane); JS reads them as `inspect()` (`state().inspection`). After a chat
+edit changes the timeline, Settings → Check edits (default on) sends one
+check request: the request, the code, the findings it introduced, and a
+JPEG contact sheet (`openreel_media::contact_sheet`: one cell per visible
+shot, at most 16, labelled time/clip/lane, titles drawn from
+`title_look`). The model replies with a no-op or one fix; the fix shares
+the edit's Undo, and a check failure or timeline change keeps the edit.
+Checks are not repeated, and the sheet is sampled pictures, not motion.
 Pending chat retains its request-time timeline and state JSON. Timeline
 changes reject stale replies, selection/playhead defaults use that saved
 state, and an explicit timeline clear cancels the pending request.

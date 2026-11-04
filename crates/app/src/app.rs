@@ -19,6 +19,7 @@ use crate::theme;
 pub(crate) mod chat;
 mod gallery;
 mod history;
+mod inspect;
 pub(crate) mod intents;
 mod media;
 mod project;
@@ -1537,6 +1538,7 @@ impl EditorApp {
             "sweepCandidates": sweep_candidates,
             "sceneClips": scene_clips,
             "transcriptSegments": transcript_segments,
+            "inspection": inspect::inspect(&self.timeline, &self.assets),
         })
         .to_string()
     }

@@ -139,7 +139,7 @@ impl Drop for FilterGraphFile {
 }
 
 /// Escape user text for drawtext's `text=` value.
-fn escape_drawtext(text: &str) -> String {
+pub(crate) fn escape_drawtext(text: &str) -> String {
     text.replace('\\', "/")
         .replace('\'', "’")
         .replace(':', " -")
@@ -147,7 +147,7 @@ fn escape_drawtext(text: &str) -> String {
         .replace('\n', " ")
 }
 
-fn font_file() -> Option<String> {
+pub(crate) fn font_file() -> Option<String> {
     if let Ok(out) = Command::new("fc-match")
         .args(["-f", "%{file}", "sans"])
         .output()

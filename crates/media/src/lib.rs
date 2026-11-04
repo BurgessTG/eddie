@@ -12,6 +12,7 @@ mod evidence;
 mod export;
 mod playback;
 mod samples;
+mod sheet;
 mod sweep;
 
 pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
@@ -22,6 +23,7 @@ pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo
 pub use export::{export_canvas, export_timeline, title_look, TitleLook};
 pub use playback::FrameStream;
 pub use samples::generate_samples;
+pub use sheet::{contact_sheet, SheetCell};
 pub use sweep::{
     analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,
     frame_visual_evidence, motion_samples, pcm_mono_16k, sam_unavailable_reason, write_wav_24k,
