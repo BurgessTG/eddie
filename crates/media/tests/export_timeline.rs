@@ -82,6 +82,10 @@ impl Fixture {
     }
 
     fn export(&self, name: &str, timeline: &Timeline) -> PathBuf {
+        self.export_with(name, timeline, false)
+    }
+
+    fn export_with(&self, name: &str, timeline: &Timeline, normalize: bool) -> PathBuf {
         let mut infos = HashMap::new();
         for path in timeline
             .clips
@@ -94,7 +98,7 @@ impl Fixture {
         }
         let path = self.0.join(name);
         let (tx, rx) = channel();
-        export_timeline(timeline, &infos, &path, tx).expect("public export_timeline");
+        export_timeline(timeline, &infos, &path, normalize, tx).expect("public export_timeline");
         let progress: Vec<_> = rx.try_iter().collect();
         assert_eq!(progress.last(), Some(&1.0));
         path
@@ -1097,7 +1101,7 @@ fn encoder_failure_is_reported_without_success_progress() {
     let infos = [(source.clone(), probe(&source).unwrap())].into();
     let (tx, rx) = channel();
     let output = fixture.0.join("missing-directory/export.mp4");
-    let error = export_timeline(&timeline, &infos, &output, tx).unwrap_err();
+    let error = export_timeline(&timeline, &infos, &output, false, tx).unwrap_err();
     eprintln!("expected encoder failure: {error}");
     assert!(error.starts_with("export failed:"));
     assert!(!output.exists());
@@ -1145,6 +1149,62 @@ fn reordered_repeated_ranges_preserve_every_frame_across_a_long_edit() {
         &expected,
     );
     assert!(tone_amplitude(&exported, 440.0) > 0.06);
+}
+
+#[test]
+fn normalized_export_brings_a_quiet_mix_to_the_loudness_target() {
+    let fixture = Fixture::new();
+    let source = fixture.color("quiet.mp4", "red", Some(440));
+    let mut timeline = Timeline::new(30.0);
+    let clip = video(&mut timeline, &source, 0, 0.0, 3.0, 0.0);
+    timeline.clip_mut(clip).unwrap().volume = 0.1;
+
+    let plain = fixture.export("quiet-plain.mp4", &timeline);
+    let normalized = fixture.export_with("quiet-normalized.mp4", &timeline, true);
+    let raw = integrated_loudness(&plain);
+    let loud = integrated_loudness(&normalized);
+    eprintln!("plain {raw} LUFS, normalized {loud} LUFS");
+    assert!(raw < -35.0, "the plain export keeps the quiet mix: {raw}");
+    assert!((loud + 16.0).abs() < 1.0, "normalized to -16 LUFS: {loud}");
+    let peak = tone_window(&normalized, 440.0, 0.1, 2.9);
+    assert!(
+        peak < 0.8,
+        "the limiter keeps peaks under the ceiling: {peak}"
+    );
+
+    // A loud mix is turned down, not limited flat.
+    timeline.clip_mut(clip).unwrap().volume = 2.0;
+    let hot = integrated_loudness(&fixture.export_with("hot.mp4", &timeline, true));
+    assert!((hot + 16.0).abs() < 1.0, "loud mix normalized down: {hot}");
+
+    // Without audio there is nothing to measure; export still succeeds.
+    let mut silent = Timeline::new(30.0);
+    let picture = video(&mut silent, &source, 0, 0.0, 1.0, 0.0);
+    silent.clip_mut(picture).unwrap().embedded_audio = false;
+    fixture.export_with("silent.mp4", &silent, true);
+}
+
+/// Integrated loudness in LUFS, measured by FFmpeg's EBU R128 meter.
+fn integrated_loudness(path: &Path) -> f64 {
+    let out = run(Command::new("ffmpeg").args([
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        path.to_str().unwrap(),
+        "-vn",
+        "-af",
+        "ebur128",
+        "-f",
+        "null",
+        "-",
+    ]));
+    let log = String::from_utf8_lossy(&out.stderr);
+    let summary = &log[log.rfind("Summary:").expect("ebur128 summary")..];
+    let line = summary
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("I:"))
+        .expect("integrated loudness line");
+    line.trim().trim_end_matches("LUFS").trim().parse().unwrap()
 }
 
 #[test]
