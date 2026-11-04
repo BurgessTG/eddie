@@ -50,6 +50,7 @@ enum ExportMsg {
 
 #[derive(Clone, Copy)]
 enum UiAction {
+    NewProject,
     Import,
     Export,
     OpenProject,
@@ -1232,6 +1233,7 @@ impl EditorApp {
                     self.start_export(ctx, output);
                 }
             }
+            UiAction::NewProject => self.request_discard(ctx, project::Discard::New),
             UiAction::OpenProject => self.request_discard(ctx, project::Discard::Open),
             UiAction::SaveProject => {
                 self.save_project(false);
@@ -1912,6 +1914,15 @@ impl EditorApp {
                     ui.label(RichText::new("Eddie").family(theme::semibold()).size(15.0));
                     ui.add_space(10.0);
                     ui.menu_button("File", |ui| {
+                        if menu_item(
+                            ui,
+                            "New project",
+                            "Ctrl+N",
+                            "Start an empty project with an empty media bin",
+                            true,
+                        ) {
+                            action = Some(UiAction::NewProject);
+                        }
                         if menu_item(
                             ui,
                             "Open project…",
@@ -2982,6 +2993,8 @@ fn shortcut_action(ctx: &egui::Context) -> Option<UiAction> {
             Some(UiAction::SaveProject)
         } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)) {
             Some(UiAction::OpenProject)
+        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N)) {
+            Some(UiAction::NewProject)
         } else if typing {
             None
         } else if i.consume_shortcut(&KeyboardShortcut::new(shift, Key::Z))
@@ -3173,7 +3186,7 @@ fn menu_item(ui: &mut Ui, label: &str, shortcut: &str, tooltip: &str, enabled: b
 }
 
 /// Menu entry for an action that discards work, in the destructive colour.
-fn menu_item_destructive(ui: &mut Ui, label: &str, tooltip: &str) -> bool {
+pub(super) fn menu_item_destructive(ui: &mut Ui, label: &str, tooltip: &str) -> bool {
     let response = ui
         .add(
             egui::Button::new(RichText::new(label).color(theme::DESTRUCTIVE))
@@ -6586,6 +6599,28 @@ mod tests {
             3,
             "nothing is dropped before an answer"
         );
+        reopened.pending_discard = None;
+
+        // Media in use stays in the bin; unused media can be removed.
+        let source = reopened.assets[0].info.path.clone();
+        reopened.remove_asset(&source);
+        assert_eq!(reopened.assets.len(), 1, "{}", reopened.status);
+        reopened.timeline.clips.retain(|clip| clip.source.is_none());
+        reopened.remove_asset(&source);
+        assert!(reopened.assets.is_empty(), "{}", reopened.status);
+
+        // New project asks while edits are unsaved, then starts empty.
+        reopened.handle_action(&ctx, UiAction::NewProject);
+        assert_eq!(reopened.pending_discard, Some(project::Discard::New));
+        reopened.pending_discard = None;
+        reopened.spawn_import(&ctx, vec![media.clone()]);
+        settle(&mut reopened, &ctx);
+        reopened.save_project_to(&dir.join("other")).unwrap();
+        reopened.handle_action(&ctx, UiAction::NewProject);
+        assert!(reopened.timeline.clips.is_empty());
+        assert!(reopened.assets.is_empty(), "the bin starts empty");
+        assert!(reopened.project_path.is_none(), "Save asks for a new file");
+        assert!(!reopened.has_unsaved_changes());
 
         // The project and its footage move together: nothing goes missing.
         let moved = dir.with_extension("moved");

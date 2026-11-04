@@ -265,6 +265,43 @@ impl EditorApp {
 
     /// First lane with no clip overlapping [at, at+duration), or a
     /// freshly appended lane. Lanes are kind-agnostic.
+    /// Take a file out of the bin. The file and its saved curation stay on
+    /// disk, so importing it again restores both.
+    pub(super) fn remove_asset(&mut self, path: &str) {
+        let Some(index) = self.assets.iter().position(|a| a.info.path == path) else {
+            return;
+        };
+        let name = self.assets[index].info.name.clone();
+        let used = self
+            .timeline
+            .clips
+            .iter()
+            .filter(|clip| clip.source.as_deref() == Some(path))
+            .count();
+        if used > 0 {
+            self.status = format!(
+                "{name} is in {used} timeline clip{}; delete {} first.",
+                if used == 1 { "" } else { "s" },
+                if used == 1 { "it" } else { "them" }
+            );
+            return;
+        }
+        if self.assets[index].state != AssetState::Ready {
+            self.status = format!("{name} is still importing.");
+            return;
+        }
+        if self.sweep_running.iter().any(|running| running == path) {
+            self.status = format!("{name} is being curated; wait for it to finish.");
+            return;
+        }
+        self.sweep_queue.retain(|queued| queued != path);
+        self.assets.remove(index);
+        if self.selected_asset.as_deref() == Some(path) {
+            self.selected_asset = None;
+        }
+        self.status = format!("Removed {name} from the bin.");
+    }
+
     pub(super) fn first_free_track(&mut self, at: f64, duration: f64) -> usize {
         let end = at + duration;
         for track in 0..self.timeline.track_labels.len() {
@@ -424,6 +461,7 @@ impl EditorApp {
         }
         let mut action: Option<UiAction> = None;
         let mut add_request: Option<(String, Option<usize>, f64)> = None;
+        let mut remove_request: Option<String> = None;
         let mut open_gallery = false;
         let mut curate_selected: Option<String> = None;
         let mut curate_all_new = false;
@@ -724,7 +762,16 @@ impl EditorApp {
                                         asset_meta(asset)
                                     )
                                 };
-                                response.on_hover_text(hover);
+                                response.context_menu(|ui| {
+                                    if super::menu_item_destructive(
+                                        ui,
+                                        "Remove from bin",
+                                        "Take this file out of the bin; the file stays on disk",
+                                    ) {
+                                        remove_request = Some(asset.info.path.clone());
+                                    }
+                                });
+                                response.on_hover_text(format!("{hover}\nRight-click to remove it."));
                             }
                         });
                         ui.add_space(GAP);
@@ -905,6 +952,9 @@ impl EditorApp {
             });
         if let Some((path, track, at)) = add_request {
             self.add_asset_to_timeline(&path, track, at);
+        }
+        if let Some(path) = remove_request {
+            self.remove_asset(&path);
         }
         if open_gallery {
             self.open_curator_gallery();
