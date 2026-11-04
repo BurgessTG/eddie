@@ -18,7 +18,6 @@ use crate::theme;
 pub(crate) mod chat;
 mod gallery;
 mod history;
-pub(crate) mod intents;
 mod media;
 mod project;
 #[cfg(test)]

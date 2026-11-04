@@ -1633,44 +1633,6 @@ fn offline_pricing_resolves_against_transcript_segments() {
 }
 
 #[test]
-fn local_intent_builds_timeline_offline_through_script_commands() {
-    // The "Reactions first" button with the network unplugged: no
-    // JsSource, no model — ordered candidates become a
-    // ScriptCommand batch applied like any chat edit.
-    use crate::app::intents::{local_commands, ordered_candidates, CandidateView, LocalSort};
-    let fixture = scenario("reaction_shots").fixture;
-    let fixture = fixture();
-    let views: Vec<CandidateView> = fixture
-        .sweep
-        .iter()
-        .map(|c| CandidateView {
-            id: c.id.clone(),
-            asset_path: c.asset_path.clone(),
-            title: c.title.clone(),
-            source_in: c.source_in,
-            duration: c.duration,
-            score: c.score,
-            stability: 0.5,
-            reaction_score: c.reaction_score,
-            is_reaction: c.is_reaction,
-            has_video: c.has_video,
-        })
-        .collect();
-    let ordered = ordered_candidates(&views, LocalSort::ReactionsFirst);
-    assert_eq!(ordered[0].source_in, 40.0, "reaction lands first");
-    let mut editor = HeadlessEditor::from_fixture(&fixture);
-    let notes = editor.apply(local_commands(&[], &ordered));
-    assert!(notes.iter().all(|n| !n.starts_with("error:")), "{notes:?}");
-    let video = clips_of_kind(&editor.timeline, ClipKind::Video);
-    let source_ins: Vec<f64> = video.iter().map(|c| c.source_in).collect();
-    assert_eq!(source_ins, vec![40.0, 70.0, 12.0]);
-    assert_eq!(
-        video.iter().map(|c| c.start).collect::<Vec<_>>(),
-        vec![0.0, 5.0, 8.0]
-    );
-}
-
-#[test]
 fn offline_impossible_request_fails_without_corruption() {
     assert_canned("impossible_request");
 }

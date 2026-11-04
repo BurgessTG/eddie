@@ -21,9 +21,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
-use openreel_engine::{ClipId, ClipKind, Orientation, Timeline};
+use openreel_engine::{ClipId, Orientation, Timeline};
 
-use super::intents::{intent_by_id, CandidateView, IntentKind, INTENTS};
 use super::media::AssetState;
 use super::session::{
     build_pinned_summary, estimate_tokens, pinned_fingerprint, transcript_segment_id, ChatMessage,
@@ -89,6 +88,7 @@ pub(super) struct PendingChat {
     generation: u64,
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<String>>,
+    started: Instant,
 }
 
 impl PendingChat {
@@ -109,14 +109,18 @@ impl PendingChat {
             generation: 1,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(progress.to_owned())),
+            started: Instant::now(),
         }
     }
 
+    /// The worker's current stage plus seconds since the request was sent.
     fn progress_label(&self) -> String {
-        self.progress
+        let stage = self
+            .progress
             .lock()
             .map(|label| label.clone())
-            .unwrap_or_else(|_| "Working…".to_owned())
+            .unwrap_or_else(|_| "Working…".to_owned());
+        format!("{stage} {}s", self.started.elapsed().as_secs())
     }
 }
 
@@ -131,7 +135,7 @@ pub(super) enum ChatWorkerResult {
     Failed(String),
 }
 
-/// Timeline snapshot taken before an AI/local-intent command batch
+/// Timeline snapshot taken before an AI command batch
 /// is applied, so the edit is one-click undoable.
 #[derive(Clone)]
 pub(super) struct TimelineSnapshot {
@@ -753,18 +757,6 @@ fn set_progress(progress: Option<&Mutex<String>>, label: &str) {
     }
 }
 
-fn progress_for_request(request: &str) -> &'static str {
-    let lower = request.to_lowercase();
-    if ["sweep", "montage", "rank", "reaction", "clip"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "Ranking clips…"
-    } else {
-        "Writing the edit…"
-    }
-}
-
 pub(super) fn api_endpoint(settings: &ChatSettings, endpoint: &str) -> String {
     let base = settings.base_url.trim().trim_end_matches('/');
     let base = base.strip_suffix("/chat/completions").unwrap_or(base);
@@ -906,7 +898,14 @@ pub(super) fn post_chat_completion_cancellable(
                 .map_err(|_| "Couldn't read the model response.".to_owned());
         }
         if should_retry(status) && attempt + 1 < MAX_MODEL_ATTEMPTS {
-            set_progress(progress, "Service busy — retrying…");
+            set_progress(
+                progress,
+                &format!(
+                    "Service busy, retry {} of {}…",
+                    attempt + 1,
+                    MAX_MODEL_ATTEMPTS - 1
+                ),
+            );
             let delay = backoff_delay(attempt, retry_after, jitter_for_attempt(attempt));
             if sleep_cancellable(delay, cancel) {
                 return Err(CANCELLED.to_owned());
@@ -1035,7 +1034,7 @@ impl EditorApp {
         }
     }
 
-    /// Model and local-intent edits either finish completely or restore the
+    /// Model edits either finish completely or restore the
     /// editor. Explicit console I/O uses the same command executor without
     /// this transaction; generated code cannot authorize filesystem effects.
     fn apply_edit_commands(
@@ -1182,24 +1181,11 @@ impl EditorApp {
     }
 
     fn submit_chat(&mut self, ctx: &egui::Context, text: String) {
-        let text = text.trim().to_owned();
-        let progress = progress_for_request(&text);
-        self.submit_chat_request(ctx, text.clone(), text, progress);
-    }
-
-    /// `display` is what the user sees as their turn (a button
-    /// label for model intents); `request` is what the model gets.
-    fn submit_chat_request(
-        &mut self,
-        ctx: &egui::Context,
-        display: String,
-        request: String,
-        progress: &'static str,
-    ) {
-        if display.trim().is_empty() || self.chat_pending.is_some() {
+        let request = text.trim().to_owned();
+        if request.is_empty() || self.chat_pending.is_some() {
             return;
         }
-        self.push_chat(ChatRole::User, display);
+        self.push_chat(ChatRole::User, request.clone());
         if self.chat_settings.api_key.trim().is_empty() && !self.chat_settings.allows_missing_key()
         {
             self.show_chat_settings = true;
@@ -1216,76 +1202,13 @@ impl EditorApp {
             attempt: 0,
             generation: self.chat_generation,
             cancel: Arc::new(AtomicBool::new(false)),
-            progress: Arc::new(Mutex::new(progress.to_owned())),
+            progress: Arc::new(Mutex::new(format!(
+                "Asking {}…",
+                model_label(&self.chat_settings.model)
+            ))),
+            started: Instant::now(),
         });
         self.spawn_chat_request(ctx, None);
-    }
-
-    /// One registry entry point for every button. Local intents
-    /// never touch the network; model intents reuse `submit_chat`.
-    fn dispatch_intent(&mut self, ctx: &egui::Context, intent_id: &str) {
-        let Some(intent) = intent_by_id(intent_id) else {
-            return;
-        };
-        match intent.kind {
-            IntentKind::Model => {
-                if let Some(prompt) = intent.prompt {
-                    self.submit_chat_request(
-                        ctx,
-                        intent.label.to_owned(),
-                        prompt.to_owned(),
-                        intent.progress,
-                    );
-                }
-            }
-            IntentKind::Local(sort) => {
-                if self.chat_pending.is_some() {
-                    return;
-                }
-                let ordered = super::intents::ordered_candidates(
-                    &self
-                        .assets
-                        .iter()
-                        .filter(|asset| !self.clashes_with_format(&asset.info))
-                        .flat_map(|asset| asset.sweep.candidates.iter())
-                        .filter(|candidate| {
-                            !candidate.dismissed
-                                && !candidate.tags.iter().any(|tag| tag == "on-screen-text")
-                        })
-                        .map(CandidateView::from)
-                        .collect::<Vec<_>>(),
-                    sort,
-                );
-                self.push_chat(ChatRole::User, intent.label.to_owned());
-                if ordered.is_empty() {
-                    let message = if self.assets.is_empty() {
-                        "No clips yet. Import media first."
-                    } else {
-                        "No curated clips yet. Curate a video first."
-                    }
-                    .to_owned();
-                    self.push_chat(ChatRole::Assistant, message.clone());
-                    self.status = message;
-                    return;
-                }
-                // Arrange replaces the main video track's clips;
-                // titles and audio stay put.
-                let existing: Vec<u64> = self
-                    .timeline
-                    .clips
-                    .iter()
-                    .filter(|clip| clip.kind == ClipKind::Video)
-                    .map(|clip| clip.id)
-                    .collect();
-                let commands = super::intents::local_commands(&existing, &ordered);
-                let message = match self.apply_edit_commands(ctx, commands) {
-                    Ok(notes) => summarize_chat_result(&notes, ordered.len()),
-                    Err(error) => format!("No changes made: {}.", error.trim_end_matches('.')),
-                };
-                self.push_chat(ChatRole::Assistant, message.clone());
-                self.status = message;
-            }
-        }
     }
 
     fn start_connection_check(&mut self, ctx: &egui::Context) {
@@ -1434,7 +1357,7 @@ impl EditorApp {
                             if let Some(pending) = self.chat_pending.as_mut() {
                                 pending.attempt = 1;
                                 if let Ok(mut label) = pending.progress.lock() {
-                                    *label = "Writing the edit…".to_owned();
+                                    *label = "Fixing a script error…".to_owned();
                                 }
                             }
                             self.spawn_chat_request(ctx, Some((js, error)));
@@ -1459,53 +1382,8 @@ impl EditorApp {
         let ui = &mut *ui;
         let focus_requested = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K));
         let mut submitted: Option<String> = None;
-        let mut clicked_intent: Option<&'static str> = None;
         let mut cancel_clicked = false;
         {
-            if let Some(pending) = &self.chat_pending {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(pending.progress_label()).color(theme::MUTED_FG),
-                        )
-                        .truncate(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::ghost_button(ui, "Cancel")
-                            .on_hover_text("Cancel the in-flight model call")
-                            .clicked()
-                        {
-                            cancel_clicked = true;
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-            }
-
-            // Button intents: one registry, local first. New buttons are
-            // declared in `intents.rs`. Compact chips at natural width wrap
-            // like suggestions instead of a grid of full-width buttons; the
-            // tooltip says which run offline.
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                for intent in INTENTS {
-                    let tooltip = match intent.kind {
-                        IntentKind::Local(_) => format!("{} Runs locally.", intent.tooltip),
-                        IntentKind::Model => format!("{} Uses the model.", intent.tooltip),
-                    };
-                    if theme::secondary_button(ui, intent.label)
-                        .on_hover_text(tooltip)
-                        .clicked()
-                    {
-                        clicked_intent = Some(intent.id);
-                    }
-                }
-            });
-            ui.add_space(8.0);
-            theme::divider(ui);
-            ui.add_space(4.0);
-
             let debug_height = if self.show_chat_debug { 58.0 } else { 0.0 };
             let messages_height = (ui.available_height() - 74.0 - debug_height).max(28.0);
             egui::ScrollArea::vertical()
@@ -1562,6 +1440,30 @@ impl EditorApp {
                             }
                         });
                         ui.add_space(10.0);
+                    }
+                    // The reply in progress sits where the reply will land.
+                    if let Some(pending) = &self.chat_pending {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED_FG));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(pending.progress_label()).color(theme::MUTED_FG),
+                                )
+                                .truncate(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if theme::ghost_button(ui, "Cancel")
+                                        .on_hover_text("Cancel the in-flight model call")
+                                        .clicked()
+                                    {
+                                        cancel_clicked = true;
+                                    }
+                                },
+                            );
+                        });
                     }
                 });
 
@@ -1622,9 +1524,6 @@ impl EditorApp {
         }
         if cancel_clicked {
             self.cancel_chat();
-        }
-        if let Some(intent_id) = clicked_intent {
-            self.dispatch_intent(ctx, intent_id);
         }
         if let Some(text) = submitted {
             self.submit_chat(ctx, text);
@@ -1915,6 +1814,7 @@ fn summarize_chat_result(notes: &[String], command_count: usize) -> String {
 mod tests {
     use super::super::session::RECENT_MESSAGES_KEPT_VERBATIM;
     use super::*;
+    use openreel_engine::ClipKind;
 
     struct TestDir(PathBuf);
 
@@ -2632,64 +2532,6 @@ mod tests {
     }
 
     #[test]
-    fn local_montage_skips_ranges_with_burned_in_text() {
-        use super::super::sweep;
-        let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
-        let candidate = |source_in: f64, score: f32, tags: &[&str]| sweep::SweepCandidate {
-            id: format!("ready.mp4#{source_in}"),
-            asset_path: "ready.mp4".to_owned(),
-            asset_name: "ready.mp4".to_owned(),
-            title: "ready.mp4".to_owned(),
-            source_in,
-            duration: 2.0,
-            score,
-            reason: "test".to_owned(),
-            stability: 0.9,
-            audio_energy: 0.1,
-            audio_peak: 0.1,
-            category: "broll".to_owned(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
-            motion_score: 0.3,
-            audio_score: 0.1,
-            music_bed: false,
-            visual: None,
-            has_video: true,
-            transcript: Vec::new(),
-            review: sweep::ClipReview::default(),
-            dismissed: false,
-        };
-        app.assets.push(super::super::media::BinAsset {
-            info: openreel_media::MediaInfo {
-                path: "ready.mp4".to_owned(),
-                name: "ready.mp4".to_owned(),
-                duration: 10.0,
-                width: 320,
-                height: 180,
-                fps: 30.0,
-                has_video: true,
-                has_audio: false,
-            },
-            size_bytes: 0,
-            state: AssetState::Ready,
-            peaks: Vec::new(),
-            beats: None,
-            thumb_textures: Vec::new(),
-            sweep: sweep::SweepData {
-                // The title card outranks the clean shot, so a missing filter places it first.
-                candidates: vec![
-                    candidate(0.0, 95.0, &["on-screen-text"]),
-                    candidate(4.0, 60.0, &[]),
-                ],
-                ..Default::default()
-            },
-        });
-        app.dispatch_intent(&ctx, "by-score");
-        let placed: Vec<_> = app.timeline.clips.iter().map(|c| c.source_in).collect();
-        assert_eq!(placed, vec![4.0]);
-    }
-
-    #[test]
     fn a_cutaway_moved_to_lane_zero_shows_over_the_base_clip() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::headless_for_test(&ctx);
@@ -3259,12 +3101,7 @@ mod tests {
                 let mut app = EditorApp::headless_for_test(&ctx);
                 app.chat_settings.base_url =
                     format!("http://{}/v1", listener.local_addr().unwrap());
-                app.submit_chat_request(
-                    &ctx,
-                    "Oversized request".to_owned(),
-                    "x".repeat(TOKEN_BUDGET * 4 + 100),
-                    "Testing",
-                );
+                app.submit_chat(&ctx, "x".repeat(TOKEN_BUDGET * 4 + 100));
                 assert!(
                     app.chat_pending.is_none(),
                     "oversized context must not start a request"
