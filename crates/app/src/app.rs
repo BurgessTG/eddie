@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -129,6 +129,9 @@ pub struct EditorApp {
 
     export_rx: Option<Receiver<ExportMsg>>,
     export_progress: Option<f64>,
+    /// The last finished export and the status line announcing it; Open
+    /// folder shows while that line is still the status.
+    exported: Option<(PathBuf, String)>,
 
     show_media: bool,
     show_inspector: bool,
@@ -232,6 +235,7 @@ impl EditorApp {
             transport_scrubbing: false,
             export_rx: None,
             export_progress: None,
+            exported: None,
             show_media: true,
             show_inspector: true,
             show_console: false,
@@ -322,6 +326,7 @@ impl EditorApp {
             transport_scrubbing: false,
             export_rx: None,
             export_progress: None,
+            exported: None,
             show_media: true,
             show_inspector: true,
             show_console: false,
@@ -1166,8 +1171,10 @@ impl EditorApp {
         }
     }
 
-    fn poll_export(&mut self) {
+    /// Returns true when an export finished successfully this frame.
+    fn poll_export(&mut self) -> bool {
         let mut done = false;
+        let mut exported = false;
         loop {
             let msg = match self.export_rx.as_ref().map(|rx| rx.try_recv()) {
                 Some(Ok(msg)) => msg,
@@ -1181,7 +1188,10 @@ impl EditorApp {
             match msg {
                 ExportMsg::Progress(p) => self.export_progress = Some(p),
                 ExportMsg::Done(Ok(path)) => {
-                    self.status = format!("Exported {}", path.display());
+                    let name = path.file_name().unwrap_or(path.as_os_str());
+                    self.status = format!("Exported {}", name.to_string_lossy());
+                    self.exported = Some((path, self.status.clone()));
+                    exported = true;
                     done = true;
                 }
                 ExportMsg::Done(Err(e)) => {
@@ -1194,6 +1204,7 @@ impl EditorApp {
             self.export_rx = None;
             self.export_progress = None;
         }
+        exported
     }
 
     fn start_export(&mut self, ctx: &egui::Context, output: PathBuf) {
@@ -2135,6 +2146,11 @@ impl EditorApp {
     }
 
     fn status_bar(&mut self, ctx: &egui::Context) {
+        let just_exported = self
+            .exported
+            .as_ref()
+            .is_some_and(|(_, message)| *message == self.status);
+        let mut open_dir = None;
         egui::TopBottomPanel::bottom("status_bar")
             .frame(
                 egui::Frame::new()
@@ -2161,11 +2177,13 @@ impl EditorApp {
                     let status = |ui: &mut egui::Ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add(
-                                egui::Label::new(
-                                    RichText::new(&self.status)
-                                        .size(12.0)
-                                        .color(theme::MUTED_FG),
-                                )
+                                egui::Label::new(RichText::new(&self.status).size(12.0).color(
+                                    if just_exported {
+                                        theme::FOREGROUND
+                                    } else {
+                                        theme::MUTED_FG
+                                    },
+                                ))
                                 .truncate(),
                             )
                             .on_hover_text(&self.status);
@@ -2183,6 +2201,19 @@ impl EditorApp {
                             ui.add_space(12.0);
                             status(ui);
                             return;
+                        }
+                        if let Some((path, _)) = self
+                            .exported
+                            .as_ref()
+                            .filter(|(_, message)| *message == self.status)
+                        {
+                            let open = theme::secondary_button(ui, "Open folder").on_hover_text(
+                                format!("Show the exported file's folder\n{}", path.display()),
+                            );
+                            if open.clicked() {
+                                open_dir = path.parent().map(Path::to_path_buf);
+                            }
+                            ui.add_space(12.0);
                         }
                         // Right to left: memory, UI frame time, length, rate.
                         let segments = [
@@ -2217,6 +2248,11 @@ impl EditorApp {
                     });
                 });
             });
+        if let Some(dir) = open_dir {
+            if let Err(error) = open_folder(&dir) {
+                self.status = format!("Could not open the folder: {error}");
+            }
+        }
     }
 
     fn timeline_panel(&mut self, ctx: &egui::Context) {
@@ -3019,7 +3055,12 @@ impl eframe::App for EditorApp {
         self.advance_playback(ctx);
         self.poll_imports(ctx);
         self.poll_frames(ctx);
-        self.poll_export();
+        if self.poll_export() {
+            // Flash the taskbar entry so a finished export is noticed.
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
         self.poll_chat(ctx);
         self.poll_sweeps(ctx);
         if !self.initial_imports.is_empty() && self.import_rx.is_none() {
@@ -3109,6 +3150,21 @@ fn shortcut_action(ctx: &egui::Context) -> Option<UiAction> {
 }
 
 /// Resident set size from `/proc` (Linux). Returns 0 elsewhere.
+/// Open `dir` in the desktop's file manager without blocking the UI.
+fn open_folder(dir: &Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(opener).arg(dir).spawn()?;
+    // Reap the launcher so it does not linger as a zombie.
+    thread::spawn(move || child.wait());
+    Ok(())
+}
+
 fn read_rss_mb() -> u64 {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
@@ -4337,6 +4393,31 @@ mod tests {
                     });
             });
         }
+    }
+
+    #[test]
+    fn finished_export_offers_open_folder_until_the_status_moves_on() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let (tx, rx) = channel();
+        app.export_rx = Some(rx);
+        tx.send(ExportMsg::Done(Ok(PathBuf::from(
+            "/videos/cut/montage.mp4",
+        ))))
+        .unwrap();
+        assert!(app.poll_export(), "a successful export reports itself");
+        assert_eq!(app.status, "Exported montage.mp4");
+        let shows_open_folder = |app: &mut EditorApp| {
+            ctx.run(egui::RawInput::default(), |ctx| app.status_bar(ctx))
+                .shapes
+                .iter()
+                .any(|shape| {
+                    matches!(&shape.shape, Shape::Text(t) if t.galley.text() == "Open folder")
+                })
+        };
+        assert!(shows_open_folder(&mut app));
+        app.status = "Split clip.".to_owned();
+        assert!(!shows_open_folder(&mut app), "stale exports offer nothing");
     }
 
     #[test]
