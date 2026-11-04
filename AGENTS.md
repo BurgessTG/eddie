@@ -496,7 +496,11 @@ one decoder per file across the 480/960 widths, decodes forward up to 0.5 s
 or within the GOP instead of seeking, and keeps refcounted recent pictures
 (8, at most 64 MiB; 4K keeps 5) for stepping back. 1080p/2 s-GOP steps went
 from about 92 ms to 2 ms forward and 95 to 10 ms back (4K: 380 to 9, 396 to
-77; a 32 MiB budget kept 2 and gave 130). Stills are an LRU of 24. Audio plays in process (`crates/media/src/audio.rs`):
+77; a 32 MiB budget kept 2 and gave 130). Stills are an LRU of 24. Paused on a picture, the still worker
+prefetches the frames one step either side (a prefetch shows only if the
+playhead lands on it), so an arrow step shows in the same UI frame. Preview
+uploads refill one of three pooled `Arc<ColorImage>`s once the renderer
+drops its reference; 150 uploads made one allocation. Audio plays in process (`crates/media/src/audio.rs`):
 one mixer at 48 kHz stereo, one ffmpeg-next decode/swresample thread per
 audible clip, with clips starting within 0.75 s prerolled. The samples the
 mixer renders are the transport clock; the playhead reads it less ALSA's
