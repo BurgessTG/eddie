@@ -23,6 +23,7 @@ mod project;
 #[cfg(test)]
 mod screenshot;
 pub(crate) mod session;
+mod shortcuts;
 mod sweep;
 use crate::timeline_ui::{ClipVisual, TimelineView, VisualMap};
 use chat::{ChatSettings, ChatWorkerResult, PendingChat, TimelineSnapshot};
@@ -47,7 +48,7 @@ enum ExportMsg {
     Done(Result<PathBuf, String>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiAction {
     NewProject,
     Import,
@@ -64,8 +65,20 @@ enum UiAction {
     AddTitle,
     ZoomIn,
     ZoomOut,
+    ZoomFit,
     GoStart,
     GoEnd,
+    PlayPause,
+    StepBack,
+    StepForward,
+    StepBackSecond,
+    StepForwardSecond,
+    PrevEdit,
+    NextEdit,
+    ToggleMagnet,
+    Deselect,
+    FocusChat,
+    ShowShortcuts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +183,9 @@ pub struct EditorApp {
     prev_selected: Option<ClipId>,
     /// Focus the Details text box next frame (monitor caption double-click).
     focus_title_text: bool,
+    /// Focus the chat input next frame (Ctrl+K).
+    focus_chat: bool,
+    show_shortcuts: bool,
     show_chat_settings: bool,
     show_chat_debug: bool,
     last_generated_js: String,
@@ -263,6 +279,8 @@ impl EditorApp {
             right_tab: RightTab::Chat,
             prev_selected: None,
             focus_title_text: false,
+            focus_chat: false,
+            show_shortcuts: false,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -355,6 +373,8 @@ impl EditorApp {
             right_tab: RightTab::Chat,
             prev_selected: None,
             focus_title_text: false,
+            focus_chat: false,
+            show_shortcuts: false,
             show_chat_settings: false,
             show_chat_debug: false,
             last_generated_js: String::new(),
@@ -1337,14 +1357,74 @@ impl EditorApp {
                 self.selected = Some(id);
                 self.status = "Title added.".to_owned();
             }
-            UiAction::ZoomIn => {
-                self.timeline_view.px_per_sec = (self.timeline_view.px_per_sec * 1.5).min(600.0);
+            UiAction::ZoomIn => self.timeline_view.zoom(1.5, self.playhead),
+            UiAction::ZoomOut => self.timeline_view.zoom(1.0 / 1.5, self.playhead),
+            UiAction::ZoomFit => self.timeline_view.zoom_to_fit(self.timeline.end()),
+            UiAction::GoStart => self.seek_and_reveal(0.0),
+            UiAction::GoEnd => self.seek_and_reveal(self.timeline.end()),
+            UiAction::PlayPause => {
+                // Playback shows on Program, not behind the gallery.
+                self.curator.open = false;
+                let next = !self.playing;
+                self.set_playing(next);
             }
-            UiAction::ZoomOut => {
-                self.timeline_view.px_per_sec = (self.timeline_view.px_per_sec / 1.5).max(4.0);
+            UiAction::StepBack => self.seek_and_reveal(self.playhead - 1.0 / self.timeline.fps),
+            UiAction::StepForward => self.seek_and_reveal(self.playhead + 1.0 / self.timeline.fps),
+            UiAction::StepBackSecond => self.seek_and_reveal(self.playhead - 1.0),
+            UiAction::StepForwardSecond => self.seek_and_reveal(self.playhead + 1.0),
+            UiAction::PrevEdit | UiAction::NextEdit => {
+                if let Some(time) = self.edit_point(action == UiAction::NextEdit) {
+                    self.seek_and_reveal(time);
+                }
             }
-            UiAction::GoStart => self.seek(0.0),
-            UiAction::GoEnd => self.seek(self.timeline.end()),
+            UiAction::ToggleMagnet => {
+                self.timeline_view.magnet = !self.timeline_view.magnet;
+                self.status = if self.timeline_view.magnet {
+                    "Magnet on.".to_owned()
+                } else {
+                    "Magnet off.".to_owned()
+                };
+            }
+            UiAction::Deselect => {
+                if self.show_shortcuts {
+                    self.show_shortcuts = false;
+                } else {
+                    self.selected = None;
+                }
+            }
+            UiAction::FocusChat => {
+                self.show_chat = true;
+                self.right_tab = RightTab::Chat;
+                self.focus_chat = true;
+            }
+            UiAction::ShowShortcuts => self.show_shortcuts = !self.show_shortcuts,
+        }
+    }
+
+    /// Keyboard and transport seeks keep the playhead on screen.
+    fn seek_and_reveal(&mut self, time: f64) {
+        self.seek(time);
+        self.timeline_view.reveal(self.playhead);
+    }
+
+    /// The nearest clip edge (or timeline start/end) after or before the
+    /// playhead. Half a frame of slack steps past an edge the grid moved.
+    fn edit_point(&self, forward: bool) -> Option<f64> {
+        let slack = 0.5 / self.timeline.fps;
+        let points = self
+            .timeline
+            .clips
+            .iter()
+            .flat_map(|clip| [clip.start, clip.end()])
+            .chain([0.0, self.timeline.end()]);
+        if forward {
+            points
+                .filter(|time| *time > self.playhead + slack)
+                .min_by(f64::total_cmp)
+        } else {
+            points
+                .filter(|time| *time < self.playhead - slack)
+                .max_by(f64::total_cmp)
         }
     }
 
@@ -1939,44 +2019,11 @@ impl EditorApp {
                 ctx.request_repaint();
             }
         }
-        let text_focused = ctx.memory(|m| m.focused().is_some());
-        if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            let next = !self.playing;
-            self.set_playing(next);
-        }
-        if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
-            if let Some(id) = self.selected.take() {
-                self.delete_clip(id);
-                self.status = "Clip deleted.".to_owned();
-            }
-        }
-        if !text_focused {
-            let frame = 1.0 / self.timeline.fps;
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                self.seek(self.playhead - frame);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                self.seek(self.playhead + frame);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
-                self.seek(0.0);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::End)) {
-                self.seek(self.timeline.end());
-            }
-            if ctx.input(|i| {
-                !i.modifiers.command && (i.key_pressed(egui::Key::S) || i.key_pressed(egui::Key::B))
-            }) {
-                self.split_at_playhead();
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::M)) {
-                self.timeline_view.magnet = !self.timeline_view.magnet;
-            }
-        }
     }
 
     fn menu_bar(&mut self, ctx: &egui::Context) -> Option<UiAction> {
         let mut action: Option<UiAction> = None;
+        let key = |action| shortcuts::label(ctx, action);
         egui::TopBottomPanel::top("menu_bar")
             .frame(
                 egui::Frame::new()
@@ -1992,7 +2039,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "New project",
-                            "Ctrl+N",
+                            &key(UiAction::NewProject),
                             "Start an empty project with an empty media bin",
                             true,
                         ) {
@@ -2001,7 +2048,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Open project…",
-                            "Ctrl+O",
+                            &key(UiAction::OpenProject),
                             "Open a saved timeline and its media",
                             true,
                         ) {
@@ -2010,7 +2057,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Save project",
-                            "Ctrl+S",
+                            &key(UiAction::SaveProject),
                             "Save the timeline and its media list",
                             true,
                         ) {
@@ -2019,7 +2066,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Save project as…",
-                            "Ctrl+Shift+S",
+                            &key(UiAction::SaveProjectAs),
                             "Save the project to a new file",
                             true,
                         ) {
@@ -2040,12 +2087,22 @@ impl EditorApp {
                             action = Some(UiAction::LocateMedia);
                         }
                         ui.separator();
-                        if menu_item(ui, "Import media…", "", "Import video or audio files", true)
-                        {
+                        if menu_item(
+                            ui,
+                            "Import media…",
+                            &key(UiAction::Import),
+                            "Import video or audio files",
+                            true,
+                        ) {
                             action = Some(UiAction::Import);
                         }
-                        if menu_item(ui, "Export MP4…", "", "Export the timeline as an MP4", true)
-                        {
+                        if menu_item(
+                            ui,
+                            "Export MP4…",
+                            &key(UiAction::Export),
+                            "Export the timeline as an MP4",
+                            true,
+                        ) {
                             action = Some(UiAction::Export);
                         }
                         ui.separator();
@@ -2058,14 +2115,20 @@ impl EditorApp {
                         }
                     });
                     ui.menu_button("Edit", |ui| {
-                        if menu_item(ui, "Undo", "Ctrl+Z", "Undo the last timeline edit", true) {
+                        if menu_item(
+                            ui,
+                            "Undo",
+                            &key(UiAction::Undo),
+                            "Undo the last timeline edit",
+                            true,
+                        ) {
                             action = Some(UiAction::Undo);
                         }
                         if menu_item(
                             ui,
                             "Redo",
-                            "Ctrl+Shift+Z",
-                            "Redo the edit you undid (also Ctrl+Y)",
+                            &key(UiAction::Redo),
+                            "Redo the edit you undid",
                             true,
                         ) {
                             action = Some(UiAction::Redo);
@@ -2075,7 +2138,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Split at playhead",
-                            "S",
+                            &key(UiAction::SplitSelected),
                             "Split the selected clip at the playhead",
                             has_selection,
                         ) {
@@ -2084,7 +2147,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Delete clip",
-                            "Del",
+                            &key(UiAction::DeleteSelected),
                             "Delete the selected clip",
                             has_selection,
                         ) {
@@ -2094,7 +2157,7 @@ impl EditorApp {
                         if menu_item(
                             ui,
                             "Add title",
-                            "",
+                            &key(UiAction::AddTitle),
                             "Add a title clip at the playhead",
                             true,
                         ) {
@@ -2105,35 +2168,80 @@ impl EditorApp {
                         ui.checkbox(&mut self.show_media, "Media bin")
                             .on_hover_text("Show the media bin and curator card");
                         ui.checkbox(&mut self.show_chat, "Chat")
-                            .on_hover_text("Show the chat tab in the right dock (Ctrl+K)");
+                            .on_hover_text(shortcuts::tip(
+                                ctx,
+                                "Show the chat tab in the right dock",
+                                UiAction::FocusChat,
+                            ));
                         ui.checkbox(&mut self.show_inspector, "Details")
                             .on_hover_text("Show the selected clip's details in the right dock");
                         ui.checkbox(&mut self.show_console, "JS console")
                             .on_hover_text("Debug console for the editing script API");
                         ui.separator();
-                        if menu_item(ui, "Zoom in", "Ctrl+Scroll", "Zoom the timeline in", true) {
+                        if menu_item(
+                            ui,
+                            "Zoom in",
+                            &key(UiAction::ZoomIn),
+                            "Zoom the timeline in around the playhead",
+                            true,
+                        ) {
                             action = Some(UiAction::ZoomIn);
                         }
-                        if menu_item(ui, "Zoom out", "Ctrl+Scroll", "Zoom the timeline out", true) {
+                        if menu_item(
+                            ui,
+                            "Zoom out",
+                            &key(UiAction::ZoomOut),
+                            "Zoom the timeline out around the playhead",
+                            true,
+                        ) {
                             action = Some(UiAction::ZoomOut);
+                        }
+                        if menu_item(
+                            ui,
+                            "Fit timeline",
+                            &key(UiAction::ZoomFit),
+                            "Zoom so the whole timeline fits",
+                            true,
+                        ) {
+                            action = Some(UiAction::ZoomFit);
                         }
                         ui.separator();
                         if menu_item(
                             ui,
                             "Go to start",
-                            "Home",
+                            &key(UiAction::GoStart),
                             "Move the playhead to the start",
                             true,
                         ) {
                             action = Some(UiAction::GoStart);
                         }
-                        if menu_item(ui, "Go to end", "End", "Move the playhead to the end", true) {
+                        if menu_item(
+                            ui,
+                            "Go to end",
+                            &key(UiAction::GoEnd),
+                            "Move the playhead to the end",
+                            true,
+                        ) {
                             action = Some(UiAction::GoEnd);
+                        }
+                        ui.separator();
+                        if menu_item(
+                            ui,
+                            "Keyboard shortcuts",
+                            &key(UiAction::ShowShortcuts),
+                            "List every keyboard shortcut",
+                            true,
+                        ) {
+                            action = Some(UiAction::ShowShortcuts);
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::primary_button(ui, "Export")
-                            .on_hover_text("Export the timeline as an MP4")
+                            .on_hover_text(shortcuts::tip(
+                                ctx,
+                                "Export the timeline as an MP4",
+                                UiAction::Export,
+                            ))
                             .clicked()
                         {
                             action = Some(UiAction::Export);
@@ -2277,63 +2385,53 @@ impl EditorApp {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     theme::panel_title(ui, "Timeline");
                     ui.add_space(10.0);
+                    let tip = |text, action| shortcuts::tip(ctx, text, action);
+                    let mut action = None;
                     if tool_icon_button(
                         ui,
                         ToolIcon::Magnet,
                         self.timeline_view.magnet,
-                        "Magnet: snap clip edges while dragging (M)",
+                        &tip(
+                            "Magnet: snap clip edges while dragging",
+                            UiAction::ToggleMagnet,
+                        ),
                     )
                     .clicked()
                     {
-                        self.timeline_view.magnet = !self.timeline_view.magnet;
+                        action = Some(UiAction::ToggleMagnet);
                     }
                     toolbar_divider(ui);
-                    if tool_icon_button(
-                        ui,
-                        ToolIcon::Title,
-                        false,
-                        "Add a title clip at the playhead",
-                    )
-                    .clicked()
-                    {
-                        let track = self.first_free_track(self.playhead, 4.0);
-                        let id = self.timeline.add_clip(
-                            "New title",
-                            ClipKind::Title,
-                            track,
-                            self.playhead,
-                            4.0,
-                            0.0,
-                        );
-                        self.selected = Some(id);
-                        self.status = "Title added.".to_owned();
-                    }
-                    if tool_icon_button(
-                        ui,
-                        ToolIcon::Split,
-                        false,
-                        "Split the clip under the playhead (S)",
-                    )
-                    .clicked()
-                    {
-                        self.split_at_playhead();
-                    }
-                    if tool_icon_button(
-                        ui,
-                        ToolIcon::Delete,
-                        false,
-                        "Delete the selected clip (Del)",
-                    )
-                    .clicked()
-                    {
-                        if let Some(id) = self.selected.take() {
-                            self.delete_clip(id);
+                    for (icon, text, button_action) in [
+                        (
+                            ToolIcon::Title,
+                            "Add a title clip at the playhead",
+                            UiAction::AddTitle,
+                        ),
+                        (
+                            ToolIcon::Split,
+                            "Split the clip under the playhead",
+                            UiAction::SplitSelected,
+                        ),
+                        (
+                            ToolIcon::Delete,
+                            "Delete the selected clip",
+                            UiAction::DeleteSelected,
+                        ),
+                    ] {
+                        if tool_icon_button(ui, icon, false, &tip(text, button_action)).clicked() {
+                            action = Some(button_action);
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if tool_icon_button(ui, ToolIcon::ZoomIn, false, "Zoom in").clicked() {
-                            self.timeline_view.px_per_sec =
-                                (self.timeline_view.px_per_sec * 1.5).min(600.0);
+                        if tool_icon_button(
+                            ui,
+                            ToolIcon::ZoomIn,
+                            false,
+                            &tip("Zoom in", UiAction::ZoomIn),
+                        )
+                        .clicked()
+                        {
+                            action = Some(UiAction::ZoomIn);
                         }
                         ui.spacing_mut().slider_width = 110.0;
                         ui.add(
@@ -2342,11 +2440,20 @@ impl EditorApp {
                                 .show_value(false),
                         )
                         .on_hover_text("Timeline zoom. Ctrl+scroll over the timeline also zooms.");
-                        if tool_icon_button(ui, ToolIcon::ZoomOut, false, "Zoom out").clicked() {
-                            self.timeline_view.px_per_sec =
-                                (self.timeline_view.px_per_sec / 1.5).max(4.0);
+                        if tool_icon_button(
+                            ui,
+                            ToolIcon::ZoomOut,
+                            false,
+                            &tip("Zoom out", UiAction::ZoomOut),
+                        )
+                        .clicked()
+                        {
+                            action = Some(UiAction::ZoomOut);
                         }
                     });
+                    if let Some(action) = action {
+                        self.handle_action(ctx, action);
+                    }
                 });
                 ui.add_space(8.0);
                 let visuals: VisualMap<'_> = self
@@ -2385,9 +2492,6 @@ impl EditorApp {
             if self.selected.is_some() && self.show_inspector {
                 self.right_tab = RightTab::Details;
             }
-        }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) && self.show_chat {
-            self.right_tab = RightTab::Chat;
         }
         // Fall back when the active tab is hidden from the View menu.
         match self.right_tab {
@@ -2700,15 +2804,17 @@ impl EditorApp {
                 }
             });
             ui.add_space(12.0);
+            let split_tip = shortcuts::tip(
+                ui.ctx(),
+                "Split this clip at the playhead",
+                UiAction::SplitSelected,
+            );
+            let delete_tip = shortcuts::tip(ui.ctx(), "Delete this clip", UiAction::DeleteSelected);
             button_row(
                 ui,
                 vec![
-                    (
-                        "Split at playhead",
-                        "Split this clip at the playhead (S)",
-                        &mut do_split,
-                    ),
-                    ("Delete", "Delete this clip (Del)", &mut do_delete),
+                    ("Split at playhead", &split_tip, &mut do_split),
+                    ("Delete", &delete_tip, &mut do_delete),
                 ],
                 true,
             );
@@ -2930,36 +3036,40 @@ impl EditorApp {
                             ui.available_width() - controls_w
                         };
                         ui.add_space(left_pad.max(8.0));
-                        if transport_button(ui, TransportIcon::ToStart, "Go to start (Home)")
-                            .clicked()
-                        {
-                            self.seek(0.0);
-                        }
-                        if transport_button(ui, TransportIcon::StepBack, "Step back one frame (←)")
-                            .clicked()
-                        {
-                            self.seek(self.playhead - 1.0 / self.timeline.fps);
-                        }
-                        let (icon, tip) = if self.playing {
-                            (TransportIcon::Pause, "Pause (Space)")
+                        let ctx = ui.ctx().clone();
+                        let play = if self.playing {
+                            (TransportIcon::Pause, "Pause")
                         } else {
-                            (TransportIcon::Play, "Play (Space)")
+                            (TransportIcon::Play, "Play")
                         };
-                        if transport_button(ui, icon, tip).clicked() {
-                            let next = !self.playing;
-                            self.set_playing(next);
+                        let mut pressed = None;
+                        for (icon, text, button_action) in [
+                            (TransportIcon::ToStart, "Go to start", UiAction::GoStart),
+                            (
+                                TransportIcon::StepBack,
+                                "Back one frame",
+                                UiAction::StepBack,
+                            ),
+                            (play.0, play.1, UiAction::PlayPause),
+                            (
+                                TransportIcon::StepForward,
+                                "Forward one frame",
+                                UiAction::StepForward,
+                            ),
+                            (TransportIcon::ToEnd, "Go to end", UiAction::GoEnd),
+                        ] {
+                            if transport_button(
+                                ui,
+                                icon,
+                                &shortcuts::tip(&ctx, text, button_action),
+                            )
+                            .clicked()
+                            {
+                                pressed = Some(button_action);
+                            }
                         }
-                        if transport_button(
-                            ui,
-                            TransportIcon::StepForward,
-                            "Step forward one frame (→)",
-                        )
-                        .clicked()
-                        {
-                            self.seek(self.playhead + 1.0 / self.timeline.fps);
-                        }
-                        if transport_button(ui, TransportIcon::ToEnd, "Go to end (End)").clicked() {
-                            self.seek(self.timeline.end());
+                        if let Some(action) = pressed {
+                            self.handle_action(&ctx, action);
                         }
                         if !show_length {
                             return;
@@ -3041,10 +3151,11 @@ impl EditorApp {
     /// intent is known; a per-frame close here cannot tell a gap a
     /// left trim opened on purpose from one a delete left behind.
     fn finish_frame(&mut self, ctx: &egui::Context, action: Option<UiAction>) {
-        self.sync_playback(ctx);
+        // Act first, so a play, pause or seek reaches playback this frame.
         if let Some(action) = action {
             self.handle_action(ctx, action);
         }
+        self.sync_playback(ctx);
     }
 }
 
@@ -3090,8 +3201,10 @@ impl eframe::App for EditorApp {
         self.right_dock(ctx);
         self.central(ctx);
         self.unsaved_dialog(ctx);
+        shortcuts::window(ctx, &mut self.show_shortcuts);
         if action.is_none() && self.pending_discard.is_none() {
-            action = shortcut_action(ctx);
+            let typing = ctx.memory(|m| m.focused().is_some());
+            action = shortcuts::take_action(ctx, typing);
         }
         self.finish_frame(ctx, action);
         let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
@@ -3117,35 +3230,6 @@ impl eframe::App for EditorApp {
             self.rss_mb = read_rss_mb();
         }
     }
-}
-
-/// Project and history shortcuts. Undo/redo leave a focused text field
-/// its own text undo.
-fn shortcut_action(ctx: &egui::Context) -> Option<UiAction> {
-    use egui::{Key, KeyboardShortcut, Modifiers};
-    let typing = ctx.memory(|m| m.focused().is_some());
-    ctx.input_mut(|i| {
-        let shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        if i.consume_shortcut(&KeyboardShortcut::new(shift, Key::S)) {
-            Some(UiAction::SaveProjectAs)
-        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)) {
-            Some(UiAction::SaveProject)
-        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)) {
-            Some(UiAction::OpenProject)
-        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N)) {
-            Some(UiAction::NewProject)
-        } else if typing {
-            None
-        } else if i.consume_shortcut(&KeyboardShortcut::new(shift, Key::Z))
-            || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y))
-        {
-            Some(UiAction::Redo)
-        } else if i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)) {
-            Some(UiAction::Undo)
-        } else {
-            None
-        }
-    })
 }
 
 /// Resident set size from `/proc` (Linux). Returns 0 elsewhere.

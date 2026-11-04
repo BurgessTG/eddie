@@ -1380,7 +1380,7 @@ impl EditorApp {
     /// `EditorApp::right_dock`; this only paints into the given Ui.
     pub(super) fn chat_content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let ui = &mut *ui;
-        let focus_requested = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K));
+        let focus_requested = std::mem::take(&mut self.focus_chat);
         let mut submitted: Option<String> = None;
         let mut cancel_clicked = false;
         {

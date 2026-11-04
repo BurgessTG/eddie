@@ -153,6 +153,41 @@ impl TimelineView {
         ((x - content_left + self.scroll_x) / self.px_per_sec) as f64
     }
 
+    /// Zoom by `factor`, keeping `anchor` at the same screen position.
+    pub fn zoom(&mut self, factor: f32, anchor: f64) {
+        let offset = anchor as f32 * self.px_per_sec - self.scroll_x;
+        self.px_per_sec = (self.px_per_sec * factor).clamp(4.0, 600.0);
+        self.scroll_x = (anchor as f32 * self.px_per_sec - offset).max(0.0);
+    }
+
+    /// Zoom so `duration` seconds fill the lanes.
+    pub fn zoom_to_fit(&mut self, duration: f64) {
+        let Some(rect) = self.last_rect else {
+            return;
+        };
+        if duration <= 0.0 {
+            return;
+        }
+        let width = (rect.width() - HEADER_W - 24.0).max(40.0);
+        self.px_per_sec = (width / duration as f32).clamp(4.0, 600.0);
+        self.scroll_x = 0.0;
+    }
+
+    /// Scroll just enough to keep `time` inside the visible lanes.
+    pub fn reveal(&mut self, time: f64) {
+        let Some(rect) = self.last_rect else {
+            return;
+        };
+        let width = rect.width() - HEADER_W;
+        let margin = (width * 0.1).min(60.0);
+        let x = time as f32 * self.px_per_sec - self.scroll_x;
+        if x < margin {
+            self.scroll_x = (time as f32 * self.px_per_sec - margin).max(0.0);
+        } else if x > width - margin {
+            self.scroll_x = time as f32 * self.px_per_sec - (width - margin);
+        }
+    }
+
     /// True while the user is scrubbing the ruler or dragging a clip.
     pub fn is_interacting(&self) -> bool {
         self.seeking || self.drag.is_some()
@@ -188,7 +223,7 @@ impl TimelineView {
         );
         self.paint(ui, timeline, *playhead, *selected, visuals, rect, content);
         response.on_hover_text(
-            "Click to move the playhead. Drag clips to move, drag edges to trim. S splits at the playhead. Ctrl+scroll zooms.",
+            "Click to move the playhead. Drag clips to move, drag edges to trim. Ctrl+scroll zooms. F1 lists shortcuts.",
         );
     }
 
