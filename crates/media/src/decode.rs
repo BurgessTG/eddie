@@ -38,7 +38,7 @@ fn err(context: &str, error: ffmpeg::Error) -> String {
 pub struct VideoDecoder {
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
-    scaler: ffmpeg::software::scaling::Context,
+    scaler: Scaler,
     stream_index: usize,
     time_base: ffmpeg::Rational,
     source_origin: i64,
@@ -53,7 +53,6 @@ pub struct VideoDecoder {
     lookahead: ffmpeg::frame::Video,
     lookahead_pts: Option<f64>,
     seek_target: Option<f64>,
-    scaled: ffmpeg::frame::Video,
     eof_sent: bool,
     /// The decoder returned its final picture since the last seek.
     drained: bool,
@@ -133,7 +132,7 @@ impl VideoDecoder {
             .video()
             .map_err(|e| err("open video decoder", e))?;
 
-        let (scaler, target_h) = scaler_for(&decoder, turns, target_w, fast)?;
+        let (scaler, target_h) = Scaler::new(&decoder, turns, target_w, fast)?;
         Ok(Self {
             input,
             decoder,
@@ -150,7 +149,6 @@ impl VideoDecoder {
             lookahead: ffmpeg::frame::Video::empty(),
             lookahead_pts: None,
             seek_target: None,
-            scaled: ffmpeg::frame::Video::empty(),
             eof_sent: false,
             drained: false,
             recent: VecDeque::new(),
@@ -166,9 +164,8 @@ impl VideoDecoder {
     /// decoder, so scrub and settle sizes share one position.
     pub(crate) fn set_output(&mut self, target_w: u32, fast: bool) -> MediaResult<()> {
         if (target_w, fast) != (self.target_w, self.fast) {
-            let (scaler, target_h) = scaler_for(&self.decoder, self.turns, target_w, fast)?;
+            let (scaler, target_h) = Scaler::new(&self.decoder, self.turns, target_w, fast)?;
             self.scaler = scaler;
-            self.scaled = ffmpeg::frame::Video::empty();
             (self.target_w, self.target_h, self.fast) = (target_w, target_h, fast);
         }
         Ok(())
@@ -384,14 +381,12 @@ impl VideoDecoder {
             Some(index) => &self.recent[index].1,
             None => &self.decoded,
         };
-        self.scaler
-            .run(picture, &mut self.scaled)
-            .map_err(|e| err("scale frame", e))?;
-        let stride = self.scaled.stride(0);
+        let scaled = self.scaler.run(picture)?;
+        let stride = scaled.stride(0);
         let width = self.target_w as usize;
         let height = self.target_h as usize;
         buffer.resize(width * height * 4, 0);
-        let data = self.scaled.data(0);
+        let data = scaled.data(0);
         // Output pixel (x, y) reads this scaled pixel. The scaled picture is
         // width×height, or height×width (transposed) for a quarter turn.
         let source = |x: usize, y: usize| match self.turns {
@@ -469,42 +464,130 @@ pub(crate) fn clockwise_turns(degrees: f64) -> u8 {
     }
 }
 
-/// An RGBA scaler for `target_w` display pixels, and the display height.
-fn scaler_for(
-    decoder: &ffmpeg::decoder::Video,
-    turns: u8,
-    target_w: u32,
-    fast: bool,
-) -> MediaResult<(ffmpeg::software::scaling::Context, u32)> {
-    // target_w/target_h are display dimensions. A quarter-turn scales to
-    // the transposed size, then rotates while copying out.
-    let quarter = turns % 2 == 1;
-    let target_h = if quarter {
-        scaled_height(decoder.height(), decoder.width(), target_w)
-    } else {
-        scaled_height(decoder.width(), decoder.height(), target_w)
-    };
-    let (scaled_w, scaled_h) = if quarter {
-        (target_h, target_w)
-    } else {
-        (target_w, target_h)
-    };
-    let flags = if fast {
-        ffmpeg::software::scaling::Flags::FAST_BILINEAR
-    } else {
-        ffmpeg::software::scaling::Flags::BICUBIC
-    };
-    let scaler = ffmpeg::software::scaling::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        ffmpeg::format::Pixel::RGBA,
-        scaled_w,
-        scaled_h,
-        flags,
-    )
-    .map_err(|e| err("create scaler", e))?;
-    Ok((scaler, target_h))
+/// Source pictures to display-size RGBA in two swscale passes: resize in
+/// the source format, then convert at the small size with each picture's
+/// own matrix and range, as export does. One combined pass cost about
+/// 2.8 ms per 4K picture against about 1.25 ms for both, and read every
+/// source as BT.601, which oversaturated BT.709 HD footage.
+struct Scaler {
+    resize: ffmpeg::software::scaling::Context,
+    convert: ffmpeg::software::scaling::Context,
+    resized: ffmpeg::frame::Video,
+    rgba: ffmpeg::frame::Video,
+    /// swscale matrix and full-range flag last applied to `convert`.
+    colors: Option<(i32, i32)>,
+}
+
+impl Scaler {
+    /// A scaler for `target_w` display pixels, and the display height.
+    fn new(
+        decoder: &ffmpeg::decoder::Video,
+        turns: u8,
+        target_w: u32,
+        fast: bool,
+    ) -> MediaResult<(Self, u32)> {
+        use ffmpeg::format::Pixel;
+        use ffmpeg::software::scaling::{Context, Flags};
+        // target_w/target_h are display dimensions. A quarter-turn scales to
+        // the transposed size, then rotates while copying out.
+        let quarter = turns % 2 == 1;
+        let target_h = if quarter {
+            scaled_height(decoder.height(), decoder.width(), target_w)
+        } else {
+            scaled_height(decoder.width(), decoder.height(), target_w)
+        };
+        let (scaled_w, scaled_h) = if quarter {
+            (target_h, target_w)
+        } else {
+            (target_w, target_h)
+        };
+        let flags = if fast {
+            Flags::FAST_BILINEAR
+        } else {
+            Flags::BICUBIC
+        };
+        let source = decoder.format();
+        // SAFETY: a pure query on a pixel format value.
+        let resizable = unsafe { ffmpeg::ffi::sws_isSupportedOutput(source.into()) } > 0;
+        let middle = if resizable { source } else { Pixel::YUV420P };
+        let resize = Context::get(
+            source,
+            decoder.width(),
+            decoder.height(),
+            middle,
+            scaled_w,
+            scaled_h,
+            flags,
+        )
+        .map_err(|e| err("create scaler", e))?;
+        let convert = Context::get(
+            middle,
+            scaled_w,
+            scaled_h,
+            Pixel::RGBA,
+            scaled_w,
+            scaled_h,
+            flags,
+        )
+        .map_err(|e| err("create converter", e))?;
+        let scaler = Self {
+            resize,
+            convert,
+            resized: ffmpeg::frame::Video::empty(),
+            rgba: ffmpeg::frame::Video::empty(),
+            colors: None,
+        };
+        Ok((scaler, target_h))
+    }
+
+    fn run(&mut self, picture: &ffmpeg::frame::Video) -> MediaResult<&ffmpeg::frame::Video> {
+        use ffmpeg::color::{Range, Space};
+        use ffmpeg::ffi;
+        // Untagged matrices use swscale's default (BT.601), as the FFmpeg
+        // CLI and export do; yuvj formats are full range by definition.
+        let matrix = match picture.color_space() {
+            Space::BT709 => ffi::SWS_CS_ITU709,
+            Space::FCC => ffi::SWS_CS_FCC,
+            Space::SMPTE240M => ffi::SWS_CS_SMPTE240M,
+            Space::BT2020NCL | Space::BT2020CL => ffi::SWS_CS_BT2020,
+            _ => ffi::SWS_CS_DEFAULT,
+        };
+        let full = match picture.color_range() {
+            Range::JPEG => 1,
+            Range::MPEG => 0,
+            _ => i32::from(matches!(
+                picture.format(),
+                ffmpeg::format::Pixel::YUVJ420P
+                    | ffmpeg::format::Pixel::YUVJ422P
+                    | ffmpeg::format::Pixel::YUVJ444P
+                    | ffmpeg::format::Pixel::YUVJ440P
+            )),
+        };
+        if self.colors != Some((matrix, full)) {
+            // SAFETY: the context is owned and initialized; coefficient
+            // tables are static. RGB output is always full range.
+            unsafe {
+                ffi::sws_setColorspaceDetails(
+                    self.convert.as_mut_ptr(),
+                    ffi::sws_getCoefficients(matrix),
+                    full,
+                    ffi::sws_getCoefficients(ffi::SWS_CS_DEFAULT),
+                    1,
+                    0,
+                    1 << 16,
+                    1 << 16,
+                );
+            }
+            self.colors = Some((matrix, full));
+        }
+        self.resize
+            .run(picture, &mut self.resized)
+            .map_err(|e| err("scale frame", e))?;
+        self.convert
+            .run(&self.resized, &mut self.rgba)
+            .map_err(|e| err("convert frame", e))?;
+        Ok(&self.rgba)
+    }
 }
 
 /// Filmstrip stills at `times` (ascending), keyed by each still's PTS.

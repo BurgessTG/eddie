@@ -461,6 +461,12 @@ than one frame. Do not add a final encoder `-t` that rounds away that sample.
 Display rotation (phone portrait footage) is honored everywhere: `probe`
 reports displayed width/height, and the native decoder rotates quarter and
 half turns while copying out, matching the FFmpeg CLI's autorotate.
+The native decoder (preview, stills, thumbnails) converts to RGBA with each
+picture's own matrix and range, untagged as BT.601 like the FFmpeg CLI and
+export. It used swscale's default before, so BT.709 green (32, 176, 64)
+previewed as (43, 197, 66). It resizes in the source format first, then
+converts at preview size: 4K to 960 px went from 3.5-3.8 ms to 2.3 ms per
+frame (bicubic 7.4-9.0 to 5.7-7.1); 1080p is unchanged.
 Native seeks select presentation intervals `[PTS, next PTS)`, normalize
 source time to the container origin, and drain delayed frames at EOF.
 Playback discards seek preroll and paces from the requested source-in.

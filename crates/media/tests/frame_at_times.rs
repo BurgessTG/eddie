@@ -383,6 +383,85 @@ fn still_decoder_returns_frame_at_requested_time() {
     ));
 }
 
+/// Preview converts with each source's own matrix and range, as export
+/// does, so BT.709 HD footage is not read as BT.601 (greens and reds came
+/// out about 20 levels too strong). Untagged sources match the FFmpeg CLI.
+#[test]
+fn native_decoder_uses_the_source_color_matrix_and_range() {
+    let dir = std::env::temp_dir().join(format!(
+        "openreel_color_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).expect("temp dir");
+    let _cleanup = Fixture {
+        path: dir.join("unused"),
+        dir: dir.clone(),
+    };
+    let source = [32_u8, 176, 64];
+    let center = |rgba: &[u8], width: usize, height: usize| {
+        let i = ((height / 2) * width + width / 2) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    };
+    // (name, encode matrix, encode range, tags), all from the same RGB.
+    let cases = [
+        ("bt709-tv", "bt709", "tv", Some(("bt709", "tv"))),
+        ("bt601-tv", "bt601", "tv", Some(("smpte170m", "tv"))),
+        ("bt709-pc", "bt709", "pc", Some(("bt709", "pc"))),
+        ("untagged", "bt709", "tv", None),
+    ];
+    for (name, matrix, range, tags) in cases {
+        let path = dir.join(format!("{name}.mp4"));
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=c=0x20B040:s=64x36:r=10:d=0.5,format=gbrp")
+            .arg("-vf")
+            .arg(format!(
+                "scale=out_color_matrix={matrix}:out_range={range},format=yuv420p"
+            ))
+            .args(["-c:v", "libx264", "-qp", "0"]);
+        if let Some((space, range)) = tags {
+            cmd.args(["-colorspace", space, "-color_range", range]);
+        }
+        run_ffmpeg(cmd.arg(&path));
+        let expected = match tags {
+            Some(_) => source,
+            None => {
+                let out = Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args([
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        "format=rgb24",
+                        "-f",
+                        "rawvideo",
+                        "-",
+                    ])
+                    .output()
+                    .expect("ffmpeg reference decode");
+                let i = (18 * 64 + 32) * 3;
+                [out.stdout[i], out.stdout[i + 1], out.stdout[i + 2]]
+            }
+        };
+        for fast in [false, true] {
+            let frame = native::VideoDecoder::open(path.to_str().unwrap(), 64, fast)
+                .and_then(|mut decoder| decoder.frame_at(0.0))
+                .expect("decode color patch");
+            let got = center(&frame.rgba, frame.width as usize, frame.height as usize);
+            let off = (0..3)
+                .map(|c| (got[c] as i32 - expected[c] as i32).abs())
+                .max()
+                .unwrap();
+            assert!(
+                off <= 3,
+                "{name} fast={fast}: got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+}
+
 /// Scrubbing reuses one decoder: forward steps decode on, backward steps
 /// read recent pictures, other moves seek, and the width can change between
 /// requests. Every answer must equal a fresh seek-and-decode of that time.
