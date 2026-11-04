@@ -327,7 +327,7 @@ Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from lo
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
-Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
+Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create, and split/splitClip return one for the new right-hand piece; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
 Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Where video clips overlap, the lowest lane index is the picture shown (lane 0 wins), and a lower-opacity winner fades to black, never revealing another lane: there is no picture-in-picture or video overlay. To cut away from a long base clip (an interview, a monologue) and keep its sound, first setClipLane(baseId, 1), then add the cutaway, then setClipLane(cutawayHandle, 0) and setEmbeddedAudio(cutawayHandle, false) if its own sound is unwanted. Times are seconds. \
 For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
 Refer to clips, sweep candidates, and transcript segments by the ids in state(). Do not invent ids or asset names. \
@@ -2733,6 +2733,30 @@ mod tests {
             .find(|c| c.name == "broll.mp4")
             .unwrap();
         assert!(!cut.embedded_audio);
+
+        // Inserting time: split the base and move its right piece by handle.
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "var t = clips().filter(c => c.name == 'talk.mp4')[0].id; \
+             var right = splitClip(t, 9); moveClip(right, 29); console.log('Inserted.');",
+        );
+        let mut talk: Vec<_> = app
+            .timeline
+            .clips
+            .iter()
+            .filter(|c| c.name == "talk.mp4")
+            .map(|c| (c.start, c.source_in, c.duration))
+            .collect();
+        talk.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(
+            talk,
+            vec![(0.0, 0.0, 9.0), (29.0, 9.0, 3.0)],
+            "{}",
+            app.status
+        );
     }
 
     #[test]

@@ -60,7 +60,8 @@ The media bin and import pipeline live in `crates/app/src/app/media.rs`.
 Chat editing lives in `crates/app/src/app/chat.rs`. Its HTTP call runs on
 a worker thread in app code. Generated JavaScript still goes through
 `scripting.rs` and mutates state only as `ScriptCommand`s. `addAsset`,
-`addAssetRange` and `addTitle` return a handle (from `CLIP_HANDLE_BASE`,
+`addAssetRange`, `addTitle` and `split`/`splitClip` (its new right-hand
+piece) return a handle (from `CLIP_HANDLE_BASE`,
 never reused within one engine); each applied batch maps handles to the
 clips it created, so later commands in the same run can target new clips
 without guessing IDs. A handle from an earlier run is an error. Checked chat

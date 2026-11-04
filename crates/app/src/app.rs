@@ -1517,12 +1517,13 @@ impl EditorApp {
                 self.seek(self.playhead + n as f64 / self.timeline.fps);
             }
             ScriptCommand::SelectClip(id) => self.selected = Some(id),
-            ScriptCommand::SplitClip { clip, at } => {
-                self.selected = Some(
-                    self.timeline
-                        .split_at(clip, at)
-                        .ok_or_else(|| format!("cannot split clip {clip} at {at}"))?,
-                );
+            ScriptCommand::SplitClip { clip, at, handle } => {
+                let right = self
+                    .timeline
+                    .split_at(clip, at)
+                    .ok_or_else(|| format!("cannot split clip {clip} at {at}"))?;
+                self.selected = Some(right);
+                created.extend(handle.map(|handle| (handle, right)));
             }
             ScriptCommand::DeleteClip(id) => {
                 self.timeline.remove_clip(id);
