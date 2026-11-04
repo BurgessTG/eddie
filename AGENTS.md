@@ -442,10 +442,21 @@ largest source of the project orientation sets the size (width capped at
 lowest video lane wins (insertion order breaks ties), its opacity fades
 against black rather than revealing another lane, and the first active
 title wins. All audible clips still mix independently of picture visibility.
-Export streams raw video batches into one H.264/AAC encoder rather
-than sharing decoded frames across clips on different source clocks.
-Batches use at most four independent video inputs and eight seconds;
-decoder, filter, and final encoder parallelism are bounded. A branch
+Export renders raw video batches rather than sharing decoded frames
+across clips on different source clocks. Batches use at most four
+independent video inputs and eight seconds, depend only on the timeline,
+and each pipes into its own H.264 segment (titles drawn there on shifted
+timeline frames). Segments join by `-c copy` concat with one AAC encode,
+made alongside the video, muxed once. Scratch segments live in a private
+hidden folder beside the output, removed on every return path. Batches in
+flight come from the CPU budget (cgroup quota included): one below 12
+CPUs, at most three. On a 4-CPU orb one batch saturates the CPUs; two
+or four were slower (54 s, 60 s vs 47 s) and used 1.5 GB and 3.0 GB, not
+0.9 GB. Speedup on 16 cores is not yet measured. x264 threads follow
+that budget; its 16-core default raised peak RSS from 0.83 to 1.28 GB. A
+BT.601 or untagged source makes the accurate-rounding, full-chroma scale
+cost about 4x (14.7 vs 3.9 CPU-s per 240 4K frames); BT.709 sources barely
+pay for it. A branch
 starts at its first visible output frame, not at batch time zero, and
 stops at its last one (decoding to the batch end was most of the 4K
 work). Inputs use slice threads: frame threads on four 4K inputs reached
