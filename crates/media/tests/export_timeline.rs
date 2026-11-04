@@ -672,16 +672,26 @@ fn mixed_color_matrices_and_ranges_preserve_rgb_through_export() {
     let fixture = Fixture::new();
     let mut timeline = Timeline::new(10.0);
     let mut expected = Vec::new();
-    for (index, (matrix, range)) in [("bt709", "tv"), ("bt470bg", "tv"), ("bt709", "pc")]
-        .into_iter()
-        .enumerate()
+    // Untagged sources are BT.601 limited range.
+    for (index, (matrix, range)) in [
+        ("bt709", "tv"),
+        ("bt470bg", "tv"),
+        ("bt709", "pc"),
+        ("unknown", "unknown"),
+    ]
+    .into_iter()
+    .enumerate()
     {
+        let (encoded, encoded_range) = match (matrix, range) {
+            ("unknown", "unknown") => ("bt601", "tv"),
+            _ => (matrix, range),
+        };
         let source = fixture.video(
             &format!("{matrix}-{range}.mp4"),
             "color=c=0xD14C29:s=64x36:r=10:d=0.5",
             &format!(
                 "drawbox=x=32:y=0:w=32:h=36:color=0x2369BD:t=fill,\
-                 scale=in_color_matrix=bt601:out_color_matrix={matrix}:out_range={range},\
+                 scale=in_color_matrix=bt601:out_color_matrix={encoded}:out_range={encoded_range},\
                  setparams=colorspace={matrix}:range={range}"
             ),
             None,
@@ -698,8 +708,10 @@ fn mixed_color_matrices_and_ranges_preserve_rgb_through_export() {
             &source,
         ]));
         let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-        assert_eq!(metadata["streams"][0]["color_space"], matrix);
-        assert_eq!(metadata["streams"][0]["color_range"], range);
+        let tagged = metadata["streams"][0]["color_space"].as_str();
+        assert_eq!(tagged.unwrap_or("unknown"), matrix);
+        let tagged = metadata["streams"][0]["color_range"].as_str();
+        assert_eq!(tagged.unwrap_or("unknown"), range);
         let original = frames(Path::new(&source));
         for (offset, opacity) in [(0.0, 1.0), (0.2, 0.5)] {
             let id = video(

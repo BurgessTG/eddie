@@ -454,9 +454,7 @@ CPUs, at most three. On a 4-CPU orb one batch saturates the CPUs; two
 or four were slower (54 s, 60 s vs 47 s) and used 1.5 GB and 3.0 GB, not
 0.9 GB. Speedup on 16 cores is not yet measured. x264 threads follow
 that budget; its 16-core default raised peak RSS from 0.83 to 1.28 GB. A
-BT.601 or untagged source makes the accurate-rounding, full-chroma scale
-cost about 4x (14.7 vs 3.9 CPU-s per 240 4K frames); BT.709 sources barely
-pay for it. A branch
+branch
 starts at its first visible output frame, not at batch time zero, and
 stops at its last one (decoding to the batch end was most of the 4K
 work). Inputs use slice threads: frame threads on four 4K inputs reached
@@ -469,9 +467,19 @@ apply one fixed gain to -16 LUFS plus a 0.8 sample-peak limiter; tests
 can export the plain mix. Batch bytes and
 child exits are checked before export can report success.
 SDR batches convert source YCbCr matrices and ranges to limited-range
-BT.709 with accurate rounding and full chroma interpolation (without it,
-BT.601 phone footage shifted green by about 1.3 levels on textured
-pictures; flat test colors hide this). The raw-video encoder input declares that
+BT.709. BT.709 limited-range sources, and formats the `colorspace` filter
+cannot read, convert in swscale's resize with accurate rounding and full
+chroma interpolation (without it, BT.601 phone footage shifted green by
+about 1.3 levels on textured pictures; flat test colors hide this). Every
+other source resizes at its own matrix, then `colorspace` converts at
+canvas size with the matrix and range export reads from the stream
+(untagged is BT.601 limited, yuvj full); the filter fails on untagged
+frames, and its yuvj output must be named plain `yuv` or the range is
+misread. swscale's matrix change cost 14.1 CPU-s per 240 4K BT.601 frames,
+this path 6.8; the 60 s, 29-cut untagged 4K montage went from 46.8 s to
+35.7 s on a 4-CPU orb (BT.709 sources: 33.4 s). Against true RGB the
+summed mean bias fell (0.97 vs 1.49 levels); green is about -0.4, red
+near 0. Primaries and transfer are not converted. The raw-video encoder input declares that
 same representation so the output keeps its color tags. This is not an
 HDR tone-mapping or wide-gamut color-management pipeline.
 Video sample boundaries and source offsets share one integer tick clock;

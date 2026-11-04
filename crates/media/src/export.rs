@@ -172,6 +172,8 @@ pub(crate) fn font_file() -> Option<String> {
 
 struct VideoLayer<'a> {
     source: &'a str,
+    /// A cheaper exact matrix/range conversion, applied after resizing.
+    convert: Option<&'a str>,
     opacity: f32,
     source_offset: i64,
     ranges: Vec<(i64, i64)>,
@@ -211,6 +213,7 @@ const MAX_INPUTS: usize = 4;
 
 fn plan_video<'a>(
     timeline: &'a Timeline,
+    conversions: &'a HashMap<&str, Option<String>>,
     clock: VideoClock,
     frame_count: i64,
 ) -> (Vec<VideoLayer<'a>>, Vec<Batch>) {
@@ -228,6 +231,9 @@ fn plan_video<'a>(
         if clip.opacity <= 0.0 {
             continue;
         }
+        let convert = conversions
+            .get(source)
+            .and_then(|convert| convert.as_deref());
         let start = clock.boundary(clip.start);
         let source_in = clip.source_in + (start as f64 / timeline.fps - clip.start);
         let source_offset = (source_in * tick_rate as f64).round() as i64 - start * frame_ticks;
@@ -240,6 +246,7 @@ fn plan_video<'a>(
         } else {
             layers.push(VideoLayer {
                 source,
+                convert,
                 opacity: clip.opacity,
                 source_offset,
                 ranges: ranges.clone(),
@@ -273,6 +280,76 @@ fn plan_video<'a>(
         start = end;
     }
     (layers, batches)
+}
+
+/// The colorspace filter that brings a source to the export's BT.709 limited
+/// range after resizing, or `None` when it already is BT.709 limited range
+/// or the filter cannot read its format (swscale then converts while
+/// resizing). Untagged matrices are BT.601, as the FFmpeg CLI and the
+/// preview assume. Primaries and transfer stay as they are, so only the
+/// matrix and range change, as before.
+fn colorspace_filter(path: &str) -> Option<String> {
+    use ffmpeg_next::ffi::{AVColorRange, AVColorSpace, AVPixelFormat};
+    crate::decode::ensure_init();
+    let input = ffmpeg_next::format::input(path).ok()?;
+    let stream = input.streams().best(ffmpeg_next::media::Type::Video)?;
+    // SAFETY: the parameters belong to the open input and outlive this read.
+    let (space, range, format) = unsafe {
+        let parameters = &*stream.parameters().as_ptr();
+        (
+            parameters.color_space,
+            parameters.color_range,
+            parameters.format,
+        )
+    };
+    // Compare raw values: a pixel format newer than these bindings is not
+    // a valid Rust enum value.
+    let is = |f: AVPixelFormat| f as i32 == format;
+    use AVPixelFormat::*;
+    // The colorspace filter keeps a yuvj input's pixel format while tagging
+    // it limited range, and later conversions read yuvj as full range.
+    // Name the plain format of the same layout as its output.
+    let (output, full_range_format) = [
+        (AV_PIX_FMT_YUVJ420P, "yuv420p", true),
+        (AV_PIX_FMT_YUVJ422P, "yuv422p", true),
+        (AV_PIX_FMT_YUVJ444P, "yuv444p", true),
+        (AV_PIX_FMT_YUV420P, "yuv420p", false),
+        (AV_PIX_FMT_YUV422P, "yuv422p", false),
+        (AV_PIX_FMT_YUV444P, "yuv444p", false),
+        (AV_PIX_FMT_YUV420P10LE, "yuv420p10", false),
+        (AV_PIX_FMT_YUV422P10LE, "yuv422p10", false),
+        (AV_PIX_FMT_YUV444P10LE, "yuv444p10", false),
+        (AV_PIX_FMT_YUV420P12LE, "yuv420p12", false),
+        (AV_PIX_FMT_YUV422P12LE, "yuv422p12", false),
+        (AV_PIX_FMT_YUV444P12LE, "yuv444p12", false),
+    ]
+    .into_iter()
+    .find(|&(f, ..)| is(f))
+    .map(|(_, output, full)| (output, full))?;
+    let matrix = match space {
+        AVColorSpace::AVCOL_SPC_BT709 => "bt709",
+        AVColorSpace::AVCOL_SPC_UNSPECIFIED
+        | AVColorSpace::AVCOL_SPC_RESERVED
+        | AVColorSpace::AVCOL_SPC_SMPTE170M => "smpte170m",
+        AVColorSpace::AVCOL_SPC_BT470BG => "bt470bg",
+        AVColorSpace::AVCOL_SPC_SMPTE240M => "smpte240m",
+        AVColorSpace::AVCOL_SPC_FCC => "fcc",
+        AVColorSpace::AVCOL_SPC_BT2020_NCL => "bt2020ncl",
+        _ => return None,
+    };
+    let range = match range {
+        AVColorRange::AVCOL_RANGE_JPEG => "pc",
+        AVColorRange::AVCOL_RANGE_MPEG => "tv",
+        _ if full_range_format => "pc",
+        _ => "tv",
+    };
+    ((matrix, range) != (VIDEO_COLOR_SPACE, VIDEO_COLOR_RANGE)).then(|| {
+        format!(
+            "colorspace=ispace={matrix}:irange={range}:itrc=bt709:iprimaries=bt709:\
+             space={VIDEO_COLOR_SPACE}:range={VIDEO_COLOR_RANGE}:trc=bt709:primaries=bt709:\
+             format={output}"
+        )
+    })
 }
 
 /// The FFmpeg command that renders one batch as raw yuv420p on `pipe:1`.
@@ -345,6 +422,20 @@ fn batch_command(
         // the rest of the batch was wasted.
         let last = ranges.iter().map(|range| range.1).max().unwrap();
         let layer_frames = last - first;
+        // swscale's accurate, full-chroma matrix change made a 4K BT.601
+        // resize cost about 4x a BT.709 one. Resize at the source matrix,
+        // then convert at canvas size with the colorspace filter: 6.8 vs
+        // 14.1 CPU-s per 240 4K frames, and no further from true RGB.
+        let (resize, convert) = match layer.convert {
+            Some(convert) => ("bicubic+accurate_rnd".to_owned(), format!(",{convert}")),
+            None => (
+                format!(
+                    "bicubic+accurate_rnd+full_chroma_int:\
+                     out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE}"
+                ),
+                String::new(),
+            ),
+        };
         let alpha = if layer.opacity < 0.999 {
             format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
         } else {
@@ -365,10 +456,8 @@ fn batch_command(
             "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
              tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
              trim=end_frame={layer_frames},setpts=PTS+{first},\
-             scale={width}:{height}:force_original_aspect_ratio=decrease:\
-             flags=bicubic+accurate_rnd+full_chroma_int:\
-             out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE},\
-             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1{alpha}[seg{index}]"
+             scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
+             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}[seg{index}]"
         ));
         filters.push(format!(
             "[{current}][seg{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
@@ -857,7 +946,13 @@ pub fn export_timeline(
     let audio_graph = format!("{};{audio_out}[aout]", audio_filters.join(";"));
     let audio_graph = audio_graph.trim_start_matches(';');
 
-    let (layers, batches) = plan_video(timeline, clock, frame_count);
+    let mut conversions: HashMap<&str, Option<String>> = HashMap::new();
+    for source in video_clips.iter().filter_map(|clip| clip.source.as_deref()) {
+        conversions
+            .entry(source)
+            .or_insert_with(|| colorspace_filter(source));
+    }
+    let (layers, batches) = plan_video(timeline, &conversions, clock, frame_count);
     // Each batch decodes up to four inputs on slice threads and encodes on
     // its own x264, with threads from the CPU budget (cgroup quota included)
     // rather than x264's per-core default. On four CPUs one batch already
