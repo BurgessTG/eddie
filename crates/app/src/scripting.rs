@@ -28,6 +28,8 @@ pub enum ScriptCommand {
     SplitClip {
         clip: u64,
         at: f64,
+        /// Names the new right-hand piece for later commands in the run.
+        handle: Option<u64>,
     },
     DeleteClip(u64),
     MoveClip {
@@ -327,7 +329,7 @@ function help() {
     "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec)",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
-    "  // adds return a handle for the new clip; pass it to later calls in the same run",
+    "  // adds and splits return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
     "console.log(...) works. Variables persist between lines."
@@ -337,9 +339,9 @@ var console = { log: (...a) => __log(a.map(String).join(" ")) };
 function split(at) {
   const s = state();
   if (s.selected == null) throw new Error("no clip selected");
-  __split_clip(s.selected, at === undefined ? s.playhead : at);
+  return __split_clip(s.selected, at === undefined ? s.playhead : at);
 }
-function splitClip(id, at) { __split_clip(id, at); }
+function splitClip(id, at) { return __split_clip(id, at); }
 function deleteClip(id) {
   __delete_clip(id === undefined ? (state().selected ?? -1) : id);
 }
@@ -422,7 +424,11 @@ impl ScriptEngine {
                 let q = Rc::clone(&queue);
                 reg!("__split_clip", move |clip: u64, at: f64| q
                     .borrow_mut()
-                    .push(0, || ScriptCommand::SplitClip { clip, at }));
+                    .push_addition(0, |handle| ScriptCommand::SplitClip {
+                        clip,
+                        at,
+                        handle
+                    }));
                 let q = Rc::clone(&queue);
                 reg!("__delete_clip", move |clip: i64| -> rquickjs::Result<()> {
                     if clip >= 0 {
@@ -698,7 +704,11 @@ mod tests {
             commands,
             vec![
                 ScriptCommand::Seek(2.5),
-                ScriptCommand::SplitClip { clip: 3, at: 1.5 },
+                ScriptCommand::SplitClip {
+                    clip: 3,
+                    at: 1.5,
+                    handle: Some(CLIP_HANDLE_BASE),
+                },
             ]
         );
     }
@@ -1134,7 +1144,11 @@ mod tests {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for command in [
                 ScriptCommand::Seek(value),
-                ScriptCommand::SplitClip { clip: 1, at: value },
+                ScriptCommand::SplitClip {
+                    clip: 1,
+                    at: value,
+                    handle: None,
+                },
                 ScriptCommand::MoveClip {
                     clip: 1,
                     start: value,
@@ -1278,7 +1292,11 @@ mod tests {
             commands,
             vec![
                 ScriptCommand::Seek(-2.0),
-                ScriptCommand::SplitClip { clip: 1, at: -3.0 },
+                ScriptCommand::SplitClip {
+                    clip: 1,
+                    at: -3.0,
+                    handle: Some(CLIP_HANDLE_BASE),
+                },
                 ScriptCommand::MoveClip {
                     clip: 1,
                     start: -4.0
@@ -1313,19 +1331,19 @@ mod tests {
                     at: -1.0,
                     duration: -2.0,
                     style: "lower-third".to_owned(),
-                    handle: Some(CLIP_HANDLE_BASE),
+                    handle: Some(CLIP_HANDLE_BASE + 1),
                 },
                 ScriptCommand::AddAsset {
                     asset: "asset".to_owned(),
                     at: -1.0,
-                    handle: Some(CLIP_HANDLE_BASE + 1),
+                    handle: Some(CLIP_HANDLE_BASE + 2),
                 },
                 ScriptCommand::AddAssetRange {
                     asset: "asset".to_owned(),
                     at: -1.0,
                     source_in: -2.0,
                     duration: -3.0,
-                    handle: Some(CLIP_HANDLE_BASE + 2),
+                    handle: Some(CLIP_HANDLE_BASE + 3),
                 },
             ]
         );
@@ -1454,7 +1472,11 @@ mod tests {
                     handle: Some(CLIP_HANDLE_BASE + 3),
                 },
                 ScriptCommand::DeleteClip(9),
-                ScriptCommand::SplitClip { clip: 9, at: 4.0 },
+                ScriptCommand::SplitClip {
+                    clip: 9,
+                    at: 4.0,
+                    handle: Some(CLIP_HANDLE_BASE + 4),
+                },
             ]
         );
     }

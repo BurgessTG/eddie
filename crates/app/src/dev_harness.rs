@@ -774,10 +774,15 @@ impl HeadlessEditor {
                         notes.push(format!("error: no clip {id}"));
                     }
                 }
-                ScriptCommand::SplitClip { clip, at } => match self.timeline.split_at(clip, at) {
-                    Some(right) => self.selected = Some(right),
-                    None => notes.push(format!("error: cannot split clip {clip} at {at}")),
-                },
+                ScriptCommand::SplitClip { clip, at, handle } => {
+                    match self.timeline.split_at(clip, at) {
+                        Some(right) => {
+                            self.selected = Some(right);
+                            created.extend(handle.map(|handle| (handle, right)));
+                        }
+                        None => notes.push(format!("error: cannot split clip {clip} at {at}")),
+                    }
+                }
                 ScriptCommand::DeleteClip(id) => {
                     self.timeline.remove_clip(id);
                     if self.selected == Some(id) {
