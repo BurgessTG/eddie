@@ -1310,3 +1310,62 @@ fn five_hundred_distinct_frames_with_unmergeable_audio_do_not_stall() {
     eprintln!("500 unmergeable audio contributions: 440 Hz amplitude={amplitude}");
     assert!(amplitude > 0.04, "unmergeable embedded audio survives");
 }
+
+#[test]
+fn segment_seams_keep_timestamps_and_titles_on_the_timeline_clock() {
+    // Export renders bounded batches (eight seconds at most) as separate
+    // segments. A fractional rate puts the seam at frame 240 inside a title.
+    let fixture = Fixture::new();
+    let fps = 30000.0 / 1001.0;
+    let source = fixture.video(
+        "black.mp4",
+        "color=c=black:s=320x180:r=30000/1001:d=11",
+        "null",
+        Some(440),
+    );
+    let mut timeline = Timeline::new(fps);
+    video(&mut timeline, &source, 0, 0.0, 10.0, 0.0);
+    let title = timeline.add_clip("SEAM", ClipKind::Title, 1, 7.5, 1.0, 0.0);
+    timeline.clip_mut(title).unwrap().title_style = TitleStyle::LowerThird;
+    let exported = fixture.export("seam-export.mp4", &timeline);
+
+    let count = (10.0 * fps).ceil() as usize;
+    let titled = (7.5 * fps).ceil() as usize..(8.5 * fps).ceil() as usize;
+    assert!(titled.contains(&240), "the title spans the first seam");
+    let actual = frames(&exported);
+    assert_eq!(actual.len(), count, "frame count across seams");
+    for (n, frame) in actual.iter().enumerate() {
+        let lit = frame.iter().filter(|&&value| value > 64).count();
+        assert_eq!(
+            lit > 0,
+            titled.contains(&n),
+            "frame {n}: title visibility ({lit} lit values)"
+        );
+    }
+    let json = stream_json(&exported);
+    let frames_json = json["frames"].as_array().unwrap();
+    assert_eq!(frames_json.len(), count);
+    for (n, frame) in frames_json.iter().enumerate() {
+        let pts: f64 = frame["best_effort_timestamp_time"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (pts - n as f64 / fps).abs() < 0.000001,
+            "frame {n} at {pts}, expected {}",
+            n as f64 / fps
+        );
+    }
+    let samples = audio_samples(&exported);
+    assert_eq!(samples.len(), 480_000, "audio keeps the timeline duration");
+    let seam = (240.0 / fps * 48000.0) as usize;
+    let quietest = samples[seam - 4800..seam + 4800]
+        .chunks(480)
+        .map(|chunk| chunk.iter().map(|s| s.abs()).fold(0.0_f32, f32::max))
+        .fold(f32::MAX, f32::min);
+    assert!(
+        quietest > 0.02,
+        "audio is continuous at the seam: {quietest}"
+    );
+}

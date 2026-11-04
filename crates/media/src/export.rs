@@ -1,12 +1,13 @@
-//! Timeline export streams bounded video batches into one H.264/AAC encoder.
+//! Timeline export renders bounded video batches in parallel, each into its
+//! own H.264 segment, joins them by stream copy and muxes one AAC encode.
 //! Titles and the audio mix use the complete timeline clock.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -194,23 +195,29 @@ fn export_error(stderr: &str) -> String {
     )
 }
 
-fn stream_video(
-    timeline: &Timeline,
-    infos: &HashMap<String, MediaInfo>,
-    canvas: (u32, u32),
+/// One bounded batch of output frames: `[start, end)` drawn from at most
+/// [`MAX_INPUTS`] layers. Batches depend only on the timeline, never on the
+/// worker count, so the encoded segments are the same however many run.
+struct Batch {
+    start: i64,
+    end: i64,
+    inputs: Vec<usize>,
+}
+
+// Sharing a decode across different source clocks retains every frame
+// between their read positions. Independent clocks need independent
+// inputs, and batching bounds the number of live decoders as edits grow.
+const MAX_INPUTS: usize = 4;
+
+fn plan_video<'a>(
+    timeline: &'a Timeline,
     clock: VideoClock,
     frame_count: i64,
-    output: &mut impl Write,
-) -> MediaResult<()> {
-    // Sharing a decode across different source clocks retains every frame
-    // between their read positions. Independent clocks need independent
-    // inputs, and batching bounds the number of live decoders as edits grow.
-    const MAX_INPUTS: usize = 4;
-    let (width, height) = canvas;
+) -> (Vec<VideoLayer<'a>>, Vec<Batch>) {
     let VideoClock {
-        rate,
         tick_rate,
         frame_ticks,
+        ..
     } = clock;
     let visible = visible_frames(timeline, clock, Timeline::active_video);
     let mut layers: Vec<VideoLayer<'_>> = Vec::new();
@@ -247,6 +254,7 @@ fn stream_video(
     spans.sort_unstable();
 
     let batch_frames = clock.boundary(8.0).max(1);
+    let mut batches = Vec::new();
     let mut start = 0;
     while start < frame_count {
         let mut end = (start + batch_frames).min(frame_count);
@@ -261,138 +269,333 @@ fn stream_video(
             }
             inputs.push(layer);
         }
-        let count = end - start;
-        let mut filters = vec![format!(
-            "color=c=black:s={width}x{height}:r={rate},\
-             setparams=colorspace={VIDEO_COLOR_SPACE}:range={VIDEO_COLOR_RANGE},\
-             trim=end_frame={count}[base]"
-        )];
-        let mut current = "base".to_owned();
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-v",
-            "error",
-            "-filter_complex_threads",
-            "4",
-            "-filter_buffered_frames",
-            "128",
-        ]);
-        for (index, &layer) in inputs.iter().enumerate() {
-            let layer = &layers[layer];
-            let ranges: Vec<_> = layer
-                .ranges
-                .iter()
-                .filter_map(|&(a, b)| {
-                    let (a, b) = (a.max(start), b.min(end));
-                    (a < b).then_some((a - start, b - start))
-                })
-                .collect();
-            let first = ranges.iter().map(|range| range.0).min().unwrap();
-            let source_time = (start + first) as f64 / timeline.fps
-                + layer.source_offset as f64 / tick_rate as f64;
-            let last_seek = infos
-                .get(layer.source)
-                .map(|info| (info.duration - 1.0).max(0.0))
-                .unwrap_or(source_time);
-            let seek = source_time.min(last_seek).max(0.0).floor() as i64;
-            // Slice threads split each picture: frame threading on four 4K
-            // inputs pushed export to about 2.8 GB RSS.
-            cmd.args([
-                "-thread_type:v",
-                "slice",
-                "-threads:v",
-                "0",
-                "-an",
-                "-ss",
-                &seek.to_string(),
-                "-noaccurate_seek",
-                "-i",
-                layer.source,
-            ]);
-            let offset = layer.source_offset + (start + first) * frame_ticks - seek * tick_rate;
-            // Stop decoding at this input's last visible frame; overlay
-            // stops drawing it there anyway (enable), so the 4K decode of
-            // the rest of the batch was wasted.
-            let last = ranges.iter().map(|range| range.1).max().unwrap();
-            let layer_frames = last - first;
-            let alpha = if layer.opacity < 0.999 {
-                format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
-            } else {
-                String::new()
-            };
-            // Input seeking retains keyframe preroll with timestamps relative
-            // to the requested seek. Preserve that phase for VFR frame holds.
-            // Start at this input's first visible frame: padding back to zero
-            // would queue all its leading frames while another input seeks.
-            // Shift after fps in integer ticks; its start_time uses microseconds
-            // and would change sampling phase at fractional-frame boundaries.
-            // Pad before fps so EOF holds the final source frame even if it
-            // falls between output samples.
-            // Accurate rounding avoids darkening during matrix conversion.
-            // Full chroma interpolation avoids a green shift when the matrix
-            // changes (BT.601 phone footage to BT.709) on textured pictures.
-            filters.push(format!(
-                "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
-                 tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
-                 trim=end_frame={layer_frames},setpts=PTS+{first},\
-                 scale={width}:{height}:force_original_aspect_ratio=decrease:\
-                 flags=bicubic+accurate_rnd+full_chroma_int:\
-                 out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE},\
-                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1{alpha}[seg{index}]"
-            ));
-            filters.push(format!(
-                "[{current}][seg{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
-                 enable='{}'[v{index}]",
-                enabled_frames(&ranges),
-            ));
-            current = format!("v{index}");
-        }
-        filters.push(format!("[{current}]format=yuv420p[vout]"));
-        let graph = FilterGraphFile::create(&filters.join(";"))?;
-        cmd.arg("-/filter_complex").arg(&graph.0).args([
-            "-map",
-            "[vout]",
-            "-an",
-            "-frames:v",
-            &count.to_string(),
-            "-threads:v",
-            "1",
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "rawvideo",
-            "pipe:1",
-        ]);
-        let mut child = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to launch video export: {e}"))?;
-        let stderr = collect_stderr(child.stderr.take());
-        let copied = io::copy(
-            &mut child.stdout.take().expect("piped video output"),
-            output,
-        );
-        if copied.is_err() {
-            let _ = child.kill();
-        }
-        let status = child.wait();
-        let stderr = stderr.join().unwrap_or_default();
-        let status = status.map_err(|e| format!("video export wait: {e}"))?;
-        if !status.success() {
-            return Err(export_error(&stderr));
-        }
-        let bytes = copied.map_err(|e| format!("write export video: {e}"))?;
-        let expected = count as u64 * width as u64 * height as u64 * 3 / 2;
-        if bytes != expected {
-            return Err(format!(
-                "export video was incomplete: {bytes} of {expected} bytes"
-            ));
-        }
+        batches.push(Batch { start, end, inputs });
         start = end;
     }
+    (layers, batches)
+}
+
+/// The FFmpeg command that renders one batch as raw yuv420p on `pipe:1`.
+fn batch_command(
+    timeline: &Timeline,
+    infos: &HashMap<String, MediaInfo>,
+    canvas: (u32, u32),
+    clock: VideoClock,
+    layers: &[VideoLayer<'_>],
+    batch: &Batch,
+) -> MediaResult<(Command, FilterGraphFile)> {
+    let (width, height) = canvas;
+    let VideoClock {
+        rate,
+        tick_rate,
+        frame_ticks,
+    } = clock;
+    let Batch { start, end, .. } = *batch;
+    let count = end - start;
+    let mut filters = vec![format!(
+        "color=c=black:s={width}x{height}:r={rate},\
+         setparams=colorspace={VIDEO_COLOR_SPACE}:range={VIDEO_COLOR_RANGE},\
+         trim=end_frame={count}[base]"
+    )];
+    let mut current = "base".to_owned();
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-v",
+        "error",
+        "-filter_complex_threads",
+        "4",
+        "-filter_buffered_frames",
+        "128",
+    ]);
+    for (index, &layer) in batch.inputs.iter().enumerate() {
+        let layer = &layers[layer];
+        let ranges: Vec<_> = layer
+            .ranges
+            .iter()
+            .filter_map(|&(a, b)| {
+                let (a, b) = (a.max(start), b.min(end));
+                (a < b).then_some((a - start, b - start))
+            })
+            .collect();
+        let first = ranges.iter().map(|range| range.0).min().unwrap();
+        let source_time =
+            (start + first) as f64 / timeline.fps + layer.source_offset as f64 / tick_rate as f64;
+        let last_seek = infos
+            .get(layer.source)
+            .map(|info| (info.duration - 1.0).max(0.0))
+            .unwrap_or(source_time);
+        let seek = source_time.min(last_seek).max(0.0).floor() as i64;
+        // Slice threads split each picture: frame threading on four 4K
+        // inputs pushed export to about 2.8 GB RSS.
+        cmd.args([
+            "-thread_type:v",
+            "slice",
+            "-threads:v",
+            "0",
+            "-an",
+            "-ss",
+            &seek.to_string(),
+            "-noaccurate_seek",
+            "-i",
+            layer.source,
+        ]);
+        let offset = layer.source_offset + (start + first) * frame_ticks - seek * tick_rate;
+        // Stop decoding at this input's last visible frame; overlay
+        // stops drawing it there anyway (enable), so the 4K decode of
+        // the rest of the batch was wasted.
+        let last = ranges.iter().map(|range| range.1).max().unwrap();
+        let layer_frames = last - first;
+        let alpha = if layer.opacity < 0.999 {
+            format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
+        } else {
+            String::new()
+        };
+        // Input seeking retains keyframe preroll with timestamps relative
+        // to the requested seek. Preserve that phase for VFR frame holds.
+        // Start at this input's first visible frame: padding back to zero
+        // would queue all its leading frames while another input seeks.
+        // Shift after fps in integer ticks; its start_time uses microseconds
+        // and would change sampling phase at fractional-frame boundaries.
+        // Pad before fps so EOF holds the final source frame even if it
+        // falls between output samples.
+        // Accurate rounding avoids darkening during matrix conversion.
+        // Full chroma interpolation avoids a green shift when the matrix
+        // changes (BT.601 phone footage to BT.709) on textured pictures.
+        filters.push(format!(
+            "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
+             tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
+             trim=end_frame={layer_frames},setpts=PTS+{first},\
+             scale={width}:{height}:force_original_aspect_ratio=decrease:\
+             flags=bicubic+accurate_rnd+full_chroma_int:\
+             out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE},\
+             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1{alpha}[seg{index}]"
+        ));
+        filters.push(format!(
+            "[{current}][seg{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
+             enable='{}'[v{index}]",
+            enabled_frames(&ranges),
+        ));
+        current = format!("v{index}");
+    }
+    filters.push(format!("[{current}]format=yuv420p[vout]"));
+    let graph = FilterGraphFile::create(&filters.join(";"))?;
+    cmd.arg("-/filter_complex").arg(&graph.0).args([
+        "-map",
+        "[vout]",
+        "-an",
+        "-frames:v",
+        &count.to_string(),
+        "-threads:v",
+        "1",
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]);
+    Ok((cmd, graph))
+}
+
+/// Titles keep the whole-timeline clock: each segment draws the visible
+/// frames that fall inside it, shifted to its own frame numbers.
+struct Titles<'a> {
+    font: Option<String>,
+    clips: Vec<(&'a Clip, Vec<(i64, i64)>)>,
+}
+
+impl Titles<'_> {
+    fn graph(&self, start: i64, end: i64) -> String {
+        let mut filters = vec!["[0:v]null[base]".to_owned()];
+        let mut current = "base".to_owned();
+        if let Some(font) = &self.font {
+            for (i, (clip, ranges)) in self.clips.iter().enumerate() {
+                let ranges: Vec<_> = ranges
+                    .iter()
+                    .filter_map(|&(a, b)| {
+                        let (a, b) = (a.max(start), b.min(end));
+                        (a < b).then_some((a - start, b - start))
+                    })
+                    .collect();
+                if ranges.is_empty() {
+                    continue;
+                }
+                let look = title_look(clip.title_style);
+                let (r, g, b) = look.color;
+                let font_size = look.font_size;
+                let font_color = format!("0x{r:02X}{g:02X}{b:02X}");
+                let box_options = match look.box_alpha {
+                    Some(alpha) => {
+                        format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={}", look.border)
+                    }
+                    None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
+                };
+                let x = look
+                    .left
+                    .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
+                let y = format!("h-{}", look.bottom);
+                filters.push(format!(
+                    "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{:.2}:\
+                     fontsize={font_size}:{box_options}:x={x}:y={y}:\
+                     enable='{}'[t{i}]",
+                    escape_drawtext(&clip.name),
+                    clip.opacity.clamp(0.0, 1.0),
+                    enabled_frames(&ranges),
+                ));
+                current = format!("t{i}");
+            }
+        }
+        filters.push(format!("[{current}]format=yuv420p[vout]"));
+        filters.join(";")
+    }
+}
+
+/// Pipe one batch's raw frames through its own H.264 encoder into `path`.
+/// Every segment starts on a keyframe, so segments join by stream copy.
+#[allow(clippy::too_many_arguments)]
+fn encode_segment(
+    decoder: (Command, FilterGraphFile),
+    titles: &str,
+    canvas: (u32, u32),
+    rate: ffmpeg_next::Rational,
+    count: i64,
+    threads: usize,
+    path: &Path,
+) -> MediaResult<()> {
+    let (width, height) = canvas;
+    let (mut decoder, _decoder_graph) = decoder;
+    let graph = FilterGraphFile::create(titles)?;
+    let mut encoder = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "yuv420p",
+            "-video_size",
+            &format!("{width}x{height}"),
+            "-framerate",
+            &rate.to_string(),
+            "-colorspace",
+            VIDEO_COLOR_SPACE,
+            "-color_range",
+            VIDEO_COLOR_RANGE,
+            "-i",
+            "pipe:0",
+        ])
+        .arg("-/filter_complex")
+        .arg(&graph.0)
+        .args([
+            "-map",
+            "[vout]",
+            "-c:v",
+            "libx264",
+            "-threads:v",
+            &threads.to_string(),
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-f",
+            "mp4",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
+    let encoder_stderr = collect_stderr(encoder.stderr.take());
+    let mut stdin = encoder.stdin.take().expect("piped encoder input");
+    let rendered = decoder
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to launch video export: {e}"))
+        .and_then(|mut child| {
+            let stderr = collect_stderr(child.stderr.take());
+            let copied = io::copy(
+                &mut child.stdout.take().expect("piped video output"),
+                &mut stdin,
+            );
+            if copied.is_err() {
+                let _ = child.kill();
+            }
+            let status = child.wait();
+            let stderr = stderr.join().unwrap_or_default();
+            let status = status.map_err(|e| format!("video export wait: {e}"))?;
+            if !status.success() {
+                return Err(export_error(&stderr));
+            }
+            let bytes = copied.map_err(|e| format!("write export video: {e}"))?;
+            let expected = count as u64 * width as u64 * height as u64 * 3 / 2;
+            if bytes != expected {
+                return Err(format!(
+                    "export video was incomplete: {bytes} of {expected} bytes"
+                ));
+            }
+            Ok(())
+        });
+    drop(stdin);
+    if rendered.is_err() {
+        let _ = encoder.kill();
+    }
+    let status = encoder.wait();
+    let stderr = encoder_stderr.join().unwrap_or_default();
+    let status = status.map_err(|e| format!("ffmpeg wait: {e}"))?;
+    if !status.success() && !stderr.is_empty() {
+        return Err(export_error(&stderr));
+    }
+    rendered?;
+    if !status.success() {
+        return Err(format!("export failed: {status}"));
+    }
     Ok(())
+}
+
+/// Private scratch space beside the output, so segments land on the same
+/// disk as the export rather than in a RAM-backed temp directory. Removed
+/// on every return path.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn beside(output: &Path) -> MediaResult<Self> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let parent = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = output
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        loop {
+            let path = parent.join(format!(
+                ".{name}.export-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("export failed: create scratch folder: {error}")),
+            }
+        }
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The export canvas: the orientation most video clips use (a tie follows
@@ -545,46 +748,18 @@ pub fn export_timeline(
             .map(|i| (i.width, i.height)),
     );
 
-    // Input zero is the bounded video stream. Audio remains independent of
-    // picture visibility and is encoded once, without seams between batches.
+    let titles = Titles {
+        font: font_file(),
+        clips: title_clips
+            .iter()
+            .filter(|clip| clip.opacity > 0.0)
+            .filter_map(|&clip| Some((clip, visible_title.get(&clip.id)?.clone())))
+            .collect(),
+    };
+    // Audio input zero is a placeholder so the source inputs keep the same
+    // indices in the loudness measurement and the encode. Audio remains
+    // independent of picture visibility and is encoded once, without seams.
     let mut inputs: Vec<String> = Vec::new();
-    let mut filters: Vec<String> = vec!["[0:v]null[base]".to_owned()];
-    let mut current = "base".to_owned();
-
-    if let Some(font) = font_file() {
-        for (i, clip) in title_clips.iter().enumerate() {
-            let Some(ranges) = visible_title.get(&clip.id) else {
-                continue;
-            };
-            if clip.opacity <= 0.0 {
-                continue;
-            }
-            let enable = enabled_frames(ranges);
-            let look = title_look(clip.title_style);
-            let (r, g, b) = look.color;
-            let font_size = look.font_size;
-            let font_color = format!("0x{r:02X}{g:02X}{b:02X}");
-            let box_options = match look.box_alpha {
-                Some(alpha) => {
-                    format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={}", look.border)
-                }
-                None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
-            };
-            let x = look
-                .left
-                .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
-            let y = format!("h-{}", look.bottom);
-            filters.push(format!(
-                "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{:.2}:\
-                 fontsize={font_size}:{box_options}:x={x}:y={y}:\
-                 enable='{enable}'[t{i}]",
-                escape_drawtext(&clip.name),
-                clip.opacity.clamp(0.0, 1.0),
-            ));
-            current = format!("t{i}");
-        }
-    }
-    filters.push(format!("[{current}]format=yuv420p[vout]"));
 
     // Audio is independent of visibility. Coalesce only genuinely contiguous
     // same-source, same-gain runs (the All scenes workflow), rather than
@@ -711,107 +886,129 @@ pub fn export_timeline(
             ));
         }
     }
-    filters.extend(audio_filters);
-    filters.push(format!("{audio_out}[aout]"));
+    let audio_graph = format!("{};{audio_out}[aout]", audio_filters.join(";"));
+    let audio_graph = audio_graph.trim_start_matches(';');
 
-    let graph_file = FilterGraphFile::create(&filters.join(";"))?;
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args([
-        "-y",
-        "-v",
-        "error",
-        "-filter_complex_threads",
-        "2",
-        "-progress",
-        "pipe:1",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "yuv420p",
-        "-video_size",
-        &format!("{canvas_w}x{canvas_h}"),
-        "-framerate",
-        &rate.to_string(),
-        "-colorspace",
-        VIDEO_COLOR_SPACE,
-        "-color_range",
-        VIDEO_COLOR_RANGE,
-        "-i",
-        "pipe:0",
-    ]);
-    for input in &inputs {
-        cmd.args(["-vn", "-i", input]);
+    let (layers, batches) = plan_video(timeline, clock, frame_count);
+    // Each batch decodes up to four inputs on slice threads and encodes on
+    // its own x264, with threads from the CPU budget (cgroup quota included)
+    // rather than x264's per-core default. On four CPUs one batch already
+    // saturates them: two or four in flight took 54 s and 60 s instead of
+    // 47 s, with 1.5 GB and 3.0 GB peak RSS instead of 0.9 GB.
+    let cores = thread::available_parallelism().map_or(4, |n| n.get());
+    let workers = (cores / 6).clamp(1, 3).min(batches.len());
+    let encoder_threads = (cores / workers).max(1);
+    let scratch = ScratchDir::beside(output)?;
+    let segment = |index: usize| scratch.0.join(format!("{index:05}.mp4"));
+    let audio_path = scratch.0.join("audio.m4a");
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let done = AtomicI64::new(0);
+    let (audio, video) = thread::scope(|scope| {
+        let audio = scope.spawn(|| encode_audio(&inputs, audio_graph, &audio_path));
+        let workers: Vec<_> = (0..workers)
+            .map(|_| {
+                let progress = progress.clone();
+                scope.spawn(|| -> MediaResult<()> {
+                    let progress = progress;
+                    while !failed.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(batch) = batches.get(index) else {
+                            break;
+                        };
+                        let count = batch.end - batch.start;
+                        let result = batch_command(
+                            timeline,
+                            infos,
+                            (canvas_w, canvas_h),
+                            clock,
+                            &layers,
+                            batch,
+                        )
+                        .and_then(|decoder| {
+                            encode_segment(
+                                decoder,
+                                &titles.graph(batch.start, batch.end),
+                                (canvas_w, canvas_h),
+                                rate,
+                                count,
+                                encoder_threads,
+                                &segment(index),
+                            )
+                        });
+                        if let Err(error) = result {
+                            failed.store(true, Ordering::Relaxed);
+                            return Err(error);
+                        }
+                        let frames = done.fetch_add(count, Ordering::Relaxed) + count;
+                        let _ = progress.send((frames as f64 / frame_count as f64).min(0.99));
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        let video = workers
+            .into_iter()
+            .try_for_each(|worker| worker.join().expect("export worker panicked"));
+        (audio.join().expect("audio export panicked"), video)
+    });
+    video?;
+    audio?;
+
+    // Every segment opens with a keyframe on one shared encoder setup, so
+    // they join by stream copy, and the single audio encode is muxed once.
+    let list = scratch.0.join("segments.ffconcat");
+    let mut entries = "ffconcat version 1.0\n".to_owned();
+    for index in 0..batches.len() {
+        entries.push_str(&format!("file '{index:05}.mp4'\n"));
     }
-    cmd.arg("-/filter_complex")
-        .arg(&graph_file.0)
+    fs::write(&list, entries).map_err(|e| format!("write export segment list: {e}"))?;
+    let out = Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list)
+        .arg("-i")
+        .arg(&audio_path)
         .args([
             "-map",
-            "[vout]",
+            "0:v",
             "-map",
-            "[aout]",
-            "-c:v",
-            "libx264",
-            "-threads:v",
-            "0",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
+            "1:a",
+            "-c",
+            "copy",
             "-movflags",
             "+faststart",
         ])
         .arg(output)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
+        .stdin(Stdio::null())
+        .output()
         .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
-    let stderr_thread = collect_stderr(child.stderr.take());
-    let stdout = child.stdout.take();
-    let updates = progress.clone();
-    let progress_thread = thread::spawn(move || {
-        if let Some(stdout) = stdout {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(value) = line.strip_prefix("out_time_ms=") {
-                    if let Ok(us) = value.trim().parse::<f64>() {
-                        let _ = updates.send((us / 1_000_000.0 / total).clamp(0.0, 0.999));
-                    }
-                }
-            }
-        }
-    });
-    let mut stdin = child.stdin.take().expect("piped encoder input");
-    let rendered = stream_video(
-        timeline,
-        infos,
-        (canvas_w, canvas_h),
-        clock,
-        frame_count,
-        &mut stdin,
-    );
-    drop(stdin);
-    if rendered.is_err() {
-        let _ = child.kill();
-    }
-    let status = child.wait();
-    let stderr = stderr_thread.join().unwrap_or_default();
-    let _ = progress_thread.join();
-    let status = status.map_err(|e| format!("ffmpeg wait: {e}"))?;
-    if !status.success() && !stderr.is_empty() {
-        return Err(export_error(&stderr));
-    }
-    rendered?;
-    if !status.success() {
-        return Err(format!("export failed: {status}"));
+    if !out.status.success() {
+        return Err(export_error(&String::from_utf8_lossy(&out.stderr)));
     }
     let _ = progress.send(1.0);
     Ok(output.to_path_buf())
+}
+
+/// Encode the timeline's audio mix once, on the whole-timeline clock.
+fn encode_audio(inputs: &[String], graph: &str, path: &Path) -> MediaResult<()> {
+    let graph_file = FilterGraphFile::create(graph)?;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=d=0.01"]);
+    for input in inputs {
+        cmd.args(["-vn", "-i", input]);
+    }
+    let out = cmd
+        .arg("-/filter_complex")
+        .arg(&graph_file.0)
+        .args(["-map", "[aout]", "-c:a", "aac", "-b:a", "160k", "-f", "mp4"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
+    if !out.status.success() {
+        return Err(export_error(&String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(())
 }
 
 /// Integrated loudness (LUFS) of the export's audio mix, decoding only the
