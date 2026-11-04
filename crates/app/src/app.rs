@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
@@ -42,6 +42,8 @@ const MEDIA_EXTS: &[&str] = &[
 // Clip identity, source, and exact timeline/source starts. Editing a clip's
 // source mapping invalidates playback even when its ID has not changed.
 type VideoKey = (ClipId, String, u64, u64);
+/// A still picture: clip, source frame index, and decoded width.
+type StillKey = (ClipId, i64, u32);
 
 enum ExportMsg {
     Progress(f64),
@@ -107,9 +109,12 @@ pub struct EditorApp {
     preview_texture: Option<TextureHandle>,
     preview_key: Option<VideoKey>,
     still_gen: u64,
-    still_pending: bool,
-    still_key: Option<(ClipId, i64, u32)>,
-    still_cache: HashMap<(ClipId, i64, u32), RawFrame>,
+    /// The one still request being decoded; `None` key discards its answer.
+    still_inflight: Option<(u64, Option<StillKey>)>,
+    /// The still the preview texture shows, if it shows one.
+    still_shown: Option<StillKey>,
+    /// Recently decoded stills, least recently used first.
+    still_cache: VecDeque<(StillKey, RawFrame)>,
 
     stream: Option<FrameStream>,
     stream_key: Option<VideoKey>,
@@ -214,9 +219,9 @@ impl EditorApp {
             preview_texture: None,
             preview_key: None,
             still_gen: 0,
-            still_pending: false,
-            still_key: None,
-            still_cache: HashMap::new(),
+            still_inflight: None,
+            still_shown: None,
+            still_cache: VecDeque::new(),
             stream: None,
             stream_key: None,
             stream_generation: 0,
@@ -303,9 +308,9 @@ impl EditorApp {
             preview_texture: None,
             preview_key: None,
             still_gen: 0,
-            still_pending: false,
-            still_key: None,
-            still_cache: HashMap::new(),
+            still_inflight: None,
+            still_shown: None,
+            still_cache: VecDeque::new(),
             stream: None,
             stream_key: None,
             stream_generation: 0,
@@ -678,9 +683,8 @@ impl EditorApp {
         self.stream_key = None;
         self.stream_ready = false;
         self.stream_failed = false;
-        self.still_gen = self.still_gen.wrapping_add(1);
-        self.still_pending = false;
-        self.still_key = None;
+        // A still decoding now still answers its own frame; let it land.
+        self.still_shown = None;
         self.audio_failed = false;
         self.clock_playhead = None;
         if let Some(audio) = &mut self.audio {
@@ -729,9 +733,9 @@ impl EditorApp {
         self.playhead = self
             .timeline
             .snap(time.clamp(0.0, self.timeline.end().max(0.0)));
+        // The current picture stays up until the new one arrives; a different
+        // clip's picture is cleared in poll_frames.
         self.stop_sources();
-        self.preview_texture = None;
-        self.preview_key = None;
     }
 
     /// Ruler, clip drag or monitor scrubber held: preview from low-res
@@ -836,6 +840,16 @@ impl EditorApp {
         self.preview_key = self.active_video_key();
     }
 
+    /// Drop cached stills and the answer in flight after the timeline is
+    /// replaced, so no picture from before can show.
+    fn forget_stills(&mut self) {
+        self.still_shown = None;
+        self.still_cache.clear();
+        if let Some((_, key)) = &mut self.still_inflight {
+            *key = None;
+        }
+    }
+
     fn poll_frames(&mut self, ctx: &egui::Context) {
         let active_key = self.active_video_key();
         if self.preview_key != active_key {
@@ -847,33 +861,28 @@ impl EditorApp {
             .as_ref()
             .map(|clip| clip.source_in + (self.playhead - clip.start));
         let wants_still = !self.playing || self.scrubbing();
-        let mut latest_still: Option<((ClipId, i64, u32), RawFrame)> = None;
         while let Ok((gen, result)) = self.still_rx.try_recv() {
-            if gen == self.still_gen {
-                self.still_pending = false;
-                match result {
-                    Ok(frame) => {
-                        if let Some(key) = self.still_key {
-                            if wants_still
-                                && active.as_ref().is_some_and(|clip| clip.id == key.0)
-                                && source_time.is_some_and(|time| {
-                                    (time * self.timeline.fps).round() as i64 == key.1
-                                })
-                            {
-                                latest_still = Some((key, frame));
-                            }
-                        }
-                    }
-                    Err(_) => self.still_key = None,
-                }
+            let Some((pending, key)) = self.still_inflight else {
+                continue;
+            };
+            if gen != pending {
+                continue;
             }
-        }
-        if let Some((key, frame)) = latest_still {
-            self.update_preview_texture(ctx, &frame);
+            self.still_inflight = None;
+            let (Some(key), Ok(frame)) = (key, result) else {
+                continue;
+            };
+            // The newest finished picture of this clip shows even when the
+            // pointer has moved on; the next request chases the pointer.
+            if wants_still && active.as_ref().is_some_and(|clip| clip.id == key.0) {
+                self.update_preview_texture(ctx, &frame);
+                self.still_shown = Some(key);
+            }
+            self.still_cache.retain(|(cached, _)| *cached != key);
             if self.still_cache.len() >= STILL_CACHE_CAP {
-                self.still_cache.clear();
+                self.still_cache.pop_front();
             }
-            self.still_cache.insert(key, frame);
+            self.still_cache.push_back((key, frame));
         }
 
         // A boundary/seek may precede sync_playback in this UI frame. Never
@@ -888,6 +897,7 @@ impl EditorApp {
         match result {
             Some(Ok(frame)) => {
                 self.update_preview_texture(ctx, &frame);
+                self.still_shown = None;
                 self.stream_ready = true;
                 if self.status == "Buffering video." {
                     self.status = "Playing.".to_owned();
@@ -920,28 +930,28 @@ impl EditorApp {
             (source_time * self.timeline.fps).round() as i64,
             width,
         );
-        if self.still_key == Some(key) && (self.still_pending || self.preview_texture.is_some()) {
+        if self.still_shown == Some(key) && self.preview_texture.is_some() {
             return;
         }
-        if let Some(cached) = self.still_cache.get(&key) {
-            self.still_key = Some(key);
-            let image = ColorImage::from_rgba_unmultiplied(
-                [cached.width as usize, cached.height as usize],
-                &cached.rgba,
-            );
-            match self.preview_texture.as_mut() {
-                Some(tex) if tex.size() == image.size => tex.set(image, TextureOptions::LINEAR),
-                _ => {
-                    self.preview_texture =
-                        Some(ctx.load_texture("preview", image, TextureOptions::LINEAR));
-                }
-            }
-            self.preview_key = self.active_video_key();
+        if let Some(index) = self
+            .still_cache
+            .iter()
+            .position(|(cached, _)| *cached == key)
+        {
+            // Most recently used moves to the back.
+            let (key, frame) = self.still_cache.remove(index).unwrap();
+            self.update_preview_texture(ctx, &frame);
+            self.still_shown = Some(key);
+            self.still_cache.push_back((key, frame));
             return;
         }
-        self.still_key = Some(key);
-        self.still_pending = true;
+        // One request at a time: while it decodes, the pointer can move on;
+        // its answer shows, then this asks for wherever the pointer is.
+        if self.still_inflight.is_some() {
+            return;
+        }
         self.still_gen += 1;
+        self.still_inflight = Some((self.still_gen, Some(key)));
         self.still_decoder.request(
             self.still_gen,
             source,
@@ -1010,9 +1020,7 @@ impl EditorApp {
             self.stream_key = active_key;
             self.stream_ready = false;
             self.stream_failed = false;
-            self.still_gen = self.still_gen.wrapping_add(1);
-            self.still_pending = false;
-            self.still_key = None;
+            self.still_shown = None;
             if let Some(clip) = &active_video {
                 if let Some(source) = &clip.source {
                     if self.asset(source).is_some() {
@@ -1203,8 +1211,7 @@ impl EditorApp {
         }
         self.set_playing(false);
         self.playhead = self.playhead.min(self.timeline.end());
-        self.still_key = None;
-        self.still_cache.clear();
+        self.forget_stills();
         self.status = if redo {
             "Redid the edit."
         } else {
@@ -1252,8 +1259,7 @@ impl EditorApp {
                     Timeline::empty_project().with_orientation(self.timeline.orientation);
                 self.selected = None;
                 self.playhead = 0.0;
-                self.still_key = None;
-                self.still_cache.clear();
+                self.forget_stills();
                 self.status = "Timeline cleared. Media bin kept.".to_owned();
             }
             UiAction::SplitSelected => self.split_at_playhead(),
@@ -1693,8 +1699,7 @@ impl EditorApp {
                     Timeline::empty_project().with_orientation(self.timeline.orientation);
                 self.selected = None;
                 self.playhead = 0.0;
-                self.still_key = None;
-                self.still_cache.clear();
+                self.forget_stills();
             }
             ScriptCommand::SetTool(tool) => match tool.as_str() {
                 // One pointer mode remains; split is an action at the playhead.
@@ -3598,6 +3603,33 @@ mod tests {
             );
         }
 
+        /// A drag that moves to a new frame every UI frame, faster than the
+        /// still decoder answers, still shows pictures while it moves.
+        #[test]
+        fn continuous_scrub_shows_pictures_while_the_pointer_moves() {
+            let fixture = Fixture::new();
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            add_asset(&mut app, &fixture.path);
+            app.timeline
+                .add_media_clip("Scrub", ClipKind::Video, 0, 0.0, 2.0, 0.0, &fixture.path);
+            app.transport_scrubbing = true;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for step in 1_u32.. {
+                app.playhead = f64::from(step % 20) / 10.0;
+                app.poll_frames(&ctx);
+                app.sync_playback(&ctx);
+                if app.preview_texture.is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no picture during a continuous scrub"
+                );
+                thread::sleep(Duration::from_micros(200));
+            }
+        }
+
         #[test]
         fn preview_boundary_never_uploads_the_previous_clip() {
             let fixture = Fixture::new();
@@ -4049,7 +4081,7 @@ mod tests {
             app.sync_playback(&ctx);
             assert_eq!(app.stream_generation, failed_generation);
             assert!(
-                !app.still_pending,
+                app.still_inflight.is_none(),
                 "a failure must not retry through the still worker"
             );
             app.set_playing(false);

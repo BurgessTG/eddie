@@ -383,6 +383,96 @@ fn still_decoder_returns_frame_at_requested_time() {
     ));
 }
 
+/// Scrubbing reuses one decoder: forward steps decode on, backward steps
+/// read recent pictures, other moves seek, and the width can change between
+/// requests. Every answer must equal a fresh seek-and-decode of that time.
+#[test]
+fn still_decoder_scrub_sequence_matches_fresh_decodes() {
+    let dir = std::env::temp_dir().join(format!(
+        "openreel_scrub_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).expect("temp dir");
+    let fixture = Fixture {
+        path: dir.join("ramp.mp4"),
+        dir,
+    };
+    // Every frame has its own brightness; eight-frame GOPs with B-frames.
+    run_ffmpeg(
+        Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=black:s=64x36:r=10:d=4,geq=lum='16+N*5':cb=128:cr=128")
+            .args(["-c:v", "libx264", "-qp", "0", "-g", "8", "-bf", "3"])
+            .args([
+                "-sc_threshold",
+                "0",
+                "-threads:v",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&fixture.path),
+    );
+    let path = fixture.path.to_str().unwrap().to_owned();
+    let fresh = |time: f64, width: u32| {
+        native::VideoDecoder::open(&path, width, true)
+            .and_then(|mut decoder| decoder.frame_at(time))
+            .expect("fresh decode")
+    };
+    for index in 0..39 {
+        let (a, b) = (index as f64 / 10.0 + 0.05, (index + 1) as f64 / 10.0 + 0.05);
+        assert_ne!(
+            fresh(a, 64).rgba,
+            fresh(b, 64).rgba,
+            "frames {index} and next"
+        );
+    }
+
+    let (decoder, rx) = openreel_media::StillDecoder::spawn(|| {});
+    // Seconds; 10 fps, keyframes every 0.8 s. Mid-frame times and exact
+    // frame starts (which belong to the starting frame).
+    let requests: &[(f64, u32)] = &[
+        (0.55, 64),
+        (0.65, 64),
+        (0.7, 64),  // exact start of the next frame
+        (0.85, 64), // forward across a keyframe
+        (0.95, 64),
+        (1.0, 64),
+        (0.9, 64), // back through recent pictures, exact start
+        (0.75, 64),
+        (0.65, 64),
+        (0.65, 32), // narrower output, same position
+        (0.55, 32),
+        (0.35, 32), // further back than recent pictures
+        (0.45, 64),
+        (2.05, 64), // forward past several keyframes
+        (1.95, 64),
+        (2.15, 64),
+        (3.95, 64),
+        (6.0, 64), // past the end clamps to the last picture
+        (3.85, 64),
+        (0.05, 64),
+        (-0.5, 64), // before the start clamps to the first picture
+        (0.15, 64),
+    ];
+    for (id, &(time, width)) in requests.iter().enumerate() {
+        decoder.request(id as u64, path.clone(), 64, 36, time, width, true);
+        let (answered, result) = rx.recv_timeout(Duration::from_secs(30)).expect("still");
+        assert_eq!(answered, id as u64);
+        let still = result.expect("still decode");
+        let expected = fresh(time, width);
+        assert_eq!(
+            (still.width, still.height),
+            (expected.width, expected.height)
+        );
+        assert!(
+            still.rgba == expected.rgba,
+            "request {id}: {time} s at {width}px"
+        );
+    }
+}
+
 fn collect_stream(path: &Path, start: f64) -> Vec<(f64, (f64, f64, f64))> {
     let stream =
         openreel_media::FrameStream::spawn(path.to_str().unwrap(), 320, 180, start, 320, 30.0)

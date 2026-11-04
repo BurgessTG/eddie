@@ -481,7 +481,16 @@ on eight cores it saved 0.04 s for 200 MB and on 16 nothing for 300 MB. Preroll 
 CPU-bound. Clip switches and seeks
 do not wait for native open/seek/decode; obsolete frames and errors are ignored.
 Decode completes a captured clock target before chasing a newer one, preventing
-moving-clock starvation. Audio plays in process (`crates/media/src/audio.rs`):
+moving-clock starvation. Paused stills (scrub, arrow steps) work the same way
+(after fframes): one request in flight; its answer shows if it is the active
+clip's, even after the pointer moved on, then the newest position is asked.
+Discarding late answers froze the monitor for a whole drag. A seek within a
+clip keeps the current picture until the next arrives. `StillDecoder` keeps
+one decoder per file across the 480/960 widths, decodes forward up to 0.5 s
+or within the GOP instead of seeking, and keeps refcounted recent pictures
+(8, at most 64 MiB; 4K keeps 5) for stepping back. 1080p/2 s-GOP steps went
+from about 92 ms to 2 ms forward and 95 to 10 ms back (4K: 380 to 9, 396 to
+77; a 32 MiB budget kept 2 and gave 130). Stills are an LRU of 24. Audio plays in process (`crates/media/src/audio.rs`):
 one mixer at 48 kHz stereo, one ffmpeg-next decode/swresample thread per
 audible clip, with clips starting within 0.75 s prerolled. The samples the
 mixer renders are the transport clock; the playhead reads it less ALSA's

@@ -126,8 +126,7 @@ impl EditorApp {
         self.timeline = timeline;
         self.selected = None;
         self.playhead = 0.0;
-        self.still_key = None;
-        self.still_cache.clear();
+        self.forget_stills();
         if let Some(mute) = value["muteMusicBeds"].as_bool() {
             self.mute_music_beds = mute;
         }
@@ -257,8 +256,7 @@ impl EditorApp {
         self.missing_media.clear();
         self.selected = None;
         self.playhead = 0.0;
-        self.still_key = None;
-        self.still_cache.clear();
+        self.forget_stills();
         self.sweep_queue.clear();
         let running = &self.sweep_running;
         self.assets
