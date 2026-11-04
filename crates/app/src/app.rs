@@ -3730,6 +3730,15 @@ fn transport_button(ui: &mut Ui, icon: TransportIcon, tooltip: &str) -> egui::Re
 mod tests {
     use super::*;
 
+    /// Generated sample media (video, music), made once per test run.
+    fn sample_media() -> &'static [PathBuf] {
+        static SAMPLES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        SAMPLES.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("eddie-samples-{}", std::process::id()));
+            openreel_media::generate_samples(&dir).expect("generate samples")
+        })
+    }
+
     mod playback_tests {
         use super::*;
         use std::io::Write;
@@ -4909,14 +4918,8 @@ mod tests {
     fn import_while_busy_queues_instead_of_dropping() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::headless_for_test(&ctx);
-        let first = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/sample_video.mp4"
-        ));
-        let second = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/sample_music.mp3"
-        ));
+        let first = sample_media()[0].clone();
+        let second = sample_media()[1].clone();
         app.spawn_import(&ctx, vec![first]);
         assert!(app.import_rx.is_some());
         app.spawn_import(&ctx, vec![second.clone()]);
@@ -4986,10 +4989,7 @@ mod tests {
     fn finished_import_keeps_the_users_selection() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::headless_for_test(&ctx);
-        let music = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/sample_music.mp3"
-        );
+        let music = sample_media()[1].to_str().expect("utf-8 sample path");
         let import = |app: &mut EditorApp| {
             app.spawn_import(&ctx, vec![PathBuf::from(music)]);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);

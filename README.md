@@ -128,8 +128,7 @@ default, or `muse-spark-1.3`). The key is stored only in the local config file.
 
 The UI follows shadcn/ui conventions translated to egui (zinc palette,
 Inter, borderless buttons, segmented tabs, cards); tokens and variants live
-in `crates/app/src/theme.rs`. `AGENTS.md` records design decisions and the
-detailed curator contract.
+in `crates/app/src/theme.rs`.
 
 ## Limitations
 

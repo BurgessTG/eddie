@@ -1,6 +1,6 @@
 # Formatting and the timeline engine's tests. The media and app crates need
 # FFmpeg 9 development libraries, which GitHub's Ubuntu images do not ship;
-# run their suites locally (see AGENTS.md).
+# run their suites locally.
 name: CI
 
 on:
