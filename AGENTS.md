@@ -93,6 +93,9 @@ shot, at most 16, labelled time/clip/lane, titles drawn from
 `title_look`). The model replies with a no-op or one fix; the fix shares
 the edit's Undo, and a check failure or timeline change keeps the edit.
 Checks are not repeated, and the sheet is sampled pictures, not motion.
+Check requests omit transcript word timings (most of a talking project's
+state: 21.3k to 9.0k prompt tokens on the monolog); the fix's QuickJS
+run still reads the full snapshot.
 Pending chat retains its request-time timeline and state JSON. Timeline
 changes reject stale replies, selection/playhead defaults use that saved
 state, and an explicit timeline clear cancels the pending request.
