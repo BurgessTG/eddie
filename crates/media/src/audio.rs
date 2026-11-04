@@ -47,6 +47,9 @@ pub struct AudioSegment {
     /// Linear fade lengths, seconds; fitted with `openreel_engine::fit_fades`.
     pub fade_in: f64,
     pub fade_out: f64,
+    /// Ducking ranges in clip-local seconds, from
+    /// `openreel_engine::Timeline::duck_ranges`; empty when it never ducks.
+    pub duck: Vec<(f64, f64)>,
 }
 
 /// Fitted fade lengths in samples, packed in/out so a fade change
@@ -74,6 +77,7 @@ struct Voice {
     end: u64,
     volume: Arc<AtomicU32>,
     fades: Arc<AtomicU64>,
+    duck: Arc<[(f64, f64)]>,
     chunks: Receiver<MediaResult<Chunk>>,
     recycle: SyncSender<Vec<f32>>,
     current: Option<Chunk>,
@@ -133,6 +137,8 @@ impl Voice {
         let fades = self.fades.load(Ordering::Relaxed);
         let (fade_in, fade_out) = (fades >> 32, fades & u64::from(u32::MAX));
         let (start, clip_end) = (self.start, self.end);
+        // Shared, so pulling chunks below can borrow the voice mutably.
+        let duck = Arc::clone(&self.duck);
         // Linear ramps over the fitted fades; unity in between.
         let gain = |at: u64| -> f32 {
             let mut gain = 1.0_f32;
@@ -141,6 +147,9 @@ impl Voice {
             }
             if fade_out > 0 && at + fade_out > clip_end {
                 gain = gain.min(clip_end.saturating_sub(at) as f32 / fade_out as f32);
+            }
+            if !duck.is_empty() {
+                gain *= openreel_engine::duck_gain((at - start) as f64 / RATE, &duck);
             }
             gain * volume
         };
@@ -161,7 +170,7 @@ impl Voice {
                     let offset = (at - chunk.at) as usize * 2;
                     let target = (at - from) as usize * 2;
                     let count = (stop - at) as usize * 2;
-                    if fade_in == 0 && fade_out == 0 {
+                    if fade_in == 0 && fade_out == 0 && duck.is_empty() {
                         for (dst, src) in out[target..target + count]
                             .iter_mut()
                             .zip(&chunk.data[offset..offset + count])
@@ -196,6 +205,7 @@ enum Command {
     Seek { generation: u64, at: u64 },
     Add(Box<Voice>),
     Remove(u64),
+    Duck(u64, Arc<[(f64, f64)]>),
 }
 
 struct Shared {
@@ -254,6 +264,11 @@ impl Mixer {
                     self.voices.push(*voice);
                 }
                 Command::Remove(id) => self.voices.retain(|voice| voice.id != id),
+                Command::Duck(id, duck) => {
+                    if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+                        voice.duck = duck;
+                    }
+                }
             }
         }
         if self.stereo.len() < frames * 2 {
@@ -536,6 +551,12 @@ impl AudioEngine {
                     .store(segment.volume.to_bits(), Ordering::Relaxed);
                 handle.segment.volume = segment.volume;
                 handle.fades.store(pack_fades(segment), Ordering::Relaxed);
+                if handle.segment.duck != segment.duck {
+                    handle.segment.duck = segment.duck.clone();
+                    let _ = self
+                        .commands
+                        .send(Command::Duck(*id, segment.duck.as_slice().into()));
+                }
                 continue;
             }
             let start = sample(segment.start);
@@ -563,6 +584,7 @@ impl AudioEngine {
                 end,
                 volume: Arc::clone(&volume),
                 fades: Arc::clone(&fades),
+                duck: segment.duck.as_slice().into(),
                 chunks,
                 recycle,
                 current: None,

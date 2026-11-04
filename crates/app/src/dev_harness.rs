@@ -1070,6 +1070,18 @@ impl HeadlessEditor {
                 ScriptCommand::CloseGaps => {
                     self.timeline.close_gaps();
                 }
+                ScriptCommand::SetDuck { clip, enabled } => {
+                    if let Some(c) = self.timeline.clip_mut(clip) {
+                        c.duck = enabled;
+                    }
+                }
+                ScriptCommand::InsertTime { at, seconds } => {
+                    if seconds > 0.0 {
+                        self.timeline.insert_time(at, seconds);
+                    } else {
+                        notes.push(format!("error: insertTime needs a positive length"));
+                    }
+                }
             }
         }
         notes

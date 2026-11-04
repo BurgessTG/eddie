@@ -41,6 +41,7 @@ fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) 
         volume,
         fade_in: 0.0,
         fade_out: 0.0,
+        duck: Vec::new(),
     }
 }
 
@@ -171,6 +172,48 @@ fn fades_ramp_linearly_and_overlong_fades_meet_in_proportion() {
         (at(2.75) - 0.25).abs() < 0.02,
         "scaled fade-out: {}",
         at(2.75)
+    );
+}
+
+#[test]
+fn ducking_dips_under_speech_with_ramps_and_updates_without_restarting() {
+    let path = tone_file("tone.wav", 0.0, &["-c:a", "pcm_s16le"]);
+    // A clip at timeline 1 s ducks over its own seconds 1.0..1.5.
+    let mut clip = segment(&path, 1.0, 3.0, 0.0, 1.0);
+    clip.duck = vec![(1.0, 1.5)];
+    let mut engine = playing(&[(1, clip.clone())]);
+    let mix = render(&mut engine, 4.0);
+    let at = |t: f64| peak(&mix, t - 0.005, t + 0.005);
+    assert!(
+        (at(1.5) - 0.5).abs() < 0.01,
+        "full before the ramp: {}",
+        at(1.5)
+    );
+    assert!(
+        (at(1.85) - 0.3125).abs() < 0.02,
+        "halfway down: {}",
+        at(1.85)
+    );
+    assert!(
+        (at(2.25) - 0.125).abs() < 0.01,
+        "ducked to a quarter: {}",
+        at(2.25)
+    );
+    assert!((at(3.0) - 0.5).abs() < 0.01, "recovered: {}", at(3.0));
+
+    // New ranges reach a playing voice without restarting it.
+    let mut plain = clip.clone();
+    plain.duck.clear();
+    let mut engine = playing(&[(1, plain)]);
+    let head = render(&mut engine, 1.5);
+    assert!((peak(&head, 1.1, 1.5) - 0.5).abs() < 0.01);
+    clip.duck = vec![(1.5, 2.5)];
+    engine.set_voices(&[(1, clip)]);
+    let tail = render(&mut engine, 2.0);
+    let ducked = peak(&tail, 1.25, 1.75);
+    assert!(
+        (ducked - 0.125).abs() < 0.01,
+        "timeline 2.75 is ducked: {ducked}"
     );
 }
 

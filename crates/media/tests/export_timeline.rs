@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
 use openreel_engine::{ClipKind, Timeline, TitleStyle};
-use openreel_media::{export_timeline, probe};
+use openreel_media::{export_timeline, probe, ExportOptions};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -82,10 +82,10 @@ impl Fixture {
     }
 
     fn export(&self, name: &str, timeline: &Timeline) -> PathBuf {
-        self.export_with(name, timeline, false)
+        self.export_with(name, timeline, &ExportOptions::default())
     }
 
-    fn export_with(&self, name: &str, timeline: &Timeline, normalize: bool) -> PathBuf {
+    fn export_with(&self, name: &str, timeline: &Timeline, options: &ExportOptions) -> PathBuf {
         let mut infos = HashMap::new();
         for path in timeline
             .clips
@@ -98,7 +98,7 @@ impl Fixture {
         }
         let path = self.0.join(name);
         let (tx, rx) = channel();
-        export_timeline(timeline, &infos, &path, normalize, tx).expect("public export_timeline");
+        export_timeline(timeline, &infos, &path, options, tx).expect("public export_timeline");
         let progress: Vec<_> = rx.try_iter().collect();
         assert_eq!(progress.last(), Some(&1.0));
         path
@@ -1101,7 +1101,8 @@ fn encoder_failure_is_reported_without_success_progress() {
     let infos = [(source.clone(), probe(&source).unwrap())].into();
     let (tx, rx) = channel();
     let output = fixture.0.join("missing-directory/export.mp4");
-    let error = export_timeline(&timeline, &infos, &output, false, tx).unwrap_err();
+    let error =
+        export_timeline(&timeline, &infos, &output, &ExportOptions::default(), tx).unwrap_err();
     eprintln!("expected encoder failure: {error}");
     assert!(error.starts_with("export failed:"));
     assert!(!output.exists());
@@ -1159,8 +1160,12 @@ fn normalized_export_brings_a_quiet_mix_to_the_loudness_target() {
     let clip = video(&mut timeline, &source, 0, 0.0, 3.0, 0.0);
     timeline.clip_mut(clip).unwrap().volume = 0.1;
 
+    let normalize = ExportOptions {
+        normalize_loudness: true,
+        ..Default::default()
+    };
     let plain = fixture.export("quiet-plain.mp4", &timeline);
-    let normalized = fixture.export_with("quiet-normalized.mp4", &timeline, true);
+    let normalized = fixture.export_with("quiet-normalized.mp4", &timeline, &normalize);
     let raw = integrated_loudness(&plain);
     let loud = integrated_loudness(&normalized);
     eprintln!("plain {raw} LUFS, normalized {loud} LUFS");
@@ -1174,14 +1179,49 @@ fn normalized_export_brings_a_quiet_mix_to_the_loudness_target() {
 
     // A loud mix is turned down, not limited flat.
     timeline.clip_mut(clip).unwrap().volume = 2.0;
-    let hot = integrated_loudness(&fixture.export_with("hot.mp4", &timeline, true));
+    let hot = integrated_loudness(&fixture.export_with("hot.mp4", &timeline, &normalize));
     assert!((hot + 16.0).abs() < 1.0, "loud mix normalized down: {hot}");
 
     // Without audio there is nothing to measure; export still succeeds.
     let mut silent = Timeline::new(30.0);
     let picture = video(&mut silent, &source, 0, 0.0, 1.0, 0.0);
     silent.clip_mut(picture).unwrap().embedded_audio = false;
-    fixture.export_with("silent.mp4", &silent, true);
+    fixture.export_with("silent.mp4", &silent, &normalize);
+}
+
+#[test]
+fn ducked_music_dips_only_while_the_speech_source_is_audible() {
+    let fixture = Fixture::new();
+    let talk = fixture.color("talk.mp4", "blue", Some(440));
+    let bed = fixture.color("bed.mp4", "green", Some(880));
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &talk, 0, 0.0, 3.0, 0.0);
+    let music = timeline.add_media_clip("bed", ClipKind::Audio, 1, 0.0, 3.0, 0.0, &bed);
+    timeline.clip_mut(music).unwrap().duck = true;
+    let options = ExportOptions {
+        speech: [(talk.clone(), vec![(1.0, 2.0)])].into(),
+        ..Default::default()
+    };
+    let ducked = fixture.export_with("ducked.mp4", &timeline, &options);
+    let before = tone_window(&ducked, 880.0, 0.1, 0.6);
+    let during = tone_window(&ducked, 880.0, 1.35, 1.65);
+    let after = tone_window(&ducked, 880.0, 2.4, 2.9);
+    eprintln!("bed 880 Hz: before {before}, during {during}, after {after}");
+    assert!(
+        (0.2..0.32).contains(&(during / before)),
+        "ducked to a quarter"
+    );
+    assert!((after / before - 1.0).abs() < 0.1, "recovers after speech");
+    let voice = tone_window(&ducked, 440.0, 1.35, 1.65);
+    assert!(
+        (voice / tone_window(&ducked, 440.0, 0.1, 0.6) - 1.0).abs() < 0.1,
+        "speech is untouched"
+    );
+
+    // Without speech evidence nothing ducks.
+    let plain = fixture.export("unducked.mp4", &timeline);
+    let flat = tone_window(&plain, 880.0, 1.35, 1.65) / tone_window(&plain, 880.0, 0.1, 0.6);
+    assert!((flat - 1.0).abs() < 0.1, "{flat}");
 }
 
 /// Integrated loudness in LUFS, measured by FFmpeg's EBU R128 meter.

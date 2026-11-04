@@ -618,7 +618,9 @@ impl EditorApp {
                 }
                 let clipped_start = chunk.start.max(source_start);
                 let clipped_end = chunk.end.min(source_end);
-                if clipped_end <= clipped_start {
+                // A line mostly spoken on the other side of a cut belongs
+                // there; showing it again here repeats it for a moment.
+                if clipped_end - clipped_start < 0.5 * (chunk.end - chunk.start) {
                     continue;
                 }
                 let start = self
@@ -1076,9 +1078,49 @@ impl EditorApp {
             .is_some_and(|audio| !audio.voice_ids().is_empty())
     }
 
+    /// Where each source that a non-ducking clip plays is audible, in
+    /// source seconds: its waveform outside the silences tightenSilence
+    /// uses. Empty when no clip ducks, so playback pays nothing for it.
+    fn speech_map(&self) -> HashMap<String, Vec<(f64, f64)>> {
+        if !self.timeline.clips.iter().any(|clip| clip.duck) {
+            return HashMap::new();
+        }
+        let mut map = HashMap::new();
+        for clip in self.timeline.clips.iter().filter(|clip| !clip.duck) {
+            let Some(source) = clip.source.as_ref() else {
+                continue;
+            };
+            if map.contains_key(source) {
+                continue;
+            }
+            let Some(asset) = self.asset(source) else {
+                continue;
+            };
+            let duration = asset.info.duration;
+            if !asset.info.has_audio || asset.peaks.is_empty() || duration <= 0.0 {
+                continue;
+            }
+            let rate = asset.peaks.len() as f64 / duration;
+            let mut audible = Vec::new();
+            let mut cursor = 0.0;
+            for quiet in openreel_media::silence_ranges(&asset.peaks, rate, 0.03, 0.35) {
+                if quiet.start > cursor {
+                    audible.push((cursor, quiet.start));
+                }
+                cursor = quiet.end;
+            }
+            if cursor < duration {
+                audible.push((cursor, duration));
+            }
+            map.insert(source.clone(), audible);
+        }
+        map
+    }
+
     /// Give the mixer every audible clip under the playhead or starting
     /// within the look-ahead, so it starts decoding before their edges.
     fn sync_audio(&mut self) {
+        let speech = self.speech_map();
         const LOOK_AHEAD: f64 = 0.75;
         let horizon = self.playhead + LOOK_AHEAD;
         let segments: Vec<(u64, AudioSegment)> = self
@@ -1104,6 +1146,7 @@ impl EditorApp {
                             volume: c.volume,
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
+                            duck: self.timeline.duck_ranges(c, &speech),
                         },
                     )
                 })
@@ -1159,6 +1202,10 @@ impl EditorApp {
             return;
         }
         let timeline = self.timeline.clone();
+        let options = openreel_media::ExportOptions {
+            normalize_loudness: true,
+            speech: self.speech_map(),
+        };
         let infos: HashMap<String, MediaInfo> = self
             .assets
             .iter()
@@ -1179,7 +1226,7 @@ impl EditorApp {
                 }
             });
             let result =
-                openreel_media::export_timeline(&timeline, &infos, &output, true, progress_tx);
+                openreel_media::export_timeline(&timeline, &infos, &output, &options, progress_tx);
             let _ = forwarder.join();
             let _ = tx.send(ExportMsg::Done(result));
             ctx.request_repaint();
@@ -1312,6 +1359,7 @@ impl EditorApp {
                     "volume": c.volume,
                     "fadeIn": c.fade_in,
                     "fadeOut": c.fade_out,
+                    "duck": c.duck,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
@@ -1706,6 +1754,17 @@ impl EditorApp {
             ScriptCommand::SetZoom(px) => self.timeline_view.px_per_sec = px.clamp(4.0, 600.0),
             ScriptCommand::CloseGaps => {
                 self.timeline.close_gaps();
+            }
+            ScriptCommand::SetDuck { clip, enabled } => {
+                if let Some(c) = self.timeline.clip_mut(clip) {
+                    c.duck = enabled;
+                }
+            }
+            ScriptCommand::InsertTime { at, seconds } => {
+                if seconds <= 0.0 {
+                    return Err(format!("insertTime needs a positive length, not {seconds}"));
+                }
+                self.timeline.insert_time(at, seconds);
             }
         }
         Ok(None)
@@ -2491,6 +2550,8 @@ impl EditorApp {
                             .on_hover_text("Fade out: seconds to fall to silence");
                         fade_in.union(fade_out)
                     });
+                    ui.checkbox(&mut clip.duck, "Duck under speech")
+                        .on_hover_text("Dip this sound while another clip is talking");
                 }
                 if kind == ClipKind::Title {
                     prop_row(ui, "Style", |ui| {
@@ -5689,6 +5750,22 @@ mod tests {
         assert_eq!(
             app.add_captions_for_clip(clip, openreel_engine::TitleStyle::PopCaption)
                 .expect("second caption pass is idempotent"),
+            0
+        );
+
+        // A piece that only catches the edges of two lines repeats neither.
+        let sliver = app.timeline.add_media_clip(
+            "talk.mp4",
+            ClipKind::Video,
+            0,
+            20.0,
+            0.5,
+            12.9,
+            "/media/talk.mp4",
+        );
+        assert_eq!(
+            app.add_captions_for_clip(sliver, openreel_engine::TitleStyle::PopCaption)
+                .expect("edge-only piece"),
             0
         );
     }

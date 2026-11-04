@@ -435,10 +435,12 @@ impl EditorApp {
             source_in,
             path,
         );
-        if starts_muted {
-            if let Some(clip) = self.timeline.clip_mut(id) {
+        if let Some(clip) = self.timeline.clip_mut(id) {
+            if starts_muted {
                 clip.volume = 0.0;
             }
+            // Audio-only media is the soundtrack: it dips under speech.
+            clip.duck = !has_video;
         }
         self.selected = Some(id);
         self.status = format!(

@@ -489,15 +489,24 @@ pub const LOUDNESS_TARGET: f64 = -16.0;
 /// headroom for AAC's inter-sample peaks.
 const LOUDNESS_PEAK_LIMIT: f64 = 0.8;
 
-/// Export the timeline as an H.264/AAC MP4. With `normalize_loudness`,
-/// the mix is measured first and one fixed gain brings it to
-/// [`LOUDNESS_TARGET`], with a limiter catching the peaks that gain
-/// pushes over the ceiling; without it, audio is the plain mix.
+/// How export treats the audio mix.
+#[derive(Clone, Debug, Default)]
+pub struct ExportOptions {
+    /// Measure the mix first and apply one fixed gain to
+    /// [`LOUDNESS_TARGET`], with a limiter catching the peaks that gain
+    /// pushes over the ceiling. Off exports the plain mix.
+    pub normalize_loudness: bool,
+    /// Audible source-time ranges per source path, for clips that duck
+    /// under speech (`openreel_engine::Timeline::duck_ranges`).
+    pub speech: HashMap<String, Vec<(f64, f64)>>,
+}
+
+/// Export the timeline as an H.264/AAC MP4.
 pub fn export_timeline(
     timeline: &Timeline,
     infos: &HashMap<String, MediaInfo>,
     output: &Path,
-    normalize_loudness: bool,
+    options: &ExportOptions,
     progress: Sender<f64>,
 ) -> MediaResult<PathBuf> {
     let total = timeline.end();
@@ -605,6 +614,8 @@ pub fn export_timeline(
         if let Some(last) = audio_runs.last_mut().filter(|last| {
             last.source == clip.source
                 && last.volume == clip.volume
+                && !last.duck
+                && !clip.duck
                 && last.fade_lengths() == (0.0, 0.0)
                 && clip.fade_lengths() == (0.0, 0.0)
                 && same_time(last.end(), clip.start)
@@ -645,6 +656,27 @@ pub fn export_timeline(
                 f(fade_out)
             ));
         }
+        // The same envelope as the preview mixer's `duck_gain`: a trapezoid
+        // per range, evaluated per audio frame on clip-local time.
+        let ducks = timeline.duck_ranges(clip, &options.speech);
+        if !ducks.is_empty() {
+            let ramp = f(openreel_engine::DUCK_RAMP);
+            let depth: Vec<String> = ducks
+                .iter()
+                .map(|&(start, end)| {
+                    format!(
+                        "clip((t-{})/{ramp},0,1)*clip(({}-t)/{ramp},0,1)",
+                        f(start - openreel_engine::DUCK_RAMP),
+                        f(end + openreel_engine::DUCK_RAMP),
+                    )
+                })
+                .collect();
+            fades.push_str(&format!(
+                ",volume=volume='1-{}*min(1,{})':eval=frame",
+                f(1.0 - f64::from(openreel_engine::DUCK_LEVEL)),
+                depth.join("+")
+            ));
+        }
         filters.push(format!(
             "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000,\
              volume={:.3}{fades},adelay={delay_ms}|{delay_ms}[{label}]",
@@ -671,7 +703,7 @@ pub fn export_timeline(
     // Video is already bounded by frame_count. Output -t rounds on its frame
     // clock and can drop the final active frame; limit audio independently.
     let mut audio_out = format!("{audio_mix},atrim=end={}", f(total));
-    if normalize_loudness && !audio_labels.is_empty() {
+    if options.normalize_loudness && !audio_labels.is_empty() {
         if let Some(loudness) = measure_loudness(&inputs, &audio_filters, &audio_out)? {
             let gain = (LOUDNESS_TARGET - loudness).clamp(-30.0, 30.0);
             audio_out.push_str(&format!(

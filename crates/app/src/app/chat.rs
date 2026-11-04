@@ -313,7 +313,7 @@ If you make no edits because you need the user's decision or cannot do part of t
 Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
 selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), setClipLane(id, lane), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
-setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
+setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), setDuck(id, bool) (music that dips about 12 dB wherever another clip is talking and comes back up in pauses; audio-only adds such as music beds duck by default, so keep the bed's own volume where it sounds right between lines), insertTime(at, seconds) (opens empty time: splits every clip crossing at, keeping titles' text on both sides, and moves everything from at on later on every lane; use it to make room for an inserted shot instead of moving clips one by one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
 setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
 closeGaps() runs when it is reached in the queue. It removes only time that no video or audio clip covers on any lane (titles do not count) and shifts later clips on every lane left by the same amount, so music still spanning a gap keeps it open. To close a picture gap under longer music, shorten the music first or move the later clips yourself with moveClip. \
@@ -2757,6 +2757,55 @@ mod tests {
             "{}",
             app.status
         );
+
+        // Music ducks by default; insertTime opens room on every lane at once.
+        app.assets.push(super::super::media::BinAsset {
+            info: openreel_media::MediaInfo {
+                path: "bed.mp3".to_owned(),
+                name: "bed.mp3".to_owned(),
+                duration: 60.0,
+                width: 0,
+                height: 0,
+                fps: 0.0,
+                has_video: false,
+                has_audio: true,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: super::super::sweep::SweepData::default(),
+        });
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "addAssetRange('bed.mp3', 0, 0, 20); insertTime(2, 5); console.log('Room made.');",
+        );
+        let spans = |name: &str| {
+            let mut found: Vec<_> = app
+                .timeline
+                .clips
+                .iter()
+                .filter(|c| c.name == name)
+                .map(|c| (c.start, c.source_in, c.duck))
+                .collect();
+            found.sort_by(|a, b| a.0.total_cmp(&b.0));
+            found
+        };
+        assert_eq!(
+            spans("bed.mp3"),
+            vec![(0.0, 0.0, true), (7.0, 2.0, true)],
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            spans("talk.mp4"),
+            vec![(0.0, 0.0, false), (7.0, 2.0, false), (34.0, 9.0, false)]
+        );
+        assert_eq!(spans("broll.mp4"), vec![(9.0, 2.0, false)]);
     }
 
     #[test]

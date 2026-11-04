@@ -72,6 +72,14 @@ pub enum ScriptCommand {
         clip: u64,
         enabled: bool,
     },
+    SetDuck {
+        clip: u64,
+        enabled: bool,
+    },
+    InsertTime {
+        at: f64,
+        seconds: f64,
+    },
     TightenSilence {
         clip: u64,
         threshold: f32,
@@ -137,6 +145,7 @@ impl ScriptCommand {
             | Self::UnlinkClip { clip }
             | Self::SetClipLane { clip, .. }
             | Self::SetEmbeddedAudio { clip, .. }
+            | Self::SetDuck { clip, .. }
             | Self::TightenSilence { clip, .. }
             | Self::SetTitleStyle { clip, .. }
             | Self::AddCaptionsForClip { clip, .. } => Some(clip),
@@ -168,6 +177,7 @@ impl ScriptCommand {
             Self::SetFade {
                 fade_in, fade_out, ..
             } => fade_in.is_finite() && fade_out.is_finite(),
+            Self::InsertTime { at, seconds } => at.is_finite() && seconds.is_finite(),
             Self::TrimClip { left, right, .. } => {
                 left.iter().chain(right).all(|value| value.is_finite())
             }
@@ -198,6 +208,7 @@ impl ScriptCommand {
             | Self::UnlinkClip { .. }
             | Self::SetClipLane { .. }
             | Self::SetEmbeddedAudio { .. }
+            | Self::SetDuck { .. }
             | Self::SetTitleStyle { .. }
             | Self::AddCaptionsForClip { .. }
             | Self::Import(_)
@@ -326,7 +337,8 @@ function help() {
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",
-    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec)",
+    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec) setDuck(id, bool)",
+    "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
     "  // adds and splits return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
@@ -492,6 +504,14 @@ impl ScriptEngine {
                         clip,
                         enabled
                     }));
+                let q = Rc::clone(&queue);
+                reg!("setDuck", move |clip: u64, enabled: bool| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::SetDuck { clip, enabled }));
+                let q = Rc::clone(&queue);
+                reg!("insertTime", move |at: f64, seconds: f64| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::InsertTime { at, seconds }));
                 let q = Rc::clone(&queue);
                 reg!(
                     "__tighten_silence",

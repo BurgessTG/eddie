@@ -86,6 +86,10 @@ pub struct Clip {
     /// split together until explicitly unlinked.
     pub linked_clip: Option<ClipId>,
     pub title_style: TitleStyle,
+    /// Sound that dips under speech: it drops to [`DUCK_LEVEL`] wherever
+    /// another audible clip that does not itself duck is talking.
+    #[serde(default)]
+    pub duck: bool,
 }
 
 impl Clip {
@@ -134,6 +138,31 @@ pub fn fade_gain(offset: f64, duration: f64, fade_in: f64, fade_out: f64) -> f32
         gain = gain.min((duration - offset) / fade_out);
     }
     gain.clamp(0.0, 1.0) as f32
+}
+
+/// Ducked sound plays at this gain under speech (about -12 dB).
+pub const DUCK_LEVEL: f32 = 0.25;
+/// Seconds to fall to [`DUCK_LEVEL`] before speech and to recover after.
+pub const DUCK_RAMP: f64 = 0.3;
+/// Pauses shorter than this stay ducked, so music does not pump between
+/// words. Equal to two ramps, so neighbouring dips never overlap.
+const DUCK_HOLD: f64 = 2.0 * DUCK_RAMP;
+
+/// Gain of a ducking envelope `offset` seconds into a clip, given its
+/// sorted, non-overlapping speech ranges from [`Timeline::duck_ranges`].
+/// Unity away from speech, [`DUCK_LEVEL`] inside it, linear ramps between.
+pub fn duck_gain(offset: f64, ranges: &[(f64, f64)]) -> f32 {
+    let first = ranges.partition_point(|&(_, end)| end + DUCK_RAMP <= offset);
+    let depth = ranges[first..]
+        .iter()
+        .take(2)
+        .map(|&(start, end)| {
+            let rise = (offset - (start - DUCK_RAMP)) / DUCK_RAMP;
+            let fall = (end + DUCK_RAMP - offset) / DUCK_RAMP;
+            rise.min(fall).clamp(0.0, 1.0)
+        })
+        .fold(0.0_f64, f64::max);
+    (1.0 - (1.0 - f64::from(DUCK_LEVEL)) * depth) as f32
 }
 
 /// Project picture format. The canvas never follows the footage: video
@@ -325,6 +354,7 @@ impl Timeline {
             fade_out: 0.0,
             linked_clip: None,
             title_style: TitleStyle::default(),
+            duck: false,
         });
         id
     }
@@ -653,6 +683,7 @@ impl Timeline {
             right_clip.fade_out = clip.fade_out;
             right_clip.linked_clip = None;
             right_clip.title_style = clip.title_style;
+            right_clip.duck = clip.duck;
         }
         Some(right)
     }
@@ -670,6 +701,79 @@ impl Timeline {
             }
         }
         Some(right)
+    }
+
+    /// Open `seconds` of empty time at `at`: every clip that crosses the
+    /// point splits there (linked pairs together, titles keep their text),
+    /// and everything from the point on, on every lane, moves later by the
+    /// same amount, so pictures, sound and captions stay in sync.
+    pub fn insert_time(&mut self, at: f64, seconds: f64) {
+        let at = self.snap(at.max(0.0));
+        let seconds = self.snap(seconds);
+        if seconds <= 0.0 {
+            return;
+        }
+        let crossing: Vec<ClipId> = self
+            .clips
+            .iter()
+            .filter(|clip| clip.start < at && at < clip.end())
+            .map(|clip| clip.id)
+            .collect();
+        for id in crossing {
+            // A linked partner may already have split with its pair.
+            if self.clip(id).is_some_and(|clip| at < clip.end()) {
+                self.split_at(id, at);
+            }
+        }
+        let frame = 1.0 / self.fps;
+        for clip in &mut self.clips {
+            if clip.start >= at - frame / 2.0 {
+                clip.start += seconds;
+            }
+        }
+    }
+
+    /// Where `target` ducks, as sorted ranges in its own clip-local
+    /// seconds: wherever another audible clip that does not itself duck
+    /// is speaking. `speech` maps a source path to its audible
+    /// source-time ranges. Empty unless `target.duck` is set.
+    pub fn duck_ranges(
+        &self,
+        target: &Clip,
+        speech: &std::collections::HashMap<String, Vec<(f64, f64)>>,
+    ) -> Vec<(f64, f64)> {
+        if !target.duck {
+            return Vec::new();
+        }
+        let mut ranges: Vec<(f64, f64)> = Vec::new();
+        for clip in &self.clips {
+            let audible = clip.kind == ClipKind::Audio
+                || (clip.kind == ClipKind::Video && clip.embedded_audio);
+            if clip.id == target.id || clip.duck || !audible || clip.volume <= 0.0 {
+                continue;
+            }
+            let Some(spans) = clip.source.as_ref().and_then(|source| speech.get(source)) else {
+                continue;
+            };
+            let source_end = clip.source_in + clip.duration;
+            for &(from, to) in spans {
+                let (from, to) = (from.max(clip.source_in), to.min(source_end));
+                let offset = clip.start - clip.source_in - target.start;
+                let (start, end) = ((from + offset).max(0.0), (to + offset).min(target.duration));
+                if end > start {
+                    ranges.push((start, end));
+                }
+            }
+        }
+        ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                Some(last) if start - last.1 < DUCK_HOLD => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
     }
 
     /// Magnetic main-track behavior: shift clips on `track` left so no
@@ -1302,5 +1406,106 @@ mod tests {
         assert_eq!(tl.clip(audio).unwrap().linked_clip, None);
         tl.move_clip(video, 3.0);
         assert_eq!(tl.clip(audio).unwrap().start, 0.0);
+    }
+
+    #[test]
+    fn inserting_time_splits_crossing_clips_and_moves_everything_after() {
+        let mut tl = Timeline::new(30.0);
+        let early = tl.add_clip("Hello", ClipKind::Title, 2, 1.0, 1.0, 0.0);
+        let talk = tl.add_media_clip("talk", ClipKind::Video, 1, 0.0, 10.0, 0.0, "/m/talk.mp4");
+        let sound = tl.detach_audio(talk).expect("detach");
+        let caption = tl.add_clip("across the point", ClipKind::Title, 2, 3.0, 3.0, 0.0);
+        let broll = tl.add_media_clip("broll", ClipKind::Video, 0, 7.0, 2.0, 4.0, "/m/b.mp4");
+
+        tl.insert_time(5.0, 4.0);
+
+        let span = |id: ClipId| {
+            let clip = tl.clip(id).unwrap();
+            (clip.start, clip.end(), clip.source_in)
+        };
+        assert_eq!(span(early), (1.0, 2.0, 0.0), "clips before the point stay");
+        assert_eq!(span(talk), (0.0, 5.0, 0.0));
+        assert_eq!(span(sound), (0.0, 5.0, 0.0));
+        assert_eq!(span(caption).0, 3.0);
+        assert_eq!(span(caption).1, 5.0);
+        assert_eq!(
+            span(broll),
+            (11.0, 13.0, 4.0),
+            "later clips move by the gap"
+        );
+        let pieces = |name: &str| {
+            let mut found: Vec<_> = tl
+                .clips
+                .iter()
+                .filter(|c| c.name == name)
+                .map(|c| (c.start, c.end(), c.source_in, c.linked_clip.is_some()))
+                .collect();
+            found.sort_by(|a, b| a.0.total_cmp(&b.0));
+            found
+        };
+        assert_eq!(
+            pieces("talk")[1],
+            (9.0, 14.0, 5.0, true),
+            "right piece resumes the source"
+        );
+        assert_eq!(
+            pieces("across the point")[1].0,
+            9.0,
+            "titles keep their text after the gap"
+        );
+        let right_talk = tl
+            .clips
+            .iter()
+            .find(|c| c.name == "talk" && c.start == 9.0)
+            .unwrap();
+        let partner = tl.clip(right_talk.linked_clip.unwrap()).unwrap();
+        assert_eq!((partner.kind, partner.start), (ClipKind::Audio, 9.0));
+        assert_eq!(tl.end(), 14.0);
+        assert!(
+            tl.clips.iter().all(|c| c.end() <= 5.0 || c.start >= 9.0),
+            "nothing plays inside the inserted time"
+        );
+    }
+
+    #[test]
+    fn ducked_sound_dips_under_other_clips_speech_and_recovers_in_pauses() {
+        let mut tl = Timeline::new(30.0);
+        let music = tl.add_media_clip("bed", ClipKind::Audio, 2, 2.0, 20.0, 0.0, "/m/bed.mp3");
+        tl.clip_mut(music).unwrap().duck = true;
+        let other_bed =
+            tl.add_media_clip("bed2", ClipKind::Audio, 3, 0.0, 30.0, 0.0, "/m/bed2.mp3");
+        tl.clip_mut(other_bed).unwrap().duck = true;
+        tl.add_media_clip("talk", ClipKind::Video, 0, 5.0, 10.0, 10.0, "/m/talk.mp4");
+        let muted = tl.add_media_clip("muted", ClipKind::Audio, 4, 0.0, 30.0, 0.0, "/m/muted.wav");
+        tl.clip_mut(muted).unwrap().volume = 0.0;
+        let speech: std::collections::HashMap<String, Vec<(f64, f64)>> = [
+            // Source time; the talk clip shows source 10..20 at timeline 5..15.
+            (
+                "/m/talk.mp4".to_owned(),
+                vec![(11.0, 13.0), (13.4, 14.0), (18.0, 30.0)],
+            ),
+            ("/m/bed2.mp3".to_owned(), vec![(0.0, 30.0)]),
+            ("/m/muted.wav".to_owned(), vec![(0.0, 30.0)]),
+        ]
+        .into();
+        let bed = tl.clip(music).unwrap().clone();
+        // Timeline 6..8 and 8.4..9 (a 0.4 s pause stays ducked), then 13..15,
+        // in the bed's own time (it starts at 2).
+        assert_eq!(
+            tl.duck_ranges(&bed, &speech),
+            vec![(4.0, 7.0), (11.0, 13.0)]
+        );
+        let mut plain = bed.clone();
+        plain.duck = false;
+        assert!(tl.duck_ranges(&plain, &speech).is_empty());
+
+        let ranges = tl.duck_ranges(&bed, &speech);
+        let gain = |t: f64| duck_gain(t, &ranges);
+        assert_eq!(gain(2.0), 1.0);
+        assert!((gain(3.85) - 0.625).abs() < 1e-6, "halfway down the ramp");
+        assert_eq!(gain(5.0), DUCK_LEVEL);
+        assert_eq!(gain(7.3), 1.0, "recovered after the ramp");
+        assert_eq!(gain(9.0), 1.0, "a real pause brings the music back");
+        assert_eq!(gain(12.0), DUCK_LEVEL);
     }
 }

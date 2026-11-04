@@ -208,6 +208,90 @@ pub(super) struct CaptionChunk {
     pub(super) text: String,
 }
 
+/// A word's letters and apostrophes, lowercased, for comparing repeats.
+fn caption_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '\'' || *c == '’')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn ends_with_any(text: &str, marks: &str) -> bool {
+    text.trim_end_matches(['"', '”', ')'])
+        .chars()
+        .last()
+        .is_some_and(|c| marks.contains(c))
+}
+
+/// Remove spoken stutters: a run of one to three words immediately
+/// repeated ("out of of", "if it's if it's"). The first copy keeps its
+/// start, the second's end and punctuation. Different words that only
+/// share a stem ("Eddie Eddie's") are kept.
+fn drop_stutters(words: Vec<(f64, f64, String)>) -> Vec<(f64, f64, String)> {
+    let mut kept: Vec<(f64, f64, String)> = Vec::new();
+    let mut index = 0;
+    'words: while index < words.len() {
+        for run in (1..=3).rev() {
+            if kept.len() < run || index + run > words.len() {
+                continue;
+            }
+            let earlier = &kept[kept.len() - run..];
+            let later = &words[index..index + run];
+            // A sentence end between the copies is a real repeat, not a stutter.
+            if ends_with_any(&earlier[run - 1].2, ".?!") {
+                continue;
+            }
+            let same = earlier.iter().zip(later).all(|(a, b)| {
+                !caption_key(&a.2).is_empty() && caption_key(&a.2) == caption_key(&b.2)
+            });
+            if same {
+                let last = kept.last_mut().expect("run is non-empty");
+                let (_, end, text) = &later[run - 1];
+                last.1 = last.1.max(*end);
+                if ends_with_any(text, ".?!,;:") && !ends_with_any(&last.2, ".?!,;:") {
+                    last.2 = text.clone();
+                }
+                index += run;
+                continue 'words;
+            }
+        }
+        kept.push(words[index].clone());
+        index += 1;
+    }
+    kept
+}
+
+/// How many words of a full caption line to keep when the next word does
+/// not fit: after a clause mark, else before a conjunction, in the later
+/// two thirds; else all but a dangling article, preposition or pronoun.
+fn caption_break(group: &[(f64, f64, String)]) -> usize {
+    const JOINS: [&str; 9] = [
+        "and", "but", "so", "because", "while", "when", "after", "then", "or",
+    ];
+    const DANGLING: [&str; 24] = [
+        "a", "an", "the", "i", "to", "of", "in", "on", "at", "by", "from", "into", "with", "for",
+        "my", "our", "your", "it", "it's", "and", "but", "so", "or", "is",
+    ];
+    let earliest = group.len().div_ceil(3).max(1);
+    if let Some(keep) = (earliest..group.len())
+        .rev()
+        .find(|&keep| ends_with_any(&group[keep - 1].2, ",;:"))
+    {
+        return keep;
+    }
+    if let Some(keep) = (earliest..group.len())
+        .rev()
+        .find(|&keep| JOINS.contains(&caption_key(&group[keep].2).as_str()))
+    {
+        return keep;
+    }
+    let mut keep = group.len();
+    while keep > earliest && DANGLING.contains(&caption_key(&group[keep - 1].2).as_str()) {
+        keep -= 1;
+    }
+    keep
+}
+
 /// Split one transcript turn into readable caption chunks. Real
 /// word timings are used when present; turn-only text is allocated
 /// proportionally and therefore remains an estimate.
@@ -230,43 +314,52 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
             })
             .collect();
         words.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let words = drop_stutters(
+            words
+                .into_iter()
+                .map(|word| (word.start, word.end, word.text.trim().to_owned()))
+                .collect(),
+        );
         if !words.is_empty() {
             let mut chunks: Vec<CaptionChunk> = Vec::new();
-            let mut group: Vec<&TranscriptWord> = Vec::new();
-            let push_group = |group: &Vec<&TranscriptWord>, chunks: &mut Vec<CaptionChunk>| {
-                if group.is_empty() {
+            let mut group: Vec<(f64, f64, String)> = Vec::new();
+            let push_group = |group: &[(f64, f64, String)], chunks: &mut Vec<CaptionChunk>| {
+                let (Some(first), Some(last)) = (group.first(), group.last()) else {
                     return;
-                }
-                let start = group
-                    .first()
-                    .map(|word| word.start)
-                    .unwrap_or(segment.start);
-                let last_end = group.last().map(|word| word.end).unwrap_or(segment.end);
+                };
+                let (start, last_end) = (first.0, last.1);
                 chunks.push(CaptionChunk {
                     start,
                     end: last_end.max(start + 0.8).min(segment.end.max(last_end)),
                     text: group
                         .iter()
-                        .map(|word| word.text.trim())
+                        .map(|word| word.2.as_str())
                         .collect::<Vec<_>>()
                         .join(" "),
                 });
             };
             for word in words {
-                let next_len = group
-                    .iter()
-                    .map(|existing| existing.text.trim().len() + 1)
-                    .sum::<usize>()
-                    + word.text.trim().len();
-                let next_duration = group
-                    .first()
-                    .map(|first| word.end - first.start)
-                    .unwrap_or(0.0);
-                if !group.is_empty() && (next_len > MAX_CHARS || next_duration > MAX_DURATION) {
+                let next_len = group.iter().map(|w| w.2.len() + 1).sum::<usize>() + word.2.len();
+                let next_duration = group.first().map(|first| word.1 - first.0).unwrap_or(0.0);
+                let ends_sentence = ends_with_any(&word.2, ".?!");
+                // A sentence may run a little long rather than leave its
+                // last word alone on the next caption.
+                let max_chars = if ends_sentence {
+                    MAX_CHARS + 8
+                } else {
+                    MAX_CHARS
+                };
+                if !group.is_empty() && (next_len > max_chars || next_duration > MAX_DURATION) {
+                    let keep = caption_break(&group);
+                    let carried = group.split_off(keep);
+                    push_group(&group, &mut chunks);
+                    group = carried;
+                }
+                group.push(word);
+                if ends_sentence {
                     push_group(&group, &mut chunks);
                     group.clear();
                 }
-                group.push(word);
             }
             push_group(&group, &mut chunks);
             for index in 0..chunks.len().saturating_sub(1) {
@@ -284,7 +377,14 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
 
     let mut pieces: Vec<String> = Vec::new();
     let mut current = String::new();
-    for word in segment.text.split_whitespace() {
+    let words = drop_stutters(
+        segment
+            .text
+            .split_whitespace()
+            .map(|word| (0.0, 0.0, word.to_owned()))
+            .collect(),
+    );
+    for (_, _, word) in &words {
         if !current.is_empty() && current.len() + 1 + word.len() > MAX_CHARS {
             pieces.push(std::mem::take(&mut current));
         }
@@ -2392,6 +2492,90 @@ mod tests {
             session: None,
         };
         assert_eq!(caption_chunks(&ambient), Vec::new());
+    }
+
+    #[test]
+    fn captions_drop_stutters_and_break_at_sentences_not_mid_phrase() {
+        let text = "The slow part was out of of Bothell, Washington. Short clips get the good \
+                    bits and and a person talking stays a person. After curation if it's if it's \
+                    not sure it says so. It's called Eddie Eddie's a video editor. It's still a \
+                    normal editor too so if it's a little off I can fix it by hand. What \
+                    you're about to see are my initial tests. Thanks for watching";
+        let words: Vec<TranscriptWord> = text
+            .split_whitespace()
+            .enumerate()
+            .map(|(index, word)| TranscriptWord {
+                start: index as f64 * 0.3,
+                end: index as f64 * 0.3 + 0.25,
+                text: word.to_owned(),
+                confidence: None,
+                estimated: false,
+            })
+            .collect();
+        let segment = TranscriptSegment {
+            start: 0.0,
+            end: words.last().unwrap().end,
+            speaker: None,
+            text: text.to_owned(),
+            words,
+            session: None,
+        };
+        let chunks = caption_chunks(&segment);
+        let lines: Vec<&str> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        let all = lines.join(" ");
+        for stutter in ["of of", "and and", "if it's if it's"] {
+            assert!(!all.contains(stutter), "{stutter:?} remains in {lines:?}");
+        }
+        assert!(all.contains("out of Bothell, Washington."), "{all}");
+        assert!(
+            all.contains("Eddie Eddie's"),
+            "a stem is not a stutter: {all}"
+        );
+        assert!(
+            lines.iter().any(|line| line.ends_with("stays a person.")),
+            "a sentence end closes its caption: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("After curation")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"What you're about to see are my initial tests."),
+            "a sentence finishes on its own line: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| line.split(' ').count() > 1),
+            "no one-word leftovers: {lines:?}"
+        );
+        for line in &lines {
+            assert!(line.len() <= 50, "{line:?}");
+            let last = line.rsplit(' ').next().unwrap();
+            assert!(
+                !["a", "the", "I", "to", "of", "it", "and", "by"].contains(&last),
+                "no dangling word ends a caption: {lines:?}"
+            );
+        }
+        assert!(chunks.windows(2).all(|pair| pair[0].end <= pair[1].start));
+        // The first copy of a stutter keeps its start time.
+        let bothell = chunks
+            .iter()
+            .find(|c| c.text.contains("out of Bothell"))
+            .unwrap();
+        assert!(bothell.start <= 4.0 * 0.3 + 1e-9, "{bothell:?}");
+
+        // Turn-only text loses its stutters too.
+        let turn = TranscriptSegment {
+            start: 0.0,
+            end: 3.0,
+            speaker: None,
+            text: "trying trying to find great moments".to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        assert_eq!(
+            caption_chunks(&turn)[0].text,
+            "trying to find great moments"
+        );
     }
 
     #[test]

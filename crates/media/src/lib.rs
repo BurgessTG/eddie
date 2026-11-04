@@ -19,7 +19,7 @@ pub use beats::{beat_grid, BeatGrid};
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
-pub use export::{export_canvas, export_timeline, title_look, TitleLook};
+pub use export::{export_canvas, export_timeline, title_look, ExportOptions, TitleLook};
 pub use playback::FrameStream;
 pub use samples::generate_samples;
 pub use sweep::{
@@ -631,6 +631,7 @@ mod tests {
                 volume: 1.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                duck: Vec::new(),
             },
         )]);
         let mut mix = Vec::new();
@@ -661,7 +662,17 @@ mod tests {
             [(video_path.clone(), video), (music_path.clone(), music)].into();
         let out = dir.join("export.mp4");
         let (tx, rx) = channel();
-        export_timeline(&tl, &infos, &out, true, tx).expect("export");
+        export_timeline(
+            &tl,
+            &infos,
+            &out,
+            &crate::ExportOptions {
+                normalize_loudness: true,
+                ..Default::default()
+            },
+            tx,
+        )
+        .expect("export");
         let progress: Vec<f64> = rx.try_iter().collect();
         assert!(progress.iter().any(|p| *p >= 0.99), "{progress:?}");
 
