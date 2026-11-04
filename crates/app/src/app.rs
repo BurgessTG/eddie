@@ -1178,7 +1178,8 @@ impl EditorApp {
                     ctx_progress.request_repaint();
                 }
             });
-            let result = openreel_media::export_timeline(&timeline, &infos, &output, progress_tx);
+            let result =
+                openreel_media::export_timeline(&timeline, &infos, &output, true, progress_tx);
             let _ = forwarder.join();
             let _ = tx.send(ExportMsg::Done(result));
             ctx.request_repaint();

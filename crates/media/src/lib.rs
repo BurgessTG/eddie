@@ -661,7 +661,7 @@ mod tests {
             [(video_path.clone(), video), (music_path.clone(), music)].into();
         let out = dir.join("export.mp4");
         let (tx, rx) = channel();
-        export_timeline(&tl, &infos, &out, tx).expect("export");
+        export_timeline(&tl, &infos, &out, true, tx).expect("export");
         let progress: Vec<f64> = rx.try_iter().collect();
         assert!(progress.iter().any(|p| *p >= 0.99), "{progress:?}");
 

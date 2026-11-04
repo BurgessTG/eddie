@@ -483,10 +483,21 @@ pub fn export_canvas(
 
 /// Export `timeline` to `output` (H.264/AAC MP4). Sends 0..=1 progress on
 /// `progress` as ffmpeg reports it. Blocks — call from a worker thread.
+/// Integrated loudness a normalized export aims for, in LUFS.
+pub const LOUDNESS_TARGET: f64 = -16.0;
+/// Sample-peak ceiling after normalization (about -1.9 dBFS), leaving
+/// headroom for AAC's inter-sample peaks.
+const LOUDNESS_PEAK_LIMIT: f64 = 0.8;
+
+/// Export the timeline as an H.264/AAC MP4. With `normalize_loudness`,
+/// the mix is measured first and one fixed gain brings it to
+/// [`LOUDNESS_TARGET`], with a limiter catching the peaks that gain
+/// pushes over the ceiling; without it, audio is the plain mix.
 pub fn export_timeline(
     timeline: &Timeline,
     infos: &HashMap<String, MediaInfo>,
     output: &Path,
+    normalize_loudness: bool,
     progress: Sender<f64>,
 ) -> MediaResult<PathBuf> {
     let total = timeline.end();
@@ -605,6 +616,7 @@ pub fn export_timeline(
         }
     }
     let mut audio_labels: Vec<String> = Vec::new();
+    let mut audio_filters: Vec<String> = Vec::new();
     let add_audio = |clip: &Clip,
                      inputs: &mut Vec<String>,
                      filters: &mut Vec<String>,
@@ -643,7 +655,7 @@ pub fn export_timeline(
         labels.push(label);
     };
     for clip in &audio_runs {
-        add_audio(clip, &mut inputs, &mut filters, &mut audio_labels);
+        add_audio(clip, &mut inputs, &mut audio_filters, &mut audio_labels);
     }
     let audio_mix = match audio_labels.len() {
         0 => "anullsrc=r=48000:cl=stereo".to_owned(),
@@ -658,7 +670,17 @@ pub fn export_timeline(
     };
     // Video is already bounded by frame_count. Output -t rounds on its frame
     // clock and can drop the final active frame; limit audio independently.
-    filters.push(format!("{audio_mix},atrim=end={}[aout]", f(total)));
+    let mut audio_out = format!("{audio_mix},atrim=end={}", f(total));
+    if normalize_loudness && !audio_labels.is_empty() {
+        if let Some(loudness) = measure_loudness(&inputs, &audio_filters, &audio_out)? {
+            let gain = (LOUDNESS_TARGET - loudness).clamp(-30.0, 30.0);
+            audio_out.push_str(&format!(
+                ",volume={gain:.2}dB,alimiter=limit={LOUDNESS_PEAK_LIMIT}:level=disabled:latency=1"
+            ));
+        }
+    }
+    filters.extend(audio_filters);
+    filters.push(format!("{audio_out}[aout]"));
 
     let graph_file = FilterGraphFile::create(&filters.join(";"))?;
     let mut cmd = Command::new("ffmpeg");
@@ -758,6 +780,56 @@ pub fn export_timeline(
     }
     let _ = progress.send(1.0);
     Ok(output.to_path_buf())
+}
+
+/// Integrated loudness (LUFS) of the export's audio mix, decoding only the
+/// audio inputs. `None` when the mix is silent.
+fn measure_loudness(
+    inputs: &[String],
+    audio_filters: &[String],
+    mix: &str,
+) -> MediaResult<Option<f64>> {
+    let graph = format!(
+        "{};{mix},loudnorm=print_format=json[aout]",
+        audio_filters.join(";")
+    );
+    let graph_file = FilterGraphFile::create(&graph)?;
+    let mut cmd = Command::new("ffmpeg");
+    // Input 0 stands in for the video pipe so audio input indices match.
+    cmd.args([
+        "-hide_banner",
+        "-nostats",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=d=0.01",
+    ]);
+    for input in inputs {
+        cmd.args(["-vn", "-i", input]);
+    }
+    let out = cmd
+        .arg("-/filter_complex")
+        .arg(&graph_file.0)
+        .args(["-map", "[aout]", "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(export_error(&stderr));
+    }
+    // The JSON report is followed by FFmpeg's own summary lines.
+    let report = stderr
+        .rfind('{')
+        .zip(stderr.rfind('}'))
+        .and_then(|(start, end)| {
+            serde_json::from_str::<serde_json::Value>(stderr.get(start..=end)?).ok()
+        })
+        .ok_or_else(|| "loudness measurement returned no report".to_owned())?;
+    Ok(report["input_i"]
+        .as_str()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > -70.0))
 }
 
 #[cfg(test)]

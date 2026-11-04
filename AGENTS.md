@@ -440,7 +440,10 @@ work). Inputs use slice threads: frame threads on four 4K inputs reached
 about 2.8 GB RSS. A 60 s, 29-cut montage from 4K sources exported in
 46.6 s (was 103.6 s).
 Titles and audio remain on the whole timeline clock. Existing export
-resolution, CRF, and audio settings are unchanged. Batch bytes and
+resolution, CRF, and audio settings are unchanged. App exports measure the
+mix's integrated loudness (`loudnorm` analysis, audio inputs only), then
+apply one fixed gain to -16 LUFS plus a 0.8 sample-peak limiter; tests
+can export the plain mix. Batch bytes and
 child exits are checked before export can report success.
 SDR batches convert source YCbCr matrices and ranges to limited-range
 BT.709 with accurate rounding and full chroma interpolation (without it,
