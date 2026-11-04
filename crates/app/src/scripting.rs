@@ -331,9 +331,10 @@ function assets() { return state().assets; }
 function sweepCandidates() { return state().sweepCandidates || []; }
 function sceneClips() { return state().sceneClips || []; }
 function transcriptSegments() { return state().transcriptSegments || []; }
+function inspect() { return state().inspection || []; }
 function help() {
   return [
-    "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments()",
+    "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect()",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",

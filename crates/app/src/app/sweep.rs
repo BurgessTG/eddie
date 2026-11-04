@@ -1553,7 +1553,7 @@ fn sam_responses_url(settings: &ChatSettings) -> String {
     api_endpoint(settings, "responses")
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
+pub(super) fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

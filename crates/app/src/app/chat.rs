@@ -21,8 +21,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
-use openreel_engine::{ClipId, Orientation, Timeline};
+use openreel_engine::{ClipId, ClipKind, Orientation, Timeline};
 
+use super::inspect::{self, Finding};
 use super::media::AssetState;
 use super::session::{
     build_pinned_summary, estimate_tokens, pinned_fingerprint, transcript_segment_id, ChatMessage,
@@ -61,6 +62,9 @@ pub(super) struct ChatSettings {
     /// Picture format for new and cleared projects; Settings also
     /// applies it to the open project.
     pub(super) format: Orientation,
+    /// After a chat edit, the model checks a contact sheet of the result
+    /// and `inspect()` findings, and may send one fix.
+    pub(super) check_edits: bool,
 }
 
 impl Default for ChatSettings {
@@ -71,6 +75,7 @@ impl Default for ChatSettings {
             model: MODEL_WONDER.to_owned(),
             contributor_opt_in: false,
             format: Orientation::Landscape,
+            check_edits: true,
         }
     }
 }
@@ -89,6 +94,16 @@ pub(super) struct PendingChat {
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<String>>,
     started: Instant,
+    /// Set when this request checks an applied edit; `request` then holds
+    /// the check prompt and `timeline` the edited timeline.
+    review: Option<EditReview>,
+}
+
+/// The pictures a check request attaches: rendered on the worker thread.
+#[derive(Clone)]
+pub(super) struct EditReview {
+    cells: Arc<Vec<openreel_media::SheetCell>>,
+    canvas: (u32, u32),
 }
 
 impl PendingChat {
@@ -110,6 +125,7 @@ impl PendingChat {
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(progress.to_owned())),
             started: Instant::now(),
+            review: None,
         }
     }
 
@@ -228,6 +244,9 @@ impl ChatSettings {
         if let Some(v) = value["format"].as_str().and_then(Orientation::from_name) {
             settings.format = v;
         }
+        if let Some(v) = value["check_edits"].as_bool() {
+            settings.check_edits = v;
+        }
         settings
     }
 
@@ -242,6 +261,7 @@ impl ChatSettings {
             "model": self.model,
             "contributor_opt_in": self.contributor_opt_in,
             "format": self.format.as_str(),
+            "check_edits": self.check_edits,
         });
         static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
         let (temporary, mut file) = loop {
@@ -314,7 +334,7 @@ Reply with a single JSON object {\"code\": \"...\", \"explanation\": \"...\"} an
 \"code\" is executable JavaScript only, with no markdown fences inside it, ending with exactly one console.log(\"Done — ...\") line. \
 \"explanation\" is one short plain-language summary for the user. \
 If you make no edits because you need the user's decision or cannot do part of the request, the code makes no edits and console.logs each problem or question as its own plain sentence before the Done line; the user sees those lines. \
-Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), play(), pause(), toggle(), seek(t), step(frames), \
+Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips(), transcriptSegments(), inspect(), play(), pause(), toggle(), seek(t), step(frames), \
 selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), setClipLane(id, lane), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
 setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), setDuck(id, bool) (music that dips about 12 dB wherever another clip is talking and comes back up in pauses; audio-only adds such as music beds duck by default, so keep the bed's own volume where it sounds right between lines), insertTime(at, seconds) (opens empty time: splits every clip crossing at, keeping titles' text on both sides, and moves everything from at on later on every lane; use it to make room for an inserted shot instead of moving clips one by one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
@@ -334,6 +354,7 @@ For requests like “use the part where he talks about pricing”, find the tran
 Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create, and split/splitClip return one for the new right-hand piece; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
 Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Where video clips overlap, the lowest lane index is the picture shown (lane 0 wins), and a lower-opacity winner fades to black, never revealing another lane: there is no picture-in-picture or video overlay. To cut away from a long base clip (an interview, a monologue) and keep its sound, first setClipLane(baseId, 1), then add the cutaway, then setClipLane(cutawayHandle, 0) and setEmbeddedAudio(cutawayHandle, false) if its own sound is unwanted. Times are seconds. \
 For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
+inspect() returns state().inspection: measured problems in the request-time timeline, each {kind, severity, message, clips, start, end}; kinds are missing-media, orientation, source-range, fade-too-long, on-screen-text, picture-gap (black with no title), flash-frame (visible under two frames) and hidden-clip (covered by a lower lane). They are facts, not taste: a deliberate gap or flash can stay. \
 Refer to clips, sweep candidates, and transcript segments by the ids in state(). Do not invent ids or asset names. \
 Top-level const/let are isolated per checked chat eval, so retries may reuse names. \
 Keep edits minimal and preserve source limits. If the request is impossible with the given state, \
@@ -350,6 +371,49 @@ Timeline state JSON:
 {"playhead":0,"playing":false,"selected":null,"duration":0,"fps":30,"tool":"select","magnet":true,"musicBedMuted":true,"clips":[],"assets":[{"name":"Rushes.mp4","path":"media/Rushes.mp4","duration":60,"width":1280,"height":720,"hasVideo":true,"hasAudio":true,"ready":true}],"sceneClips":[],"sweepCandidates":[{"id":"media/Rushes.mp4#1","asset":"media/Rushes.mp4","assetName":"Rushes.mp4","title":"Rushes.mp4 · 0:12","sourceIn":12,"duration":4,"score":88,"reason":"Big laugh, steady frame.","category":"reaction","tags":["loud-peak","steady"],"musicBed":false,"quality":{"stability":0.8,"audio":0.7,"motion":0.3},"stability":0.8,"audioEnergy":0.5,"audioPeak":0.9,"isReaction":true,"reactionScore":0.84,"hasVideo":true,"transcript":""}],"transcriptSegments":[]}"#;
 
 const FEW_SHOT_ASSISTANT: &str = r#"{"code": "var shots = sweepCandidates().filter(function (c) { return c.isReaction; });\nclips().forEach(function (c) { deleteClip(c.id); });\nvar cursor = 0;\nshots.forEach(function (c) { addAssetRange(c.asset, cursor, c.sourceIn, c.duration); cursor += c.duration; });\nconsole.log(\"Done — built the cut from the reaction shots.\");", "explanation": "Built the cut from the reaction shots."}"#;
+
+/// Sent after an applied chat edit, with a contact sheet of the result.
+const CHECK_INSTRUCTIONS: &str = "\
+The attached image is a contact sheet of the program after your edit: one cell per visible shot \
+(evenly sampled when there are many), left to right and top to bottom. Each cell shows the picture \
+and any title as exported, labelled with its program time, clip id and lane, or no picture. \
+If the result does what the request asked, reply with code that only logs \"Done — checked.\" \
+Otherwise reply with code that fixes only what is wrong, using the clip ids in the timeline state, \
+and explain the fix. Leave problems the request did not touch. If something is wrong that you \
+cannot fix, console.log it as its own sentence before the Done line.";
+
+/// The check request for an applied edit: what was asked, the code that
+/// ran, and the problems it introduced.
+fn check_request(request: &str, code: &str, introduced: &[&Finding]) -> String {
+    let introduced = serde_json::to_string(introduced).unwrap_or_else(|_| "[]".to_owned());
+    format!(
+        "Check that your last edit did what the user asked, and fix it if not.\n\n\
+         The user asked:\n{request}\n\n\
+         Your JavaScript (already applied; the timeline state below is the result):\n{code}\n\n\
+         Problems this edit introduced (state().inspection lists all of them):\n{introduced}\n\n\
+         {CHECK_INSTRUCTIONS}"
+    )
+}
+
+/// Put the contact sheet beside the final message's text.
+fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
+    let Some(message) = body["messages"]
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+    else {
+        return;
+    };
+    let mut text = message["content"].as_str().unwrap_or_default().to_owned();
+    let mut content = Vec::new();
+    match openreel_media::contact_sheet(&review.cells, review.canvas) {
+        Ok(jpeg) => content.push(serde_json::json!({"type": "image_url", "image_url": {
+            "url": format!("data:image/jpeg;base64,{}", super::sweep::base64_encode(&jpeg)),
+        }})),
+        Err(error) => text.push_str(&format!("\n\nNo contact sheet is attached: {error}.")),
+    }
+    content.insert(0, serde_json::json!({"type": "text", "text": text}));
+    message["content"] = serde_json::Value::Array(content);
+}
 
 fn model_context_state(snapshot: &str) -> String {
     let Ok(mut state) = serde_json::from_str::<serde_json::Value>(snapshot) else {
@@ -1124,9 +1188,64 @@ impl EditorApp {
         // Dropping the receiver leaves the worker's send undelivered;
         // the retry loop also observes the cancel flag directly.
         self.chat_rx = None;
-        let message = "Cancelled.".to_owned();
+        let message = if pending.review.is_some() {
+            "Check cancelled; the edit is kept."
+        } else {
+            "Cancelled."
+        }
+        .to_owned();
         self.push_chat(ChatRole::Assistant, message.clone());
         self.status = message;
+    }
+
+    /// Ask the model to check the edit it just applied, against a contact
+    /// sheet of the program and the problems the edit introduced.
+    fn start_edit_review(
+        &mut self,
+        ctx: &egui::Context,
+        request: &str,
+        code: &str,
+        before: &[Finding],
+    ) {
+        let findings = inspect::inspect(&self.timeline, &self.assets);
+        let introduced: Vec<&Finding> = findings
+            .iter()
+            .filter(|finding| {
+                !before.iter().any(|old| {
+                    old.kind == finding.kind
+                        && old.clips == finding.clips
+                        && (!finding.clips.is_empty()
+                            || ((old.start - finding.start).abs() < 1e-6
+                                && (old.end - finding.end).abs() < 1e-6))
+                })
+            })
+            .collect();
+        let canvas = openreel_media::export_canvas(
+            self.timeline.orientation,
+            self.timeline
+                .clips
+                .iter()
+                .filter(|clip| clip.kind == ClipKind::Video)
+                .filter_map(|clip| self.asset(clip.source.as_deref()?))
+                .map(|asset| (asset.info.width, asset.info.height)),
+        );
+        self.chat_generation += 1;
+        self.chat_pending = Some(PendingChat {
+            request: check_request(request, code, &introduced),
+            timeline: self.timeline.clone(),
+            state_json: self.script_state_json(),
+            attempt: 0,
+            generation: self.chat_generation,
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new("Checking the edit…".to_owned())),
+            started: Instant::now(),
+            review: Some(EditReview {
+                cells: Arc::new(inspect::sheet_cells(&self.timeline)),
+                canvas,
+            }),
+        });
+        self.status = "Checking the edit…".to_owned();
+        self.spawn_chat_request(ctx, None);
     }
 
     fn spawn_chat_request(&mut self, ctx: &egui::Context, correction: Option<(String, String)>) {
@@ -1164,10 +1283,15 @@ impl EditorApp {
             &state,
             correction_ref,
         );
+        let review = pending.review.clone();
         let (tx, rx) = channel::<(u64, ChatWorkerResult)>();
         self.chat_rx = Some(rx);
         let ctx = ctx.clone();
         thread::spawn(move || {
+            let mut body = body;
+            if let Some(review) = &review {
+                attach_contact_sheet(&mut body, review);
+            }
             let result = match request_generated_edit(&settings, &body, &cancel, &progress) {
                 Ok(edit) => ChatWorkerResult::Generated(edit),
                 Err(message) => ChatWorkerResult::Failed(message),
@@ -1204,6 +1328,7 @@ impl EditorApp {
                 model_label(&self.chat_settings.model)
             ))),
             started: Instant::now(),
+            review: None,
         });
         self.spawn_chat_request(ctx, None);
     }
@@ -1253,6 +1378,44 @@ impl EditorApp {
         self.connection_result = Some(result);
     }
 
+    /// Report a check: a fix joins the edit's undo; a clean check only
+    /// updates the status; problems the model could not fix are listed.
+    fn finish_edit_review(
+        &mut self,
+        result: Result<Vec<String>, String>,
+        explanation: Option<String>,
+        changed: bool,
+        command_count: usize,
+    ) {
+        let message = match result {
+            Err(error) => Some(format!(
+                "Checked the edit, but its fix failed: {}. The edit is kept.",
+                error.trim_end_matches('.')
+            )),
+            Ok(notes) if changed => Some(format!(
+                "Checked and fixed: {}",
+                explanation
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| summarize_chat_result(&notes, command_count))
+            )),
+            Ok(notes) => {
+                let problems: Vec<&str> = notes
+                    .iter()
+                    .map(|note| note.trim())
+                    .filter(|note| !note.is_empty() && !note.starts_with("Done"))
+                    .collect();
+                (!problems.is_empty()).then(|| format!("Checked: {}", problems.join("\n")))
+            }
+        };
+        match message {
+            Some(message) => {
+                self.status = message.lines().next().unwrap_or_default().to_owned();
+                self.push_chat(ChatRole::Assistant, message);
+            }
+            None => self.status = "Edit checked.".to_owned(),
+        }
+    }
+
     pub(super) fn poll_chat(&mut self, ctx: &egui::Context) {
         self.poll_connection_check(ctx);
         let Some((generation, result)) = self.chat_rx.as_ref().and_then(|rx| rx.try_recv().ok())
@@ -1276,7 +1439,17 @@ impl EditorApp {
         self.chat_rx = None;
         match result {
             ChatWorkerResult::Failed(message) => {
-                self.chat_pending = None;
+                let review = self
+                    .chat_pending
+                    .take()
+                    .is_some_and(|pending| pending.review.is_some());
+                if review && message != CANCELLED {
+                    let message =
+                        format!("Couldn't check the edit; it is kept. {}", message.trim());
+                    self.push_chat(ChatRole::Assistant, message.clone());
+                    self.status = message.lines().next().unwrap_or_default().to_owned();
+                    return;
+                }
                 if message == CANCELLED {
                     let message = "Cancelled.".to_owned();
                     self.push_chat(ChatRole::Assistant, message.clone());
@@ -1290,8 +1463,14 @@ impl EditorApp {
                 let js = edit.code;
                 self.last_generated_js = js.clone();
                 let pending = self.chat_pending.as_ref().expect("current generation");
+                let review = pending.review.is_some();
                 if pending.timeline != self.timeline {
                     self.chat_pending = None;
+                    if review {
+                        self.status =
+                            "Edit kept; the timeline changed before its check.".to_owned();
+                        return;
+                    }
                     let message = "Timeline changed; send the edit again.".to_owned();
                     self.push_chat(ChatRole::Assistant, message.clone());
                     self.status = message;
@@ -1315,8 +1494,25 @@ impl EditorApp {
                             .iter()
                             .all(|command| matches!(command, ScriptCommand::Log(_)));
                         let command_count = commands.len();
+                        let pending = self.chat_pending.take().expect("current generation");
+                        let before = (!review && self.chat_settings.check_edits)
+                            .then(|| inspect::inspect(&pending.timeline, &self.assets));
+                        // A check's fix undoes together with the edit it checked.
+                        let undo = if review { self.chat_undo.take() } else { None };
                         let result = self.apply_edit_commands(ctx, commands);
-                        self.chat_pending = None;
+                        if review {
+                            self.chat_undo = undo;
+                        }
+                        let changed = self.timeline != pending.timeline;
+                        if review {
+                            self.finish_edit_review(
+                                result,
+                                edit.explanation,
+                                changed,
+                                command_count,
+                            );
+                            return;
+                        }
                         let message = match result {
                             Err(error) => {
                                 format!("No changes made: {}.", error.trim_end_matches('.'))
@@ -1343,6 +1539,11 @@ impl EditorApp {
                         // The status bar keeps one line; chat keeps the report.
                         self.status = message.lines().next().unwrap_or_default().to_owned();
                         self.push_chat(ChatRole::Assistant, message);
+                        if let Some(before) =
+                            before.filter(|_| changed && self.chat_settings.can_call_model())
+                        {
+                            self.start_edit_review(ctx, &pending.request, &js, &before);
+                        }
                     }
                     Err(error) => {
                         let should_retry = self
@@ -1360,8 +1561,12 @@ impl EditorApp {
                             self.spawn_chat_request(ctx, Some((js, error)));
                         } else {
                             self.chat_pending = None;
-                            let message =
-                                "I couldn't do that one — try naming the clip.".to_owned();
+                            let message = if review {
+                                "Checked the edit, but its fix did not run; the edit is kept."
+                            } else {
+                                "I couldn't do that one — try naming the clip."
+                            }
+                            .to_owned();
                             self.push_chat(ChatRole::Assistant, message.clone());
                             self.status = message;
                         }
@@ -1641,6 +1846,17 @@ impl EditorApp {
                             "Contributor models let Meta train on your prompts and content. Off by default; Standard models do not.",
                         );
                         if self.chat_settings.contributor_opt_in != before {
+                            dirty = true;
+                        }
+                        ui.end_row();
+
+                        ui.label(RichText::new("Review").color(theme::MUTED_FG));
+                        let before = self.chat_settings.check_edits;
+                        ui.checkbox(&mut self.chat_settings.check_edits, "Check edits")
+                            .on_hover_text(
+                                "After each chat edit, the model looks at a contact sheet of the result and fixes mistakes. One more request per edit.",
+                            );
+                        if self.chat_settings.check_edits != before {
                             dirty = true;
                         }
                         ui.end_row();
@@ -2232,17 +2448,19 @@ mod tests {
                     model: MODEL_WONDER.to_owned(),
                     ..ChatSettings::default()
                 };
-                for (contributor, format) in [
-                    (false, Orientation::Landscape),
-                    (true, Orientation::Portrait),
+                for (contributor, format, check) in [
+                    (false, Orientation::Landscape, true),
+                    (true, Orientation::Portrait, false),
                 ] {
                     settings.contributor_opt_in = contributor;
                     settings.format = format;
+                    settings.check_edits = check;
                     settings.save().unwrap();
                     assert!(ChatSettings::load() == settings, "settings round-trip");
                     let value: serde_json::Value =
                         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                    assert_eq!(value.as_object().unwrap().len(), 5);
+                    assert_eq!(value.as_object().unwrap().len(), 6);
+                    assert_eq!(value["check_edits"], check);
                     assert_eq!(value["model"], "muse-wonder-1.0");
                     assert_eq!(value["format"], settings.format.as_str());
                     #[cfg(unix)]
@@ -2505,6 +2723,70 @@ mod tests {
             }),
         ));
         app.poll_chat(ctx);
+    }
+
+    /// An applied edit is checked: the model receives a contact sheet and the
+    /// problems the edit introduced, its fix is applied, and one Undo
+    /// removes both the edit and the fix.
+    #[test]
+    fn applied_edits_are_checked_against_a_contact_sheet_and_fixed() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.assets.push(super::super::media::BinAsset {
+            info: openreel_media::MediaInfo {
+                path: "ready.mp4".to_owned(),
+                name: "ready.mp4".to_owned(),
+                duration: 10.0,
+                width: 320,
+                height: 180,
+                fps: 30.0,
+                has_video: true,
+                has_audio: false,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: super::super::sweep::SweepData::default(),
+        });
+        let fix = r#"{"code": "var late = clips().filter(function (c) { return c.start > 2.5; })[0]; moveClip(late.id, 2); console.log('Done — closed the gap.');", "explanation": "Closed the black gap."}"#;
+        let (settings, server) = fake_model_api(move |_| {
+            let body = serde_json::json!({"choices": [{"message": {"content": fix}}]});
+            (200, body.to_string())
+        });
+        app.chat_settings = settings;
+        let tx = queue_reply(&mut app);
+        deliver_reply(
+            &mut app,
+            &ctx,
+            &tx,
+            "addAssetRange('ready.mp4', 0, 0, 2); addAssetRange('ready.mp4', 3, 4, 2); \
+             console.log('Done — placed two shots.');",
+        );
+        assert_eq!(app.status, "Checking the edit…");
+        let request = server.join().unwrap();
+        assert!(request.contains("Request:\\nCheck that your last edit did what the user asked"));
+        assert!(
+            request.contains("data:image/jpeg;base64,"),
+            "no contact sheet"
+        );
+        let introduced = request.split("introduced").nth(1).unwrap_or_default();
+        assert!(introduced.contains("picture-gap"), "gap not reported");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.chat_pending.is_some() {
+            assert!(Instant::now() < deadline, "check did not finish");
+            app.poll_chat(&ctx);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let starts: Vec<f64> = app.timeline.clips.iter().map(|clip| clip.start).collect();
+        assert_eq!(starts, vec![0.0, 2.0]);
+        assert_eq!(
+            app.chat_session.messages.last().unwrap().text,
+            "Checked and fixed: Closed the black gap."
+        );
+        app.undo_chat_edit();
+        assert!(app.timeline.clips.is_empty(), "undo kept part of the edit");
     }
 
     #[test]
