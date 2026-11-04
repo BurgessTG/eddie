@@ -380,7 +380,8 @@ and any title as exported, labelled with its program time, clip id and lane, or 
 If the result does what the request asked, reply with code that only logs \"Done — checked.\" \
 Otherwise reply with code that fixes only what is wrong, using the clip ids in the timeline state, \
 and explain the fix. Leave problems the request did not touch. If something is wrong that you \
-cannot fix, console.log it as its own sentence before the Done line.";
+cannot fix, console.log it as its own sentence before the Done line. \
+transcriptSegments here omit words; transcriptSegments() in code still has them.";
 
 /// The check request for an applied edit: what was asked, the code that
 /// ran, and the problems it introduced.
@@ -413,6 +414,23 @@ fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
     }
     content.insert(0, serde_json::json!({"type": "text", "text": text}));
     message["content"] = serde_json::Value::Array(content);
+}
+
+/// A check reads clip ids and transcript text, not per-word timing, which is
+/// most of a talking project's state. QuickJS keeps the full snapshot.
+fn without_word_timings(snapshot: &str) -> String {
+    let Ok(mut state) = serde_json::from_str::<serde_json::Value>(snapshot) else {
+        return snapshot.to_owned();
+    };
+    let segments = state
+        .get_mut("transcriptSegments")
+        .and_then(|segments| segments.as_array_mut());
+    for segment in segments.into_iter().flatten() {
+        if let Some(fields) = segment.as_object_mut() {
+            fields.remove("words");
+        }
+    }
+    state.to_string()
 }
 
 fn model_context_state(snapshot: &str) -> String {
@@ -1254,7 +1272,10 @@ impl EditorApp {
             return;
         };
         // Corrections use the same basis as the initial request.
-        let state = pending.state_json.clone();
+        let mut state = pending.state_json.clone();
+        if pending.review.is_some() {
+            state = without_word_timings(&state);
+        }
         let request = pending.request.clone();
         let generation = pending.generation;
         let cancel = pending.cancel.clone();
@@ -2748,7 +2769,23 @@ mod tests {
             peaks: Vec::new(),
             beats: None,
             thumb_textures: Vec::new(),
-            sweep: super::super::sweep::SweepData::default(),
+            sweep: super::super::sweep::SweepData {
+                transcript: vec![super::super::sweep::TranscriptSegment {
+                    start: 0.0,
+                    end: 1.0,
+                    speaker: None,
+                    text: "Welcome back.".to_owned(),
+                    words: vec![super::super::sweep::TranscriptWord {
+                        start: 0.25,
+                        end: 0.625,
+                        text: "Welcome".to_owned(),
+                        confidence: None,
+                        estimated: false,
+                    }],
+                    session: None,
+                }],
+                ..Default::default()
+            },
         });
         let fix = r#"{"code": "var late = clips().filter(function (c) { return c.start > 2.5; })[0]; moveClip(late.id, 2); console.log('Done — closed the gap.');", "explanation": "Closed the black gap."}"#;
         let (settings, server) = fake_model_api(move |_| {
@@ -2773,6 +2810,14 @@ mod tests {
         );
         let introduced = request.split("introduced").nth(1).unwrap_or_default();
         assert!(introduced.contains("picture-gap"), "gap not reported");
+        assert!(
+            introduced.contains("Welcome back."),
+            "transcript text dropped"
+        );
+        assert!(
+            !introduced.contains(r#"\"words\":"#),
+            "check resent word timings"
+        );
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.chat_pending.is_some() {
             assert!(Instant::now() < deadline, "check did not finish");
