@@ -127,8 +127,12 @@ saved IDs are never reused. Ctrl+S/Ctrl+O work in text fields; split's
 S/B shortcut ignores Ctrl. Projects also store their own folder: a
 missing file is retried at the same relative place beside the moved
 project (not an edit), then File → Locate missing media relinks by hand,
-including same-named files in the picked folder. Close and Open ask
-"Save changes?" when the timeline differs from the last save or open;
+including same-named files in the picked folder. Close, Open and New
+project (Ctrl+N) ask "Save changes?" when the timeline differs from the
+last save or open; New empties the timeline and bin except files still
+importing or curating. Right-click a bin tile to remove it; media used
+by a timeline clip, importing or curating is refused, and the file and
+its saved curation stay on disk.
 Clear timeline does not ask because it is undoable. CI
 (`.github/workflows/ci.yml`) runs fmt and engine tests only.
 The import QC sweep is the curator. It lives in

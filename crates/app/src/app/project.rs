@@ -12,6 +12,8 @@ use eframe::egui;
 use openreel_engine::Timeline;
 use serde_json::json;
 
+use super::media::AssetState;
+use super::sweep::{SweepData, SweepStatus};
 use super::{EditorApp, MEDIA_EXTS};
 use crate::theme;
 
@@ -23,6 +25,7 @@ pub(super) const EXTENSION: &str = "eddie";
 pub(super) enum Discard {
     Close,
     Open,
+    New,
 }
 
 impl EditorApp {
@@ -237,7 +240,42 @@ impl EditorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Discard::Open => self.pick_and_open_project(ctx),
+            Discard::New => self.new_project(),
         }
+    }
+
+    /// An empty timeline and bin, in the current format. Files still
+    /// importing or being curated stay so their work is not lost.
+    fn new_project(&mut self) {
+        self.cancel_chat();
+        self.set_playing(false);
+        self.chat_undo = None;
+        self.timeline = Timeline::empty_project().with_orientation(self.timeline.orientation);
+        self.history.reset(&self.timeline);
+        self.saved_timeline = self.timeline.clone();
+        self.project_path = None;
+        self.missing_media.clear();
+        self.selected = None;
+        self.playhead = 0.0;
+        self.still_key = None;
+        self.still_cache.clear();
+        self.sweep_queue.clear();
+        let running = &self.sweep_running;
+        self.assets
+            .retain(|asset| asset.state != AssetState::Ready || running.contains(&asset.info.path));
+        for asset in &mut self.assets {
+            if asset.sweep.status == SweepStatus::Running && !running.contains(&asset.info.path) {
+                asset.sweep = SweepData::default();
+            }
+        }
+        self.selected_asset = None;
+        self.status = match self.assets.len() {
+            0 => "New project.".to_owned(),
+            kept => format!(
+                "New project; kept {kept} file{} still importing or curating.",
+                plural(kept)
+            ),
+        };
     }
 
     pub(super) fn guard_close(&mut self, ctx: &egui::Context) {
