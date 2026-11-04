@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -35,6 +36,8 @@ use sweep::SweepMsg;
 const PREVIEW_W: u32 = 960;
 const SCRUB_W: u32 = 480;
 const STILL_CACHE_CAP: usize = 24;
+/// Preview pictures kept for reuse once the renderer has uploaded them.
+const PREVIEW_IMAGES: usize = 3;
 const MEDIA_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "flac", "m4a", "aac", "ogg",
 ];
@@ -44,6 +47,14 @@ const MEDIA_EXTS: &[&str] = &[
 type VideoKey = (ClipId, String, u64, u64);
 /// A still picture: clip, source frame index, and decoded width.
 type StillKey = (ClipId, i64, u32);
+
+/// What a still request decodes: its key, source path and size, and time.
+struct StillTarget {
+    key: StillKey,
+    source: String,
+    size: (u32, u32),
+    time: f64,
+}
 
 enum ExportMsg {
     Progress(f64),
@@ -119,10 +130,14 @@ pub struct EditorApp {
     still_decoder: StillDecoder,
     still_rx: Receiver<(u64, Result<RawFrame, String>)>,
     preview_texture: Option<TextureHandle>,
+    /// Pixels of recent uploads; one the renderer has released is refilled
+    /// instead of allocating a frame-sized image per upload.
+    preview_images: Vec<Arc<ColorImage>>,
     preview_key: Option<VideoKey>,
     still_gen: u64,
     /// The one still request being decoded; `None` key discards its answer.
-    still_inflight: Option<(u64, Option<StillKey>)>,
+    /// A prefetch only shows if the playhead has since moved onto it.
+    still_inflight: Option<(u64, Option<StillKey>, bool)>,
     /// The still the preview texture shows, if it shows one.
     still_shown: Option<StillKey>,
     /// Recently decoded stills, least recently used first.
@@ -237,6 +252,7 @@ impl EditorApp {
             still_decoder,
             still_rx,
             preview_texture: None,
+            preview_images: Vec::new(),
             preview_key: None,
             still_gen: 0,
             still_inflight: None,
@@ -330,6 +346,7 @@ impl EditorApp {
             still_decoder,
             still_rx,
             preview_texture: None,
+            preview_images: Vec::new(),
             preview_key: None,
             still_gen: 0,
             still_inflight: None,
@@ -856,12 +873,30 @@ impl EditorApp {
     }
 
     fn update_preview_texture(&mut self, ctx: &egui::Context, frame: &RawFrame) {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [frame.width as usize, frame.height as usize],
-            &frame.rgba,
-        );
+        let size = [frame.width as usize, frame.height as usize];
+        self.preview_images.retain(|image| image.size == size);
+        // The renderer drops its reference after uploading, so a released
+        // image is refilled. Decoded video is opaque: RGBA is premultiplied.
+        let free = self
+            .preview_images
+            .iter_mut()
+            .position(|image| Arc::get_mut(image).is_some());
+        let index = free.unwrap_or_else(|| {
+            if self.preview_images.len() >= PREVIEW_IMAGES {
+                self.preview_images.remove(0);
+            }
+            let pixels = vec![egui::Color32::BLACK; size[0] * size[1]];
+            self.preview_images
+                .push(Arc::new(ColorImage::new(size, pixels)));
+            self.preview_images.len() - 1
+        });
+        Arc::get_mut(&mut self.preview_images[index])
+            .expect("unshared preview image")
+            .as_raw_mut()
+            .copy_from_slice(&frame.rgba);
+        let image = Arc::clone(&self.preview_images[index]);
         match self.preview_texture.as_mut() {
-            Some(tex) if tex.size() == image.size => tex.set(image, TextureOptions::LINEAR),
+            Some(tex) if tex.size() == size => tex.set(image, TextureOptions::LINEAR),
             _ => {
                 self.preview_texture =
                     Some(ctx.load_texture("preview", image, TextureOptions::LINEAR));
@@ -875,7 +910,7 @@ impl EditorApp {
     fn forget_stills(&mut self) {
         self.still_shown = None;
         self.still_cache.clear();
-        if let Some((_, key)) = &mut self.still_inflight {
+        if let Some((_, key, _)) = &mut self.still_inflight {
             *key = None;
         }
     }
@@ -892,7 +927,7 @@ impl EditorApp {
             .map(|clip| clip.source_in + (self.playhead - clip.start));
         let wants_still = !self.playing || self.scrubbing();
         while let Ok((gen, result)) = self.still_rx.try_recv() {
-            let Some((pending, key)) = self.still_inflight else {
+            let Some((pending, key, prefetch)) = self.still_inflight else {
                 continue;
             };
             if gen != pending {
@@ -904,7 +939,14 @@ impl EditorApp {
             };
             // The newest finished picture of this clip shows even when the
             // pointer has moved on; the next request chases the pointer.
-            if wants_still && active.as_ref().is_some_and(|clip| clip.id == key.0) {
+            // A prefetched neighbor shows only once the playhead is on it.
+            let shows = if prefetch {
+                self.still_target(self.playhead, PREVIEW_W)
+                    .is_some_and(|target| target.key == key)
+            } else {
+                active.as_ref().is_some_and(|clip| clip.id == key.0)
+            };
+            if wants_still && shows {
                 self.update_preview_texture(ctx, &frame);
                 self.still_shown = Some(key);
             }
@@ -941,56 +983,80 @@ impl EditorApp {
         }
     }
 
-    fn request_still_if_needed(&mut self, ctx: &egui::Context) {
-        let Some(clip) = self.active_video_clip() else {
-            return;
-        };
-        let Some(source) = clip.source.clone() else {
-            return;
-        };
-        let Some(asset) = self.asset(&source) else {
-            return;
-        };
-        let (w, h) = (asset.info.width, asset.info.height);
-        let source_time = clip.source_in + (self.playhead - clip.start);
-        // Two tiers: fast small frames while interacting, full quality when idle.
-        let width = if self.scrubbing() { SCRUB_W } else { PREVIEW_W };
-        let key = (
-            clip.id,
-            (source_time * self.timeline.fps).round() as i64,
-            width,
-        );
-        if self.still_shown == Some(key) && self.preview_texture.is_some() {
-            return;
-        }
-        if let Some(index) = self
-            .still_cache
-            .iter()
-            .position(|(cached, _)| *cached == key)
-        {
-            // Most recently used moves to the back.
-            let (key, frame) = self.still_cache.remove(index).unwrap();
-            self.update_preview_texture(ctx, &frame);
-            self.still_shown = Some(key);
-            self.still_cache.push_back((key, frame));
-            return;
-        }
-        // One request at a time: while it decodes, the pointer can move on;
-        // its answer shows, then this asks for wherever the pointer is.
-        if self.still_inflight.is_some() {
-            return;
-        }
+    /// The still for the video picture at timeline time `at`, decoded at
+    /// `width`.
+    fn still_target(&self, at: f64, width: u32) -> Option<StillTarget> {
+        let clip = self.timeline.active_video(at)?;
+        let source = clip.source.clone()?;
+        let info = &self.asset(&source)?.info;
+        let time = clip.source_in + (at - clip.start);
+        Some(StillTarget {
+            key: (clip.id, (time * self.timeline.fps).round() as i64, width),
+            size: (info.width, info.height),
+            source,
+            time,
+        })
+    }
+
+    fn request_still(&mut self, target: StillTarget, prefetch: bool) {
         self.still_gen += 1;
-        self.still_inflight = Some((self.still_gen, Some(key)));
+        self.still_inflight = Some((self.still_gen, Some(target.key), prefetch));
+        let width = target.key.2;
         self.still_decoder.request(
             self.still_gen,
-            source,
-            w,
-            h,
-            source_time,
+            target.source,
+            target.size.0,
+            target.size.1,
+            target.time,
             width,
             width <= SCRUB_W,
         );
+    }
+
+    fn request_still_if_needed(&mut self, ctx: &egui::Context) {
+        // Two tiers: fast small frames while interacting, full quality when idle.
+        let width = if self.scrubbing() { SCRUB_W } else { PREVIEW_W };
+        let Some(target) = self.still_target(self.playhead, width) else {
+            return;
+        };
+        let key = target.key;
+        let cached =
+            |app: &Self, key: StillKey| app.still_cache.iter().position(|(c, _)| *c == key);
+        if self.still_shown != Some(key) || self.preview_texture.is_none() {
+            if let Some(index) = cached(self, key) {
+                // Most recently used moves to the back.
+                let (key, frame) = self.still_cache.remove(index).unwrap();
+                self.update_preview_texture(ctx, &frame);
+                self.still_shown = Some(key);
+                self.still_cache.push_back((key, frame));
+            } else {
+                // One request at a time: while it decodes, the pointer can
+                // move on; its answer shows, then this asks for wherever the
+                // pointer is.
+                if self.still_inflight.is_none() {
+                    self.request_still(target, false);
+                }
+                return;
+            }
+        }
+        // Paused on a picture: decode the frames an arrow step reaches next,
+        // so the step shows from the cache in the same UI frame.
+        if width != PREVIEW_W || self.still_inflight.is_some() {
+            return;
+        }
+        let frame = 1.0 / self.timeline.fps;
+        for at in [self.playhead + frame, self.playhead - frame] {
+            let at = self.timeline.snap(at);
+            if at < 0.0 || at > self.timeline.end() {
+                continue;
+            }
+            if let Some(neighbor) = self.still_target(at, PREVIEW_W) {
+                if cached(self, neighbor.key).is_none() {
+                    self.request_still(neighbor, true);
+                    return;
+                }
+            }
+        }
     }
 
     /// Keep the video stream and audio players aligned with the playhead.
@@ -3873,6 +3939,74 @@ mod tests {
                 );
                 thread::sleep(Duration::from_micros(200));
             }
+        }
+
+        /// Paused on a picture, the frames an arrow step reaches are decoded
+        /// ahead, so stepping across a cut in the source shows the new
+        /// picture in the same UI frame, without waiting for the decoder.
+        #[test]
+        fn paused_arrow_steps_show_prefetched_neighbors_at_once() {
+            let fixture = Fixture::new();
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            add_asset(&mut app, &fixture.path);
+            app.timeline
+                .add_media_clip("Steps", ClipKind::Video, 0, 0.0, 2.0, 0.0, &fixture.path);
+            let frame = 1.0 / app.timeline.fps;
+            // Red is source [0, 1), blue [1, 2): the next frame is blue.
+            app.seek(1.0 - frame);
+            let red = await_picture(&mut app, &ctx);
+            assert!(red.r() > 240 && red.b() < 10, "paused picture: {red:?}");
+            let next = app.still_target(app.timeline.snap(1.0), PREVIEW_W).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app.still_cache.iter().any(|(key, _)| *key == next.key) {
+                assert!(Instant::now() < deadline, "next frame was not prefetched");
+                app.poll_frames(&ctx);
+                app.sync_playback(&ctx);
+                thread::sleep(Duration::from_millis(5));
+            }
+            let _ = ctx.tex_manager().write().take_delta();
+            for (time, blue) in [(1.0, true), (1.0 - frame, false)] {
+                app.seek(time);
+                app.poll_frames(&ctx);
+                app.sync_playback(&ctx);
+                let preview = app.preview_texture.as_ref().map(TextureHandle::id);
+                let delta = ctx.tex_manager().write().take_delta();
+                let (_, delta) = delta
+                    .set
+                    .iter()
+                    .find(|(id, _)| Some(*id) == preview)
+                    .unwrap_or_else(|| panic!("step to {time} waited for the decoder"));
+                let egui::ImageData::Color(image) = &delta.image;
+                let picture = image.pixels[image.pixels.len() / 2];
+                assert_eq!(
+                    picture.b() > 240 && picture.r() < 10,
+                    blue,
+                    "step to {time}: {picture:?}"
+                );
+            }
+        }
+
+        /// Once the renderer has uploaded a preview picture, the next upload
+        /// refills its pixels instead of allocating another frame.
+        #[test]
+        fn preview_uploads_reuse_released_pixels() {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut uploaded = Vec::new();
+            for value in [10_u8, 200] {
+                let frame = RawFrame {
+                    width: 4,
+                    height: 2,
+                    rgba: [value, value, value, 255].repeat(8),
+                };
+                app.update_preview_texture(&ctx, &frame);
+                let delta = ctx.tex_manager().write().take_delta();
+                let egui::ImageData::Color(image) = &delta.set.last().unwrap().1.image;
+                assert_eq!(image.pixels[0], egui::Color32::from_gray(value));
+                uploaded.push(image.pixels.as_ptr());
+            }
+            assert_eq!(uploaded[0], uploaded[1], "second upload allocated");
         }
 
         #[test]
