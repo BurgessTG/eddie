@@ -3,6 +3,7 @@
 //! Replaces process-per-frame scrubbing and pipe streaming: one decoder
 //! seeks and yields scaled RGBA frames, with libavcodec frame threading.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Once;
 use std::thread;
@@ -11,6 +12,14 @@ use ffmpeg::Rescale;
 use ffmpeg_next as ffmpeg;
 
 use crate::{scaled_height, MediaResult, RawFrame};
+
+/// Without a container index, decode forward rather than seek only this far.
+pub(crate) const FORWARD_WITHOUT_INDEX: f64 = 0.5;
+/// Still decoders keep this many pictures before the current one, so a
+/// step back does not seek and decode a GOP again.
+const RECENT_PICTURES: usize = 8;
+/// ...or fewer when they would hold more decoded bytes than this (4K keeps 5).
+const RECENT_BYTES: usize = 64 << 20;
 
 static INIT: Once = Once::new();
 
@@ -35,14 +44,22 @@ pub struct VideoDecoder {
     source_origin: i64,
     target_w: u32,
     target_h: u32,
+    fast: bool,
     /// Clockwise quarter turns from the stream's display matrix.
     turns: u8,
     decoded: ffmpeg::frame::Video,
+    /// Presentation time of `decoded` once it was returned.
+    decoded_pts: Option<f64>,
     lookahead: ffmpeg::frame::Video,
     lookahead_pts: Option<f64>,
     seek_target: Option<f64>,
     scaled: ffmpeg::frame::Video,
     eof_sent: bool,
+    /// The decoder returned its final picture since the last seek.
+    drained: bool,
+    /// Consecutive pictures just before `decoded` (references, not copies).
+    recent: VecDeque<(f64, ffmpeg::frame::Video)>,
+    recent_limit: usize,
 }
 
 // SAFETY: every field is exclusively owned. ffmpeg-next marks the demuxer,
@@ -116,35 +133,7 @@ impl VideoDecoder {
             .video()
             .map_err(|e| err("open video decoder", e))?;
 
-        // target_w/target_h are display dimensions. A quarter-turn scales to
-        // the transposed size, then rotates while copying out.
-        let quarter = turns % 2 == 1;
-        let target_h = if quarter {
-            scaled_height(decoder.height(), decoder.width(), target_w)
-        } else {
-            scaled_height(decoder.width(), decoder.height(), target_w)
-        };
-        let (scaled_w, scaled_h) = if quarter {
-            (target_h, target_w)
-        } else {
-            (target_w, target_h)
-        };
-        let flags = if fast {
-            ffmpeg::software::scaling::Flags::FAST_BILINEAR
-        } else {
-            ffmpeg::software::scaling::Flags::BICUBIC
-        };
-        let scaler = ffmpeg::software::scaling::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            scaled_w,
-            scaled_h,
-            flags,
-        )
-        .map_err(|e| err("create scaler", e))?;
-
+        let (scaler, target_h) = scaler_for(&decoder, turns, target_w, fast)?;
         Ok(Self {
             input,
             decoder,
@@ -154,18 +143,35 @@ impl VideoDecoder {
             source_origin,
             target_w,
             target_h,
+            fast,
             turns,
             decoded: ffmpeg::frame::Video::empty(),
+            decoded_pts: None,
             lookahead: ffmpeg::frame::Video::empty(),
             lookahead_pts: None,
             seek_target: None,
             scaled: ffmpeg::frame::Video::empty(),
             eof_sent: false,
+            drained: false,
+            recent: VecDeque::new(),
+            recent_limit: 0,
         })
     }
 
     pub fn output_size(&self) -> (u32, u32) {
         (self.target_w, self.target_h)
+    }
+
+    /// Change the output width or scaling quality without moving the
+    /// decoder, so scrub and settle sizes share one position.
+    pub(crate) fn set_output(&mut self, target_w: u32, fast: bool) -> MediaResult<()> {
+        if (target_w, fast) != (self.target_w, self.fast) {
+            let (scaler, target_h) = scaler_for(&self.decoder, self.turns, target_w, fast)?;
+            self.scaler = scaler;
+            self.scaled = ffmpeg::frame::Video::empty();
+            (self.target_w, self.target_h, self.fast) = (target_w, target_h, fast);
+        }
+        Ok(())
     }
 
     /// Seek in source-relative seconds. The next frame covers `time`, not
@@ -181,7 +187,10 @@ impl VideoDecoder {
         self.input.seek(ts, ..ts).map_err(|e| err("seek", e))?;
         self.decoder.flush();
         self.eof_sent = false;
+        self.drained = false;
+        self.decoded_pts = None;
         self.lookahead_pts = None;
+        self.recent.clear();
         self.seek_target = Some(time);
         Ok(())
     }
@@ -235,7 +244,10 @@ impl VideoDecoder {
         loop {
             match self.decoder.receive_frame(&mut self.decoded) {
                 Ok(()) => return Ok(Some(self.frame_seconds(&self.decoded))),
-                Err(ffmpeg::Error::Eof) => return Ok(None),
+                Err(ffmpeg::Error::Eof) => {
+                    self.drained = true;
+                    return Ok(None);
+                }
                 Err(ffmpeg::Error::Other { errno })
                     if errno == ffmpeg::error::EAGAIN && !self.eof_sent => {}
                 Err(e) => return Err(err("receive frame", e)),
@@ -264,6 +276,9 @@ impl VideoDecoder {
     }
 
     fn next_decoded(&mut self) -> MediaResult<Option<f64>> {
+        if let Some(pts) = self.decoded_pts.take() {
+            self.remember(pts, false);
+        }
         let seconds = if let Some(pts) = self.lookahead_pts.take() {
             std::mem::swap(&mut self.decoded, &mut self.lookahead);
             Some(pts)
@@ -271,6 +286,7 @@ impl VideoDecoder {
             self.receive_decoded()?
         };
         let Some(target) = self.seek_target.take() else {
+            self.decoded_pts = seconds;
             return Ok(seconds);
         };
         let Some(mut seconds) = seconds else {
@@ -283,20 +299,93 @@ impl VideoDecoder {
             std::mem::swap(&mut self.decoded, &mut self.lookahead);
             let next = self.receive_decoded()?;
             if let Some(pts) = next.filter(|pts| *pts <= target) {
+                self.remember(seconds, true);
                 seconds = pts;
                 continue;
             }
             std::mem::swap(&mut self.decoded, &mut self.lookahead);
             self.lookahead_pts = next;
+            self.decoded_pts = Some(seconds);
             // [seconds, next): equality selected the new frame above. At
             // actual EOF (or before the first PTS), clamp to the nearest frame.
             return Ok(Some(seconds));
         }
     }
 
-    fn scale_decoded_into(&mut self, mut buffer: Vec<u8>) -> MediaResult<RawFrame> {
+    /// Keep a reference to a picture being passed over (`decoded`, or the
+    /// candidate parked in `lookahead`) when this decoder keeps recent ones.
+    fn remember(&mut self, pts: f64, parked: bool) {
+        if self.recent_limit == 0 {
+            return;
+        }
+        let picture = if parked {
+            &self.lookahead
+        } else {
+            &self.decoded
+        };
+        // SAFETY: av_frame_clone adds a reference to the same buffers; the
+        // result is owned by the wrapper, or null on allocation failure.
+        let reference = unsafe { ffmpeg::ffi::av_frame_clone(picture.as_ptr()) };
+        if reference.is_null() {
+            // Recent pictures must stay consecutive; start over instead.
+            self.recent.clear();
+            return;
+        }
+        let reference = unsafe { ffmpeg::frame::Video::wrap(reference) };
+        let bytes: usize = (0..reference.planes())
+            .map(|plane| reference.data(plane).len())
+            .sum();
+        let keep = (RECENT_BYTES / bytes.max(1)).clamp(1, self.recent_limit);
+        self.recent.push_back((pts, reference));
+        while self.recent.len() > keep {
+            self.recent.pop_front();
+        }
+    }
+
+    /// The picture covering `time`, reusing the decoder's position: the
+    /// current or a recent picture is rescaled, a later time that is near or
+    /// in the same GOP decodes forward, and anything else seeks. Matches
+    /// `frame_at`.
+    pub(crate) fn still_at(&mut self, time: f64) -> MediaResult<RawFrame> {
+        let time = time.max(0.0);
+        if let Some(current) = self.decoded_pts {
+            if time < current {
+                // Recent pictures are consecutive: each lasts until the next.
+                if let Some(index) = self.recent.iter().rposition(|(pts, _)| *pts <= time) {
+                    return self.scale_into(Some(index), Vec::new());
+                }
+            } else if self.lookahead_pts.map_or(self.drained, |next| time < next) {
+                return self.scale_decoded_into(Vec::new());
+            } else {
+                // A seek restarts frame threading, which costs more than
+                // decoding a short way on even across a keyframe.
+                let forward = time - current <= FORWARD_WITHOUT_INDEX
+                    || self
+                        .keyframe_before(time)
+                        .is_some_and(|keyframe| keyframe <= current + 1e-6);
+                if forward {
+                    self.skip_to(time);
+                    self.next_decoded()?
+                        .ok_or_else(|| "no frame decoded at requested time".to_owned())?;
+                    return self.scale_decoded_into(Vec::new());
+                }
+            }
+        }
+        self.frame_at(time)
+    }
+
+    fn scale_decoded_into(&mut self, buffer: Vec<u8>) -> MediaResult<RawFrame> {
+        self.scale_into(None, buffer)
+    }
+
+    /// Scale `decoded`, or the recent picture at `recent`, into `buffer`.
+    fn scale_into(&mut self, recent: Option<usize>, mut buffer: Vec<u8>) -> MediaResult<RawFrame> {
+        let picture = match recent {
+            Some(index) => &self.recent[index].1,
+            None => &self.decoded,
+        };
         self.scaler
-            .run(&self.decoded, &mut self.scaled)
+            .run(picture, &mut self.scaled)
             .map_err(|e| err("scale frame", e))?;
         let stride = self.scaled.stride(0);
         let width = self.target_w as usize;
@@ -380,6 +469,44 @@ pub(crate) fn clockwise_turns(degrees: f64) -> u8 {
     }
 }
 
+/// An RGBA scaler for `target_w` display pixels, and the display height.
+fn scaler_for(
+    decoder: &ffmpeg::decoder::Video,
+    turns: u8,
+    target_w: u32,
+    fast: bool,
+) -> MediaResult<(ffmpeg::software::scaling::Context, u32)> {
+    // target_w/target_h are display dimensions. A quarter-turn scales to
+    // the transposed size, then rotates while copying out.
+    let quarter = turns % 2 == 1;
+    let target_h = if quarter {
+        scaled_height(decoder.height(), decoder.width(), target_w)
+    } else {
+        scaled_height(decoder.width(), decoder.height(), target_w)
+    };
+    let (scaled_w, scaled_h) = if quarter {
+        (target_h, target_w)
+    } else {
+        (target_w, target_h)
+    };
+    let flags = if fast {
+        ffmpeg::software::scaling::Flags::FAST_BILINEAR
+    } else {
+        ffmpeg::software::scaling::Flags::BICUBIC
+    };
+    let scaler = ffmpeg::software::scaling::Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        ffmpeg::format::Pixel::RGBA,
+        scaled_w,
+        scaled_h,
+        flags,
+    )
+    .map_err(|e| err("create scaler", e))?;
+    Ok((scaler, target_h))
+}
+
 /// Filmstrip stills at `times` (ascending), keyed by each still's PTS.
 /// A sample within `tolerance` after its keyframe shows that keyframe,
 /// decoding keyframes only; a sample deep inside a long GOP (or without an
@@ -444,9 +571,10 @@ struct StillRequest {
 
 /// Persistent scrub decoder on a worker thread.
 ///
-/// Reuses one `VideoDecoder` across requests for the same file/width and
-/// coalesces queued requests to the latest one, so fast scrubbing never
-/// builds a backlog of stale decodes.
+/// Reuses one `VideoDecoder` per file across widths, so stepping and short
+/// forward moves decode on and stepping back reads recent pictures instead
+/// of seeking. Coalesces queued requests to the latest one, so fast
+/// scrubbing never builds a backlog of stale decodes.
 pub struct StillDecoder {
     tx: Sender<StillRequest>,
 }
@@ -458,23 +586,26 @@ impl StillDecoder {
         let (request_tx, request_rx) = channel::<StillRequest>();
         let (result_tx, result_rx) = channel::<(u64, MediaResult<RawFrame>)>();
         thread::spawn(move || {
-            let mut current: Option<((String, u32, bool), VideoDecoder)> = None;
+            let mut current: Option<(String, VideoDecoder)> = None;
             while let Ok(mut request) = request_rx.recv() {
                 while let Ok(latest) = request_rx.try_recv() {
                     request = latest;
                 }
-                let key = (request.path.clone(), request.target_w, request.fast);
                 if current
                     .as_ref()
-                    .map(|(current_key, _)| current_key != &key)
-                    .unwrap_or(true)
+                    .is_none_or(|(path, _)| *path != request.path)
                 {
                     current = VideoDecoder::open(&request.path, request.target_w, request.fast)
                         .ok()
-                        .map(|decoder| (key.clone(), decoder));
+                        .map(|mut decoder| {
+                            decoder.recent_limit = RECENT_PICTURES;
+                            (request.path.clone(), decoder)
+                        });
                 }
                 let mut result = match current.as_mut() {
-                    Some((_, decoder)) => decoder.frame_at(request.time),
+                    Some((_, decoder)) => decoder
+                        .set_output(request.target_w, request.fast)
+                        .and_then(|()| decoder.still_at(request.time)),
                     None => Err("decoder unavailable".to_owned()),
                 };
                 if result.is_err() {

@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::decode::FORWARD_WITHOUT_INDEX;
 use crate::{MediaResult, RawFrame, VideoDecoder};
 
 /// Streaming decoder on its own thread. Paced by presentation timestamps,
@@ -403,8 +404,6 @@ fn parked_decoders() -> usize {
 }
 /// Recycled preview buffers; more are only allocated when this runs dry.
 const PREVIEW_POOL: usize = 8;
-/// Without a container index, decode forward rather than seek only this far.
-const FORWARD_WITHOUT_INDEX: f64 = 0.5;
 
 /// A decoded picture and its source-relative presentation time.
 type Picture = (f64, RawFrame);

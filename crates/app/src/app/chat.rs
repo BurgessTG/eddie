@@ -1085,8 +1085,7 @@ impl EditorApp {
                 if self.timeline != before.timeline {
                     self.chat_undo = Some(before);
                     self.stop_sources();
-                    self.still_key = None;
-                    self.still_cache.clear();
+                    self.forget_stills();
                 }
                 Ok(notes)
             }
@@ -1098,8 +1097,7 @@ impl EditorApp {
                 self.mute_music_beds = mute_music_beds;
                 self.stop_sources();
                 self.last_now = None;
-                self.still_key = None;
-                self.still_cache.clear();
+                self.forget_stills();
                 Err(error)
             }
         }
@@ -1112,8 +1110,7 @@ impl EditorApp {
         self.stop_sources();
         self.playing = false;
         snapshot.restore_into(&mut self.timeline, &mut self.selected, &mut self.playhead);
-        self.still_key = None;
-        self.still_cache.clear();
+        self.forget_stills();
         let message = "Undid the last edit.".to_owned();
         self.push_chat(ChatRole::Assistant, message.clone());
         self.status = message;
