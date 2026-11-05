@@ -53,6 +53,10 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    SetCleanVoice {
+        clip: u64,
+        enabled: bool,
+    },
     SetFade {
         clip: u64,
         fade_in: f64,
@@ -141,6 +145,7 @@ impl ScriptCommand {
             | Self::SetOpacity { clip, .. }
             | Self::SetVolume { clip, .. }
             | Self::SetFade { clip, .. }
+            | Self::SetCleanVoice { clip, .. }
             | Self::DetachAudio { clip }
             | Self::UnlinkClip { clip }
             | Self::SetClipLane { clip, .. }
@@ -209,6 +214,7 @@ impl ScriptCommand {
             | Self::SetClipLane { .. }
             | Self::SetEmbeddedAudio { .. }
             | Self::SetDuck { .. }
+            | Self::SetCleanVoice { .. }
             | Self::SetTitleStyle { .. }
             | Self::AddCaptionsForClip { .. }
             | Self::Import(_)
@@ -340,7 +346,7 @@ function help() {
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",
-    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec) setDuck(id, bool)",
+    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
     "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
@@ -491,6 +497,10 @@ impl ScriptEngine {
                 reg!("setVolume", move |clip: u64, value: f32| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetVolume { clip, value }));
+                let q = Rc::clone(&queue);
+                reg!("setCleanVoice", move |clip: u64, enabled: bool| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::SetCleanVoice { clip, enabled }));
                 let q = Rc::clone(&queue);
                 reg!("setFade", move |clip: u64, fade_in: f64, fade_out: f64| q
                     .borrow_mut()

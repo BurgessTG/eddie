@@ -1075,6 +1075,11 @@ impl HeadlessEditor {
                         c.duck = enabled;
                     }
                 }
+                ScriptCommand::SetCleanVoice { clip, enabled } => {
+                    if let Some(c) = self.timeline.clip_mut(clip) {
+                        c.clean_voice = enabled;
+                    }
+                }
                 ScriptCommand::InsertTime { at, seconds } => {
                     if seconds > 0.0 {
                         self.timeline.insert_time(at, seconds);

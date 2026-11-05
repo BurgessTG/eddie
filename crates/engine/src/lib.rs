@@ -97,6 +97,10 @@ pub struct Clip {
     /// another audible clip that does not itself duck is talking.
     #[serde(default)]
     pub duck: bool,
+    /// Speech cleanup (80 Hz high-pass and a gentle compressor) in preview
+    /// and export. Projects saved before it load with it off.
+    #[serde(default)]
+    pub clean_voice: bool,
     /// Titles only: when each whitespace-separated word of `name` starts,
     /// on the clip's source clock (timeline time is
     /// `start + word - source_in`, so trims and splits keep them aligned).
@@ -399,6 +403,7 @@ impl Timeline {
             linked_clip: None,
             title_style: TitleStyle::default(),
             duck: false,
+            clean_voice: false,
             words: Vec::new(),
         });
         id
@@ -729,6 +734,7 @@ impl Timeline {
             right_clip.linked_clip = None;
             right_clip.title_style = clip.title_style;
             right_clip.duck = clip.duck;
+            right_clip.clean_voice = clip.clean_voice;
             right_clip.words = clip.words.clone();
         }
         Some(right)

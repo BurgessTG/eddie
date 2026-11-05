@@ -975,6 +975,7 @@ pub fn export_timeline(
                 && last.volume == clip.volume
                 && !last.duck
                 && !clip.duck
+                && last.clean_voice == clip.clean_voice
                 && last.fade_lengths() == (0.0, 0.0)
                 && clip.fade_lengths() == (0.0, 0.0)
                 && same_time(last.end(), clip.start)
@@ -1015,6 +1016,11 @@ pub fn export_timeline(
                 f(fade_out)
             ));
         }
+        let cleanup = if clip.clean_voice {
+            crate::voice::voice_filter()
+        } else {
+            String::new()
+        };
         // The same envelope as the preview mixer's `duck_gain`: a trapezoid
         // per range, evaluated per audio frame on clip-local time.
         let ducks = timeline.duck_ranges(clip, &options.speech);
@@ -1037,7 +1043,7 @@ pub fn export_timeline(
             ));
         }
         filters.push(format!(
-            "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000,\
+            "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{cleanup},\
              volume={:.3}{fades},adelay={delay_ms}|{delay_ms}[{label}]",
             f(clip.source_in),
             f(clip.source_in + clip.duration),

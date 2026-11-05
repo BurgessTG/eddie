@@ -1348,6 +1348,7 @@ impl EditorApp {
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
                             duck: self.timeline.duck_ranges(c, &speech),
+                            clean_voice: c.clean_voice,
                         },
                     )
                 })
@@ -1730,6 +1731,7 @@ impl EditorApp {
                     "fadeIn": c.fade_in,
                     "fadeOut": c.fade_out,
                     "duck": c.duck,
+                    "cleanVoice": c.clean_voice,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
@@ -2129,6 +2131,11 @@ impl EditorApp {
             ScriptCommand::SetDuck { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.duck = enabled;
+                }
+            }
+            ScriptCommand::SetCleanVoice { clip, enabled } => {
+                if let Some(c) = self.timeline.clip_mut(clip) {
+                    c.clean_voice = enabled;
                 }
             }
             ScriptCommand::InsertTime { at, seconds } => {
@@ -3000,6 +3007,10 @@ impl EditorApp {
                     });
                     ui.checkbox(&mut clip.duck, "Duck under speech")
                         .on_hover_text("Dip this sound while another clip is talking");
+                    ui.checkbox(&mut clip.clean_voice, "Clean voice")
+                        .on_hover_text(
+                        "Cut low rumble and even out loud and quiet speech, in preview and export",
+                    );
                 }
                 if kind == ClipKind::Title {
                     prop_row(ui, "Style", |ui| {

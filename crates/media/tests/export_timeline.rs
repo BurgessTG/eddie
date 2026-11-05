@@ -989,6 +989,89 @@ fn highlight_captions_light_only_the_word_being_spoken() {
 }
 
 #[test]
+fn clean_voice_cuts_rumble_and_preview_matches_export() {
+    // Loud and quiet 220 Hz "speech" every half second over 30 Hz rumble.
+    let fixture = Fixture::new();
+    let speech = fixture.0.join("speech.wav");
+    run(Command::new("ffmpeg").args([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=if(lt(mod(t\\,1)\\,0.5)\\,0.5\\,0.06)*sin(2*PI*220*t)+0.15*sin(2*PI*30*t):s=48000:d=3",
+        "-c:a",
+        "pcm_f32le",
+        speech.to_str().unwrap(),
+    ]));
+    let speech = speech.to_str().unwrap().to_owned();
+    let picture = fixture.color("black.mp4", "black", None);
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &picture, 0, 0.0, 3.0, 0.0);
+    let voice = timeline.add_media_clip("voice", ClipKind::Audio, 1, 0.0, 3.0, 0.0, &speech);
+    let plain = fixture.export("plain.mp4", &timeline);
+    timeline.clip_mut(voice).unwrap().clean_voice = true;
+    let cleaned = fixture.export("cleaned.mp4", &timeline);
+
+    // Rumble falls by well over 12 dB; the speech tone keeps its level.
+    let rumble = tone_window(&cleaned, 30.0, 1.6, 1.9) / tone_window(&plain, 30.0, 1.6, 1.9);
+    assert!(rumble < 0.25, "rumble ratio {rumble}");
+    let quiet = tone_window(&cleaned, 220.0, 1.6, 1.9) / tone_window(&plain, 220.0, 1.6, 1.9);
+    let loud = tone_window(&cleaned, 220.0, 1.1, 1.4) / tone_window(&plain, 220.0, 1.1, 1.4);
+    // Quiet speech gains the makeup; loud speech is pulled down toward it.
+    assert!(quiet / loud > 1.6, "quiet {quiet} vs loud {loud}");
+
+    // The preview runs the same high-pass and acompressor law: every 100 ms
+    // window, including recovery after loud speech, matches export. A lone
+    // mono clip exports mono; the preview upmixes it 3 dB down per channel,
+    // as FFmpeg does, and must still compress it at the source's level.
+    let mut engine = openreel_media::AudioEngine::manual();
+    engine.seek(0.0);
+    engine.set_limit(3.0);
+    engine.set_running(true);
+    engine.set_voices(&[(
+        voice,
+        openreel_media::AudioSegment {
+            path: speech.clone(),
+            start: 0.0,
+            duration: 3.0,
+            source_in: 0.0,
+            volume: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            duck: Vec::new().into(),
+            clean_voice: true,
+        },
+    )]);
+    let mut preview = Vec::new();
+    while preview.len() < 3 * 48_000 {
+        let block = engine.render(1024);
+        assert!(!block.is_empty(), "preview clock stopped");
+        preview.extend(block.chunks_exact(2).map(|frame| frame[0]));
+    }
+    let exported = audio_samples(&cleaned);
+    let db = |samples: &[f32]| {
+        let mean =
+            samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64;
+        10.0 * mean.log10()
+    };
+    let mut worst = 0.0_f64;
+    for window in 2..29 {
+        let (a, b) = (window * 4800, (window + 1) * 4800);
+        eprintln!(
+            "w{window}: preview {:.2} export {:.2}",
+            db(&preview[a..b]),
+            db(&exported[a..b])
+        );
+        let upmix = 20.0 * std::f64::consts::FRAC_1_SQRT_2.log10();
+        worst = worst.max((db(&preview[a..b]) - upmix - db(&exported[a..b])).abs());
+    }
+    eprintln!("clean voice: rumble x{rumble:.3}, quiet/loud {:.2}, worst preview-export window {worst:.2} dB", quiet / loud);
+    assert!(worst < 0.1, "preview and export differ by {worst:.2} dB");
+}
+
+#[test]
 fn transparent_first_title_hides_its_box_and_blocks_later_titles() {
     let fixture = Fixture::new();
     let source = fixture.color("white.mp4", "white", None);

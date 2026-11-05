@@ -50,6 +50,8 @@ pub struct AudioSegment {
     /// Ducking ranges in clip-local seconds, from
     /// `openreel_engine::Timeline::duck_ranges`; empty when it never ducks.
     pub duck: Vec<(f64, f64)>,
+    /// Voice cleanup (`voice.rs`), applied as the clip decodes.
+    pub clean_voice: bool,
 }
 
 /// Fitted fade lengths in samples, packed in/out so a fade change
@@ -670,7 +672,11 @@ impl Drop for AudioEngine {
 }
 
 fn same_source(a: &AudioSegment, b: &AudioSegment) -> bool {
-    a.path == b.path && a.start == b.start && a.duration == b.duration && a.source_in == b.source_in
+    a.path == b.path
+        && a.start == b.start
+        && a.duration == b.duration
+        && a.source_in == b.source_in
+        && a.clean_voice == b.clean_voice
 }
 
 fn spawn_null(mut mixer: Mixer) -> Arc<AtomicBool> {
@@ -820,6 +826,9 @@ fn decode_voice(
     // Source sample (at RATE) of the next resampled frame.
     let mut cursor: Option<i64> = None;
     let mut scratch: Vec<f32> = Vec::new();
+    let mut cleanup = segment
+        .clean_voice
+        .then(|| crate::voice::VoiceCleanup::new(RATE));
     let mut eof = false;
     let mut packets = input.packets();
     loop {
@@ -852,6 +861,11 @@ fn decode_voice(
             } else {
                 ffmpeg::ChannelLayout::default(i32::from(frame.channels()))
             };
+            if let Some(cleanup) = cleanup.as_mut() {
+                // Upmixing puts mono 3 dB down on each channel; export
+                // compresses the mono source itself, so detect at its level.
+                cleanup.set_mono(layout.channels() == 1);
+            }
             let context = ffmpeg::software::resampling::Context::get(
                 frame.format(),
                 layout,
@@ -904,6 +918,9 @@ fn decode_voice(
             let mut data = recycle.try_recv().unwrap_or_default();
             data.clear();
             data.extend_from_slice(&scratch[keep_from * 2..keep_to * 2]);
+            if let Some(cleanup) = cleanup.as_mut() {
+                cleanup.process(&mut data);
+            }
             let chunk = Chunk {
                 at: (block_at + keep_from as i64) as u64,
                 data,

@@ -15,6 +15,7 @@ mod playback;
 mod samples;
 mod sheet;
 mod sweep;
+mod voice;
 
 pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use beats::{beat_grid, BeatGrid};
@@ -638,6 +639,7 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
+                clean_voice: false,
             },
         )]);
         let mut mix = Vec::new();
