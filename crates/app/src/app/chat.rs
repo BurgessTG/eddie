@@ -1344,7 +1344,12 @@ impl EditorApp {
                 .filter_map(|clip| self.asset(clip.source.as_deref()?))
                 .map(|asset| (asset.info.width, asset.info.height)),
         );
-        let strip = inspect::source_strip(before_timeline, &self.timeline, &self.assets);
+        let strip = inspect::source_strip(
+            before_timeline,
+            &self.timeline,
+            &self.assets,
+            self.curation_dir.as_deref(),
+        );
         self.chat_generation += 1;
         self.chat_pending = Some(PendingChat {
             request: check_request(request, code, &introduced, &strip.legend),

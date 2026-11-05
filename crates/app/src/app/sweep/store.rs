@@ -45,8 +45,12 @@ pub(in crate::app) fn save(dir: &Path, path: &str, data: &SweepData) -> Result<(
         "modified": modified.to_string(),
         "data": data,
     });
+    write_private(dir, &file_for(dir, path), &body)
+}
+
+/// Atomically replace `target` in `dir`, private from creation on Unix.
+fn write_private(dir: &Path, target: &Path, body: &serde_json::Value) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-    let target = file_for(dir, path);
     let temporary = target.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
@@ -60,7 +64,7 @@ pub(in crate::app) fn save(dir: &Path, path: &str, data: &SweepData) -> Result<(
         let mut file = options.open(&temporary)?;
         file.write_all(body.to_string().as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temporary, &target)
+        std::fs::rename(&temporary, target)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -87,4 +91,73 @@ pub(in crate::app) fn load(dir: &Path, path: &str) -> Option<SweepData> {
             .to_owned();
         data
     })
+}
+
+/// Shots detected in a source for edit-check strips, beside its curation
+/// (`<hash>.shots.json`), so a restart does not decode the file again.
+pub(in crate::app) fn save_shots(
+    dir: &Path,
+    path: &str,
+    shots: &[(f64, f64)],
+) -> Result<(), String> {
+    let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
+    let body = json!({
+        "version": VERSION,
+        "path": path,
+        "size": size,
+        "modified": modified.to_string(),
+        "shots": shots,
+    });
+    write_private(
+        dir,
+        &file_for(dir, path).with_extension("shots.json"),
+        &body,
+    )
+}
+
+/// Saved shots for this exact file (same path, size and modification time).
+pub(in crate::app) fn load_shots(dir: &Path, path: &str) -> Option<Vec<(f64, f64)>> {
+    let (size, modified) = identity(path)?;
+    let raw = std::fs::read(file_for(dir, path).with_extension("shots.json")).ok()?;
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if value["version"].as_u64() != Some(VERSION)
+        || value["path"].as_str() != Some(path)
+        || value["size"].as_u64() != Some(size)
+        || value["modified"].as_str() != Some(modified.to_string().as_str())
+    {
+        return None;
+    }
+    serde_json::from_value(value["shots"].take())
+        .ok()
+        .filter(|shots: &Vec<(f64, f64)>| !shots.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saved shots come back for the same file and not after it changes.
+    #[test]
+    fn detected_shots_restore_only_for_the_unchanged_file() {
+        let dir = std::env::temp_dir().join(format!("openreel_shots_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, b"pictures").unwrap();
+        let source = source.to_str().unwrap();
+        let store = dir.join("store");
+        let shots = vec![(0.0, 3.43), (3.43, 10.7)];
+        assert_eq!(load_shots(&store, source), None);
+        save_shots(&store, source, &shots).unwrap();
+        assert_eq!(load_shots(&store, source), Some(shots));
+        // Its curation file is a different one.
+        assert!(load(&store, source).is_none());
+        std::fs::write(source, b"other pictures").unwrap();
+        assert_eq!(
+            load_shots(&store, source),
+            None,
+            "a changed file is rescanned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

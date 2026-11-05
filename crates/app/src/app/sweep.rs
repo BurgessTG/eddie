@@ -27,7 +27,9 @@ mod curation_tests;
 mod store;
 mod subjects;
 pub(super) use curation::{ClipReview, ReviewStatus, ReviewUsage};
-pub(super) use store::{default_dir as default_curation_dir, load as load_curation};
+pub(super) use store::{
+    default_dir as default_curation_dir, load as load_curation, load_shots, save_shots,
+};
 
 const TRANSCRIBE_MODEL: &str = "muse-voice-transcribe-1.0";
 const SAM_MODEL: &str = "sam-3.1";

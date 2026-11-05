@@ -303,6 +303,8 @@ pub(super) struct StripSource {
     placed: Vec<(f64, f64)>,
     /// The curated scene inventory; `None` until shots are detected.
     shots: Option<Vec<(f64, f64)>>,
+    /// The curation store, where detected shots are saved per file.
+    store: Option<std::path::PathBuf>,
 }
 
 impl StripSource {
@@ -318,6 +320,18 @@ impl StripSource {
         let key = (self.info.path.clone(), self.info.duration.to_bits());
         if let Some(shots) = DETECTED.lock().unwrap().get_or_insert_default().get(&key) {
             return Some(shots.clone());
+        }
+        let saved = self
+            .store
+            .as_deref()
+            .and_then(|dir| super::sweep::load_shots(dir, &self.info.path));
+        if let Some(shots) = saved {
+            DETECTED
+                .lock()
+                .unwrap()
+                .get_or_insert_default()
+                .insert(key, shots.clone());
+            return Some(shots);
         }
         if self.info.duration > STRIP_SCAN_LIMIT {
             return None;
@@ -337,6 +351,10 @@ impl StripSource {
             .unwrap()
             .get_or_insert_default()
             .insert(key, shots.clone());
+        if let Some(dir) = &self.store {
+            // Failure only costs another scan after a restart.
+            let _ = super::sweep::save_shots(dir, &self.info.path, &shots);
+        }
         Some(shots)
     }
 
@@ -498,6 +516,7 @@ pub(super) fn source_strip(
     before: &Timeline,
     after: &Timeline,
     assets: &[BinAsset],
+    store: Option<&std::path::Path>,
 ) -> SourceStrip {
     let key = |clip: &openreel_engine::Clip| {
         (
@@ -566,6 +585,7 @@ pub(super) fn source_strip(
                 .iter()
                 .map(|clip| (clip.source_in, clip.source_in + clip.duration))
                 .collect(),
+            store: store.map(std::path::Path::to_path_buf),
             shots: (!scenes.is_empty()).then(|| {
                 scenes
                     .iter()
@@ -819,7 +839,7 @@ mod tests {
         after.add_media_clip("H", ClipKind::Video, 1, 2.0, 2.0, 0.0, "c.mp4");
         after.add_media_clip("M", ClipKind::Audio, 2, 0.0, 4.0, 0.0, "d.mp4");
         let assets = ["a.mp4", "b.mp4", "c.mp4", "d.mp4"].map(|path| asset(path, 1920, 1080));
-        let strip = source_strip(&before, &after, &assets);
+        let strip = source_strip(&before, &after, &assets, None);
         assert_eq!(
             strip.legend,
             vec![format!(
@@ -854,7 +874,9 @@ mod tests {
             "{shots}"
         );
         // An edit that changes no visible picture gets no strip.
-        assert!(source_strip(&after, &after, &assets).sources.is_empty());
+        assert!(source_strip(&after, &after, &assets, None)
+            .sources
+            .is_empty());
     }
 
     /// Few shots: every shot gets a picture, however short, and the rest go
