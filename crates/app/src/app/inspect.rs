@@ -342,9 +342,10 @@ impl StripSource {
     /// `STRIP_CELLS` pictures labelled `S1 12.30s`, with `*` on those inside
     /// a placed range, and the line listing the shots they fall in.
     pub(super) fn cells(&self, shots: Option<&[(f64, f64)]>) -> (Vec<SheetCell>, String) {
-        let cells = strip_times(self.info.duration, shots)
-            .into_iter()
-            .map(|time| {
+        let times = strip_times(self.info.duration, shots);
+        let cells = times
+            .iter()
+            .map(|&(time, _)| {
                 let inside = self
                     .placed
                     .iter()
@@ -357,39 +358,59 @@ impl StripSource {
                 }
             })
             .collect();
+        // Only pictured shots are listed: a long list of unseen cuts made
+        // the model cross-check every boundary at great reasoning cost.
         let line = match shots {
-            Some(shots) => format!(
-                "{} shots: {}",
-                self.tag,
-                shots
-                    .iter()
-                    .map(|(start, end)| format!("{start:.2}-{end:.2}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Some(shots) => {
+                let mut pictured: Vec<(f64, f64)> = times.iter().map(|&(_, shot)| shot).collect();
+                pictured.dedup();
+                let mut line = format!(
+                    "{} shots with pictures: {}",
+                    self.tag,
+                    pictured
+                        .iter()
+                        .map(|(start, end)| format!("{start:.2}-{end:.2}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let unseen = shots.len().saturating_sub(pictured.len());
+                if unseen > 0 {
+                    line.push_str(&format!(
+                        "; {unseen} shorter shots fill the rest and have no picture"
+                    ));
+                }
+                line
+            }
             None => format!("{} shots: unknown", self.tag),
         };
         (cells, line)
     }
 }
 
-/// Sample times through a source: at least one per shot, the rest given
-/// to the shots with the most time per picture, spread evenly inside each.
-/// Without shots, the middles of equal slices of the file. Over
-/// `STRIP_CELLS` shots, one picture each for shots picked evenly.
-fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<f64> {
+/// At most this many shots get a picture, so the longest shots keep spare
+/// pictures; a merged shot (a fade between two views) then shows both.
+const STRIP_SHOTS: usize = 12;
+
+/// Sample times through a source and the shots they fall in, in source
+/// order. Up to `STRIP_SHOTS` of the longest shots get one picture each; the
+/// rest go to the pictured shots with the most time per picture, spread
+/// evenly inside each. Without shots, the middles of equal slices of the
+/// file. Picking by length, not index, keeps a long card or take from going
+/// unseen in footage with many quick cuts.
+fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<(f64, (f64, f64))> {
     let whole = [(0.0, duration)];
     let shots = match shots {
         Some(shots) if !shots.is_empty() => shots,
         _ => &whole[..],
     };
-    let picked: Vec<(f64, f64)> = if shots.len() > STRIP_CELLS {
-        (0..STRIP_CELLS)
-            .map(|index| shots[(2 * index + 1) * shots.len() / (2 * STRIP_CELLS)])
-            .collect()
-    } else {
-        shots.to_vec()
-    };
+    let mut order: Vec<usize> = (0..shots.len()).collect();
+    order.sort_by(|a, b| {
+        let length = |i: usize| shots[i].1 - shots[i].0;
+        length(*b).total_cmp(&length(*a))
+    });
+    order.truncate(STRIP_SHOTS);
+    order.sort_unstable();
+    let picked: Vec<(f64, f64)> = order.into_iter().map(|i| shots[i]).collect();
     let mut counts = vec![1_usize; picked.len()];
     for _ in picked.len()..STRIP_CELLS {
         let longest = (0..picked.len())
@@ -403,8 +424,13 @@ fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<f64> {
     picked
         .iter()
         .zip(counts)
-        .flat_map(|((start, end), count)| {
-            (0..count).map(move |k| start + (k as f64 + 0.5) * (end - start) / count as f64)
+        .flat_map(|(&(start, end), count)| {
+            (0..count).map(move |k| {
+                (
+                    start + (k as f64 + 0.5) * (end - start) / count as f64,
+                    (start, end),
+                )
+            })
         })
         .collect()
 }
@@ -761,30 +787,61 @@ mod tests {
             .as_ref()
             .is_some_and(|(path, _)| path == "b.mp4")));
         let (_, shots) = strip.sources[0].cells(Some(&[(0.0, 2.5), (2.5, 10.0)]));
-        assert_eq!(shots, "S1 shots: 0.00-2.50, 2.50-10.00");
+        assert_eq!(shots, "S1 shots with pictures: 0.00-2.50, 2.50-10.00");
+        let many: Vec<(f64, f64)> = (0..20)
+            .map(|i| (i as f64 * 0.5, i as f64 * 0.5 + 0.5))
+            .collect();
+        let (_, shots) = strip.sources[0].cells(Some(&many));
+        assert!(
+            shots.ends_with("; 8 shorter shots fill the rest and have no picture"),
+            "{shots}"
+        );
         // An edit that changes no visible picture gets no strip.
         assert!(source_strip(&after, &after, &assets).sources.is_empty());
     }
 
-    /// Every shot gets a picture, however short; the rest go where a
-    /// picture covers the most time, and none lands across a cut.
+    /// Few shots: every shot gets a picture, however short, and the rest go
+    /// where a picture covers the most time, none across a cut. Many shots:
+    /// the longest are pictured wherever they fall, not every n-th one.
     #[test]
-    fn strip_times_cover_every_shot_and_split_long_ones() {
+    fn strip_times_cover_the_longest_shots_and_split_them() {
         let times = strip_times(10.0, Some(&[(0.0, 0.5), (0.5, 9.0), (9.0, 10.0)]));
-        let count =
-            |start: f64, end: f64| times.iter().filter(|t| (start..end).contains(*t)).count();
+        let count = |times: &[(f64, (f64, f64))], start: f64, end: f64| {
+            times
+                .iter()
+                .filter(|(t, _)| (start..end).contains(t))
+                .count()
+        };
         assert_eq!(times.len(), STRIP_CELLS);
         assert_eq!(
-            (count(0.0, 0.5), count(0.5, 9.0), count(9.0, 10.0)),
+            (
+                count(&times, 0.0, 0.5),
+                count(&times, 0.5, 9.0),
+                count(&times, 9.0, 10.0)
+            ),
             (1, 13, 2)
         );
-        assert_eq!(times[0], 0.25);
-        assert_eq!(&times[14..], &[9.25, 9.75]);
-        // Too many shots: one picture each for shots picked across the file.
-        let many: Vec<(f64, f64)> = (0..40).map(|i| (i as f64, i as f64 + 1.0)).collect();
-        let times = strip_times(40.0, Some(&many));
+        assert_eq!(times[0], (0.25, (0.0, 0.5)));
+        assert_eq!(times[14], (9.25, (9.0, 10.0)));
+        assert!(times.iter().all(|(t, (start, end))| start <= t && t < end));
+        // 47 one-second shots and a 5.3 s card at 31.18, as on honey's
+        // 0vSt expo cut: index picking skipped the card entirely.
+        let mut many: Vec<(f64, f64)> = (0..31).map(|i| (i as f64, i as f64 + 1.0)).collect();
+        many.push((31.0, 31.18));
+        many.push((31.18, 36.49));
+        many.extend((0..14).map(|i| (36.49 + i as f64 * 0.5, 36.99 + i as f64 * 0.5)));
+        let times = strip_times(43.49, Some(&many));
         assert_eq!(times.len(), STRIP_CELLS);
-        assert_eq!((times[0], times[STRIP_CELLS - 1]), (1.5, 38.5));
+        assert!(times.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(
+            count(&times, 31.18, 36.49) >= 3,
+            "the longest shot keeps spare pictures: {times:?}"
+        );
+        assert_eq!(
+            count(&times, 36.49, 43.49),
+            0,
+            "half-second shots stay unseen"
+        );
     }
 
     #[test]

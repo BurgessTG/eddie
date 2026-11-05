@@ -413,13 +413,14 @@ fn check_request(
     } else {
         format!(
             "\n\nThe second image is a source strip: {} pictures through the whole of \
-             each source your edit placed, at least one per shot, labelled with the source and the \
-             source time in seconds; * marks pictures inside a range your edit placed. Each source's \
-             shots are listed below. Use the strip to find the shot the user described. A picture \
-             verifies its own moment and its shot halfway to the neighbouring pictures of that shot. \
-             A replacement may span consecutive pictures of one shot that all show what was asked, \
-             never crosses a listed shot boundary, and is no longer than that unless a candidate, \
-             scene or transcript confirms more.\n{}",
+             each source your edit placed, from its longest shots, labelled with the source and the \
+             source time in seconds; * marks pictures inside a range your edit placed. The shots \
+             that have pictures are listed below; time outside them is unverified. Use the strip to \
+             find the shot the user described. A picture verifies its shot halfway to the \
+             neighbouring pictures in that shot, up to the shot's listed bounds. A replacement \
+             covers only verified time that shows what was asked; it continues into a touching \
+             listed shot only when the pictures on both sides of that cut show it. It is no longer \
+             than that unless a candidate, scene or transcript confirms more.\n{}",
             inspect::STRIP_CELLS,
             strip_legend.join("\n")
         )
@@ -450,9 +451,21 @@ fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
         Err(error) => text.push_str(&format!("\n\nNo contact sheet is attached: {error}.")),
     }
     if !review.strip.is_empty() {
+        // Detecting shots decodes each uncurated source; do them together.
+        let shots: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = review
+                .strip
+                .iter()
+                .map(|source| scope.spawn(|| source.shots()))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().ok().flatten())
+                .collect()
+        });
         let mut cells = Vec::new();
-        for source in review.strip.iter() {
-            let (source_cells, shots) = source.cells(source.shots().as_deref());
+        for (source, shots) in review.strip.iter().zip(shots) {
+            let (source_cells, shots) = source.cells(shots.as_deref());
             cells.extend(source_cells);
             text.push('\n');
             text.push_str(&shots);
@@ -2980,7 +2993,7 @@ mod tests {
             "a contact sheet and a source strip"
         );
         assert!(
-            request.contains("S1 shots: "),
+            request.contains("S1 shots"),
             "the check lists the strip source's shots"
         );
         assert!(
