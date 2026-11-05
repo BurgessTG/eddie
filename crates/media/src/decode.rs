@@ -31,6 +31,52 @@ pub(crate) fn ensure_init() {
     });
 }
 
+/// EXPERIMENT: `EDDIE_HWDEC=vaapi` decodes on a VAAPI device. libavcodec
+/// picks the hardware format when the profile is supported and silently
+/// falls back to software otherwise.
+fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
+    if std::env::var("EDDIE_HWDEC").as_deref() != Ok("vaapi") {
+        return false;
+    }
+    let mut device = std::ptr::null_mut();
+    let node = c"/dev/dri/renderD128";
+    // SAFETY: creates a device owned by this decoder (handed to the context).
+    let result = unsafe {
+        ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut device,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            node.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result < 0 {
+        return false;
+    }
+    // SAFETY: the codec context is not open yet; it takes its own reference.
+    unsafe {
+        let raw = context.as_mut_ptr();
+        (*raw).hw_device_ctx = device;
+        // Recent pictures, the lookahead and the current one hold surfaces.
+        (*raw).extra_hw_frames = RECENT_PICTURES as i32 + 4;
+    }
+    true
+}
+
+/// Copy a VAAPI surface into `into` (NV12 or P010) with its timing and colour.
+fn download(picture: &ffmpeg::frame::Video, into: &mut ffmpeg::frame::Video) -> MediaResult<()> {
+    // SAFETY: both frames are owned; transfer allocates `into`'s buffers.
+    unsafe {
+        ffmpeg::ffi::av_frame_unref(into.as_mut_ptr());
+        let result = ffmpeg::ffi::av_hwframe_transfer_data(into.as_mut_ptr(), picture.as_ptr(), 0);
+        if result < 0 {
+            return Err(err("download surface", ffmpeg::Error::from(result)));
+        }
+        ffmpeg::ffi::av_frame_copy_props(into.as_mut_ptr(), picture.as_ptr());
+    }
+    Ok(())
+}
+
 fn err(context: &str, error: ffmpeg::Error) -> String {
     format!("{context}: {error}")
 }
@@ -59,6 +105,8 @@ pub struct VideoDecoder {
     /// Consecutive pictures just before `decoded` (references, not copies).
     recent: VecDeque<(f64, ffmpeg::frame::Video)>,
     recent_limit: usize,
+    /// EXPERIMENT: a downloaded VAAPI surface.
+    transfer: ffmpeg::frame::Video,
 }
 
 // SAFETY: every field is exclusively owned. ffmpeg-next marks the demuxer,
@@ -127,12 +175,24 @@ impl VideoDecoder {
             kind: threading,
             count: 0, // libavcodec chooses based on CPU cores.
         });
+        if attach_vaapi(&mut context) && std::env::var("EDDIE_HWDEC_THREADS").as_deref() == Ok("1")
+        {
+            context.set_threading(ffmpeg::codec::threading::Config {
+                kind: threading,
+                count: 1,
+            });
+        }
         let decoder = context
             .decoder()
             .video()
             .map_err(|e| err("open video decoder", e))?;
 
-        let (scaler, target_h) = Scaler::new(&decoder, turns, target_w, fast)?;
+        let (scaler, target_h) = Scaler::new(
+            (decoder.format(), decoder.width(), decoder.height()),
+            turns,
+            target_w,
+            fast,
+        )?;
         Ok(Self {
             input,
             decoder,
@@ -153,6 +213,7 @@ impl VideoDecoder {
             drained: false,
             recent: VecDeque::new(),
             recent_limit: 0,
+            transfer: ffmpeg::frame::Video::empty(),
         })
     }
 
@@ -164,7 +225,7 @@ impl VideoDecoder {
     /// decoder, so scrub and settle sizes share one position.
     pub(crate) fn set_output(&mut self, target_w: u32, fast: bool) -> MediaResult<()> {
         if (target_w, fast) != (self.target_w, self.fast) {
-            let (scaler, target_h) = Scaler::new(&self.decoder, self.turns, target_w, fast)?;
+            let (scaler, target_h) = Scaler::new(self.scaler.source, self.turns, target_w, fast)?;
             self.scaler = scaler;
             (self.target_w, self.target_h, self.fast) = (target_w, target_h, fast);
         }
@@ -377,10 +438,25 @@ impl VideoDecoder {
 
     /// Scale `decoded`, or the recent picture at `recent`, into `buffer`.
     fn scale_into(&mut self, recent: Option<usize>, mut buffer: Vec<u8>) -> MediaResult<RawFrame> {
-        let picture = match recent {
+        let mut picture = match recent {
             Some(index) => &self.recent[index].1,
             None => &self.decoded,
         };
+        // Surfaces stay on the GPU until shown, so seek preroll copies nothing.
+        if picture.format() == ffmpeg::format::Pixel::VAAPI {
+            download(picture, &mut self.transfer)?;
+            picture = &self.transfer;
+        }
+        let source = (picture.format(), picture.width(), picture.height());
+        if source != self.scaler.source {
+            // A download changes only the format. A mid-stream size change
+            // stays unsupported: the output size was fixed at open.
+            let (_, width, height) = self.scaler.source;
+            if (source.1, source.2) != (width, height) {
+                return Err("video size changed mid-stream".to_owned());
+            }
+            self.scaler = Scaler::new(source, self.turns, self.target_w, self.fast)?.0;
+        }
         let scaled = self.scaler.run(picture)?;
         let stride = scaled.stride(0);
         let width = self.target_w as usize;
@@ -476,12 +552,14 @@ struct Scaler {
     rgba: ffmpeg::frame::Video,
     /// swscale matrix and full-range flag last applied to `convert`.
     colors: Option<(i32, i32)>,
+    /// Input format and size this scaler reads.
+    source: (ffmpeg::format::Pixel, u32, u32),
 }
 
 impl Scaler {
     /// A scaler for `target_w` display pixels, and the display height.
     fn new(
-        decoder: &ffmpeg::decoder::Video,
+        (source, width, height): (ffmpeg::format::Pixel, u32, u32),
         turns: u8,
         target_w: u32,
         fast: bool,
@@ -492,9 +570,9 @@ impl Scaler {
         // the transposed size, then rotates while copying out.
         let quarter = turns % 2 == 1;
         let target_h = if quarter {
-            scaled_height(decoder.height(), decoder.width(), target_w)
+            scaled_height(height, width, target_w)
         } else {
-            scaled_height(decoder.width(), decoder.height(), target_w)
+            scaled_height(width, height, target_w)
         };
         let (scaled_w, scaled_h) = if quarter {
             (target_h, target_w)
@@ -506,20 +584,11 @@ impl Scaler {
         } else {
             Flags::BICUBIC
         };
-        let source = decoder.format();
         // SAFETY: a pure query on a pixel format value.
         let resizable = unsafe { ffmpeg::ffi::sws_isSupportedOutput(source.into()) } > 0;
         let middle = if resizable { source } else { Pixel::YUV420P };
-        let resize = Context::get(
-            source,
-            decoder.width(),
-            decoder.height(),
-            middle,
-            scaled_w,
-            scaled_h,
-            flags,
-        )
-        .map_err(|e| err("create scaler", e))?;
+        let resize = Context::get(source, width, height, middle, scaled_w, scaled_h, flags)
+            .map_err(|e| err("create scaler", e))?;
         let convert = Context::get(
             middle,
             scaled_w,
@@ -536,6 +605,7 @@ impl Scaler {
             resized: ffmpeg::frame::Video::empty(),
             rgba: ffmpeg::frame::Video::empty(),
             colors: None,
+            source: (source, width, height),
         };
         Ok((scaler, target_h))
     }
