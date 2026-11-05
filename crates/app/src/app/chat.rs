@@ -103,6 +103,8 @@ pub(super) struct PendingChat {
 #[derive(Clone)]
 pub(super) struct EditReview {
     cells: Arc<Vec<openreel_media::SheetCell>>,
+    /// Pictures sampled through the sources the edit placed; may be empty.
+    strip: Arc<Vec<openreel_media::SheetCell>>,
     canvas: (u32, u32),
 }
 
@@ -384,21 +386,40 @@ If the result does what the request asked, reply with code that only logs \"Done
 Otherwise reply with code that fixes only what is wrong, using the clip ids in the timeline state, \
 and explain the fix. Leave problems the request did not touch. If something is wrong that you \
 cannot fix, console.log it as its own sentence before the Done line. \
-Only place a source range whose content you can verify, from the contact sheet or from a candidate, \
-scene or transcript that describes it; never guess a source time. If you cannot verify a \
+Only place a source range whose content you can verify, from the contact sheet, the source strip, \
+or a candidate, scene or transcript that describes it; never guess a source time. If you cannot verify a \
 replacement, make no edit and console.log what is wrong. \
 transcriptSegments here omit words; transcriptSegments() in code still has them.";
 
 /// The check request for an applied edit: what was asked, the code that
 /// ran, and the problems it introduced.
-fn check_request(request: &str, code: &str, introduced: &[&Finding]) -> String {
+fn check_request(
+    request: &str,
+    code: &str,
+    introduced: &[&Finding],
+    strip_legend: &[String],
+) -> String {
     let introduced = serde_json::to_string(introduced).unwrap_or_else(|_| "[]".to_owned());
+    let strip = if strip_legend.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe second image is a source strip: {} pictures sampled evenly \
+             through the whole of each source your edit placed, labelled with the source and the \
+             source time in seconds; * marks pictures inside a range your edit placed. Use it to \
+             find the shot the user described. A picture verifies only the moment it shows: place a \
+             replacement centred on that time and no longer than the spacing between samples, unless \
+             a candidate, scene or transcript confirms a longer range.\n{}",
+            inspect::STRIP_CELLS,
+            strip_legend.join("\n")
+        )
+    };
     format!(
         "Check that your last edit did what the user asked, and fix it if not.\n\n\
          The user asked:\n{request}\n\n\
          Your JavaScript (already applied; the timeline state below is the result):\n{code}\n\n\
          Problems this edit introduced (state().inspection lists all of them):\n{introduced}\n\n\
-         {CHECK_INSTRUCTIONS}"
+         {CHECK_INSTRUCTIONS}{strip}"
     )
 }
 
@@ -417,6 +438,14 @@ fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
             "url": format!("data:image/jpeg;base64,{}", super::sweep::base64_encode(&jpeg)),
         }})),
         Err(error) => text.push_str(&format!("\n\nNo contact sheet is attached: {error}.")),
+    }
+    if !review.strip.is_empty() {
+        match openreel_media::source_strip(&review.strip, review.canvas) {
+            Ok(jpeg) => content.push(serde_json::json!({"type": "image_url", "image_url": {
+                "url": format!("data:image/jpeg;base64,{}", super::sweep::base64_encode(&jpeg)),
+            }})),
+            Err(error) => text.push_str(&format!("\n\nNo source strip is attached: {error}.")),
+        }
     }
     content.insert(0, serde_json::json!({"type": "text", "text": text}));
     message["content"] = serde_json::Value::Array(content);
@@ -1259,6 +1288,7 @@ impl EditorApp {
         request: &str,
         code: &str,
         before: &[Finding],
+        before_timeline: &Timeline,
     ) {
         let findings = inspect::inspect(&self.timeline, &self.assets);
         let introduced: Vec<&Finding> = findings
@@ -1282,9 +1312,10 @@ impl EditorApp {
                 .filter_map(|clip| self.asset(clip.source.as_deref()?))
                 .map(|asset| (asset.info.width, asset.info.height)),
         );
+        let strip = inspect::source_strip(before_timeline, &self.timeline, &self.assets);
         self.chat_generation += 1;
         self.chat_pending = Some(PendingChat {
-            request: check_request(request, code, &introduced),
+            request: check_request(request, code, &introduced, &strip.legend),
             timeline: self.timeline.clone(),
             state_json: self.script_state_json(),
             attempt: 0,
@@ -1294,6 +1325,7 @@ impl EditorApp {
             started: Instant::now(),
             review: Some(EditReview {
                 cells: Arc::new(inspect::sheet_cells(&self.timeline)),
+                strip: Arc::new(strip.cells),
                 canvas,
             }),
         });
@@ -1599,7 +1631,13 @@ impl EditorApp {
                         if let Some(before) =
                             before.filter(|_| changed && self.chat_settings.can_call_model())
                         {
-                            self.start_edit_review(ctx, &pending.request, &js, &before);
+                            self.start_edit_review(
+                                ctx,
+                                &pending.request,
+                                &js,
+                                &before,
+                                &pending.timeline,
+                            );
                         }
                     }
                     Err(error) => {
@@ -2905,9 +2943,14 @@ mod tests {
             request.contains("never guess a source time"),
             "a check must not swap in unverified source ranges"
         );
+        assert_eq!(
+            request.matches("data:image/jpeg;base64,").count(),
+            2,
+            "a contact sheet and a source strip"
+        );
         assert!(
-            request.contains("data:image/jpeg;base64,"),
-            "no contact sheet"
+            request.contains("S1 = ready.mp4 (10.00s long;"),
+            "the strip legend names the placed source"
         );
         let introduced = request.split("introduced").nth(1).unwrap_or_default();
         assert!(introduced.contains("picture-gap"), "gap not reported");

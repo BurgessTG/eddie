@@ -277,6 +277,106 @@ pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> 
     findings
 }
 
+/// Pictures sampled per source in a check's source strip.
+pub(super) const STRIP_CELLS: usize = 16;
+/// At most this many sources get a strip, in program order.
+const STRIP_SOURCES: usize = 3;
+
+/// Pictures sampled through whole source files, so a check can see where
+/// a described shot actually is instead of guessing a source time.
+pub(super) struct SourceStrip {
+    pub(super) cells: Vec<SheetCell>,
+    /// One line per source: its tag (`S1`), path, length and what the edit
+    /// placed from it.
+    pub(super) legend: Vec<String>,
+}
+
+/// A strip for each source whose visible picture the edit placed or
+/// changed: `STRIP_CELLS` pictures at the middles of equal slices of the
+/// file, labelled `S1 12.3s`, with `*` on those inside a placed range.
+pub(super) fn source_strip(
+    before: &Timeline,
+    after: &Timeline,
+    assets: &[BinAsset],
+) -> SourceStrip {
+    let key = |clip: &openreel_engine::Clip| {
+        (
+            clip.source.clone(),
+            clip.source_in.to_bits(),
+            clip.duration.to_bits(),
+        )
+    };
+    let old: Vec<_> = before
+        .clips
+        .iter()
+        .filter(|clip| clip.kind == ClipKind::Video)
+        .map(key)
+        .collect();
+    let mut sources: Vec<(String, Vec<&openreel_engine::Clip>)> = Vec::new();
+    for segment in program_segments(after) {
+        let Some(clip) = segment.video.and_then(|id| after.clip(id)) else {
+            continue;
+        };
+        let Some(source) = clip.source.clone() else {
+            continue;
+        };
+        if old.contains(&key(clip)) {
+            continue;
+        }
+        if let Some((_, clips)) = sources.iter_mut().find(|(path, _)| *path == source) {
+            if !clips.iter().any(|c| c.id == clip.id) {
+                clips.push(clip);
+            }
+        } else if sources.len() < STRIP_SOURCES {
+            sources.push((source, vec![clip]));
+        }
+    }
+    let mut strip = SourceStrip {
+        cells: Vec::new(),
+        legend: Vec::new(),
+    };
+    for (index, (path, clips)) in sources.iter().enumerate() {
+        let Some(info) = assets
+            .iter()
+            .map(|asset| &asset.info)
+            .find(|info| info.path == *path && info.has_video && info.duration > 0.0)
+        else {
+            continue;
+        };
+        let tag = format!("S{}", index + 1);
+        let placed: Vec<String> = clips
+            .iter()
+            .map(|clip| {
+                format!(
+                    "clip {} shows {:.2}-{:.2}s",
+                    clip.id,
+                    clip.source_in,
+                    clip.source_in + clip.duration
+                )
+            })
+            .collect();
+        strip.legend.push(format!(
+            "{tag} = {path} ({:.2}s long; {})",
+            info.duration,
+            placed.join(", ")
+        ));
+        for cell in 0..STRIP_CELLS {
+            let time = (cell as f64 + 0.5) * info.duration / STRIP_CELLS as f64;
+            let time = (time * 10.0).round() / 10.0;
+            let inside = clips
+                .iter()
+                .any(|clip| clip.source_in <= time && time < clip.source_in + clip.duration);
+            strip.cells.push(SheetCell {
+                picture: Some((path.clone(), time)),
+                opacity: 1.0,
+                title: None,
+                label: format!("{tag} {time:.1}s{}", if inside { " *" } else { "" }),
+            });
+        }
+    }
+    strip
+}
+
 /// One cell per visible shot (sampled evenly beyond `SHEET_CELLS`), each
 /// at the middle of its stretch, labelled with its time and clip.
 pub(super) fn sheet_cells(timeline: &Timeline) -> Vec<SheetCell> {
@@ -504,6 +604,44 @@ mod tests {
         assert!(pops[0].message.contains("skips 2"), "{}", pops[0].message);
         assert!(pops[1].message.contains("repeats 1"), "{}", pops[1].message);
         let _ = e;
+    }
+
+    /// The strip covers sources whose visible picture the edit changed,
+    /// sampled through the whole file on its own clock, and marks the
+    /// samples inside the placed source range (not its program range).
+    #[test]
+    fn source_strip_samples_whole_sources_the_edit_placed() {
+        let mut before = Timeline::empty_project();
+        before.add_media_clip("A", ClipKind::Video, 0, 0.0, 2.0, 0.0, "a.mp4");
+        let mut after = before.clone();
+        let b = after.add_media_clip("B", ClipKind::Video, 0, 2.0, 2.0, 3.0, "b.mp4");
+        // Hidden under B on a higher lane, and sound only: neither is shown.
+        after.add_media_clip("H", ClipKind::Video, 1, 2.0, 2.0, 0.0, "c.mp4");
+        after.add_media_clip("M", ClipKind::Audio, 2, 0.0, 4.0, 0.0, "d.mp4");
+        let assets = ["a.mp4", "b.mp4", "c.mp4", "d.mp4"].map(|path| asset(path, 1920, 1080));
+        let strip = source_strip(&before, &after, &assets);
+        assert_eq!(
+            strip.legend,
+            vec![format!(
+                "S1 = b.mp4 (10.00s long; clip {b} shows 3.00-5.00s)"
+            )]
+        );
+        let labels: Vec<&str> = strip.cells.iter().map(|cell| cell.label.as_str()).collect();
+        assert_eq!(labels.len(), STRIP_CELLS);
+        assert_eq!(labels[0], "S1 0.3s");
+        assert_eq!(labels[STRIP_CELLS - 1], "S1 9.7s");
+        let marked: Vec<&str> = labels
+            .iter()
+            .copied()
+            .filter(|l| l.ends_with('*'))
+            .collect();
+        assert_eq!(marked, vec!["S1 3.4s *", "S1 4.1s *", "S1 4.7s *"]);
+        assert!(strip.cells.iter().all(|cell| cell
+            .picture
+            .as_ref()
+            .is_some_and(|(path, _)| path == "b.mp4")));
+        // An edit that changes no visible picture gets no strip.
+        assert!(source_strip(&after, &after, &assets).cells.is_empty());
     }
 
     #[test]

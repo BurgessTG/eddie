@@ -28,7 +28,7 @@ pub use export::{
 pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use playback::FrameStream;
 pub use samples::generate_samples;
-pub use sheet::{contact_sheet, SheetCell};
+pub use sheet::{contact_sheet, source_strip, SheetCell};
 pub use sweep::{
     analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,
     frame_visual_evidence, motion_samples, pcm_mono_16k, sam_unavailable_reason, write_wav_24k,

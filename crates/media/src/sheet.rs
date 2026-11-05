@@ -12,7 +12,6 @@ use openreel_engine::TitleStyle;
 use crate::export::{escape_drawtext, font_file};
 use crate::{scaled_height, title_look, MediaResult, VideoDecoder};
 
-const COLUMNS: usize = 4;
 /// Strip under each cell holding its label.
 const LABEL_H: usize = 26;
 const GUTTER: usize = 4;
@@ -32,14 +31,29 @@ pub struct SheetCell {
 /// A labelled JPEG grid of `cells` on the export `canvas` aspect, four
 /// columns wide. Undecodable pictures stay black; their label says so.
 pub fn contact_sheet(cells: &[SheetCell], canvas: (u32, u32)) -> MediaResult<Vec<u8>> {
+    let portrait = canvas.1 > canvas.0;
+    render(cells, canvas, if portrait { 216 } else { 384 }, 4)
+}
+
+/// Like [`contact_sheet`] at half the cell width and eight columns: many
+/// small pictures sampled through source files, for finding a shot.
+pub fn source_strip(cells: &[SheetCell], canvas: (u32, u32)) -> MediaResult<Vec<u8>> {
+    let portrait = canvas.1 > canvas.0;
+    render(cells, canvas, if portrait { 108 } else { 192 }, 8)
+}
+
+fn render(
+    cells: &[SheetCell],
+    canvas: (u32, u32),
+    cell_w: usize,
+    per_row: usize,
+) -> MediaResult<Vec<u8>> {
     if cells.is_empty() {
         return Err("no cells".to_owned());
     }
-    let portrait = canvas.1 > canvas.0;
-    let cell_w: usize = if portrait { 216 } else { 384 };
     let cell_h = scaled_height(canvas.0, canvas.1, cell_w as u32) as usize;
-    let columns = cells.len().min(COLUMNS);
-    let rows = cells.len().div_ceil(COLUMNS);
+    let columns = cells.len().min(per_row);
+    let rows = cells.len().div_ceil(per_row);
     let width = columns * cell_w + (columns + 1) * GUTTER;
     let height = rows * (cell_h + LABEL_H) + (rows + 1) * GUTTER;
     let mut sheet = vec![0_u8; width * height * 4];
@@ -47,7 +61,7 @@ pub fn contact_sheet(cells: &[SheetCell], canvas: (u32, u32)) -> MediaResult<Vec
         pixel.copy_from_slice(&[38, 38, 42, 255]);
     }
     let origin = |index: usize| {
-        let (column, row) = (index % COLUMNS, index / COLUMNS);
+        let (column, row) = (index % per_row, index / per_row);
         (
             GUTTER + column * (cell_w + GUTTER),
             GUTTER + row * (cell_h + LABEL_H + GUTTER),

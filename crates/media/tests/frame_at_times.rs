@@ -523,6 +523,47 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
     assert!(caption > 20, "no caption box drawn ({caption} dark pixels)");
 }
 
+/// A source strip is the same grid at 192 px, eight to a row, so many
+/// samples of a source fit one image; each cell shows its own time.
+#[test]
+fn source_strip_shows_each_sampled_time_in_eight_columns() {
+    use openreel_media::{source_strip, SheetCell};
+    let fixture = make_color_segments_video();
+    let path = fixture.path.to_str().unwrap().to_owned();
+    let order = [3.5, 0.5, 2.5, 1.5, 0.5, 1.5, 2.5, 3.5, 2.5];
+    let cells: Vec<SheetCell> = order
+        .iter()
+        .map(|&time| SheetCell {
+            picture: Some((path.clone(), time)),
+            opacity: 1.0,
+            title: None,
+            label: format!("S1 {time:.1}s"),
+        })
+        .collect();
+    let jpeg = source_strip(&cells, (1920, 1080)).expect("source strip");
+    let strip = fixture.dir.join("strip.jpg");
+    std::fs::write(&strip, &jpeg).unwrap();
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&strip)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .expect("decode strip");
+    let (width, cell_w, cell_h) = (8 * 192 + 9 * 4, 192, 108);
+    assert_eq!(out.stdout.len(), width * (2 * (cell_h + 26) + 3 * 4) * 3);
+    for (index, time) in order.iter().enumerate() {
+        let x = 4 + (index % 8) * (cell_w + 4) + cell_w / 2;
+        let y = 4 + (index / 8) * (cell_h + 26 + 4) + cell_h / 3;
+        let i = (y * width + x) * 3;
+        let rgb = (
+            out.stdout[i] as f64,
+            out.stdout[i + 1] as f64,
+            out.stdout[i + 2] as f64,
+        );
+        assert_color(rgb, *time as usize, &format!("cell {index} at {time}s"));
+    }
+}
+
 /// Scrubbing reuses one decoder: forward steps decode on, backward steps
 /// read recent pictures, other moves seek, and the width can change between
 /// requests. Every answer must equal a fresh seek-and-decode of that time.
