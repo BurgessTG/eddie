@@ -1257,7 +1257,10 @@ impl EditorApp {
         if self.waiting_for_video() {
             // Preroll can exceed a short excerpt. The clock limit holds the
             // shared transport and its audio until the first picture.
-            self.status = "Buffering video.".to_owned();
+            // A hardware failure during buffering keeps its notice visible.
+            if !self.status.starts_with("Hardware decode failed") {
+                self.status = "Buffering video.".to_owned();
+            }
             // A held clock is not a seek, even if the next UI tick is late.
             self.last_sync_time = 0.0;
             return;
