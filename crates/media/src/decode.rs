@@ -38,41 +38,97 @@ fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
     if std::env::var("EDDIE_HWDEC").as_deref() != Ok("vaapi") {
         return false;
     }
-    let mut device = std::ptr::null_mut();
-    let node = c"/dev/dri/renderD128";
-    // SAFETY: creates a device owned by this decoder (handed to the context).
-    let result = unsafe {
-        ffmpeg::ffi::av_hwdevice_ctx_create(
-            &mut device,
-            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-            node.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if result < 0 {
+    // One device serves every decoder: creating one costs about 250 ms.
+    struct Device(*mut ffmpeg::ffi::AVBufferRef);
+    // SAFETY: the reference is created once, never freed, and only passed to
+    // av_buffer_ref, which is thread-safe.
+    unsafe impl Send for Device {}
+    unsafe impl Sync for Device {}
+    static DEVICE: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
+    let device = DEVICE.get_or_init(|| {
+        let mut device = std::ptr::null_mut();
+        // SAFETY: on failure the pointer stays null.
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                c"/dev/dri/renderD128".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        Device(if result < 0 {
+            std::ptr::null_mut()
+        } else {
+            device
+        })
+    });
+    if device.0.is_null() {
         return false;
     }
     // SAFETY: the codec context is not open yet; it takes its own reference.
     unsafe {
         let raw = context.as_mut_ptr();
-        (*raw).hw_device_ctx = device;
+        (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device.0);
         // Recent pictures, the lookahead and the current one hold surfaces.
         (*raw).extra_hw_frames = RECENT_PICTURES as i32 + 4;
     }
     true
 }
 
-/// Copy a VAAPI surface into `into` (NV12 or P010) with its timing and colour.
+#[link(name = "va")]
+extern "C" {
+    fn vaSyncSurface(display: *mut std::ffi::c_void, surface: u32) -> i32;
+}
+
+/// Wait until a decoded VAAPI surface is complete, as it leaves the decoder.
+/// nvidia-vaapi-driver (0.0.18) queues every finished picture on a 16-slot
+/// ring with no overflow check; pictures decoded ahead and never synced (seek
+/// preroll, frame threads) lap it, and a lost picture never completes, so a
+/// later sync on it waits forever. Syncing here keeps the ring drained.
+fn sync_surface(picture: &ffmpeg::frame::Video) -> MediaResult<()> {
+    if picture.format() != ffmpeg::format::Pixel::VAAPI {
+        return Ok(());
+    }
+    // SAFETY: a VAAPI frame carries its surface ID in data[3] and a frames
+    // context whose device context is an AVVAAPIDeviceContext.
+    let status = unsafe {
+        let frame = picture.as_ptr();
+        let frames = (*(*frame).hw_frames_ctx).data as *const ffmpeg::ffi::AVHWFramesContext;
+        let device = (*(*frames).device_ctx).hwctx as *const ffmpeg::ffi::AVVAAPIDeviceContext;
+        vaSyncSurface(
+            (*device).display as *mut _,
+            (*frame).data[3] as usize as u32,
+        )
+    };
+    if status != 0 {
+        return Err(format!("sync surface: VA status {status}"));
+    }
+    Ok(())
+}
+
+/// Copy a VAAPI surface into `into` (NV12 or P010) with its timing and
+/// colour. `into` keeps its buffers between pictures of the same size: a
+/// fresh 4K allocation per picture cost page faults on every frame.
 fn download(picture: &ffmpeg::frame::Video, into: &mut ffmpeg::frame::Video) -> MediaResult<()> {
-    // SAFETY: both frames are owned; transfer allocates `into`'s buffers.
+    // SAFETY: both frames are owned and `into` is never shared, so its
+    // buffers are writable; transfer allocates them when it has none.
     unsafe {
-        ffmpeg::ffi::av_frame_unref(into.as_mut_ptr());
-        let result = ffmpeg::ffi::av_hwframe_transfer_data(into.as_mut_ptr(), picture.as_ptr(), 0);
+        let (src, dst) = (picture.as_ptr(), into.as_mut_ptr());
+        if (*dst).buf[0].is_null() || ((*dst).width, (*dst).height) != ((*src).width, (*src).height)
+        {
+            ffmpeg::ffi::av_frame_unref(dst);
+        }
+        let result = ffmpeg::ffi::av_hwframe_transfer_data(dst, src, 0);
         if result < 0 {
             return Err(err("download surface", ffmpeg::Error::from(result)));
         }
-        ffmpeg::ffi::av_frame_copy_props(into.as_mut_ptr(), picture.as_ptr());
+        (*dst).pts = (*src).pts;
+        (*dst).color_range = (*src).color_range;
+        (*dst).colorspace = (*src).colorspace;
+        (*dst).color_primaries = (*src).color_primaries;
+        (*dst).color_trc = (*src).color_trc;
+        (*dst).chroma_location = (*src).chroma_location;
     }
     Ok(())
 }
@@ -175,8 +231,11 @@ impl VideoDecoder {
             kind: threading,
             count: 0, // libavcodec chooses based on CPU cores.
         });
-        if attach_vaapi(&mut context) && std::env::var("EDDIE_HWDEC_THREADS").as_deref() == Ok("1")
-        {
+        if attach_vaapi(&mut context) {
+            // The GPU decodes; threads only parse ahead. Each frame thread can
+            // finish a picture before any is synced, which overflows the
+            // driver's ring (see `sync_surface`); 4K HEVC also ran no faster
+            // with 2 threads and slower with 4.
             context.set_threading(ffmpeg::codec::threading::Config {
                 kind: threading,
                 count: 1,
@@ -301,7 +360,10 @@ impl VideoDecoder {
     fn receive_decoded(&mut self) -> MediaResult<Option<f64>> {
         loop {
             match self.decoder.receive_frame(&mut self.decoded) {
-                Ok(()) => return Ok(Some(self.frame_seconds(&self.decoded))),
+                Ok(()) => {
+                    sync_surface(&self.decoded)?;
+                    return Ok(Some(self.frame_seconds(&self.decoded)));
+                }
                 Err(ffmpeg::Error::Eof) => {
                     self.drained = true;
                     return Ok(None);
@@ -430,6 +492,39 @@ impl VideoDecoder {
             }
         }
         self.frame_at(time)
+    }
+
+    /// Presentation time of the picture after the current one, decoding it
+    /// without scaling (or downloading it from the GPU). None at EOF.
+    pub(crate) fn peek_next(&mut self) -> MediaResult<Option<f64>> {
+        if self.lookahead_pts.is_none() && !self.drained {
+            // Decode into the lookahead slot; the current picture stays put.
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            let next = self.receive_decoded();
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            self.lookahead_pts = next?;
+        }
+        Ok(self.lookahead_pts)
+    }
+
+    /// Make the latest picture at or before `target` current, passing over
+    /// earlier ones unscaled. Stays on the current picture when the next one
+    /// starts after `target`. Returns the current picture's time.
+    pub(crate) fn advance_to(&mut self, target: f64) -> MediaResult<Option<f64>> {
+        while let Some(next) = self.peek_next()?.filter(|next| *next <= target) {
+            if let Some(pts) = self.decoded_pts.take() {
+                self.remember(pts, false);
+            }
+            std::mem::swap(&mut self.decoded, &mut self.lookahead);
+            self.lookahead_pts = None;
+            self.decoded_pts = Some(next);
+        }
+        Ok(self.decoded_pts)
+    }
+
+    /// Scale the current picture.
+    pub(crate) fn scale_current(&mut self, buffer: Vec<u8>) -> MediaResult<RawFrame> {
+        self.scale_into(None, buffer)
     }
 
     fn scale_decoded_into(&mut self, buffer: Vec<u8>) -> MediaResult<RawFrame> {

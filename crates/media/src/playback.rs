@@ -61,7 +61,9 @@ impl FrameStream {
             };
             let (out_w, out_h) = decoder.output_size();
             let frame_bytes = (out_w * out_h * 4) as usize;
-            let started = Instant::now();
+            // The clock starts at the first picture, so a slow first decode
+            // (a hardware context, a 4K keyframe) does not rush later frames.
+            let mut started: Option<Instant> = None;
             let mut next_due_pts = f64::NEG_INFINITY;
             let mut spare: Option<Vec<u8>> = None;
             'stream: loop {
@@ -91,6 +93,7 @@ impl FrameStream {
                 // VFR interval. Present it now, then wait only the remaining
                 // interval, not the whole duration from that frame's PTS.
                 let due = Duration::from_secs_f64((pts - start).max(0.0));
+                let started = *started.get_or_insert_with(Instant::now);
                 loop {
                     let elapsed = started.elapsed();
                     if elapsed + Duration::from_millis(2) >= due {
@@ -717,15 +720,7 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                     } = &mut lane;
                     let decoder = &mut decoder.as_mut().unwrap().1;
                     preview_decode(
-                        &mut |buffer| decoder.try_next_frame(buffer),
-                        mailbox,
-                        &request,
-                        start,
-                        first,
-                        held,
-                        pending,
-                        pool,
-                        wake,
+                        decoder, mailbox, &request, start, first, held, pending, pool, wake,
                     )
                 })();
                 if let Some(held) = &lane.held {
@@ -754,11 +749,14 @@ impl PreviewMailbox {
 }
 
 /// Show `first` (the picture covering `start`), then follow the caller's
-/// clock. On cancellation, undelivered pictures are left in `held`/`pending`
-/// with the decoder positioned after them, so the lane can continue forward.
+/// clock. Only published pictures are scaled: pictures passed over while
+/// catching up stay decoded (on the GPU with hardware decode), so they cost
+/// no download or swscale. On cancellation, the next undelivered picture is
+/// left in `held` (and `pending`) with the decoder positioned after it, so
+/// the lane can continue forward.
 #[allow(clippy::too_many_arguments)]
 fn preview_decode(
-    next_frame: &mut impl FnMut(Vec<u8>) -> MediaResult<Option<Picture>>,
+    decoder: &mut VideoDecoder,
     mailbox: &PreviewMailbox,
     request: &PreviewRequest,
     start: f64,
@@ -769,9 +767,20 @@ fn preview_decode(
     wake: &dyn Fn(),
 ) -> MediaResult<()> {
     let generation = request.generation;
-    let mut pull = |pending: &mut Option<Picture>| match pending.take() {
-        Some(picture) => Ok(Some(picture)),
-        None => next_frame(pool.get()),
+    // `pending`, when present, is the decoder's current picture, already
+    // scaled. Otherwise the current picture was published and the next one
+    // is unscaled; scale it so a later request can continue from it.
+    let park = |decoder: &mut VideoDecoder,
+                held: &mut Option<Picture>,
+                pending: &mut Option<Picture>|
+     -> MediaResult<()> {
+        if let Some(picture) = pending.take() {
+            *held = Some(picture);
+        } else if let Some(next) = decoder.peek_next()? {
+            decoder.advance_to(next)?;
+            *held = Some((next, decoder.scale_current(pool.get())?));
+        }
+        Ok(())
     };
     // Native seeking clamps before the first source picture and at EOF, and
     // the first picture covers `start`, so it is shown without decoding on.
@@ -784,58 +793,52 @@ fn preview_decode(
     }
     loop {
         // A picture is published. Wait until the next one is due.
-        let Some((next_pts, next_frame)) = pull(pending)? else {
+        let next_pts = match pending.as_ref() {
+            Some((pts, _)) => *pts,
             // The final delayed frame remains available at EOF. A new request
             // can reuse this decoder, including seeking backwards after EOF.
-            return Ok(());
+            None => match decoder.peek_next()? {
+                Some(pts) => pts,
+                None => return Ok(()),
+            },
         };
         // Cap on stable clock ticks, not "one whole frame after now".
         // A seek just before a boundary must not delay the boundary picture
         // by an extra frame, particularly inside a long VFR interval.
         let Some(now) = mailbox.time(generation) else {
-            *held = Some((next_pts, next_frame));
-            return Ok(());
+            return park(decoder, held, pending);
         };
         let next_tick = if request.frame_interval > 0.0 {
             ((now / request.frame_interval + 1e-9).floor() + 1.0) * request.frame_interval
         } else {
             now
         };
-        let Some(target_time) = mailbox.wait_until(generation, next_pts.max(next_tick)) else {
-            *held = Some((next_pts, next_frame));
-            return Ok(());
-        };
         // Finish each captured target before following a newer clock update.
         // Chasing state.time after every decode can outrun the worker forever,
         // discarding even the first usable picture of a short clip.
-        let (mut pts, mut frame) = (next_pts, next_frame);
-        loop {
-            if mailbox.time(generation).is_none() {
-                *held = Some((pts, frame));
-                return Ok(());
-            }
-            let next = pull(pending)?;
-            match next {
-                Some(later) if later.0 <= target_time => {
-                    // Coalesce intermediate pictures within this catch-up
-                    // batch, not against a target that moves during decoding.
-                    pool.put(std::mem::replace(&mut frame, later.1).rgba);
-                    pts = later.0;
+        let Some(target_time) = mailbox.wait_until(generation, next_pts.max(next_tick)) else {
+            return park(decoder, held, pending);
+        };
+        if mailbox.time(generation).is_none() {
+            return park(decoder, held, pending);
+        }
+        // Coalesce intermediate pictures within this catch-up batch, not
+        // against a target that moves during decoding.
+        let pts = decoder
+            .advance_to(target_time)?
+            .ok_or("no video frame to show")?;
+        let picture = match pending.take() {
+            Some(picture) if picture.0 == pts => picture,
+            passed => {
+                if let Some((_, frame)) = passed {
+                    pool.put(frame.rgba);
                 }
-                later => {
-                    let at_eof = later.is_none();
-                    if let Err(picture) = mailbox.publish(generation, (pts, frame), pool, wake) {
-                        *held = Some(picture);
-                        *pending = later;
-                        return Ok(());
-                    }
-                    if at_eof {
-                        return Ok(());
-                    }
-                    *pending = later;
-                    break;
-                }
+                (pts, decoder.scale_current(pool.get())?)
             }
+        };
+        if let Err(picture) = mailbox.publish(generation, picture, pool, wake) {
+            *held = Some(picture);
+            return Ok(());
         }
     }
 }
