@@ -102,6 +102,8 @@ pub struct EditorApp {
     /// User-selected add policy: ranges from baked-in music beds
     /// start silent when true, keep their score when false.
     mute_music_beds: bool,
+    /// Speech regions handed to ducked voices, reused while unchanged.
+    duck_regions: Arc<[(f64, f64)]>,
     curator: CuratorGallery,
     caption_style: TitleStyle,
     search: String,
@@ -219,6 +221,7 @@ impl EditorApp {
             assets: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
+            duck_regions: Vec::new().into(),
             curator: CuratorGallery::default(),
             caption_style: TitleStyle::Caption,
             search: String::new(),
@@ -309,6 +312,7 @@ impl EditorApp {
             assets: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
+            duck_regions: Vec::new().into(),
             curator: CuratorGallery::default(),
             caption_style: TitleStyle::Caption,
             search: String::new(),
@@ -1151,6 +1155,31 @@ impl EditorApp {
             .is_some_and(|audio| !audio.voice_ids().is_empty())
     }
 
+    /// Where someone speaks on the timeline, merged into duck regions: the
+    /// transcript turns of every audible clip that is not itself ducked,
+    /// placed through its source range. Sparse ambience turns are not speech.
+    fn speech_regions(&self) -> Vec<(f64, f64)> {
+        let mut speech = Vec::new();
+        for clip in &self.timeline.clips {
+            let audible = clip.kind == ClipKind::Audio
+                || (clip.kind == ClipKind::Video && clip.embedded_audio);
+            if !audible || clip.duck || clip.volume <= 0.0 {
+                continue;
+            }
+            let Some(asset) = clip.source.as_deref().and_then(|source| self.asset(source)) else {
+                continue;
+            };
+            let (from, to) = (clip.source_in, clip.source_in + clip.duration);
+            for turn in &asset.sweep.transcript {
+                let (start, end) = (turn.start.max(from), turn.end.min(to));
+                if end > start && !turn.is_ambient() {
+                    speech.push((clip.start + start - from, clip.start + end - from));
+                }
+            }
+        }
+        openreel_engine::duck_regions(speech)
+    }
+
     /// Give the mixer every audible clip under the playhead or starting
     /// within the look-ahead, so it starts decoding before their edges.
     fn sync_audio(&mut self) {
@@ -1179,11 +1208,27 @@ impl EditorApp {
                             volume: c.volume,
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
+                            duck: Vec::new().into(),
                         },
                     )
                 })
             })
             .collect();
+        let mut segments = segments;
+        if segments
+            .iter()
+            .any(|(id, _)| self.timeline.clip(*id).is_some_and(|clip| clip.duck))
+        {
+            let regions = self.speech_regions();
+            if *self.duck_regions != *regions {
+                self.duck_regions = regions.into();
+            }
+            for (id, segment) in &mut segments {
+                if self.timeline.clip(*id).is_some_and(|clip| clip.duck) {
+                    segment.duck = Arc::clone(&self.duck_regions);
+                }
+            }
+        }
         let audio = self.audio_engine();
         audio.set_voices(&segments);
         if let Some(error) = audio.take_error() {
@@ -1234,6 +1279,7 @@ impl EditorApp {
             return;
         }
         let timeline = self.timeline.clone();
+        let duck = self.speech_regions();
         let infos: HashMap<String, MediaInfo> = self
             .assets
             .iter()
@@ -1253,8 +1299,14 @@ impl EditorApp {
                     ctx_progress.request_repaint();
                 }
             });
-            let result =
-                openreel_media::export_timeline(&timeline, &infos, &output, true, progress_tx);
+            let result = openreel_media::export_timeline(
+                &timeline,
+                &infos,
+                &duck,
+                &output,
+                true,
+                progress_tx,
+            );
             let _ = forwarder.join();
             let _ = tx.send(ExportMsg::Done(result));
             ctx.request_repaint();
@@ -1385,6 +1437,7 @@ impl EditorApp {
                     "volume": c.volume,
                     "fadeIn": c.fade_in,
                     "fadeOut": c.fade_out,
+                    "duck": c.duck,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
@@ -1633,6 +1686,11 @@ impl EditorApp {
             ScriptCommand::SetVolume { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.volume = value.clamp(0.0, 2.0);
+                }
+            }
+            ScriptCommand::SetDuck { clip, on } => {
+                if !self.timeline.set_duck(clip, on) {
+                    return Err(format!("clip {clip} has no sound to duck"));
                 }
             }
             ScriptCommand::SetFade {
@@ -2588,6 +2646,12 @@ impl EditorApp {
                 if video_audio && !linked {
                     ui.checkbox(&mut clip.embedded_audio, "Embedded audio")
                         .on_hover_text("Play this video clip's own sound");
+                }
+                if source_has_audio && kind != ClipKind::Title {
+                    ui.checkbox(&mut clip.duck, "Duck under speech")
+                        .on_hover_text(
+                            "Lower this sound by 12 dB while someone speaks on another clip",
+                        );
                 }
                 if let Some(partner) = &linked_snapshot {
                     ui.add(
@@ -5662,6 +5726,97 @@ mod tests {
         assert_eq!(app.timeline.clip(overlap).unwrap().track, 1);
         assert_eq!(app.timeline.clip(explicit).unwrap().track, 0);
         assert!((app.timeline.clip(clamped).unwrap().duration - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ducked_music_dips_under_placed_speech_from_other_clips() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let turn = |start: f64, end: f64, text: &str| sweep::TranscriptSegment {
+            start,
+            end,
+            speaker: None,
+            text: text.to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        let asset = |path: &str, has_video: bool, transcript| media::BinAsset {
+            info: MediaInfo {
+                path: path.to_owned(),
+                name: path.to_owned(),
+                duration: 60.0,
+                width: if has_video { 1280 } else { 0 },
+                height: if has_video { 720 } else { 0 },
+                fps: 30.0,
+                has_video,
+                has_audio: true,
+            },
+            size_bytes: 0,
+            state: media::AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: sweep::SweepData {
+                transcript,
+                ..Default::default()
+            },
+        };
+        app.assets.push(asset(
+            "talk.mp4",
+            true,
+            vec![
+                turn(10.0, 12.0, "Hello there, welcome back."),
+                // Clipped by the placed range's end at source 14 s.
+                turn(13.0, 14.5, "So today we start."),
+                // Crowd ambience: not speech.
+                turn(20.0, 30.0, "LT"),
+            ],
+        ));
+        app.assets.push(asset(
+            "song.wav",
+            false,
+            vec![turn(0.0, 3.0, "la la la la la la")],
+        ));
+        let talk =
+            app.timeline
+                .add_media_clip("talk", ClipKind::Video, 0, 5.0, 5.0, 9.0, "talk.mp4");
+        app.timeline
+            .add_media_clip("crowd", ClipKind::Video, 0, 20.0, 10.0, 20.0, "talk.mp4");
+        let song =
+            app.timeline
+                .add_media_clip("song", ClipKind::Audio, 1, 0.0, 30.0, 0.0, "song.wav");
+        let notes = app.apply_script_commands(
+            &ctx,
+            vec![
+                ScriptCommand::SetDuck {
+                    clip: song,
+                    on: true,
+                },
+                ScriptCommand::SetDuck {
+                    clip: 999,
+                    on: true,
+                },
+            ],
+        );
+        assert!(app.timeline.clip(song).unwrap().duck);
+        assert_eq!(notes.len(), 1, "unknown clip reported: {notes:?}");
+        // Source 10-12 and 13-14 land at timeline 6-8 and 9-10; one second
+        // apart, they stay down as one region. The ducked song's own
+        // lyrics and the ambience turn are not speech.
+        assert_eq!(app.speech_regions(), vec![(6.0, 10.0)]);
+        // A silenced talker does not duck the music either.
+        app.timeline.clip_mut(talk).unwrap().embedded_audio = false;
+        assert!(app.speech_regions().is_empty());
+        // Adding music ducks by default; a voiceover (no beat) does not.
+        app.assets[1].beats = Some(openreel_media::BeatGrid {
+            bpm: 120.0,
+            beats: vec![0.0, 0.5],
+        });
+        app.add_asset_range_to_timeline("song.wav", "music", None, 30.0, 0.0, 5.0);
+        assert!(app.timeline.clips.last().unwrap().duck, "music ducks");
+        app.assets[1].beats = None;
+        app.add_asset_range_to_timeline("song.wav", "voiceover", None, 40.0, 0.0, 5.0);
+        assert!(!app.timeline.clips.last().unwrap().duck, "voice does not");
     }
 
     #[test]

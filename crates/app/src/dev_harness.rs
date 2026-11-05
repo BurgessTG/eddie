@@ -821,6 +821,11 @@ impl HeadlessEditor {
                         c.volume = value.clamp(0.0, 2.0);
                     }
                 }
+                ScriptCommand::SetDuck { clip, on } => {
+                    if !self.timeline.set_duck(clip, on) {
+                        notes.push(format!("error: clip {clip} has no sound to duck"));
+                    }
+                }
                 ScriptCommand::SetFade {
                     clip,
                     fade_in,

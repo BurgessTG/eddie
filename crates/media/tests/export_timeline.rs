@@ -86,6 +86,16 @@ impl Fixture {
     }
 
     fn export_with(&self, name: &str, timeline: &Timeline, normalize: bool) -> PathBuf {
+        self.export_ducked(name, timeline, normalize, &[])
+    }
+
+    fn export_ducked(
+        &self,
+        name: &str,
+        timeline: &Timeline,
+        normalize: bool,
+        duck: &[(f64, f64)],
+    ) -> PathBuf {
         let mut infos = HashMap::new();
         for path in timeline
             .clips
@@ -98,7 +108,8 @@ impl Fixture {
         }
         let path = self.0.join(name);
         let (tx, rx) = channel();
-        export_timeline(timeline, &infos, &path, normalize, tx).expect("public export_timeline");
+        export_timeline(timeline, &infos, duck, &path, normalize, tx)
+            .expect("public export_timeline");
         let progress: Vec<_> = rx.try_iter().collect();
         assert_eq!(progress.last(), Some(&1.0));
         path
@@ -1113,7 +1124,7 @@ fn encoder_failure_is_reported_without_success_progress() {
     let infos = [(source.clone(), probe(&source).unwrap())].into();
     let (tx, rx) = channel();
     let output = fixture.0.join("missing-directory/export.mp4");
-    let error = export_timeline(&timeline, &infos, &output, false, tx).unwrap_err();
+    let error = export_timeline(&timeline, &infos, &[], &output, false, tx).unwrap_err();
     eprintln!("expected encoder failure: {error}");
     assert!(error.starts_with("export failed:"));
     assert!(!output.exists());
@@ -1339,5 +1350,63 @@ fn segment_seams_keep_timestamps_and_titles_on_the_timeline_clock() {
     assert!(
         quietest > 0.02,
         "audio is continuous at the seam: {quietest}"
+    );
+}
+
+#[test]
+fn ducked_music_dips_under_speech_with_the_preview_curve() {
+    // A 440 Hz bed from 1 s ducked under timeline speech at 2-2.5 s, so the
+    // curve must follow the timeline, not the clip's own clock: full level before the
+    // attack, -12 dB from the speech start through the hold, back to full
+    // after the release; an unducked copy of the same bed never moves.
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "bed.mp4",
+        "color=c=black:s=64x36:r=30:d=5",
+        "null",
+        Some(440),
+    );
+    let mut timeline = Timeline::new(30.0);
+    let bed = timeline.add_media_clip("bed", ClipKind::Audio, 1, 1.0, 4.0, 0.0, &source);
+    let picture = video(&mut timeline, &source, 0, 0.0, 5.0, 0.0);
+    timeline.clip_mut(picture).unwrap().embedded_audio = false;
+    let regions = openreel_engine::duck_regions(vec![(2.0, 2.5)]);
+    let plain = fixture.export_ducked("bed-plain.mp4", &timeline, false, &regions);
+    timeline.clip_mut(bed).unwrap().duck = true;
+    let ducked = fixture.export_ducked("bed-ducked.mp4", &timeline, false, &regions);
+
+    let level = |path: &Path, from: f64, to: f64| tone_window(path, 440.0, from, to);
+    let full = level(&plain, 1.1, 1.7);
+    assert!(full > 0.05, "bed is audible: {full}");
+    for (from, to) in [(1.1, 1.7), (2.0, 2.8), (3.65, 3.95)] {
+        let unchanged = level(&plain, from, to) / full;
+        assert!(
+            (unchanged - 1.0).abs() < 0.05,
+            "unducked {from}-{to}: {unchanged}"
+        );
+    }
+    let before = level(&ducked, 1.1, 1.7) / full;
+    let under = level(&ducked, 2.0, 2.8) / full;
+    let after = level(&ducked, 3.65, 3.95) / full;
+    let depth = 10f64.powf(openreel_engine::DUCK_DEPTH_DB / 20.0);
+    eprintln!("ducked bed: before {before}, under {under} (want {depth}), after {after}");
+    assert!(
+        (before - 1.0).abs() < 0.05,
+        "full before the attack: {before}"
+    );
+    assert!(
+        (under - depth).abs() < 0.03,
+        "-12 dB under speech and hold: {under}"
+    );
+    assert!(
+        (after - 1.0).abs() < 0.05,
+        "back after the release: {after}"
+    );
+    // Mid-attack (half way down in dB) sits between the two levels.
+    let attack = level(&ducked, 1.89, 1.91) / full;
+    let half = 10f64.powf(openreel_engine::DUCK_DEPTH_DB / 40.0);
+    assert!(
+        (attack - half).abs() < 0.06,
+        "raised-cosine attack: {attack} vs {half}"
     );
 }

@@ -401,6 +401,11 @@ impl EditorApp {
         let bed_overlap = asset.sweep.music_bed_overlap(source_in, range_end);
         let starts_muted =
             self.mute_music_beds && has_video && duration > 0.0 && bed_overlap >= duration * 0.5;
+        // Audio-only music ducks under speech by default. A steady beat or a
+        // curator music-bed flag marks it as music; a voiceover has neither
+        // and must stay unducked, or it would stop counting as speech.
+        let ducks = !has_video
+            && (asset.beats.is_some() || (duration > 0.0 && bed_overlap >= duration * 0.5));
         let source_in = source_in.clamp(0.0, source_duration.max(0.0));
         let duration = duration.min((source_duration - source_in).max(0.0));
         if duration <= 0.0 {
@@ -435,10 +440,11 @@ impl EditorApp {
             source_in,
             path,
         );
-        if starts_muted {
-            if let Some(clip) = self.timeline.clip_mut(id) {
+        if let Some(clip) = self.timeline.clip_mut(id) {
+            if starts_muted {
                 clip.volume = 0.0;
             }
+            clip.duck = ducks;
         }
         self.selected = Some(id);
         self.status = format!(

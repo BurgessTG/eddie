@@ -86,6 +86,10 @@ pub struct Clip {
     /// split together until explicitly unlinked.
     pub linked_clip: Option<ClipId>,
     pub title_style: TitleStyle,
+    /// Music that dips under speech on other clips (see [`duck_gain`]).
+    /// Projects saved before ducking load with it off.
+    #[serde(default)]
+    pub duck: bool,
 }
 
 impl Clip {
@@ -101,6 +105,62 @@ impl Clip {
     /// together they exceed it, both scale down to meet.
     pub fn fade_lengths(&self) -> (f64, f64) {
         fit_fades(self.duration, self.fade_in, self.fade_out)
+    }
+}
+
+/// How far ducked music dips under speech, and how it moves. The preview
+/// mixer and export share these, so what plays is what exports.
+pub const DUCK_DEPTH_DB: f64 = -12.0;
+/// Seconds before speech over which the music goes down.
+pub const DUCK_ATTACK: f64 = 0.2;
+/// Seconds the music stays down after speech ends.
+pub const DUCK_HOLD: f64 = 0.3;
+/// Seconds over which it comes back.
+pub const DUCK_RELEASE: f64 = 0.8;
+
+/// Timeline speech ranges merged into duck regions. Speech closer than a full
+/// dip and recovery stays down as one region, so music does not pump between
+/// phrases and no two ramps overlap.
+pub fn duck_regions(mut speech: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    speech.retain(|&(start, end)| start.is_finite() && end.is_finite() && end > start);
+    speech.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut regions: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in speech {
+        match regions.last_mut() {
+            Some(last) if start - last.1 < DUCK_ATTACK + DUCK_HOLD + DUCK_RELEASE => {
+                last.1 = last.1.max(end);
+            }
+            _ => regions.push((start, end)),
+        }
+    }
+    regions
+}
+
+/// How far down ducked music is at `time`, from 0 (unity) to 1 (the full
+/// depth), with raised-cosine ramps. `regions` come from [`duck_regions`].
+pub fn duck_amount(regions: &[(f64, f64)], time: f64) -> f64 {
+    let index = regions.partition_point(|&(_, end)| end + DUCK_HOLD + DUCK_RELEASE <= time);
+    let Some(&(start, end)) = regions.get(index) else {
+        return 0.0;
+    };
+    let ease = |x: f64| (1.0 - (x.clamp(0.0, 1.0) * std::f64::consts::PI).cos()) * 0.5;
+    let down = start - DUCK_ATTACK;
+    if time < down {
+        0.0
+    } else if time < start {
+        ease((time - down) / DUCK_ATTACK)
+    } else if time < end + DUCK_HOLD {
+        1.0
+    } else {
+        1.0 - ease((time - end - DUCK_HOLD) / DUCK_RELEASE)
+    }
+}
+
+/// The linear gain on ducked music at `time`.
+pub fn duck_gain(regions: &[(f64, f64)], time: f64) -> f32 {
+    match duck_amount(regions, time) {
+        0.0 => 1.0,
+        amount => 10f64.powf(DUCK_DEPTH_DB * amount / 20.0) as f32,
     }
 }
 
@@ -325,6 +385,7 @@ impl Timeline {
             fade_out: 0.0,
             linked_clip: None,
             title_style: TitleStyle::default(),
+            duck: false,
         });
         id
     }
@@ -442,6 +503,17 @@ impl Timeline {
     /// Enable or disable a video clip's own embedded sound. It
     /// cannot be re-enabled while a detached partner exists, which
     /// would otherwise play the same source audio twice.
+    /// Whether a sound clip dips under speech. Titles have no sound.
+    pub fn set_duck(&mut self, id: ClipId, on: bool) -> bool {
+        match self.clip_mut(id) {
+            Some(clip) if clip.source.is_some() => {
+                clip.duck = on;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn set_embedded_audio(&mut self, id: ClipId, enabled: bool) -> bool {
         let Some(clip) = self.clip(id).cloned() else {
             return false;

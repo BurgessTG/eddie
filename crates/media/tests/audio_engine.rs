@@ -41,6 +41,7 @@ fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) 
         volume,
         fade_in: 0.0,
         fade_out: 0.0,
+        duck: Vec::new().into(),
     }
 }
 
@@ -232,4 +233,35 @@ fn null_output_paces_the_clock_in_real_time() {
         (advanced - elapsed).abs() < 0.08,
         "advanced {advanced} in {elapsed}"
     );
+}
+
+#[test]
+fn ducked_voice_follows_the_shared_curve_and_updates_live() {
+    // Same curve as export: full level, -12 dB under speech at 1.5-2 s plus
+    // the hold, back after the release. Speech regions are timeline time.
+    let path = tone_file("tone.wav", 0.0, &["-c:a", "pcm_s16le"]);
+    let regions: std::sync::Arc<[(f64, f64)]> =
+        openreel_engine::duck_regions(vec![(1.5, 2.0)]).into();
+    let mut bed = segment(&path, 0.5, 3.5, 0.0, 1.0);
+    bed.duck = regions.clone();
+    let mut engine = playing(&[(1, bed.clone())]);
+    let mix = render(&mut engine, 4.0);
+    let depth = 10f32.powf(openreel_engine::DUCK_DEPTH_DB as f32 / 20.0);
+    let at = |t: f64| peak(&mix, t - 0.002, t + 0.002);
+    assert!((at(1.0) - 0.5).abs() < 0.01, "full before: {}", at(1.0));
+    for t in [1.3, 1.4, 1.7, 2.25, 2.6, 3.0] {
+        let want = 0.5 * openreel_engine::duck_gain(&regions, t);
+        assert!((at(t) - want).abs() < 0.01, "{t}: {} vs {want}", at(t));
+    }
+    assert!((at(1.75) - 0.5 * depth).abs() < 0.01, "down: {}", at(1.75));
+    assert!((at(3.5) - 0.5).abs() < 0.01, "back: {}", at(3.5));
+
+    // Turning ducking off applies to the running voice.
+    let mut engine = playing(&[(1, bed.clone())]);
+    render(&mut engine, 1.0);
+    bed.duck = Vec::new().into();
+    engine.set_voices(&[(1, bed)]);
+    let rest = render(&mut engine, 1.0);
+    let level = peak(&rest, 0.7, 0.9);
+    assert!((level - 0.5).abs() < 0.01, "unducked live: {level}");
 }

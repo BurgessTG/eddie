@@ -420,6 +420,17 @@ Music-bed muting on curator adds is user-selectable (Curator checkbox,
 `state().musicBedMuted`, `setMusicBedMuted(bool)`); it defaults on.
 It mutes only video ranges; a curated audio-only track is the new
 soundtrack and always adds audible.
+Ducking (`Clip::duck`, `setDuck(id, bool)`, Details "Duck under speech")
+is on by default only for audio-only adds that are music: a detected beat
+grid or a mostly music-bed range. Voiceover (neither) stays off, since a
+ducked clip no longer counts as speech. Ducking lowers a clip 12 dB under speech: the non-ambient transcript
+turns of every other audible, unmuted, unducked clip, placed through its
+source range. Speech less than attack+hold+release (1.3 s) apart is one
+region, so music does not pump between phrases. `openreel_engine::duck_amount`
+owns the raised-cosine curve (0.2 s attack, 0.3 s hold, 0.8 s release); the
+preview mixer evaluates it per sample and export as a `volume` expression
+on 256-sample frames, measured equal within 0.3% at the -12 dB floor.
+Ducking follows transcripts only: untranscribed speech does not duck.
 Clips carry linear audio fades (`fade_in`/`fade_out` seconds, `setFade`,
 and a Fades row on audio clips in Details). `fit_fades` scales fades
 that together exceed the clip by their requested ratio. The preview mixer

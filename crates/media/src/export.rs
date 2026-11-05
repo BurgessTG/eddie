@@ -784,10 +784,12 @@ const LOUDNESS_PEAK_LIMIT: f64 = 0.8;
 /// Export the timeline as an H.264/AAC MP4. With `normalize_loudness`,
 /// the mix is measured first and one fixed gain brings it to
 /// [`LOUDNESS_TARGET`], with a limiter catching the peaks that gain
-/// pushes over the ceiling; without it, audio is the plain mix.
+/// pushes over the ceiling; without it, audio is the plain mix. Clips with
+/// `duck` set dip under `duck` regions (`openreel_engine::duck_regions`).
 pub fn export_timeline(
     timeline: &Timeline,
     infos: &HashMap<String, MediaInfo>,
+    duck: &[(f64, f64)],
     output: &Path,
     normalize_loudness: bool,
     progress: Sender<f64>,
@@ -869,6 +871,7 @@ pub fn export_timeline(
         if let Some(last) = audio_runs.last_mut().filter(|last| {
             last.source == clip.source
                 && last.volume == clip.volume
+                && last.duck == clip.duck
                 && last.fade_lengths() == (0.0, 0.0)
                 && clip.fade_lengths() == (0.0, 0.0)
                 && same_time(last.end(), clip.start)
@@ -909,8 +912,13 @@ pub fn export_timeline(
                 f(fade_out)
             ));
         }
+        let ducking = if clip.duck {
+            duck_filter(duck, clip.start, clip.duration)
+        } else {
+            String::new()
+        };
         filters.push(format!(
-            "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000,\
+            "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{ducking},\
              volume={:.3}{fades},adelay={delay_ms}|{delay_ms}[{label}]",
             f(clip.source_in),
             f(clip.source_in + clip.duration),
@@ -1050,6 +1058,52 @@ pub fn export_timeline(
     }
     let _ = progress.send(1.0);
     Ok(output.to_path_buf())
+}
+
+/// The preview mixer's duck curve (`openreel_engine::duck_amount`) as a
+/// volume expression on a clip's own clock. Short frames keep its steps
+/// under 6 ms, so the ramps do not zipper.
+fn duck_filter(regions: &[(f64, f64)], start: f64, duration: f64) -> String {
+    use openreel_engine::{DUCK_ATTACK, DUCK_DEPTH_DB, DUCK_HOLD, DUCK_RELEASE};
+    // Regions never overlap, so their ramps add; nest the sum so long
+    // talks stay within AVExpr's parse depth.
+    fn sum(terms: &[String]) -> String {
+        match terms {
+            [term] => term.clone(),
+            _ => {
+                let (left, right) = terms.split_at(terms.len() / 2);
+                format!("({}+{})", sum(left), sum(right))
+            }
+        }
+    }
+    let terms: Vec<String> = regions
+        .iter()
+        .map(|&(a, b)| (a - start, b - start))
+        .filter(|&(a, b)| a - DUCK_ATTACK < duration && b + DUCK_HOLD + DUCK_RELEASE > 0.0)
+        .map(|(a, b)| {
+            let (down, hold) = (a - DUCK_ATTACK, b + DUCK_HOLD);
+            format!(
+                "if(gte(t,{})*lt(t,{}),if(lt(t,{}),(1-cos((t-{})/{}*PI))/2,\
+                 if(lt(t,{}),1,(1+cos((t-{})/{}*PI))/2)),0)",
+                f(down),
+                f(hold + DUCK_RELEASE),
+                f(a),
+                f(down),
+                f(DUCK_ATTACK),
+                f(hold),
+                f(hold),
+                f(DUCK_RELEASE),
+            )
+        })
+        .collect();
+    if terms.is_empty() {
+        return String::new();
+    }
+    format!(
+        ",asetnsamples=n=256:p=0,volume=eval=frame:volume='pow(10,{}*{}/20)'",
+        f(DUCK_DEPTH_DB),
+        sum(&terms)
+    )
 }
 
 /// Encode the timeline's audio mix once, on the whole-timeline clock.
