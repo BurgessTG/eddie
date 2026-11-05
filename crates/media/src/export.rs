@@ -976,6 +976,7 @@ pub fn export_timeline(
                 && !last.duck
                 && !clip.duck
                 && last.clean_voice == clip.clean_voice
+                && last.smooth_fades == clip.smooth_fades
                 && last.fade_lengths() == (0.0, 0.0)
                 && clip.fade_lengths() == (0.0, 0.0)
                 && same_time(last.end(), clip.start)
@@ -1003,15 +1004,17 @@ pub fn export_timeline(
         };
         let label = format!("a{}", labels.len());
         let delay_ms = (clip.start * 1000.0).round() as i64;
-        // afade's default curve is linear, matching the preview mixer.
+        // afade's default curve is linear and its qsin is
+        // `openreel_engine::fade_shape`'s quarter sine, matching the preview.
         let (fade_in, fade_out) = clip.fade_lengths();
+        let curve = if clip.smooth_fades { ":curve=qsin" } else { "" };
         let mut fades = String::new();
         if fade_in > 0.0 {
-            fades.push_str(&format!(",afade=t=in:st=0:d={}", f(fade_in)));
+            fades.push_str(&format!(",afade=t=in:st=0:d={}{curve}", f(fade_in)));
         }
         if fade_out > 0.0 {
             fades.push_str(&format!(
-                ",afade=t=out:st={}:d={}",
+                ",afade=t=out:st={}:d={}{curve}",
                 f(clip.duration - fade_out),
                 f(fade_out)
             ));

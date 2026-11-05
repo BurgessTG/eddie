@@ -989,6 +989,65 @@ fn highlight_captions_light_only_the_word_being_spoken() {
 }
 
 #[test]
+fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
+    // Halfway through a 1 s fade-in, a linear fade is at 0.5 and the
+    // equal-power quarter sine at sin(pi/4) = 0.707 of full level.
+    let fixture = Fixture::new();
+    let source = fixture.color("tone.mp4", "black", Some(440));
+    let rms = |samples: &[f32], from: f64, to: f64| {
+        let part = &samples[(from * 48_000.0) as usize..(to * 48_000.0) as usize];
+        (part.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / part.len() as f64).sqrt()
+    };
+    for (smooth, want) in [(false, 0.5), (true, std::f64::consts::FRAC_1_SQRT_2)] {
+        let mut timeline = Timeline::new(30.0);
+        let id = video(&mut timeline, &source, 0, 0.0, 2.0, 0.0);
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.fade_in = 1.0;
+        clip.smooth_fades = smooth;
+        let exported = audio_samples(&fixture.export(&format!("fade-{smooth}.mp4"), &timeline));
+        let export_mid = rms(&exported, 0.49, 0.51) / rms(&exported, 1.4, 1.6);
+
+        let mut engine = openreel_media::AudioEngine::manual();
+        engine.seek(0.0);
+        engine.set_limit(2.0);
+        engine.set_running(true);
+        engine.set_voices(&[(
+            id,
+            openreel_media::AudioSegment {
+                path: source.clone(),
+                start: 0.0,
+                duration: 2.0,
+                source_in: 0.0,
+                volume: 1.0,
+                fade_in: 1.0,
+                fade_out: 0.0,
+                duck: Vec::new(),
+                clean_voice: false,
+                smooth_fades: smooth,
+            },
+        )]);
+        let mut preview = Vec::new();
+        while preview.len() < 2 * 48_000 {
+            let block = engine.render(1024);
+            assert!(!block.is_empty(), "preview clock stopped");
+            preview.extend(block.chunks_exact(2).map(|frame| frame[0]));
+        }
+        let preview_mid = rms(&preview, 0.49, 0.51) / rms(&preview, 1.4, 1.6);
+        eprintln!(
+            "smooth={smooth}: export {export_mid:.3}, preview {preview_mid:.3}, want {want:.3}"
+        );
+        assert!(
+            (export_mid - want).abs() < 0.02,
+            "export {export_mid} vs {want}"
+        );
+        assert!(
+            (preview_mid - want).abs() < 0.02,
+            "preview {preview_mid} vs {want}"
+        );
+    }
+}
+
+#[test]
 fn clean_voice_cuts_rumble_and_preview_matches_export() {
     // Loud and quiet 220 Hz "speech" every half second over 30 Hz rumble.
     let fixture = Fixture::new();
@@ -1042,6 +1101,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             fade_out: 0.0,
             duck: Vec::new().into(),
             clean_voice: true,
+            smooth_fades: false,
         },
     )]);
     let mut preview = Vec::new();

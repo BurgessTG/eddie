@@ -1080,6 +1080,11 @@ impl HeadlessEditor {
                         c.clean_voice = enabled;
                     }
                 }
+                ScriptCommand::SetSmoothFades { clip, enabled } => {
+                    if let Some(c) = self.timeline.clip_mut(clip) {
+                        c.smooth_fades = enabled;
+                    }
+                }
                 ScriptCommand::InsertTime { at, seconds } => {
                     if seconds > 0.0 {
                         self.timeline.insert_time(at, seconds);

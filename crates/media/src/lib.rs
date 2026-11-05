@@ -640,6 +640,7 @@ mod tests {
                 fade_out: 0.0,
                 duck: Vec::new(),
                 clean_voice: false,
+                smooth_fades: false,
             },
         )]);
         let mut mix = Vec::new();

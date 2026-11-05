@@ -52,6 +52,8 @@ pub struct AudioSegment {
     pub duck: Vec<(f64, f64)>,
     /// Voice cleanup (`voice.rs`), applied as the clip decodes.
     pub clean_voice: bool,
+    /// Fades follow `openreel_engine::fade_shape`'s quarter sine.
+    pub smooth_fades: bool,
 }
 
 /// Fitted fade lengths in samples, packed in/out so a fade change
@@ -80,6 +82,7 @@ struct Voice {
     volume: Arc<AtomicU32>,
     fades: Arc<AtomicU64>,
     duck: Arc<[(f64, f64)]>,
+    smooth_fades: bool,
     chunks: Receiver<MediaResult<Chunk>>,
     recycle: SyncSender<Vec<f32>>,
     current: Option<Chunk>,
@@ -141,14 +144,17 @@ impl Voice {
         let (start, clip_end) = (self.start, self.end);
         // Shared, so pulling chunks below can borrow the voice mutably.
         let duck = Arc::clone(&self.duck);
-        // Linear ramps over the fitted fades; unity in between.
+        // Ramps over the fitted fades; unity in between.
+        let smooth = self.smooth_fades;
         let gain = |at: u64| -> f32 {
             let mut gain = 1.0_f32;
             if fade_in > 0 && at < start + fade_in {
-                gain = gain.min((at - start) as f32 / fade_in as f32);
+                let progress = (at - start) as f32 / fade_in as f32;
+                gain = gain.min(openreel_engine::fade_shape(progress, smooth));
             }
             if fade_out > 0 && at + fade_out > clip_end {
-                gain = gain.min(clip_end.saturating_sub(at) as f32 / fade_out as f32);
+                let progress = clip_end.saturating_sub(at) as f32 / fade_out as f32;
+                gain = gain.min(openreel_engine::fade_shape(progress, smooth));
             }
             if !duck.is_empty() {
                 gain *= openreel_engine::duck_gain((at - start) as f64 / RATE, &duck);
@@ -633,6 +639,7 @@ impl AudioEngine {
                 volume: Arc::clone(&volume),
                 fades: Arc::clone(&fades),
                 duck: segment.duck.as_slice().into(),
+                smooth_fades: segment.smooth_fades,
                 chunks,
                 recycle,
                 current: None,
@@ -677,6 +684,7 @@ fn same_source(a: &AudioSegment, b: &AudioSegment) -> bool {
         && a.duration == b.duration
         && a.source_in == b.source_in
         && a.clean_voice == b.clean_voice
+        && a.smooth_fades == b.smooth_fades
 }
 
 fn spawn_null(mut mixer: Mixer) -> Arc<AtomicBool> {

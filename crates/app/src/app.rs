@@ -1349,6 +1349,7 @@ impl EditorApp {
                             fade_out: c.fade_out,
                             duck: self.timeline.duck_ranges(c, &speech),
                             clean_voice: c.clean_voice,
+                            smooth_fades: c.smooth_fades,
                         },
                     )
                 })
@@ -1732,6 +1733,7 @@ impl EditorApp {
                     "fadeOut": c.fade_out,
                     "duck": c.duck,
                     "cleanVoice": c.clean_voice,
+                    "smoothFades": c.smooth_fades,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
@@ -2136,6 +2138,11 @@ impl EditorApp {
             ScriptCommand::SetCleanVoice { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.clean_voice = enabled;
+                }
+            }
+            ScriptCommand::SetSmoothFades { clip, enabled } => {
+                if let Some(c) = self.timeline.clip_mut(clip) {
+                    c.smooth_fades = enabled;
                 }
             }
             ScriptCommand::InsertTime { at, seconds } => {
@@ -3005,6 +3012,10 @@ impl EditorApp {
                             .on_hover_text("Fade out: seconds to fall to silence");
                         fade_in.union(fade_out)
                     });
+                    ui.checkbox(&mut clip.smooth_fades, "Smooth fades")
+                        .on_hover_text(
+                            "Fade on an equal-power curve, which stays fuller through a crossfade",
+                        );
                     ui.checkbox(&mut clip.duck, "Duck under speech")
                         .on_hover_text("Dip this sound while another clip is talking");
                     ui.checkbox(&mut clip.clean_voice, "Clean voice")

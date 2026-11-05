@@ -101,6 +101,10 @@ pub struct Clip {
     /// and export. Projects saved before it load with it off.
     #[serde(default)]
     pub clean_voice: bool,
+    /// Fades follow an equal-power quarter sine (FFmpeg's `qsin`) instead
+    /// of a straight line; see [`fade_shape`]. Off in older projects.
+    #[serde(default)]
+    pub smooth_fades: bool,
     /// Titles only: when each whitespace-separated word of `name` starts,
     /// on the clip's source clock (timeline time is
     /// `start + word - source_in`, so trims and splits keep them aligned).
@@ -173,6 +177,17 @@ pub fn fade_gain(offset: f64, duration: f64, fade_in: f64, fade_out: f64) -> f32
         gain = gain.min((duration - offset) / fade_out);
     }
     gain.clamp(0.0, 1.0) as f32
+}
+
+/// Gain at `progress` (0..1) through a fade: linear, or the quarter sine
+/// that holds loudness up through a crossfade. Preview and export share it.
+pub fn fade_shape(progress: f32, smooth: bool) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    if smooth {
+        (progress * std::f32::consts::FRAC_PI_2).sin()
+    } else {
+        progress
+    }
 }
 
 /// Ducked sound plays at this gain under speech (about -12 dB).
@@ -404,6 +419,7 @@ impl Timeline {
             title_style: TitleStyle::default(),
             duck: false,
             clean_voice: false,
+            smooth_fades: false,
             words: Vec::new(),
         });
         id
@@ -735,6 +751,7 @@ impl Timeline {
             right_clip.title_style = clip.title_style;
             right_clip.duck = clip.duck;
             right_clip.clean_voice = clip.clean_voice;
+            right_clip.smooth_fades = clip.smooth_fades;
             right_clip.words = clip.words.clone();
         }
         Some(right)
