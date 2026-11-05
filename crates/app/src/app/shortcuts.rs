@@ -141,6 +141,24 @@ pub(super) const BINDINGS: &[Binding] = &[
         "Play or pause",
         &[key(NONE, Key::Space)],
     ),
+    bind(
+        UiAction::ShuttleReverse,
+        "Playback",
+        "Reverse, faster each press",
+        &[key(NONE, Key::J)],
+    ),
+    bind(
+        UiAction::ShuttleStop,
+        "Playback",
+        "Stop",
+        &[key(NONE, Key::K)],
+    ),
+    bind(
+        UiAction::ShuttleForward,
+        "Playback",
+        "Forward, faster each press",
+        &[key(NONE, Key::L)],
+    ),
     repeating(bind(
         UiAction::StepBack,
         "Playback",

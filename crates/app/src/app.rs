@@ -41,6 +41,7 @@ const SCRUB_W: u32 = 480;
 const STILL_CACHE_CAP: usize = 24;
 /// Preview pictures kept for reuse once the renderer has uploaded them.
 const PREVIEW_IMAGES: usize = 3;
+const SHUTTLE_MAX: f64 = 8.0;
 const MEDIA_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "flac", "m4a", "aac", "ogg",
 ];
@@ -95,6 +96,9 @@ enum UiAction {
     Deselect,
     FocusChat,
     ShowShortcuts,
+    ShuttleReverse,
+    ShuttleStop,
+    ShuttleForward,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +112,9 @@ pub struct EditorApp {
     timeline_view: TimelineView,
     playhead: f64,
     playing: bool,
+    /// J/L shuttle speed in timeline seconds per second; negative runs
+    /// backward. Zero when off. Shuttling is silent and previews stills.
+    shuttle: f64,
     last_now: Option<f64>,
     selected: Option<ClipId>,
 
@@ -255,6 +262,7 @@ impl EditorApp {
             timeline_view: TimelineView::default(),
             playhead: 0.0,
             playing: false,
+            shuttle: 0.0,
             last_now: None,
             selected: None,
             assets: Vec::new(),
@@ -359,6 +367,7 @@ impl EditorApp {
             timeline_view: TimelineView::default(),
             playhead: 0.0,
             playing: false,
+            shuttle: 0.0,
             last_now: None,
             selected: None,
             assets: Vec::new(),
@@ -809,6 +818,7 @@ impl EditorApp {
     }
 
     fn set_playing(&mut self, playing: bool) {
+        self.shuttle = 0.0;
         if playing {
             self.curator.open = false;
             if self.stream_failed {
@@ -841,7 +851,31 @@ impl EditorApp {
     /// Ruler, clip drag or monitor scrubber held: preview from low-res
     /// stills instead of restarting playback on every move.
     fn scrubbing(&self) -> bool {
-        self.timeline_view.is_interacting() || self.transport_scrubbing
+        self.timeline_view.is_interacting() || self.transport_scrubbing || self.shuttle != 0.0
+    }
+
+    /// J and L: the first L plays normally; each repeat in the same
+    /// direction doubles the speed up to 8x. Reverse and faster-than-1x
+    /// runs are silent and preview low-res stills.
+    fn shuttle(&mut self, forward: bool) {
+        let sign = if forward { 1.0 } else { -1.0 };
+        let speed = if self.shuttle * sign > 0.0 {
+            (self.shuttle.abs() * 2.0).min(SHUTTLE_MAX)
+        } else if forward && self.playing {
+            2.0
+        } else {
+            1.0
+        };
+        if forward && speed == 1.0 {
+            self.curator.open = false;
+            self.set_playing(true);
+            self.status = "Playing.".to_owned();
+            return;
+        }
+        self.set_playing(false);
+        self.curator.open = false;
+        self.shuttle = sign * speed;
+        self.status = format!("{} {speed}x.", if forward { "Forward" } else { "Reverse" });
     }
 
     fn active_video_clip(&self) -> Option<openreel_engine::Clip> {
@@ -1153,7 +1187,7 @@ impl EditorApp {
     /// Restarts sources on seeks and clip-boundary crossings.
     fn sync_playback(&mut self, ctx: &egui::Context) {
         let now = self.last_now.unwrap_or(0.0);
-        if self.last_sync_time > 0.0 {
+        if self.last_sync_time > 0.0 && self.shuttle == 0.0 {
             let expected = if self.playing && !self.waiting_for_video() {
                 self.last_sync_playhead + (now - self.last_sync_time)
             } else {
@@ -1648,8 +1682,19 @@ impl EditorApp {
             UiAction::PlayPause => {
                 // Playback shows on Program, not behind the gallery.
                 self.curator.open = false;
-                let next = !self.playing;
+                // Space stops a shuttle rather than starting playback.
+                let next = !self.playing && self.shuttle == 0.0;
                 self.set_playing(next);
+                if !next {
+                    self.playhead = self.timeline.snap(self.playhead);
+                }
+            }
+            UiAction::ShuttleReverse => self.shuttle(false),
+            UiAction::ShuttleForward => self.shuttle(true),
+            UiAction::ShuttleStop => {
+                self.set_playing(false);
+                self.playhead = self.timeline.snap(self.playhead);
+                self.status = "Paused.".to_owned();
             }
             UiAction::StepBack => self.seek_and_reveal(self.playhead - 1.0 / self.timeline.fps),
             UiAction::StepForward => self.seek_and_reveal(self.playhead + 1.0 / self.timeline.fps),
@@ -2311,6 +2356,23 @@ impl EditorApp {
             if self.playhead >= self.timeline.end() {
                 self.playhead = self.timeline.end();
                 self.set_playing(false);
+            } else {
+                ctx.request_repaint();
+            }
+        } else if self.shuttle != 0.0 {
+            // A hand scrub takes the playhead back.
+            if self.timeline_view.is_interacting() || self.transport_scrubbing {
+                self.shuttle = 0.0;
+                return;
+            }
+            let end = self.timeline.end();
+            // A UI hitch must not fling the playhead.
+            let next = self.playhead + self.shuttle * dt.clamp(0.0, 0.1);
+            self.playhead = next.clamp(0.0, end);
+            self.timeline_view.reveal(self.playhead);
+            if next <= 0.0 || next >= end {
+                self.shuttle = 0.0;
+                self.status = "Paused.".to_owned();
             } else {
                 ctx.request_repaint();
             }
@@ -5007,6 +5069,61 @@ mod tests {
                     });
             });
         }
+    }
+
+    #[test]
+    fn jkl_shuttle_doubles_speed_runs_backward_and_stops_at_the_start() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.timeline
+            .add_clip("Card", ClipKind::Title, 0, 0.0, 10.0, 0.0);
+        let mut time = 0.0;
+        // Twenty 50 ms ticks: one second of wall clock.
+        let mut run_second = |app: &mut EditorApp| {
+            for _ in 0..20 {
+                time += 0.05;
+                let input = egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| app.advance_playback(ctx));
+            }
+        };
+        app.playhead = 6.0;
+        run_second(&mut app);
+        app.handle_action(&ctx, UiAction::ShuttleReverse);
+        run_second(&mut app);
+        assert!(
+            (app.playhead - 5.0).abs() < 1e-6,
+            "1x reverse: {}",
+            app.playhead
+        );
+        app.handle_action(&ctx, UiAction::ShuttleReverse);
+        run_second(&mut app);
+        assert!(
+            (app.playhead - 3.0).abs() < 1e-6,
+            "2x reverse: {}",
+            app.playhead
+        );
+        assert!(!app.playing, "shuttling is not audio playback");
+
+        // L after reverse is ordinary playback; L again is 2x forward.
+        app.handle_action(&ctx, UiAction::ShuttleForward);
+        assert!(app.playing && app.shuttle == 0.0);
+        app.handle_action(&ctx, UiAction::ShuttleForward);
+        assert_eq!((app.playing, app.shuttle), (false, 2.0));
+        for _ in 0..4 {
+            app.handle_action(&ctx, UiAction::ShuttleForward);
+        }
+        assert_eq!(app.shuttle, SHUTTLE_MAX, "speed caps at 8x");
+        app.handle_action(&ctx, UiAction::ShuttleStop);
+        assert_eq!((app.playing, app.shuttle), (false, 0.0));
+
+        app.playhead = 0.5;
+        app.handle_action(&ctx, UiAction::ShuttleReverse);
+        run_second(&mut app);
+        assert_eq!(app.playhead, 0.0);
+        assert_eq!(app.shuttle, 0.0, "reverse stops at the start");
     }
 
     #[test]
