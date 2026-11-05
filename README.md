@@ -111,7 +111,7 @@ the key and model without running inference.
 `master` and installs `eddie`, a desktop entry and the icon:
 
 ```sh
-cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
+mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
 makepkg -si
 ```
 
