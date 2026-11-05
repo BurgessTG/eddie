@@ -276,3 +276,70 @@ fn null_output_paces_the_clock_in_real_time() {
         "advanced {advanced} in {elapsed}"
     );
 }
+
+#[test]
+fn preview_loudness_applies_gain_then_limits_peaks() {
+    let path = tone_file("tone.wav", 0.0, &["-c:a", "pcm_s16le"]);
+    // Quieter: plain gain, no limiting below the ceiling.
+    let mut engine = playing(&[(1, segment(&path, 0.0, 1.0, 0.0, 1.0))]);
+    engine.set_loudness(Some(0.5));
+    let quiet = peak(&render(&mut engine, 1.0), 0.1, 0.9);
+    assert!((quiet - 0.25).abs() < 0.01, "{quiet}");
+    // Louder: 0.5 x 3 would be 1.5; the limiter holds it at 0.8.
+    let mut engine = playing(&[(1, segment(&path, 0.0, 2.0, 0.0, 1.0))]);
+    engine.set_loudness(Some(3.0));
+    let mix = render(&mut engine, 1.0);
+    let held = peak(&mix, 0.1, 0.9);
+    assert!(held <= 0.8 + 1e-4 && held > 0.75, "limited to {held}");
+    // Turning it off returns the plain mix.
+    engine.set_loudness(None);
+    let plain = peak(&render(&mut engine, 0.5), 0.1, 0.4);
+    assert!((plain - 0.5).abs() < 0.01, "{plain}");
+}
+
+#[test]
+fn offline_mix_measurement_matches_ffmpeg_ebur128() {
+    // Two overlapping clips with a gain change: the in-process meter over
+    // the preview mix must agree with FFmpeg's R128 meter on the same mix.
+    let path = tone_file("tone.m4a", 0.0, &["-c:a", "aac", "-b:a", "192k"]);
+    let segments = [
+        (1, segment(&path, 0.0, 3.0, 0.5, 0.4)),
+        (2, segment(&path, 1.0, 2.5, 0.0, 0.2)),
+    ];
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let ours = openreel_media::measure_mix(&segments, 3.5, &cancel)
+        .unwrap()
+        .integrated(0.0..3.5)
+        .unwrap();
+    // The same mix rendered by FFmpeg: delay, volume, sum.
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(&path)
+        .arg("-i")
+        .arg(&path)
+        .args([
+            "-filter_complex",
+            "[0:a]atrim=0.5:3.5,asetpts=PTS-STARTPTS,aresample=48000,volume=0.4[a];\
+             [1:a]atrim=0:2.5,asetpts=PTS-STARTPTS,aresample=48000,volume=0.2,adelay=1000|1000[b];\
+             [a][b]amix=inputs=2:duration=longest:normalize=0,apad=whole_dur=3.5,ebur128",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .expect("ffmpeg");
+    let log = String::from_utf8_lossy(&out.stderr);
+    let summary = &log[log.rfind("Summary:").expect("summary")..];
+    let theirs: f64 = summary
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("I:"))
+        .unwrap()
+        .trim()
+        .trim_end_matches("LUFS")
+        .trim()
+        .parse()
+        .unwrap();
+    eprintln!("in-process {ours:.2} LUFS, ffmpeg {theirs:.2} LUFS");
+    // ebur128 prints one decimal.
+    assert!((ours - theirs).abs() < 0.2, "{ours} vs {theirs}");
+}

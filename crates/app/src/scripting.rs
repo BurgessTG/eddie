@@ -332,9 +332,10 @@ function sweepCandidates() { return state().sweepCandidates || []; }
 function sceneClips() { return state().sceneClips || []; }
 function transcriptSegments() { return state().transcriptSegments || []; }
 function inspect() { return state().inspection || []; }
+function audioReport() { return state().audio || { status: "silent" }; }
 function help() {
   return [
-    "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect()",
+    "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect() audioReport()",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",

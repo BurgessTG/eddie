@@ -10,7 +10,9 @@ use eframe::egui::{
     Ui, Vec2,
 };
 use openreel_engine::{format_timecode, ClipId, ClipKind, Orientation, Timeline, TitleStyle};
-use openreel_media::{AudioEngine, AudioSegment, FrameStream, MediaInfo, RawFrame, StillDecoder};
+use openreel_media::{
+    AudioEngine, AudioSegment, FrameStream, Loudness, MediaInfo, RawFrame, StillDecoder,
+};
 
 use crate::preview;
 use crate::scripting::{ScriptCommand, ScriptEngine};
@@ -114,6 +116,17 @@ pub struct EditorApp {
     /// User-selected add policy: ranges from baked-in music beds
     /// start silent when true, keep their score when false.
     mute_music_beds: bool,
+    /// Preview loudness: the mix last measured (or being measured), the
+    /// result's gain, and the measurement in flight.
+    match_export_loudness: bool,
+    loudness_mix: Vec<(u64, AudioSegment)>,
+    loudness_gain: Option<f32>,
+    #[allow(clippy::type_complexity)]
+    loudness_rx: Option<Receiver<(Vec<(u64, AudioSegment)>, Result<Loudness, String>)>>,
+    /// The last completed measurement of `loudness_mix`.
+    loudness: Option<Loudness>,
+    loudness_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    loudness_checked: Instant,
     curator: CuratorGallery,
     caption_style: TitleStyle,
     search: String,
@@ -243,6 +256,13 @@ impl EditorApp {
             assets: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
+            match_export_loudness: true,
+            loudness_mix: Vec::new(),
+            loudness_gain: None,
+            loudness_rx: None,
+            loudness_cancel: None,
+            loudness: None,
+            loudness_checked: Instant::now(),
             curator: CuratorGallery::default(),
             caption_style: TitleStyle::Caption,
             search: String::new(),
@@ -339,6 +359,13 @@ impl EditorApp {
             assets: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
+            match_export_loudness: false,
+            loudness_mix: Vec::new(),
+            loudness_gain: None,
+            loudness_rx: None,
+            loudness_cancel: None,
+            loudness: None,
+            loudness_checked: Instant::now(),
             curator: CuratorGallery::default(),
             caption_style: TitleStyle::Caption,
             search: String::new(),
@@ -1270,16 +1297,27 @@ impl EditorApp {
     /// Give the mixer every audible clip under the playhead or starting
     /// within the look-ahead, so it starts decoding before their edges.
     fn sync_audio(&mut self) {
-        let speech = self.speech_map();
         const LOOK_AHEAD: f64 = 0.75;
-        let horizon = self.playhead + LOOK_AHEAD;
-        let segments: Vec<(u64, AudioSegment)> = self
-            .timeline
+        let segments = self.audio_segments(Some((self.playhead, self.playhead + LOOK_AHEAD)));
+        let audio = self.audio_engine();
+        audio.set_voices(&segments);
+        if let Some(error) = audio.take_error() {
+            if !self.audio_failed {
+                self.audio_failed = true;
+                self.status = format!("Audio playback failed: {error}");
+            }
+        }
+    }
+
+    /// Every audible clip as the mixer plays it (ducking included), or only
+    /// those overlapping `window`.
+    fn audio_segments(&self, window: Option<(f64, f64)>) -> Vec<(u64, AudioSegment)> {
+        let speech = self.speech_map();
+        self.timeline
             .clips
             .iter()
             .filter(|c| {
-                c.start < horizon
-                    && c.end() > self.playhead
+                window.is_none_or(|(from, to)| c.start < to && c.end() > from)
                     && (c.kind == ClipKind::Audio
                         || (c.kind == ClipKind::Video && c.embedded_audio))
             })
@@ -1301,15 +1339,120 @@ impl EditorApp {
                     )
                 })
             })
+            .collect()
+    }
+
+    /// The measured mix for scripts and chat: loudness before export's gain,
+    /// what export will do to it, quiet stretches, and the mix's loudness
+    /// while each audible clip plays.
+    fn audio_report(&self) -> serde_json::Value {
+        let round = |value: f64| (value * 100.0).round() / 100.0;
+        let status = if self.loudness_rx.is_some() {
+            "measuring"
+        } else if self.loudness_mix.is_empty() {
+            "silent"
+        } else {
+            "measured"
+        };
+        let Some(loudness) = self.loudness.as_ref().filter(|_| status == "measured") else {
+            return serde_json::json!({ "status": status });
+        };
+        let whole = 0.0..loudness.duration();
+        let integrated = loudness.integrated(whole.clone());
+        let peak = loudness.true_peak(whole);
+        let gain =
+            integrated.map(|lufs| (openreel_media::LOUDNESS_TARGET - lufs).clamp(-30.0, 30.0));
+        let export_peak = peak.zip(gain).map(|(peak, gain)| peak + gain);
+        let clips: Vec<serde_json::Value> = self
+            .loudness_mix
+            .iter()
+            .map(|(id, segment)| {
+                let range = segment.start..segment.start + segment.duration;
+                serde_json::json!({
+                    "id": id,
+                    "integratedLufs": loudness.integrated(range.clone()).map(round),
+                    "truePeakDbtp": loudness.true_peak(range).map(round),
+                })
+            })
             .collect();
-        let audio = self.audio_engine();
-        audio.set_voices(&segments);
-        if let Some(error) = audio.take_error() {
-            if !self.audio_failed {
-                self.audio_failed = true;
-                self.status = format!("Audio playback failed: {error}");
+        serde_json::json!({
+            "status": status,
+            "integratedLufs": integrated.map(round),
+            "truePeakDbtp": peak.map(round),
+            "maxMomentaryLufs": loudness.max_momentary().map(round),
+            "clippedSamples": loudness.clipped,
+            "exportTargetLufs": openreel_media::LOUDNESS_TARGET,
+            "exportGainDb": gain.map(round),
+            "exportPeakDbtp": export_peak.map(round),
+            // Export's limiter holds peaks at 0.8 (-1.94 dBFS).
+            "limited": export_peak.is_some_and(|peak| peak > 20.0 * 0.8_f64.log10()),
+            "quietRanges": loudness
+                .quiet_ranges(-60.0, 1.0)
+                .into_iter()
+                .map(|range| [round(range.start), round(range.end)])
+                .collect::<Vec<_>>(),
+            "clips": clips,
+        })
+    }
+
+    /// Keep the preview at the export's loudness. Half a second after the
+    /// mix changes (and with no pointer held), the whole mix is rendered and
+    /// measured off the UI thread; the preview then plays with the gain
+    /// export would apply and the same 0.8 limiter.
+    fn poll_loudness(&mut self, pointer_down: bool) {
+        if let Some(rx) = &self.loudness_rx {
+            match rx.try_recv() {
+                Ok((mix, result)) => {
+                    self.loudness_rx = None;
+                    if mix == self.loudness_mix {
+                        self.loudness = result.ok();
+                        let lufs = self
+                            .loudness
+                            .as_ref()
+                            .and_then(|loudness| loudness.integrated(0.0..loudness.duration()));
+                        let gain = lufs.map(|lufs| {
+                            let db = (openreel_media::LOUDNESS_TARGET - lufs).clamp(-30.0, 30.0);
+                            10f64.powf(db / 20.0) as f32
+                        });
+                        self.loudness_gain = gain;
+                        self.audio_engine().set_loudness(gain);
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.loudness_rx = None,
             }
         }
+        if !self.match_export_loudness
+            || pointer_down
+            || self.loudness_checked.elapsed() < Duration::from_millis(500)
+        {
+            return;
+        }
+        self.loudness_checked = Instant::now();
+        let mix = self.audio_segments(None);
+        if mix == self.loudness_mix {
+            return;
+        }
+        if let Some(cancel) = self.loudness_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.loudness_mix = mix.clone();
+        if mix.is_empty() {
+            self.loudness_rx = None;
+            self.loudness_gain = None;
+            self.loudness = None;
+            self.audio_engine().set_loudness(None);
+            return;
+        }
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.loudness_cancel = Some(Arc::clone(&cancel));
+        let (tx, rx) = channel();
+        self.loudness_rx = Some(rx);
+        let end = self.timeline.end();
+        thread::spawn(move || {
+            let result = openreel_media::measure_mix(&mix, end, &cancel);
+            let _ = tx.send((mix, result));
+        });
     }
 
     /// Returns true when an export finished successfully this frame.
@@ -1728,6 +1871,7 @@ impl EditorApp {
             "sceneClips": scene_clips,
             "transcriptSegments": transcript_segments,
             "inspection": inspect::inspect(&self.timeline, &self.assets),
+            "audio": self.audio_report(),
         })
         .to_string()
     }
@@ -3335,6 +3479,7 @@ impl eframe::App for EditorApp {
         }
         self.finish_frame(ctx, action);
         let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
+        self.poll_loudness(pointer_down);
         let typing = ctx.memory(|m| m.focused().is_some());
         if self
             .history
@@ -3936,6 +4081,60 @@ mod tests {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
+        }
+
+        #[test]
+        fn preview_plays_at_the_loudness_export_would_apply() {
+            let fixture = Fixture::new();
+            let tone = fixture.dir.join("tone.wav");
+            let output = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:sample_rate=48000:d=3")
+                .arg(&tone)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let tone = tone.to_string_lossy().into_owned();
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless_for_test(&ctx);
+            app.match_export_loudness = true;
+            add_asset(&mut app, &tone);
+            let clip =
+                app.timeline
+                    .add_media_clip("tone", ClipKind::Audio, 0, 0.0, 3.0, 0.0, &tone);
+            let measured = |app: &mut EditorApp| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    app.loudness_checked = Instant::now() - Duration::from_secs(1);
+                    app.poll_loudness(false);
+                    if app.loudness_rx.is_none() {
+                        if let Some(gain) = app.loudness_gain {
+                            return 20.0 * gain.log10();
+                        }
+                    }
+                    assert!(Instant::now() < deadline, "loudness never measured");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            // FFmpeg's ebur128 reads this tone at -21.8 LUFS, so export's
+            // gain to -16 LUFS is +5.8 dB.
+            let first = measured(&mut app);
+            assert!((first - 5.8).abs() < 0.3, "gain {first} dB");
+            let report = app.audio_report();
+            assert_eq!(report["status"], "measured");
+            let lufs = report["integratedLufs"].as_f64().unwrap();
+            assert!((lufs + 21.8).abs() < 0.3, "{report}");
+            assert_eq!(report["clips"][0]["id"], clip);
+            assert_eq!(report["limited"], false);
+            assert_eq!(report["quietRanges"].as_array().unwrap().len(), 0);
+            // Halving the clip's volume asks for 6 dB more.
+            app.timeline.clip_mut(clip).unwrap().volume = 0.5;
+            app.loudness_gain = None;
+            let second = measured(&mut app);
+            assert!(
+                (second - first - 6.02).abs() < 0.1,
+                "{first} then {second} dB"
+            );
         }
 
         fn add_asset(app: &mut EditorApp, path: &str) {

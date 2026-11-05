@@ -224,6 +224,10 @@ struct Shared {
     block_nanos: AtomicU64,
     /// Device latency between rendering and hearing a sample.
     latency_nanos: AtomicU64,
+    /// Master gain (f32 bits) and whether the peak limiter runs; see
+    /// `AudioEngine::set_loudness`.
+    master_gain: AtomicU32,
+    limiting: AtomicBool,
     /// Latest reported clock, in thousandths of a sample, so the clock never
     /// steps back between seeks (a released hold is heard one queue later).
     reported: AtomicU64,
@@ -246,6 +250,8 @@ struct Mixer {
     generation: u64,
     stereo: Vec<f32>,
     manual: bool,
+    /// Limiter gain envelope, 1 when idle.
+    envelope: f32,
 }
 
 impl Mixer {
@@ -301,6 +307,7 @@ impl Mixer {
                 &shared.errors,
             );
         }
+        self.master(advance);
         let start = self.position;
         self.position += advance as u64;
         let position = self.position;
@@ -318,6 +325,31 @@ impl Mixer {
             .applied_generation
             .store(self.generation, Ordering::Release);
         advance
+    }
+
+    /// The export's loudness stage: one fixed gain, then a peak limiter at
+    /// `LIMIT` with instant attack and a 50 ms release. Export's `alimiter`
+    /// looks ahead 5 ms; the preview cannot without delaying its clock, so
+    /// a sudden peak is caught on its first sample instead of eased in.
+    fn master(&mut self, frames: usize) {
+        const LIMIT: f32 = 0.8;
+        let gain = f32::from_bits(self.shared.master_gain.load(Ordering::Relaxed));
+        let limiting = self.shared.limiting.load(Ordering::Relaxed);
+        if gain == 1.0 && !limiting {
+            return;
+        }
+        let release = 1.0 - (-1.0 / (0.05 * RATE as f32)).exp();
+        for frame in self.stereo[..frames * 2].chunks_exact_mut(2) {
+            frame[0] *= gain;
+            frame[1] *= gain;
+            if limiting {
+                let peak = frame[0].abs().max(frame[1].abs());
+                let target = if peak > LIMIT { LIMIT / peak } else { 1.0 };
+                self.envelope = (self.envelope + (1.0 - self.envelope) * release).min(target);
+                frame[0] *= self.envelope;
+                frame[1] *= self.envelope;
+            }
+        }
     }
 
     fn write(&mut self, data: &mut [f32], channels: usize) {
@@ -374,6 +406,8 @@ impl AudioEngine {
             block_end: AtomicU64::new(0),
             block_nanos: AtomicU64::new(0),
             latency_nanos: AtomicU64::new(0),
+            master_gain: AtomicU32::new(1.0_f32.to_bits()),
+            limiting: AtomicBool::new(false),
             reported: AtomicU64::new(0),
             errors: Mutex::new(None),
         });
@@ -386,6 +420,7 @@ impl AudioEngine {
             generation: 0,
             stereo: vec![0.0; 8192 * 2],
             manual: false,
+            envelope: 1.0,
         };
         (shared, commands, mixer)
     }
@@ -519,6 +554,17 @@ impl AudioEngine {
             .store(generation, Ordering::Release);
         self.voices.clear();
         let _ = self.commands.send(Command::Seek { generation, at });
+    }
+
+    /// Play at the export's loudness: `Some(gain)` applies that linear gain
+    /// and the 0.8 peak limiter; `None` plays the plain mix.
+    pub fn set_loudness(&self, gain: Option<f32>) {
+        self.shared
+            .master_gain
+            .store(gain.unwrap_or(1.0).to_bits(), Ordering::Relaxed);
+        self.shared
+            .limiting
+            .store(gain.is_some(), Ordering::Relaxed);
     }
 
     pub fn set_running(&self, running: bool) {

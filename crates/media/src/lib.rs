@@ -10,6 +10,7 @@ mod beats;
 mod decode;
 mod evidence;
 mod export;
+mod loudness;
 mod playback;
 mod samples;
 mod sheet;
@@ -20,7 +21,10 @@ pub use beats::{beat_grid, BeatGrid};
 pub use decode::StillDecoder;
 pub(crate) use decode::VideoDecoder;
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
-pub use export::{export_canvas, export_timeline, title_look, ExportOptions, TitleLook};
+pub use export::{
+    export_canvas, export_timeline, title_look, ExportOptions, TitleLook, LOUDNESS_TARGET,
+};
+pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use playback::FrameStream;
 pub use samples::generate_samples;
 pub use sheet::{contact_sheet, SheetCell};
