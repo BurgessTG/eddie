@@ -3,6 +3,8 @@
 //! Times are seconds (`f64`). Media placement preserves source intervals;
 //! generated clips and explicit move/trim/split edits use the project frame grid.
 
+pub mod time_spec;
+
 pub type ClipId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -244,6 +246,19 @@ impl Timeline {
             track_labels: Vec::new(),
             clips: Vec::new(),
             next_id: 1,
+        }
+    }
+
+    /// What time specs (`1:05`, `clip:7@end`, …) resolve against.
+    pub fn time_index(&self) -> time_spec::TimeIndex {
+        time_spec::TimeIndex {
+            fps: self.fps,
+            end: self.end(),
+            clips: self
+                .clips
+                .iter()
+                .map(|clip| (clip.id, clip.start, clip.end()))
+                .collect(),
         }
     }
 

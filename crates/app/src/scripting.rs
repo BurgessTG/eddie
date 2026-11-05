@@ -336,6 +336,7 @@ function audioReport() { return state().audio || { status: "silent" }; }
 function help() {
   return [
     "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect() audioReport()",
+    "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' (request-time clips); time(spec) timeRange('a..b' | 'clip:7')",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",
@@ -350,26 +351,37 @@ function help() {
   ].join("\n");
 }
 var console = { log: (...a) => __log(a.map(String).join(" ")) };
+function __resolve(spec, range) {
+  const s = state();
+  const clips = (s.clips || []).flatMap((c) => [c.id, c.start, c.start + c.duration]);
+  return __resolve_time(String(spec), s.fps, s.duration, clips, range);
+}
+function time(spec) { return typeof spec === "number" ? spec : __resolve(spec, false)[0]; }
+function timeRange(spec) { const r = __resolve(spec, true); return { start: r[0], end: r[1] }; }
+function __t(v) { return typeof v === "string" ? time(v) : v; }
+function seek(t) { __seek(__t(t)); }
+function moveClip(id, start) { __move_clip(id, __t(start)); }
+function insertTime(at, seconds) { __insert_time(__t(at), seconds); }
 function split(at) {
   const s = state();
   if (s.selected == null) throw new Error("no clip selected");
-  return __split_clip(s.selected, at === undefined ? s.playhead : at);
+  return __split_clip(s.selected, at === undefined ? s.playhead : __t(at));
 }
-function splitClip(id, at) { return __split_clip(id, at); }
+function splitClip(id, at) { return __split_clip(id, __t(at)); }
 function deleteClip(id) {
   __delete_clip(id === undefined ? (state().selected ?? -1) : id);
 }
 function addTitle(text, at, dur, style) {
-  return __add_title(String(text), at === undefined ? state().playhead : at, dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
+  return __add_title(String(text), at === undefined ? state().playhead : __t(at), dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
 }
 function addCaptionsForClip(id, style) {
   __add_captions_for_clip(id, style === undefined ? "caption" : String(style));
 }
 function addAsset(nameOrPath, at) {
-  return __add_asset(String(nameOrPath), at === undefined ? state().playhead : at);
+  return __add_asset(String(nameOrPath), at === undefined ? state().playhead : __t(at));
 }
 function addAssetRange(nameOrPath, at, sourceIn, dur) {
-  return __add_asset_range(String(nameOrPath), at, sourceIn, dur);
+  return __add_asset_range(String(nameOrPath), __t(at), sourceIn, dur);
 }
 function tightenSilence(id, threshold, minSilence, padding) {
   __tighten_silence(
@@ -424,7 +436,7 @@ impl ScriptEngine {
                     .borrow_mut()
                     .push(0, || ScriptCommand::TogglePlay));
                 let q = Rc::clone(&queue);
-                reg!("seek", move |t: f64| q
+                reg!("__seek", move |t: f64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::Seek(t)));
                 let q = Rc::clone(&queue);
@@ -453,7 +465,7 @@ impl ScriptEngine {
                     }
                 });
                 let q = Rc::clone(&queue);
-                reg!("moveClip", move |clip: u64, start: f64| q
+                reg!("__move_clip", move |clip: u64, start: f64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::MoveClip { clip, start }));
                 let q = Rc::clone(&queue);
@@ -511,7 +523,7 @@ impl ScriptEngine {
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetDuck { clip, enabled }));
                 let q = Rc::clone(&queue);
-                reg!("insertTime", move |at: f64, seconds: f64| q
+                reg!("__insert_time", move |at: f64, seconds: f64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::InsertTime { at, seconds }));
                 let q = Rc::clone(&queue);
@@ -619,6 +631,31 @@ impl ScriptEngine {
                 reg!("closeGaps", move || q
                     .borrow_mut()
                     .push(0, || ScriptCommand::CloseGaps));
+
+                reg!(
+                    "__resolve_time",
+                    |ctx: rquickjs::Ctx<'_>,
+                     spec: String,
+                     fps: f64,
+                     end: f64,
+                     clips: Vec<f64>,
+                     range: bool| {
+                        let index = openreel_engine::time_spec::TimeIndex {
+                            fps,
+                            end,
+                            clips: clips
+                                .chunks_exact(3)
+                                .map(|clip| (clip[0] as u64, clip[1], clip[2]))
+                                .collect(),
+                        };
+                        let resolved = if range {
+                            index.range(&spec).map(|(start, end)| vec![start, end])
+                        } else {
+                            index.time(&spec).map(|time| vec![time])
+                        };
+                        resolved.map_err(|error| rquickjs::Exception::throw_message(&ctx, &error))
+                    }
+                );
 
                 globals.set("__state_json", "{}")?;
                 ctx.eval::<(), _>(PRELUDE)?;
@@ -838,6 +875,63 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn time_specs_resolve_against_the_request_time_clips() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        let state = r#"{"fps":30,"duration":20,"playhead":0,"selected":7,
+            "clips":[{"id":7,"start":10,"duration":4},{"id":9,"start":14,"duration":6}]}"#;
+        let (out, commands) = engine
+            .eval_checked(
+                "seek('clip:7@end'); moveClip(9, '0:01.5'); splitClip(7, 'clip:7@50%');
+                 addTitle('Hi', '25%', 1); seek(2); split('90f'); insertTime('clip:9', 2);
+                 const r = timeRange('clip:7..clip:9');
+                 try { seek('clip:8'); } catch (e) { console.log(String(e)); }
+                 return [time('end'), r.start, r.end].join(',');",
+                state,
+            )
+            .expect("valid specs run");
+        assert_eq!(out, "20,10,20");
+        assert_eq!(
+            commands,
+            vec![
+                ScriptCommand::Seek(14.0),
+                ScriptCommand::MoveClip {
+                    clip: 9,
+                    start: 1.5
+                },
+                ScriptCommand::SplitClip {
+                    clip: 7,
+                    at: 12.0,
+                    handle: Some(CLIP_HANDLE_BASE),
+                },
+                ScriptCommand::AddTitle {
+                    text: "Hi".to_owned(),
+                    at: 5.0,
+                    duration: 1.0,
+                    style: "lower-third".to_owned(),
+                    handle: Some(CLIP_HANDLE_BASE + 1),
+                },
+                ScriptCommand::Seek(2.0),
+                ScriptCommand::SplitClip {
+                    clip: 7,
+                    at: 3.0,
+                    handle: Some(CLIP_HANDLE_BASE + 2),
+                },
+                ScriptCommand::InsertTime {
+                    at: 14.0,
+                    seconds: 2.0
+                },
+                ScriptCommand::Log("Error: no clip 8; clips: 7, 9".to_owned()),
+            ]
+        );
+
+        // An uncaught bad spec rejects the whole run, as any thrown error does.
+        let error = engine
+            .eval_checked("seek(1); seek('soonish');", state)
+            .expect_err("bad spec");
+        assert!(error.contains("can not parse \"soonish\""), "{error}");
     }
 
     #[test]

@@ -176,6 +176,8 @@ pub struct EditorApp {
     last_sync_time: f64,
     /// The monitor's scrubber is held; previews like a ruler scrub.
     transport_scrubbing: bool,
+    /// Text typed into the playhead readout's jump box, while it is open.
+    jump_text: Option<String>,
 
     export_rx: Option<Receiver<ExportMsg>>,
     export_progress: Option<f64>,
@@ -296,6 +298,7 @@ impl EditorApp {
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
             transport_scrubbing: false,
+            jump_text: None,
             export_rx: None,
             export_progress: None,
             exported: None,
@@ -399,6 +402,7 @@ impl EditorApp {
             last_sync_playhead: 0.0,
             last_sync_time: 0.0,
             transport_scrubbing: false,
+            jump_text: None,
             export_rx: None,
             export_progress: None,
             exported: None,
@@ -3303,11 +3307,7 @@ impl EditorApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.label(timecode_job(
-                            &format_timecode(self.playhead, self.timeline.fps),
-                            theme::FOREGROUND,
-                        ))
-                        .on_hover_text("Playhead position");
+                        self.playhead_readout(ui);
                         let controls_w = 38.0 * 5.0 + 2.0 * 4.0;
                         let readout_w = ui.min_rect().width();
                         let left_pad = if show_length {
@@ -3670,6 +3670,57 @@ fn button_row(ui: &mut Ui, buttons: Vec<(&str, &str, &mut bool)>, destructive_la
 
 /// Monospace timecode with its leading zero groups dimmed, so the moving digits
 /// stand out, as in most editors' transport readouts.
+impl EditorApp {
+    /// The playhead timecode. Clicking it opens a jump box that takes any
+    /// time spec (`1:05`, `3.2s`, `120f`, `50%`, `clip:7@end`).
+    fn playhead_readout(&mut self, ui: &mut egui::Ui) {
+        let Some(text) = self.jump_text.as_mut() else {
+            let readout = ui
+                .add(
+                    egui::Label::new(timecode_job(
+                        &format_timecode(self.playhead, self.timeline.fps),
+                        theme::FOREGROUND,
+                    ))
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::Text)
+                .on_hover_text("Playhead position. Click to jump to a time: 1:05, 3.2s, 120f, 50% or clip:7@end");
+            if readout.clicked() {
+                self.jump_text = Some(format_timecode(self.playhead, self.timeline.fps));
+            }
+            return;
+        };
+        let edit = egui::TextEdit::singleline(text)
+            .id(egui::Id::new("jump-box"))
+            .font(egui::FontId::monospace(13.0))
+            .desired_width(96.0)
+            .show(ui);
+        let response = edit.response;
+        if !response.has_focus() && !response.lost_focus() {
+            // Opened this frame: focus with the old time selected, so typing replaces it.
+            response.request_focus();
+            let mut state = edit.state;
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(text.chars().count()),
+                )));
+            state.store(ui.ctx(), response.id);
+        }
+        if response.lost_focus() {
+            let entered = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let spec = self.jump_text.take().unwrap_or_default();
+            if entered {
+                match self.timeline.time_index().time(&spec) {
+                    Ok(time) => self.seek(time.clamp(0.0, self.timeline.end())),
+                    Err(error) => self.status = format!("Can't jump: {error}."),
+                }
+            }
+        }
+    }
+}
+
 fn timecode_job(timecode: &str, bright: egui::Color32) -> egui::text::LayoutJob {
     // Dim whole leading `00:` groups; seconds and frames always stay bright.
     let mut dim = 0;
@@ -5366,6 +5417,74 @@ mod tests {
         app.spawn_import(&ctx, vec![second.clone()]);
         assert_eq!(app.import_queue, vec![second]);
         assert_eq!(app.assets.len(), 2, "both files show as placeholders");
+    }
+
+    /// Clicking the playhead readout opens a jump box; typing a time spec
+    /// over the selected timecode and pressing Enter seeks there.
+    #[test]
+    fn playhead_readout_jumps_to_a_typed_time_spec() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        app.timeline
+            .add_clip("Intro", ClipKind::Title, 0, 0.0, 8.0, 0.0);
+        let outro = app
+            .timeline
+            .add_clip("Outro", ClipKind::Title, 0, 8.0, 4.0, 0.0);
+        let mut time = 0.0;
+        let mut render = |app: &mut EditorApp, events| {
+            time += 0.05;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(900.0, 600.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.central(ctx),
+            )
+        };
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        render(&mut app, Vec::new());
+        let output = render(&mut app, Vec::new());
+        let readout = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Text(text) if text.galley.text() == format_timecode(0.0, 30.0) => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("playhead readout");
+        let mut jump = |app: &mut EditorApp, spec: &str| {
+            render(app, vec![egui::Event::PointerMoved(readout)]);
+            for pressed in [true, false] {
+                render(app, vec![pointer_button(readout.x, readout.y, pressed)]);
+            }
+            render(app, Vec::new());
+            render(app, vec![egui::Event::Text(spec.to_owned())]);
+            render(app, vec![enter.clone()]);
+            render(app, Vec::new());
+        };
+        jump(&mut app, &format!("clip:{outro}@50%"));
+        assert!((app.playhead - 10.0).abs() < 1e-6, "got {}", app.playhead);
+        assert!(app.jump_text.is_none(), "Enter closes the box");
+
+        jump(&mut app, "clip:99");
+        assert!(
+            (app.playhead - 10.0).abs() < 1e-6,
+            "a bad spec does not move"
+        );
+        assert!(app.status.contains("no clip 99"), "{}", app.status);
     }
 
     /// The monitor scrubber spans the whole edit: a click a quarter of the
