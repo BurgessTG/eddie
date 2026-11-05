@@ -105,6 +105,16 @@ Open Settings with the gear in the right dock to set the API key, base URL
 default, or `muse-spark-1.3`) and format. **Check connection** validates
 the key and model without running inference.
 
+### Install on Arch
+
+`packaging/aur/PKGBUILD` builds `eddie-git` from this repository's
+`master` and installs `eddie`, a desktop entry and the icon:
+
+```sh
+cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
+makepkg -si
+```
+
 ## Shortcuts
 
 Press F1 or Ctrl+/ in the app for the full list. Cmd replaces Ctrl on

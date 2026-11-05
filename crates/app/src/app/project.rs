@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
 
 use eframe::egui;
 use openreel_engine::Timeline;
@@ -19,6 +20,21 @@ use crate::theme;
 
 const VERSION: u64 = 1;
 pub(super) const EXTENSION: &str = "eddie";
+
+/// What a file dialog's answer is for. Dialogs run on a worker thread:
+/// GTK's blocking dialog would stop the UI loop, and the window manager
+/// would mark Eddie "not responding" while the user picks a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FilePurpose {
+    Import,
+    Export,
+    OpenProject,
+    /// Save the project there, then carry on with the pending discard.
+    SaveProject(Option<Discard>),
+    LocateMedia,
+}
+
+pub(super) type PendingFileDialog = (FilePurpose, Receiver<Option<Vec<PathBuf>>>);
 
 /// What waits on the "Save changes?" answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,38 +83,100 @@ impl EditorApp {
     }
 
     /// Save to the current project file, asking for one when there is none
-    /// (or always, for Save as). False when cancelled or failed.
-    pub(super) fn save_project(&mut self, ask: bool) -> bool {
-        let path = match (&self.project_path, ask) {
-            (Some(path), false) => Some(path.clone()),
-            _ => rfd::FileDialog::new()
-                .add_filter("Eddie project", &[EXTENSION])
-                .set_file_name("project.eddie")
-                .set_title("Save project")
-                .save_file(),
-        };
-        let Some(path) = path else {
-            return false;
-        };
-        match self.save_project_to(&path) {
-            Ok(()) => true,
-            Err(error) => {
-                self.status = error;
-                false
+    /// (or always, for Save as). `then` runs once the save succeeds.
+    pub(super) fn save_project(&mut self, ctx: &egui::Context, ask: bool, then: Option<Discard>) {
+        match (&self.project_path, ask) {
+            (Some(path), false) => {
+                let path = path.clone();
+                self.save_project_at(ctx, &path, then);
             }
+            _ => self.open_file_dialog(
+                ctx,
+                FilePurpose::SaveProject(then),
+                rfd::FileDialog::new()
+                    .add_filter("Eddie project", &[EXTENSION])
+                    .set_file_name("project.eddie")
+                    .set_title("Save project"),
+            ),
+        }
+    }
+
+    fn save_project_at(&mut self, ctx: &egui::Context, path: &Path, then: Option<Discard>) {
+        match self.save_project_to(path) {
+            Ok(()) => {
+                if let Some(discard) = then {
+                    self.discard(ctx, discard);
+                }
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    /// Show `dialog` without blocking the UI; `poll_file_dialog` acts on
+    /// the answer. One dialog at a time.
+    pub(super) fn open_file_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        purpose: FilePurpose,
+        dialog: rfd::FileDialog,
+    ) {
+        if self.file_dialog.is_some() {
+            self.status = "A file dialog is already open.".to_owned();
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = match purpose {
+                FilePurpose::Import => dialog.pick_files(),
+                FilePurpose::Export | FilePurpose::SaveProject(_) => {
+                    dialog.save_file().map(|path| vec![path])
+                }
+                FilePurpose::OpenProject | FilePurpose::LocateMedia => {
+                    dialog.pick_file().map(|path| vec![path])
+                }
+            };
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+        self.file_dialog = Some((purpose, rx));
+    }
+
+    pub(super) fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        let Some((purpose, rx)) = &self.file_dialog else {
+            return;
+        };
+        let purpose = *purpose;
+        let picked = match rx.try_recv() {
+            Ok(picked) => picked,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.file_dialog = None;
+        let Some(mut paths) = picked.filter(|paths| !paths.is_empty()) else {
+            return;
+        };
+        match purpose {
+            FilePurpose::Import => self.spawn_import(ctx, paths),
+            FilePurpose::Export => self.start_export(ctx, paths.remove(0)),
+            FilePurpose::SaveProject(then) => self.save_project_at(ctx, &paths[0], then),
+            FilePurpose::OpenProject => {
+                if let Err(error) = self.open_project(ctx, &paths[0]) {
+                    self.status = error;
+                }
+            }
+            FilePurpose::LocateMedia => self.locate_missing_media(ctx, &paths[0]),
         }
     }
 
     pub(super) fn pick_and_open_project(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Eddie project", &[EXTENSION])
-            .set_title("Open project")
-            .pick_file()
-        {
-            if let Err(error) = self.open_project(ctx, &path) {
-                self.status = error;
-            }
-        }
+        self.open_file_dialog(
+            ctx,
+            FilePurpose::OpenProject,
+            rfd::FileDialog::new()
+                .add_filter("Eddie project", &[EXTENSION])
+                .set_title("Open project"),
+        );
     }
 
     /// Replace the timeline with a saved one and import its media. The
@@ -180,13 +258,10 @@ impl EditorApp {
         let Some(first) = self.missing_media.first() else {
             return;
         };
-        if let Some(picked) = rfd::FileDialog::new()
+        let dialog = rfd::FileDialog::new()
             .add_filter("Media", MEDIA_EXTS)
-            .set_title(format!("Locate {}", file_name(Path::new(first))))
-            .pick_file()
-        {
-            self.locate_missing_media(ctx, &picked);
-        }
+            .set_title(format!("Locate {}", file_name(Path::new(first))));
+        self.open_file_dialog(ctx, FilePurpose::LocateMedia, dialog);
     }
 
     /// Point the first missing file at `picked`. Other missing files with
@@ -331,11 +406,8 @@ impl EditorApp {
         }
         match choice {
             Some(true) => {
-                if self.save_project(false) {
-                    self.discard(ctx, discard);
-                } else {
-                    self.pending_discard = None;
-                }
+                self.pending_discard = None;
+                self.save_project(ctx, false, Some(discard));
             }
             Some(false) => self.discard(ctx, discard),
             None => {}

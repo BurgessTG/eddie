@@ -223,6 +223,8 @@ pub struct EditorApp {
     /// Project media not found on open, in the order Locate asks for it.
     missing_media: Vec<String>,
     pending_discard: Option<project::Discard>,
+    /// The open file dialog, answered on a worker thread.
+    file_dialog: Option<project::PendingFileDialog>,
     /// Set once the user chose to close without (or after) saving.
     allow_close: bool,
     show_chat: bool,
@@ -335,6 +337,7 @@ impl EditorApp {
             saved_timeline,
             missing_media: Vec::new(),
             pending_discard: None,
+            file_dialog: None,
             allow_close: false,
             show_chat: true,
             right_tab: RightTab::Chat,
@@ -441,6 +444,7 @@ impl EditorApp {
             saved_timeline: Timeline::empty_project(),
             missing_media: Vec::new(),
             pending_discard: None,
+            file_dialog: None,
             allow_close: false,
             show_chat: true,
             right_tab: RightTab::Chat,
@@ -1615,32 +1619,22 @@ impl EditorApp {
     fn handle_action(&mut self, ctx: &egui::Context, action: UiAction) {
         match action {
             UiAction::Import => {
-                if let Some(paths) = rfd::FileDialog::new()
+                let dialog = rfd::FileDialog::new()
                     .add_filter("Media", MEDIA_EXTS)
-                    .set_title("Import media")
-                    .pick_files()
-                {
-                    self.spawn_import(ctx, paths);
-                }
+                    .set_title("Import media");
+                self.open_file_dialog(ctx, project::FilePurpose::Import, dialog);
             }
             UiAction::Export => {
-                if let Some(output) = rfd::FileDialog::new()
+                let dialog = rfd::FileDialog::new()
                     .add_filter("MP4 video", &["mp4"])
                     .set_file_name("export.mp4")
-                    .set_title("Export MP4")
-                    .save_file()
-                {
-                    self.start_export(ctx, output);
-                }
+                    .set_title("Export MP4");
+                self.open_file_dialog(ctx, project::FilePurpose::Export, dialog);
             }
             UiAction::NewProject => self.request_discard(ctx, project::Discard::New),
             UiAction::OpenProject => self.request_discard(ctx, project::Discard::Open),
-            UiAction::SaveProject => {
-                self.save_project(false);
-            }
-            UiAction::SaveProjectAs => {
-                self.save_project(true);
-            }
+            UiAction::SaveProject => self.save_project(ctx, false, None),
+            UiAction::SaveProjectAs => self.save_project(ctx, true, None),
             UiAction::LocateMedia => self.pick_missing_media(ctx),
             UiAction::Undo => self.step_history(false),
             UiAction::Redo => self.step_history(true),
@@ -3534,9 +3528,20 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let update_start = Instant::now();
+        // Phase times for the slow-frame log below.
+        let mut phases: Vec<(&str, f32)> = Vec::new();
+        let mut last = update_start;
+        let mut mark = |name| {
+            let now = Instant::now();
+            phases.push((name, (now - last).as_secs_f32() * 1000.0));
+            last = now;
+        };
         self.advance_playback(ctx);
+        mark("playback");
         self.poll_imports(ctx);
+        mark("imports");
         self.poll_frames(ctx);
+        mark("frames");
         if openreel_media::take_hardware_failure().is_some() {
             self.status = "Hardware decode failed; playing on the CPU.".to_owned();
         }
@@ -3548,6 +3553,8 @@ impl eframe::App for EditorApp {
         }
         self.poll_chat(ctx);
         self.poll_sweeps(ctx);
+        self.poll_file_dialog(ctx);
+        mark("polls");
         if !self.initial_imports.is_empty() && self.import_rx.is_none() {
             let paths = std::mem::take(&mut self.initial_imports);
             self.spawn_import(ctx, paths);
@@ -3565,6 +3572,7 @@ impl eframe::App for EditorApp {
         }
 
         self.guard_close(ctx);
+        mark("drops");
         let mut action = self.menu_bar(ctx);
         self.status_bar(ctx);
         self.console_panel(ctx);
@@ -3577,11 +3585,13 @@ impl eframe::App for EditorApp {
         self.central(ctx);
         self.unsaved_dialog(ctx);
         shortcuts::window(ctx, &mut self.show_shortcuts);
+        mark("panels");
         if action.is_none() && self.pending_discard.is_none() {
             let typing = ctx.memory(|m| m.focused().is_some());
             action = shortcuts::take_action(ctx, typing);
         }
         self.finish_frame(ctx, action);
+        mark("action+sync");
         let (now, pointer_down) = ctx.input(|i| (i.time, i.pointer.any_down()));
         self.poll_loudness(pointer_down);
         let typing = ctx.memory(|m| m.focused().is_some());
@@ -3595,7 +3605,17 @@ impl eframe::App for EditorApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
 
+        mark("history");
         let ms = update_start.elapsed().as_secs_f32() * 1000.0;
+        // A frame this long risks the window manager's "not responding".
+        if ms > 250.0 {
+            let detail: Vec<String> = phases
+                .iter()
+                .filter(|(_, phase)| *phase >= 1.0)
+                .map(|(name, phase)| format!("{name} {phase:.0}"))
+                .collect();
+            eprintln!("slow UI frame: {ms:.0} ms ({})", detail.join(", "));
+        }
         self.frame_ms_ema = if self.frame_ms_ema == 0.0 {
             ms
         } else {

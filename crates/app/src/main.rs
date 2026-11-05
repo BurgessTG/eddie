@@ -17,6 +17,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Eddie")
+            // Matches eddie.desktop, so docks and launchers show the icon.
+            .with_app_id("eddie")
             .with_icon(eframe::egui::IconData {
                 rgba: theme::icon_rgba(256),
                 width: 256,

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Eddie
+GenericName=Video Editor
+Comment=The editor that watches the footage for you
+Exec=eddie %F
+Icon=eddie
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/quicktime;video/x-matroska;video/webm;audio/mpeg;audio/x-wav;audio/flac;
+StartupWMClass=eddie
+Keywords=video;editor;montage;timeline;
