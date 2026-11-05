@@ -2353,6 +2353,9 @@ impl EditorApp {
                 .map_or(f64::INFINITY, |(edge, _)| edge);
             self.playhead = playhead.max(clock.min(cut));
             self.clock_playhead = Some(self.playhead);
+            if !self.scrubbing() {
+                self.timeline_view.follow(playhead, self.playhead);
+            }
             if self.playhead >= self.timeline.end() {
                 self.playhead = self.timeline.end();
                 self.set_playing(false);
