@@ -15,6 +15,8 @@ path = "src/main.rs"
 # dependencies and no code to any non-test build, release included.
 [features]
 dev-harness = []
+# Experimental VAAPI preview decode (run with EDDIE_HWDEC=vaapi); links libva.
+vaapi = ["openreel-media/vaapi"]
 
 [dependencies]
 eframe = { version = "0.32", features = ["wgpu"] }

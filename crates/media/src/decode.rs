@@ -31,11 +31,11 @@ pub(crate) fn ensure_init() {
     });
 }
 
-/// EXPERIMENT: `EDDIE_HWDEC=vaapi` decodes on a VAAPI device. libavcodec
-/// picks the hardware format when the profile is supported and silently
-/// falls back to software otherwise.
+/// EXPERIMENT: built with the `vaapi` feature, `EDDIE_HWDEC=vaapi` decodes
+/// on a VAAPI device. libavcodec picks the hardware format when the profile
+/// is supported and silently falls back to software otherwise.
 fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
-    if std::env::var("EDDIE_HWDEC").as_deref() != Ok("vaapi") {
+    if !cfg!(feature = "vaapi") || std::env::var("EDDIE_HWDEC").as_deref() != Ok("vaapi") {
         return false;
     }
     // One device serves every decoder: creating one costs about 250 ms.
@@ -76,9 +76,18 @@ fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
     true
 }
 
+// Only the `vaapi` feature links libva, so default builds need no VA headers.
+#[cfg(feature = "vaapi")]
 #[link(name = "va")]
 extern "C" {
     fn vaSyncSurface(display: *mut std::ffi::c_void, surface: u32) -> i32;
+}
+
+/// Without the feature no decoder has a VAAPI device, so no picture gets here.
+#[cfg(not(feature = "vaapi"))]
+#[allow(non_snake_case)]
+unsafe fn vaSyncSurface(_display: *mut std::ffi::c_void, _surface: u32) -> i32 {
+    0
 }
 
 /// Wait until a decoded VAAPI surface is complete, as it leaves the decoder.
