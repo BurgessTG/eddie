@@ -220,6 +220,45 @@ pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> 
             _ => {}
         }
     }
+    // A cut inside one shot that skips or repeats a frame or two pops; it
+    // is usually left from a split, trim or swap (fframes' continuity scan
+    // finds these in pixels; the timeline already knows them).
+    for pair in runs.windows(2) {
+        let ((_, cut, Some(left)), (start, end, Some(right))) = (pair[0], pair[1]) else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (timeline.clip(left), timeline.clip(right)) else {
+            continue;
+        };
+        if a.source.is_none() || a.source != b.source {
+            continue;
+        }
+        let source_frame = a
+            .source
+            .as_deref()
+            .and_then(asset)
+            .map_or(frame, |asset| 1.0 / asset.info.fps.max(1.0));
+        let jump = (b.source_in + (cut - b.start)) - (a.source_in + (cut - a.start));
+        let frames = (jump / source_frame).round();
+        if frames != 0.0 && frames.abs() <= 3.0 {
+            let (verb, count) = if frames > 0.0 {
+                ("skips", frames)
+            } else {
+                ("repeats", -frames)
+            };
+            finding(
+                "near-match-cut",
+                "warning",
+                format!(
+                    "The cut from clip {left} to clip {right} at {cut:.2}s {verb} {count:.0} \
+                     source frame(s) of the same shot, so it pops."
+                ),
+                vec![left, right],
+                start,
+                end.min(start + frame),
+            );
+        }
+    }
     for clip in &timeline.clips {
         if clip.kind == ClipKind::Video && !runs.iter().any(|run| run.2 == Some(clip.id)) {
             finding(
@@ -403,6 +442,68 @@ mod tests {
             .unwrap();
         assert!((gap.start - end_b).abs() < 1e-6 && (gap.end - (end_b + 1.0)).abs() < 1e-6);
         let _ = (a, card, tail);
+    }
+
+    /// Same-shot cuts a few frames off pop; exact continuations, real jump
+    /// cuts and cuts between sources do not.
+    #[test]
+    fn near_match_cuts_report_skipped_and_repeated_frames() {
+        let mut timeline = Timeline::empty_project();
+        let frame = 1.0 / 30.0;
+        // a.mp4 runs at 30 fps: 2 frames skipped, then a clean continuation,
+        // then 1 frame repeated, then a 10-frame jump cut, then another file.
+        let a = timeline.add_media_clip("A", ClipKind::Video, 0, 0.0, 1.0, 0.0, "a.mp4");
+        let b = timeline.add_media_clip(
+            "B",
+            ClipKind::Video,
+            0,
+            1.0,
+            1.0,
+            1.0 + 2.0 * frame,
+            "a.mp4",
+        );
+        let c = timeline.add_media_clip(
+            "C",
+            ClipKind::Video,
+            0,
+            2.0,
+            1.0,
+            2.0 + 2.0 * frame,
+            "a.mp4",
+        );
+        let d = timeline.add_media_clip("D", ClipKind::Video, 0, 3.0, 1.0, 3.0 + frame, "a.mp4");
+        let e = timeline.add_media_clip(
+            "E",
+            ClipKind::Video,
+            0,
+            4.0,
+            1.0,
+            4.0 + 11.0 * frame,
+            "a.mp4",
+        );
+        timeline.add_media_clip(
+            "F",
+            ClipKind::Video,
+            0,
+            5.0,
+            1.0,
+            5.0 + 11.0 * frame,
+            "b.mp4",
+        );
+        let assets = [asset("a.mp4", 1920, 1080), asset("b.mp4", 1920, 1080)];
+        let found = inspect(&timeline, &assets);
+        let pops: Vec<_> = found
+            .iter()
+            .filter(|finding| finding.kind == "near-match-cut")
+            .collect();
+        assert_eq!(
+            pops.iter().map(|f| f.clips.clone()).collect::<Vec<_>>(),
+            vec![vec![a, b], vec![c, d]],
+            "{found:?}"
+        );
+        assert!(pops[0].message.contains("skips 2"), "{}", pops[0].message);
+        assert!(pops[1].message.contains("repeats 1"), "{}", pops[1].message);
+        let _ = e;
     }
 
     #[test]
