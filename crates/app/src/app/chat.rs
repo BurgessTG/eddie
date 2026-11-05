@@ -384,6 +384,9 @@ If the result does what the request asked, reply with code that only logs \"Done
 Otherwise reply with code that fixes only what is wrong, using the clip ids in the timeline state, \
 and explain the fix. Leave problems the request did not touch. If something is wrong that you \
 cannot fix, console.log it as its own sentence before the Done line. \
+Only place a source range whose content you can verify, from the contact sheet or from a candidate, \
+scene or transcript that describes it; never guess a source time. If you cannot verify a \
+replacement, make no edit and console.log what is wrong. \
 transcriptSegments here omit words; transcriptSegments() in code still has them.";
 
 /// The check request for an applied edit: what was asked, the code that
@@ -2898,6 +2901,10 @@ mod tests {
         assert_eq!(app.status, "Checking the edit…");
         let request = server.join().unwrap();
         assert!(request.contains("Request:\\nCheck that your last edit did what the user asked"));
+        assert!(
+            request.contains("never guess a source time"),
+            "a check must not swap in unverified source ranges"
+        );
         assert!(
             request.contains("data:image/jpeg;base64,"),
             "no contact sheet"
