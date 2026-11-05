@@ -352,6 +352,7 @@ Asset fields include waveformPeaksPerSec and silenceRanges [{start,end}] from lo
 For “build the montage from the sweep”, replace the current timeline clips with the highest-ranked video sweepCandidates() (all candidates only if none has video), placed sequentially from 0 with addAssetRange(candidate.asset, cursor, candidate.sourceIn, candidate.duration). \
 For “build it from the reaction shots”, use sweepCandidates() filtered to isReaction (if none, the highest reactionScore first), in the order given, placed sequentially from 0 the same way. \
 For requests like “use the part where he talks about pricing”, find the transcriptSegments() whose text matches and place that source range with addAssetRange(segment.asset, cursor, segment.start, segment.end - segment.start). \
+In this request, words appear only on transcript segments that share a word with the request; transcriptSegments() in code has every segment's words, so find word times there for cuts on other words (fillers, a phrase the user paraphrased). \
 Clip fields: id, name, kind ('video'|'audio'|'title'), track, start, duration, sourceIn, source, opacity, volume, fadeIn, fadeOut, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle ('lower-third'|'caption'|'pop-caption'|'minimal-caption'|'highlight-caption'; highlight-caption lights each word as it is spoken when the caption came from word-timed addCaptionsForClip). To caption an already placed media clip in the snapshot, call addCaptionsForClip(id, style?); it uses word times when available and turn-proportional estimates otherwise, and skips exact duplicates. Queries read the request-time snapshot and edits are queued, so newly placed clips do not appear in clips() during this run. addAsset, addAssetRange and addTitle return a handle for the clip they create, and split/splitClip return one for the new right-hand piece; pass it as the id to later calls in the same code (setFade, moveClip, trimClip, addCaptionsForClip and so on). Never compute or guess clip IDs. embeddedAudio false means a video's own sound is off; detachAudio(id) creates a linked audio clip and turns the picture's embedded sound off so it never doubles. Linked picture/audio pairs move, trim, and split together; call unlinkClip(id) before offsetting one side on purpose (J/L cuts, replacing dialogue, or laying sound under another shot). \
 Lanes (track indexes) are kind-agnostic and grow as needed; add functions choose a free lane automatically. Where video clips overlap, the lowest lane index is the picture shown (lane 0 wins), and a lower-opacity winner fades to black, never revealing another lane: there is no picture-in-picture or video overlay. To cut away from a long base clip (an interview, a monologue) and keep its sound, first setClipLane(baseId, 1), then add the cutaway, then setClipLane(cutawayHandle, 0) and setEmbeddedAudio(cutawayHandle, false) if its own sound is unwanted. Times are seconds. \
 For a recap or mashup across several videos or places: group sweepCandidates() by asset (assetName often carries the place or event), open each group with an establishing or prime-tagged candidate, then vary action, talking, and reaction picks, addTitle a short place card when the asset changes, and keep each source range within its candidate duration. \
@@ -421,14 +422,43 @@ fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
 /// A check reads clip ids and transcript text, not per-word timing, which is
 /// most of a talking project's state. QuickJS keeps the full snapshot.
 fn without_word_timings(snapshot: &str) -> String {
+    word_timings_for(snapshot, None)
+}
+
+/// Words of three or more letters that can tie a request to what was said.
+fn spoken_terms(text: &str) -> std::collections::HashSet<String> {
+    const COMMON: &[&str] = &[
+        "the", "and", "for", "with", "that", "this", "from", "then", "into", "make", "put", "use",
+        "add", "cut", "clip", "clips", "part", "where", "when", "about", "talks", "says", "said",
+        "say", "him", "her", "his", "she", "they", "them", "it's", "all", "out", "over", "under",
+        "after", "before", "each", "every", "some", "more", "less", "seconds", "second", "start",
+        "end", "keep", "remove", "only", "just", "can", "you",
+    ];
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .map(|word| word.trim_matches('\''))
+        .filter(|word| word.chars().count() >= 3 && !COMMON.contains(word))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Per-word timings are most of a transcript's size. Keep them only on
+/// segments that share a spoken term with `request` (none without one);
+/// segment text and times stay, and QuickJS still reads every word.
+fn word_timings_for(snapshot: &str, request: Option<&str>) -> String {
     let Ok(mut state) = serde_json::from_str::<serde_json::Value>(snapshot) else {
         return snapshot.to_owned();
     };
+    let terms = request.map(spoken_terms).unwrap_or_default();
     let segments = state
         .get_mut("transcriptSegments")
         .and_then(|segments| segments.as_array_mut());
     for segment in segments.into_iter().flatten() {
-        if let Some(fields) = segment.as_object_mut() {
+        let mentioned = !terms.is_empty()
+            && segment["text"]
+                .as_str()
+                .is_some_and(|text| !spoken_terms(text).is_disjoint(&terms));
+        if let Some(fields) = segment.as_object_mut().filter(|_| !mentioned) {
             fields.remove("words");
         }
     }
@@ -1274,10 +1304,11 @@ impl EditorApp {
             return;
         };
         // Corrections use the same basis as the initial request.
-        let mut state = pending.state_json.clone();
-        if pending.review.is_some() {
-            state = without_word_timings(&state);
-        }
+        let state = if pending.review.is_some() {
+            without_word_timings(&pending.state_json)
+        } else {
+            word_timings_for(&pending.state_json, Some(&pending.request))
+        };
         let request = pending.request.clone();
         let generation = pending.generation;
         let cancel = pending.cancel.clone();
@@ -2751,6 +2782,67 @@ mod tests {
     /// An applied edit is checked: the model receives a contact sheet and the
     /// problems the edit introduced, its fix is applied, and one Undo
     /// removes both the edit and the fix.
+    #[test]
+    fn edit_requests_carry_word_timings_only_for_segments_they_mention() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let segment = |start: f64, text: &str, word: &str| super::super::sweep::TranscriptSegment {
+            start,
+            end: start + 1.0,
+            speaker: None,
+            text: text.to_owned(),
+            words: vec![super::super::sweep::TranscriptWord {
+                start: start + 0.25,
+                end: start + 0.5,
+                text: word.to_owned(),
+                confidence: None,
+                estimated: false,
+            }],
+            session: None,
+        };
+        app.assets.push(super::super::media::BinAsset {
+            info: openreel_media::MediaInfo {
+                path: "talk.mp4".to_owned(),
+                name: "talk.mp4".to_owned(),
+                duration: 10.0,
+                width: 320,
+                height: 180,
+                fps: 30.0,
+                has_video: true,
+                has_audio: true,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: super::super::sweep::SweepData {
+                transcript: vec![
+                    segment(0.0, "Welcome back to the show.", "Welcome"),
+                    segment(2.0, "Our pricing changes today.", "pricing"),
+                ],
+                ..Default::default()
+            },
+        });
+        let (settings, server) = fake_model_api(move |_| {
+            let reply = r#"{"code": "console.log('ok')", "explanation": "Nothing to do."}"#;
+            let body = serde_json::json!({"choices": [{"message": {"content": reply}}]});
+            (200, body.to_string())
+        });
+        app.chat_settings = settings;
+        app.submit_chat(&ctx, "Cut to where he talks about Pricing".to_owned());
+        let request = server.join().unwrap();
+        assert!(request.contains("Welcome back to the show."), "text kept");
+        assert!(
+            request.contains(r#"\"text\":\"pricing\""#),
+            "the mentioned segment keeps its word timings"
+        );
+        assert!(
+            !request.contains(r#"\"text\":\"Welcome\""#),
+            "an unmentioned segment drops them"
+        );
+    }
+
     #[test]
     fn applied_edits_are_checked_against_a_contact_sheet_and_fixed() {
         let ctx = egui::Context::default();
