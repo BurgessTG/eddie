@@ -328,6 +328,7 @@ impl StripSource {
                 .iter()
                 .map(|segment| (segment.start, segment.end))
                 .collect();
+        let shots = split_at_black(&shots, &motion);
         if shots.is_empty() {
             return None;
         }
@@ -385,6 +386,62 @@ impl StripSource {
         };
         (cells, line)
     }
+}
+
+/// Mean luminance (0..1) under which a strip picture counts as black.
+const BLACK_LUMINANCE: f32 = 0.06;
+/// Black this long inside a detected shot becomes its own shot.
+const BLACK_RUN: f64 = 0.25;
+
+/// Split detected shots where they enter or leave a black run. Scene
+/// detection deliberately keeps flashes and dark frames inside a shot, so
+/// a card that hard-cuts to black read as one shot and a fix spanning
+/// "verified" card time ended on black. Only the strip's shot list uses
+/// this; curation's scene inventory is unchanged.
+fn split_at_black(
+    shots: &[(f64, f64)],
+    motion: &[openreel_media::MotionSample],
+) -> Vec<(f64, f64)> {
+    // (start, end) of each black run long enough to count.
+    let mut runs: Vec<(f64, f64)> = Vec::new();
+    let mut start: Option<f64> = None;
+    for (index, sample) in motion.iter().enumerate() {
+        let black = sample.visual.luminance < BLACK_LUMINANCE;
+        match (black, start) {
+            (true, None) => start = Some(sample.time),
+            (false, Some(from)) => {
+                if sample.time - from >= BLACK_RUN {
+                    runs.push((from, sample.time));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+        if index + 1 == motion.len() {
+            if let Some(from) = start {
+                let end = shots.last().map_or(sample.time, |shot| shot.1);
+                if end - from >= BLACK_RUN {
+                    runs.push((from, end));
+                }
+            }
+        }
+    }
+    let mut split = Vec::new();
+    for &(shot_start, shot_end) in shots {
+        let mut cuts: Vec<f64> = runs
+            .iter()
+            .flat_map(|&(from, to)| [from, to])
+            .filter(|&edge| shot_start < edge && edge < shot_end)
+            .collect();
+        cuts.sort_by(f64::total_cmp);
+        let mut from = shot_start;
+        for cut in cuts {
+            split.push((from, cut));
+            from = cut;
+        }
+        split.push((from, shot_end));
+    }
+    split
 }
 
 /// At most this many shots get a picture, so the longest shots keep spare
@@ -842,6 +899,35 @@ mod tests {
             0,
             "half-second shots stay unseen"
         );
+    }
+
+    /// honey's 0vSt card (32.15-34.58) hard-cuts to black inside one
+    /// detected shot; the black becomes its own shot, a dark blink does not.
+    #[test]
+    fn strip_shots_split_where_a_shot_cuts_to_black() {
+        let sample = |time: f64, luminance: f32| openreel_media::MotionSample {
+            time,
+            difference: 0.0,
+            scene_score: 0.0,
+            visual: openreel_media::FrameVisualEvidence {
+                luminance,
+                ..Default::default()
+            },
+        };
+        let mut motion: Vec<_> = (0..300)
+            .map(|frame| {
+                let time = 31.18 + frame as f64 / 60.0;
+                let blink = (32.0..32.05).contains(&time);
+                sample(time, if time >= 34.58 || blink { 0.01 } else { 0.2 })
+            })
+            .collect();
+        motion.retain(|s| s.time < 36.49);
+        let shots = split_at_black(&[(0.0, 31.18), (31.18, 36.49)], &motion);
+        assert_eq!(shots.len(), 3, "{shots:?}");
+        assert_eq!(shots[0], (0.0, 31.18));
+        assert_eq!(shots[1].0, 31.18);
+        assert!((shots[1].1 - 34.58).abs() < 1.0 / 60.0, "{shots:?}");
+        assert_eq!((shots[2].0, shots[2].1), (shots[1].1, 36.49));
     }
 
     #[test]
