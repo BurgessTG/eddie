@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, ColorImage, CornerRadius, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions,
@@ -134,6 +134,10 @@ pub struct EditorApp {
     /// Pixels of recent uploads; one the renderer has released is refilled
     /// instead of allocating a frame-sized image per upload.
     preview_images: Vec<Arc<ColorImage>>,
+    /// When pictures were shown during the last second of playback.
+    shown_at: VecDeque<Instant>,
+    /// Playback start, so the rate is judged only over a full second.
+    playing_since: Option<Instant>,
     preview_key: Option<VideoKey>,
     still_gen: u64,
     /// The one still request being decoded; `None` key discards its answer.
@@ -254,6 +258,8 @@ impl EditorApp {
             still_rx,
             preview_texture: None,
             preview_images: Vec::new(),
+            shown_at: VecDeque::with_capacity(128),
+            playing_since: None,
             preview_key: None,
             still_gen: 0,
             still_inflight: None,
@@ -348,6 +354,8 @@ impl EditorApp {
             still_rx,
             preview_texture: None,
             preview_images: Vec::new(),
+            shown_at: VecDeque::with_capacity(128),
+            playing_since: None,
             preview_key: None,
             still_gen: 0,
             still_inflight: None,
@@ -769,6 +777,8 @@ impl EditorApp {
             self.playhead = 0.0;
         }
         self.playing = playing;
+        self.shown_at.clear();
+        self.playing_since = playing.then(Instant::now);
         if !playing {
             self.stop_sources();
             if self.status == "Buffering video." || self.status == "Playing." {
@@ -904,6 +914,43 @@ impl EditorApp {
             }
         }
         self.preview_key = self.active_video_key();
+        if self.playing {
+            let now = Instant::now();
+            while self
+                .shown_at
+                .front()
+                .is_some_and(|at| now.duration_since(*at) > Duration::from_secs(1))
+            {
+                self.shown_at.pop_front();
+            }
+            self.shown_at.push_back(now);
+        }
+    }
+
+    /// Pictures shown over the last second of playback and the rate the
+    /// active picture should reach (its source rate, at most the project's).
+    /// `None` until playback has run a full second over video.
+    fn playback_rate(&self) -> Option<(usize, f64)> {
+        let since = self.playing_since?;
+        if !self.playing || since.elapsed() < Duration::from_secs(1) {
+            return None;
+        }
+        let clip = self.timeline.active_video(self.playhead)?;
+        let source_fps = self
+            .asset(clip.source.as_deref()?)
+            .map_or(0.0, |asset| asset.info.fps);
+        let target = if source_fps > 0.0 {
+            source_fps.min(self.timeline.fps)
+        } else {
+            self.timeline.fps
+        };
+        let now = Instant::now();
+        let shown = self
+            .shown_at
+            .iter()
+            .filter(|at| now.duration_since(**at) <= Duration::from_secs(1))
+            .count();
+        Some((shown, target))
     }
 
     /// Drop cached stills and the answer in flight after the timeline is
@@ -2348,6 +2395,13 @@ impl EditorApp {
                         egui::Spinner::new()
                             .color(theme::MUTED_FG)
                             .paint_at(ui, rect.expand(1.0));
+                    } else if let Some((shown, target)) = self.playback_rate() {
+                        let color = rate_health(shown as f64, target);
+                        ui.painter().circle_filled(rect.center(), 4.0, color);
+                        ui.interact(rect, ui.id().with("playback_rate"), Sense::hover())
+                            .on_hover_text(format!(
+                                "Playback: {shown} of {target:.0} pictures per second"
+                            ));
                     } else {
                         ui.painter()
                             .circle_filled(rect.center(), 3.0, theme::SUBTLE_FG);
@@ -3302,6 +3356,17 @@ impl eframe::App for EditorApp {
         if self.frame_count % 60 == 0 {
             self.rss_mb = read_rss_mb();
         }
+    }
+}
+
+/// Green at 80% of the target rate, amber at 50%, red below.
+fn rate_health(shown: f64, target: f64) -> egui::Color32 {
+    if shown >= target * 0.8 {
+        theme::SUCCESS
+    } else if shown >= target * 0.5 {
+        theme::WARNING
+    } else {
+        theme::DESTRUCTIVE
     }
 }
 

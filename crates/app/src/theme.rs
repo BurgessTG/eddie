@@ -24,6 +24,9 @@ pub const MUTED_FG: Color32 = Color32::from_rgb(0xA1, 0xA1, 0xAA);
 pub const SUBTLE_FG: Color32 = Color32::from_rgb(0x71, 0x71, 0x7A);
 pub const ACCENT: Color32 = Color32::from_rgb(0x27, 0x27, 0x2A);
 pub const DESTRUCTIVE: Color32 = Color32::from_rgb(0xEF, 0x44, 0x44);
+/// Health only (the playback rate dot): green-500 and amber-500.
+pub const SUCCESS: Color32 = Color32::from_rgb(0x22, 0xC5, 0x5E);
+pub const WARNING: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 pub const BORDER: Color32 = Color32::from_rgb(0x27, 0x27, 0x2A);
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3F, 0x3F, 0x46);
 pub const INPUT: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x21);

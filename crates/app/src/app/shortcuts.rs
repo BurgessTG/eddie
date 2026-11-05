@@ -169,13 +169,13 @@ pub(super) const BINDINGS: &[Binding] = &[
         UiAction::PrevEdit,
         "Playback",
         "Previous cut",
-        &[key(NONE, Key::ArrowUp)],
+        &[key(NONE, Key::ArrowUp), key(NONE, Key::OpenBracket)],
     )),
     repeating(bind(
         UiAction::NextEdit,
         "Playback",
         "Next cut",
-        &[key(NONE, Key::ArrowDown)],
+        &[key(NONE, Key::ArrowDown), key(NONE, Key::CloseBracket)],
     )),
     bind(
         UiAction::GoStart,
@@ -437,6 +437,15 @@ mod tests {
         assert_eq!(
             press(&ctx, CMD_SHIFT, Key::Plus, false),
             Some(UiAction::ZoomIn)
+        );
+        // fframes' bracket keys reach the same cut navigation as the arrows.
+        assert_eq!(
+            press(&ctx, NONE, Key::OpenBracket, false),
+            Some(UiAction::PrevEdit)
+        );
+        assert_eq!(
+            press(&ctx, NONE, Key::CloseBracket, false),
+            Some(UiAction::NextEdit)
         );
         // A focused text field owns letters, arrows and its own undo.
         assert_eq!(press(&ctx, NONE, Key::S, true), None);
