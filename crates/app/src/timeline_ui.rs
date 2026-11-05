@@ -188,18 +188,17 @@ impl TimelineView {
         }
     }
 
-    /// Playback follow: when the playhead runs past the right edge, page
-    /// so it sits near the left edge again. A view the user scrolled away
-    /// from the playhead (`was` off screen) is left alone.
+    /// Playback follow: once the playhead reaches the middle of the lanes
+    /// it stays there and the clips scroll under it. A view the user
+    /// scrolled away from the playhead (`was` off screen) is left alone.
     pub fn follow(&mut self, was: f64, now: f64) {
         let Some(rect) = self.last_rect else {
             return;
         };
         let width = rect.width() - HEADER_W;
         let x = |time: f64| time as f32 * self.px_per_sec - self.scroll_x;
-        if (0.0..=width).contains(&x(was)) && x(now) > width {
-            let margin = (width * 0.1).min(60.0);
-            self.scroll_x = (now as f32 * self.px_per_sec - margin).max(0.0);
+        if (0.0..=width).contains(&x(was)) && x(now) > width * 0.5 {
+            self.scroll_x = now as f32 * self.px_per_sec - width * 0.5;
         }
     }
 
@@ -1492,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_pages_the_view_but_leaves_a_scrolled_away_view_alone() {
+    fn playback_scrolls_smoothly_but_leaves_a_scrolled_away_view_alone() {
         // 1000 px of lanes at 10 px/s show 0..100 s.
         let mut view = TimelineView {
             px_per_sec: 10.0,
@@ -1502,13 +1501,14 @@ mod tests {
             )),
             ..Default::default()
         };
-        view.follow(99.0, 99.5);
-        assert_eq!(view.scroll_x, 0.0, "still on screen");
-        view.follow(99.5, 100.5);
-        // Paged so 100.5 s sits 60 px in from the left edge.
-        assert_eq!(view.scroll_x, 1005.0 - 60.0);
+        view.follow(40.0, 49.5);
+        assert_eq!(view.scroll_x, 0.0, "left of the middle: the playhead moves");
+        view.follow(49.5, 50.5);
+        assert_eq!(view.scroll_x, 5.0, "pinned at the middle (500 px)");
+        view.follow(50.5, 51.0);
+        assert_eq!(view.scroll_x, 10.0, "each tick scrolls by what it played");
         view.scroll_x = 3000.0;
-        view.follow(110.0, 111.0);
+        view.follow(52.0, 53.0);
         assert_eq!(view.scroll_x, 3000.0, "the user scrolled away");
     }
 
