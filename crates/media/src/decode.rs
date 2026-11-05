@@ -4,6 +4,7 @@
 //! seeks and yields scaled RGBA frames, with libavcodec frame threading.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Once;
 use std::thread;
@@ -31,81 +32,163 @@ pub(crate) fn ensure_init() {
     });
 }
 
-/// EXPERIMENT: built with the `vaapi` feature, `EDDIE_HWDEC=vaapi` decodes
-/// on a VAAPI device. libavcodec picks the hardware format when the profile
-/// is supported and silently falls back to software otherwise.
-fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
-    if !cfg!(feature = "vaapi") || std::env::var("EDDIE_HWDEC").as_deref() != Ok("vaapi") {
-        return false;
+/// Settings → Hardware decode. Only preview playback lanes use it.
+static HARDWARE_DECODE: AtomicBool = AtomicBool::new(true);
+
+/// Allow or forbid GPU decode for decoders opened from now on.
+pub fn set_hardware_decode(on: bool) {
+    HARDWARE_DECODE.store(on, Ordering::Relaxed);
+}
+
+/// Files software decodes cheaply stay in software: on a Ryzen 3700X with
+/// NVDEC through VAAPI, hardware cut 1440p H.264 CPU from 530-630% to 99%
+/// but slowed its seeks from 160-195 to 285 ms, while 4K HEVC Main10 went
+/// from 1116-1193% to 103% CPU with seeks 3.7x faster.
+fn wants_hardware(codec: ffmpeg::codec::Id, width: i32, height: i32) -> bool {
+    use ffmpeg::codec::Id;
+    matches!(codec, Id::HEVC | Id::AV1 | Id::VP9)
+        || i64::from(width) * i64::from(height) > 2560 * 1440
+}
+
+type SyncSurface = unsafe extern "C" fn(*mut std::ffi::c_void, u32) -> i32;
+
+/// libva's `vaSyncSurface`, when the FFmpeg libraries brought libva in.
+/// Looked up at run time so builds need no VA headers or libraries.
+fn va_sync_surface() -> Option<SyncSurface> {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn dlsym(
+                handle: *mut std::ffi::c_void,
+                symbol: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
+        }
+        static SYNC: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        // SAFETY: a null handle is RTLD_DEFAULT, the global symbol scope.
+        let address = *SYNC.get_or_init(|| unsafe {
+            dlsym(std::ptr::null_mut(), c"vaSyncSurface".as_ptr()) as usize
+        });
+        // SAFETY: the symbol is libva's
+        // `VAStatus vaSyncSurface(VADisplay, VASurfaceID)`.
+        (address != 0).then(|| unsafe { std::mem::transmute::<usize, SyncSurface>(address) })
     }
-    // One device serves every decoder: creating one costs about 250 ms.
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// One VAAPI device on the first DRM render node that opens, shared by
+/// every decoder: creating one costs 250-600 ms. Null when there is none.
+fn vaapi_device() -> *mut ffmpeg::ffi::AVBufferRef {
     struct Device(*mut ffmpeg::ffi::AVBufferRef);
     // SAFETY: the reference is created once, never freed, and only passed to
     // av_buffer_ref, which is thread-safe.
     unsafe impl Send for Device {}
     unsafe impl Sync for Device {}
     static DEVICE: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
-    let device = DEVICE.get_or_init(|| {
-        let mut device = std::ptr::null_mut();
-        // SAFETY: on failure the pointer stays null.
-        let result = unsafe {
-            ffmpeg::ffi::av_hwdevice_ctx_create(
-                &mut device,
-                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                c"/dev/dri/renderD128".as_ptr(),
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        Device(if result < 0 {
-            std::ptr::null_mut()
-        } else {
-            device
+    DEVICE
+        .get_or_init(|| {
+            ensure_init();
+            if va_sync_surface().is_none() {
+                return Device(std::ptr::null_mut());
+            }
+            let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("renderD"))
+                })
+                .collect();
+            nodes.sort();
+            for node in nodes {
+                let Ok(node) = std::ffi::CString::new(node.as_os_str().as_encoded_bytes()) else {
+                    continue;
+                };
+                let mut device = std::ptr::null_mut();
+                // SAFETY: on failure the pointer stays null.
+                let result = unsafe {
+                    ffmpeg::ffi::av_hwdevice_ctx_create(
+                        &mut device,
+                        ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                        node.as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                if result >= 0 {
+                    return Device(device);
+                }
+            }
+            Device(std::ptr::null_mut())
         })
-    });
-    if device.0.is_null() {
+        .0
+}
+
+/// Open the shared device off the UI path, so the first play does not wait.
+pub fn warm_hardware_decode() {
+    if HARDWARE_DECODE.load(Ordering::Relaxed) {
+        thread::spawn(|| {
+            vaapi_device();
+        });
+    }
+}
+
+/// Give a preview decoder the VAAPI device when hardware decode is on and
+/// the file is expensive in software. libavcodec decodes on the GPU when
+/// the profile is supported (NVDEC has no 4:2:2) and silently falls back to
+/// software otherwise.
+fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
+    if !HARDWARE_DECODE.load(Ordering::Relaxed) {
+        return false;
+    }
+    // SAFETY: plain reads of the unopened context's parameters.
+    let (codec, width, height) = unsafe {
+        let raw = context.as_ptr();
+        (
+            ffmpeg::codec::Id::from((*raw).codec_id),
+            (*raw).width,
+            (*raw).height,
+        )
+    };
+    if !wants_hardware(codec, width, height) {
+        return false;
+    }
+    let device = vaapi_device();
+    if device.is_null() {
         return false;
     }
     // SAFETY: the codec context is not open yet; it takes its own reference.
     unsafe {
         let raw = context.as_mut_ptr();
-        (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device.0);
-        // Recent pictures, the lookahead and the current one hold surfaces.
-        (*raw).extra_hw_frames = RECENT_PICTURES as i32 + 4;
+        (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device);
+        // Preview lanes hold the current picture and one lookahead; two
+        // more cover the frame being decoded and the one being downloaded.
+        (*raw).extra_hw_frames = 4;
     }
     true
-}
-
-// Only the `vaapi` feature links libva, so default builds need no VA headers.
-#[cfg(feature = "vaapi")]
-#[link(name = "va")]
-extern "C" {
-    fn vaSyncSurface(display: *mut std::ffi::c_void, surface: u32) -> i32;
-}
-
-/// Without the feature no decoder has a VAAPI device, so no picture gets here.
-#[cfg(not(feature = "vaapi"))]
-#[allow(non_snake_case)]
-unsafe fn vaSyncSurface(_display: *mut std::ffi::c_void, _surface: u32) -> i32 {
-    0
 }
 
 /// Wait until a decoded VAAPI surface is complete, as it leaves the decoder.
 /// nvidia-vaapi-driver (0.0.18) queues every finished picture on a 16-slot
 /// ring with no overflow check; pictures decoded ahead and never synced (seek
 /// preroll, frame threads) lap it, and a lost picture never completes, so a
-/// later sync on it waits forever. Syncing here keeps the ring drained.
+/// later sync on it waits forever. Syncing here keeps the ring drained, and
+/// a seek can no longer return a reused surface before it is rewritten.
 fn sync_surface(picture: &ffmpeg::frame::Video) -> MediaResult<()> {
     if picture.format() != ffmpeg::format::Pixel::VAAPI {
         return Ok(());
     }
+    let sync = va_sync_surface().ok_or("libva is not loaded")?;
     // SAFETY: a VAAPI frame carries its surface ID in data[3] and a frames
     // context whose device context is an AVVAAPIDeviceContext.
     let status = unsafe {
         let frame = picture.as_ptr();
         let frames = (*(*frame).hw_frames_ctx).data as *const ffmpeg::ffi::AVHWFramesContext;
         let device = (*(*frames).device_ctx).hwctx as *const ffmpeg::ffi::AVVAAPIDeviceContext;
-        vaSyncSurface(
+        sync(
             (*device).display as *mut _,
             (*frame).data[3] as usize as u32,
         )
@@ -170,7 +253,7 @@ pub struct VideoDecoder {
     /// Consecutive pictures just before `decoded` (references, not copies).
     recent: VecDeque<(f64, ffmpeg::frame::Video)>,
     recent_limit: usize,
-    /// EXPERIMENT: a downloaded VAAPI surface.
+    /// The last downloaded VAAPI surface.
     transfer: ffmpeg::frame::Video,
 }
 
@@ -183,7 +266,27 @@ unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
     pub fn open(path: &str, target_w: u32, fast: bool) -> MediaResult<Self> {
-        Self::open_threaded(path, target_w, fast, ffmpeg::codec::threading::Type::Frame)
+        Self::open_threaded(
+            path,
+            target_w,
+            fast,
+            ffmpeg::codec::threading::Type::Frame,
+            false,
+        )
+    }
+
+    /// A preview playback decoder, on the GPU when hardware decode is on and
+    /// the file is expensive in software. Stills and scrubbing stay in
+    /// software: a hardware far seek decodes its GOP on one thread, which
+    /// halved the pictures shown while scrubbing (6/s vs 12/s on 4K HEVC).
+    pub(crate) fn open_playback(path: &str, target_w: u32) -> MediaResult<Self> {
+        Self::open_threaded(
+            path,
+            target_w,
+            true,
+            ffmpeg::codec::threading::Type::Frame,
+            true,
+        )
     }
 
     /// Frame threading pipelines consecutive pictures; slice threading
@@ -193,6 +296,7 @@ impl VideoDecoder {
         target_w: u32,
         fast: bool,
         threading: ffmpeg::codec::threading::Type,
+        hardware: bool,
     ) -> MediaResult<Self> {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
@@ -240,7 +344,7 @@ impl VideoDecoder {
             kind: threading,
             count: 0, // libavcodec chooses based on CPU cores.
         });
-        if attach_vaapi(&mut context) {
+        if hardware && attach_vaapi(&mut context) {
             // The GPU decodes; threads only parse ahead. Each frame thread can
             // finish a picture before any is synced, which overflows the
             // driver's ring (see `sync_surface`); 4K HEVC also ran no faster
@@ -774,8 +878,13 @@ pub(crate) fn filmstrip_stills(
     target_w: u32,
     tolerance: f64,
 ) -> MediaResult<Vec<(f64, RawFrame)>> {
-    let mut decoder =
-        VideoDecoder::open_threaded(path, target_w, true, ffmpeg::codec::threading::Type::Slice)?;
+    let mut decoder = VideoDecoder::open_threaded(
+        path,
+        target_w,
+        true,
+        ffmpeg::codec::threading::Type::Slice,
+        false,
+    )?;
     let mut stills: Vec<(f64, RawFrame)> = Vec::new();
     let mut position: Option<f64> = None;
     for &time in times {

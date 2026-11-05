@@ -65,6 +65,9 @@ pub(super) struct ChatSettings {
     /// After a chat edit, the model checks a contact sheet of the result
     /// and `inspect()` findings, and may send one fix.
     pub(super) check_edits: bool,
+    /// Preview playback of expensive files (HEVC, AV1, VP9, above 1440p)
+    /// decodes on the GPU through VAAPI when one is available.
+    pub(super) hardware_decode: bool,
 }
 
 impl Default for ChatSettings {
@@ -76,6 +79,7 @@ impl Default for ChatSettings {
             contributor_opt_in: false,
             format: Orientation::Landscape,
             check_edits: true,
+            hardware_decode: true,
         }
     }
 }
@@ -249,6 +253,9 @@ impl ChatSettings {
         if let Some(v) = value["check_edits"].as_bool() {
             settings.check_edits = v;
         }
+        if let Some(v) = value["hardware_decode"].as_bool() {
+            settings.hardware_decode = v;
+        }
         settings
     }
 
@@ -264,6 +271,7 @@ impl ChatSettings {
             "contributor_opt_in": self.contributor_opt_in,
             "format": self.format.as_str(),
             "check_edits": self.check_edits,
+            "hardware_decode": self.hardware_decode,
         });
         static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
         let (temporary, mut file) = loop {
@@ -1965,6 +1973,18 @@ impl EditorApp {
                         }
                         ui.end_row();
 
+                        ui.label(RichText::new("Playback").color(theme::MUTED_FG));
+                        let before = self.chat_settings.hardware_decode;
+                        ui.checkbox(&mut self.chat_settings.hardware_decode, "Hardware decode")
+                            .on_hover_text(
+                                "Play HEVC, AV1, VP9 and footage above 1440p on the GPU (VAAPI) when available. Scrubbing stays on the CPU.",
+                            );
+                        if self.chat_settings.hardware_decode != before {
+                            openreel_media::set_hardware_decode(self.chat_settings.hardware_decode);
+                            dirty = true;
+                        }
+                        ui.end_row();
+
                         ui.label(RichText::new("Format").color(theme::MUTED_FG));
                         format_choice = theme::segmented(
                             ui,
@@ -2552,19 +2572,21 @@ mod tests {
                     model: MODEL_WONDER.to_owned(),
                     ..ChatSettings::default()
                 };
-                for (contributor, format, check) in [
-                    (false, Orientation::Landscape, true),
-                    (true, Orientation::Portrait, false),
+                for (contributor, format, check, hardware) in [
+                    (false, Orientation::Landscape, true, false),
+                    (true, Orientation::Portrait, false, true),
                 ] {
                     settings.contributor_opt_in = contributor;
                     settings.format = format;
                     settings.check_edits = check;
+                    settings.hardware_decode = hardware;
                     settings.save().unwrap();
                     assert!(ChatSettings::load() == settings, "settings round-trip");
                     let value: serde_json::Value =
                         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                    assert_eq!(value.as_object().unwrap().len(), 6);
+                    assert_eq!(value.as_object().unwrap().len(), 7);
                     assert_eq!(value["check_edits"], check);
+                    assert_eq!(value["hardware_decode"], hardware);
                     assert_eq!(value["model"], "muse-wonder-1.0");
                     assert_eq!(value["format"], settings.format.as_str());
                     #[cfg(unix)]

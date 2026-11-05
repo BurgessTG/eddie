@@ -245,6 +245,8 @@ impl EditorApp {
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
         let chat_settings = ChatSettings::load();
+        openreel_media::set_hardware_decode(chat_settings.hardware_decode);
+        openreel_media::warm_hardware_decode();
         let timeline = Timeline::empty_project().with_orientation(chat_settings.format);
         let saved_timeline = timeline.clone();
         Self {

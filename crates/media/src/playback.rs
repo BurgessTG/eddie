@@ -590,7 +590,7 @@ impl Lane {
             let left = std::mem::take(self);
             *self = mailbox.exchange(left, Some((path, target_w)), pool);
             if self.decoder.is_none() {
-                let decoder = VideoDecoder::open(path, target_w, true)?;
+                let decoder = VideoDecoder::open_playback(path, target_w)?;
                 self.decoder = Some(((path.to_owned(), target_w), decoder));
                 mailbox.state.lock().unwrap().opens += 1;
             }

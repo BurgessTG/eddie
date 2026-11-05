@@ -6,10 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 description = "FFmpeg-backed media probing, decoding, playback, and export for OpenReel"
 
-[features]
-# Experimental VAAPI preview decode (EDDIE_HWDEC=vaapi); links libva.
-vaapi = []
-
 [dependencies]
 ab_glyph = "0.2"
 cpal = "0.18"
