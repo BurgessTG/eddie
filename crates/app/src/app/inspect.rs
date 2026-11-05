@@ -2,6 +2,9 @@
 //! each edit, with a contact sheet of the program, so it can see what its
 //! edit produced. Measured facts about the timeline, not taste.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use openreel_engine::{ClipId, ClipKind, Orientation, Timeline};
 use openreel_media::SheetCell;
 use serde::Serialize;
@@ -281,19 +284,133 @@ pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> 
 pub(super) const STRIP_CELLS: usize = 16;
 /// At most this many sources get a strip, in program order.
 const STRIP_SOURCES: usize = 3;
+/// Longer uncurated sources are not scanned for shots at check time.
+const STRIP_SCAN_LIMIT: f64 = 600.0;
 
-/// Pictures sampled through whole source files, so a check can see where
-/// a described shot actually is instead of guessing a source time.
+/// Sources sampled whole, so a check can see where a described shot
+/// actually is instead of guessing a source time.
 pub(super) struct SourceStrip {
-    pub(super) cells: Vec<SheetCell>,
+    pub(super) sources: Vec<StripSource>,
     /// One line per source: its tag (`S1`), path, length and what the edit
     /// placed from it.
     pub(super) legend: Vec<String>,
 }
 
-/// A strip for each source whose visible picture the edit placed or
-/// changed: `STRIP_CELLS` pictures at the middles of equal slices of the
-/// file, labelled `S1 12.3s`, with `*` on those inside a placed range.
+pub(super) struct StripSource {
+    tag: String,
+    info: openreel_media::MediaInfo,
+    /// Source ranges the edit shows.
+    placed: Vec<(f64, f64)>,
+    /// The curated scene inventory; `None` until shots are detected.
+    shots: Option<Vec<(f64, f64)>>,
+}
+
+impl StripSource {
+    /// The source's shots: curated scenes, else cuts detected in its
+    /// picture (cached per file; this decodes the whole file at 64 px, so
+    /// call it off the UI thread). `None` when they cannot be measured.
+    pub(super) fn shots(&self) -> Option<Vec<(f64, f64)>> {
+        type Cache = HashMap<(String, u64), Vec<(f64, f64)>>;
+        static DETECTED: Mutex<Option<Cache>> = Mutex::new(None);
+        if let Some(shots) = &self.shots {
+            return Some(shots.clone());
+        }
+        let key = (self.info.path.clone(), self.info.duration.to_bits());
+        if let Some(shots) = DETECTED.lock().unwrap().get_or_insert_default().get(&key) {
+            return Some(shots.clone());
+        }
+        if self.info.duration > STRIP_SCAN_LIMIT {
+            return None;
+        }
+        let motion = openreel_media::motion_samples(&self.info.path, &self.info).ok()?;
+        let shots: Vec<(f64, f64)> =
+            openreel_media::build_scene_segments(self.info.duration, &motion, &[], 50)
+                .iter()
+                .map(|segment| (segment.start, segment.end))
+                .collect();
+        if shots.is_empty() {
+            return None;
+        }
+        DETECTED
+            .lock()
+            .unwrap()
+            .get_or_insert_default()
+            .insert(key, shots.clone());
+        Some(shots)
+    }
+
+    /// `STRIP_CELLS` pictures labelled `S1 12.30s`, with `*` on those inside
+    /// a placed range, and the line listing the shots they fall in.
+    pub(super) fn cells(&self, shots: Option<&[(f64, f64)]>) -> (Vec<SheetCell>, String) {
+        let cells = strip_times(self.info.duration, shots)
+            .into_iter()
+            .map(|time| {
+                let inside = self
+                    .placed
+                    .iter()
+                    .any(|(start, end)| *start <= time && time < *end);
+                SheetCell {
+                    picture: Some((self.info.path.clone(), time)),
+                    opacity: 1.0,
+                    title: None,
+                    label: format!("{} {time:.2}s{}", self.tag, if inside { " *" } else { "" }),
+                }
+            })
+            .collect();
+        let line = match shots {
+            Some(shots) => format!(
+                "{} shots: {}",
+                self.tag,
+                shots
+                    .iter()
+                    .map(|(start, end)| format!("{start:.2}-{end:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => format!("{} shots: unknown", self.tag),
+        };
+        (cells, line)
+    }
+}
+
+/// Sample times through a source: at least one per shot, the rest given
+/// to the shots with the most time per picture, spread evenly inside each.
+/// Without shots, the middles of equal slices of the file. Over
+/// `STRIP_CELLS` shots, one picture each for shots picked evenly.
+fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<f64> {
+    let whole = [(0.0, duration)];
+    let shots = match shots {
+        Some(shots) if !shots.is_empty() => shots,
+        _ => &whole[..],
+    };
+    let picked: Vec<(f64, f64)> = if shots.len() > STRIP_CELLS {
+        (0..STRIP_CELLS)
+            .map(|index| shots[(2 * index + 1) * shots.len() / (2 * STRIP_CELLS)])
+            .collect()
+    } else {
+        shots.to_vec()
+    };
+    let mut counts = vec![1_usize; picked.len()];
+    for _ in picked.len()..STRIP_CELLS {
+        let longest = (0..picked.len())
+            .max_by(|a, b| {
+                let per = |i: usize| (picked[i].1 - picked[i].0) / counts[i] as f64;
+                per(*a).total_cmp(&per(*b))
+            })
+            .unwrap();
+        counts[longest] += 1;
+    }
+    picked
+        .iter()
+        .zip(counts)
+        .flat_map(|((start, end), count)| {
+            (0..count).map(move |k| start + (k as f64 + 0.5) * (end - start) / count as f64)
+        })
+        .collect()
+}
+
+/// A strip source for each source whose visible picture the edit placed
+/// or changed, at most `STRIP_SOURCES`, in program order.
 pub(super) fn source_strip(
     before: &Timeline,
     after: &Timeline,
@@ -332,18 +449,16 @@ pub(super) fn source_strip(
         }
     }
     let mut strip = SourceStrip {
-        cells: Vec::new(),
+        sources: Vec::new(),
         legend: Vec::new(),
     };
-    for (index, (path, clips)) in sources.iter().enumerate() {
-        let Some(info) = assets
-            .iter()
-            .map(|asset| &asset.info)
-            .find(|info| info.path == *path && info.has_video && info.duration > 0.0)
-        else {
+    for (path, clips) in &sources {
+        let Some(asset) = assets.iter().find(|asset| {
+            asset.info.path == *path && asset.info.has_video && asset.info.duration > 0.0
+        }) else {
             continue;
         };
-        let tag = format!("S{}", index + 1);
+        let tag = format!("S{}", strip.sources.len() + 1);
         let placed: Vec<String> = clips
             .iter()
             .map(|clip| {
@@ -357,22 +472,24 @@ pub(super) fn source_strip(
             .collect();
         strip.legend.push(format!(
             "{tag} = {path} ({:.2}s long; {})",
-            info.duration,
+            asset.info.duration,
             placed.join(", ")
         ));
-        for cell in 0..STRIP_CELLS {
-            let time = (cell as f64 + 0.5) * info.duration / STRIP_CELLS as f64;
-            let time = (time * 10.0).round() / 10.0;
-            let inside = clips
+        let scenes = &asset.sweep.scene_clips;
+        strip.sources.push(StripSource {
+            tag,
+            info: asset.info.clone(),
+            placed: clips
                 .iter()
-                .any(|clip| clip.source_in <= time && time < clip.source_in + clip.duration);
-            strip.cells.push(SheetCell {
-                picture: Some((path.clone(), time)),
-                opacity: 1.0,
-                title: None,
-                label: format!("{tag} {time:.1}s{}", if inside { " *" } else { "" }),
-            });
-        }
+                .map(|clip| (clip.source_in, clip.source_in + clip.duration))
+                .collect(),
+            shots: (!scenes.is_empty()).then(|| {
+                scenes
+                    .iter()
+                    .map(|scene| (scene.source_in, scene.source_in + scene.duration))
+                    .collect()
+            }),
+        });
     }
     strip
 }
@@ -626,22 +743,48 @@ mod tests {
                 "S1 = b.mp4 (10.00s long; clip {b} shows 3.00-5.00s)"
             )]
         );
-        let labels: Vec<&str> = strip.cells.iter().map(|cell| cell.label.as_str()).collect();
+        // Uncurated and undecodable: no shots, equal slices of the file.
+        let (cells, shots) = strip.sources[0].cells(None);
+        assert_eq!(shots, "S1 shots: unknown");
+        let labels: Vec<&str> = cells.iter().map(|cell| cell.label.as_str()).collect();
         assert_eq!(labels.len(), STRIP_CELLS);
-        assert_eq!(labels[0], "S1 0.3s");
-        assert_eq!(labels[STRIP_CELLS - 1], "S1 9.7s");
+        assert_eq!(labels[0], "S1 0.31s");
+        assert_eq!(labels[STRIP_CELLS - 1], "S1 9.69s");
         let marked: Vec<&str> = labels
             .iter()
             .copied()
             .filter(|l| l.ends_with('*'))
             .collect();
-        assert_eq!(marked, vec!["S1 3.4s *", "S1 4.1s *", "S1 4.7s *"]);
-        assert!(strip.cells.iter().all(|cell| cell
+        assert_eq!(marked, vec!["S1 3.44s *", "S1 4.06s *", "S1 4.69s *"]);
+        assert!(cells.iter().all(|cell| cell
             .picture
             .as_ref()
             .is_some_and(|(path, _)| path == "b.mp4")));
+        let (_, shots) = strip.sources[0].cells(Some(&[(0.0, 2.5), (2.5, 10.0)]));
+        assert_eq!(shots, "S1 shots: 0.00-2.50, 2.50-10.00");
         // An edit that changes no visible picture gets no strip.
-        assert!(source_strip(&after, &after, &assets).cells.is_empty());
+        assert!(source_strip(&after, &after, &assets).sources.is_empty());
+    }
+
+    /// Every shot gets a picture, however short; the rest go where a
+    /// picture covers the most time, and none lands across a cut.
+    #[test]
+    fn strip_times_cover_every_shot_and_split_long_ones() {
+        let times = strip_times(10.0, Some(&[(0.0, 0.5), (0.5, 9.0), (9.0, 10.0)]));
+        let count =
+            |start: f64, end: f64| times.iter().filter(|t| (start..end).contains(*t)).count();
+        assert_eq!(times.len(), STRIP_CELLS);
+        assert_eq!(
+            (count(0.0, 0.5), count(0.5, 9.0), count(9.0, 10.0)),
+            (1, 13, 2)
+        );
+        assert_eq!(times[0], 0.25);
+        assert_eq!(&times[14..], &[9.25, 9.75]);
+        // Too many shots: one picture each for shots picked across the file.
+        let many: Vec<(f64, f64)> = (0..40).map(|i| (i as f64, i as f64 + 1.0)).collect();
+        let times = strip_times(40.0, Some(&many));
+        assert_eq!(times.len(), STRIP_CELLS);
+        assert_eq!((times[0], times[STRIP_CELLS - 1]), (1.5, 38.5));
     }
 
     #[test]

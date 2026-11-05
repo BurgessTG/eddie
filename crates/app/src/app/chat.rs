@@ -103,8 +103,8 @@ pub(super) struct PendingChat {
 #[derive(Clone)]
 pub(super) struct EditReview {
     cells: Arc<Vec<openreel_media::SheetCell>>,
-    /// Pictures sampled through the sources the edit placed; may be empty.
-    strip: Arc<Vec<openreel_media::SheetCell>>,
+    /// Sources the edit placed, sampled whole on the worker; may be empty.
+    strip: Arc<Vec<inspect::StripSource>>,
     canvas: (u32, u32),
 }
 
@@ -404,12 +404,14 @@ fn check_request(
         String::new()
     } else {
         format!(
-            "\n\nThe second image is a source strip: {} pictures sampled evenly \
-             through the whole of each source your edit placed, labelled with the source and the \
-             source time in seconds; * marks pictures inside a range your edit placed. Use it to \
-             find the shot the user described. A picture verifies only the moment it shows: place a \
-             replacement centred on that time and no longer than the spacing between samples, unless \
-             a candidate, scene or transcript confirms a longer range.\n{}",
+            "\n\nThe second image is a source strip: {} pictures through the whole of \
+             each source your edit placed, at least one per shot, labelled with the source and the \
+             source time in seconds; * marks pictures inside a range your edit placed. Each source's \
+             shots are listed below. Use the strip to find the shot the user described. A picture \
+             verifies its own moment and its shot halfway to the neighbouring pictures of that shot. \
+             A replacement may span consecutive pictures of one shot that all show what was asked, \
+             never crosses a listed shot boundary, and is no longer than that unless a candidate, \
+             scene or transcript confirms more.\n{}",
             inspect::STRIP_CELLS,
             strip_legend.join("\n")
         )
@@ -440,7 +442,14 @@ fn attach_contact_sheet(body: &mut serde_json::Value, review: &EditReview) {
         Err(error) => text.push_str(&format!("\n\nNo contact sheet is attached: {error}.")),
     }
     if !review.strip.is_empty() {
-        match openreel_media::source_strip(&review.strip, review.canvas) {
+        let mut cells = Vec::new();
+        for source in review.strip.iter() {
+            let (source_cells, shots) = source.cells(source.shots().as_deref());
+            cells.extend(source_cells);
+            text.push('\n');
+            text.push_str(&shots);
+        }
+        match openreel_media::source_strip(&cells, review.canvas) {
             Ok(jpeg) => content.push(serde_json::json!({"type": "image_url", "image_url": {
                 "url": format!("data:image/jpeg;base64,{}", super::sweep::base64_encode(&jpeg)),
             }})),
@@ -1325,7 +1334,7 @@ impl EditorApp {
             started: Instant::now(),
             review: Some(EditReview {
                 cells: Arc::new(inspect::sheet_cells(&self.timeline)),
-                strip: Arc::new(strip.cells),
+                strip: Arc::new(strip.sources),
                 canvas,
             }),
         });
@@ -2947,6 +2956,10 @@ mod tests {
             request.matches("data:image/jpeg;base64,").count(),
             2,
             "a contact sheet and a source strip"
+        );
+        assert!(
+            request.contains("S1 shots: "),
+            "the check lists the strip source's shots"
         );
         assert!(
             request.contains("S1 = ready.mp4 (10.00s long;"),

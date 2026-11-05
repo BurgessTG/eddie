@@ -15,6 +15,9 @@ use crate::{scaled_height, title_look, MediaResult, VideoDecoder};
 /// Strip under each cell holding its label.
 const LABEL_H: usize = 26;
 const GUTTER: usize = 4;
+/// mjpeg `-q:v` for source strips; 7 was 32-39% smaller than the
+/// sheet's 3 with labels and shots still clear.
+const STRIP_QUALITY: u32 = 7;
 
 /// One cell: the picture shown at a program time, as preview and export
 /// compose it, and the label drawn under it.
@@ -32,14 +35,22 @@ pub struct SheetCell {
 /// columns wide. Undecodable pictures stay black; their label says so.
 pub fn contact_sheet(cells: &[SheetCell], canvas: (u32, u32)) -> MediaResult<Vec<u8>> {
     let portrait = canvas.1 > canvas.0;
-    render(cells, canvas, if portrait { 216 } else { 384 }, 4)
+    render(cells, canvas, if portrait { 216 } else { 384 }, 4, 3)
 }
 
 /// Like [`contact_sheet`] at half the cell width and eight columns: many
 /// small pictures sampled through source files, for finding a shot.
 pub fn source_strip(cells: &[SheetCell], canvas: (u32, u32)) -> MediaResult<Vec<u8>> {
     let portrait = canvas.1 > canvas.0;
-    render(cells, canvas, if portrait { 108 } else { 192 }, 8)
+    // Lower JPEG quality: these pictures are for finding a shot, and at
+    // the sheet's quality a strip was most of a check request's bytes.
+    render(
+        cells,
+        canvas,
+        if portrait { 108 } else { 192 },
+        8,
+        STRIP_QUALITY,
+    )
 }
 
 fn render(
@@ -47,6 +58,7 @@ fn render(
     canvas: (u32, u32),
     cell_w: usize,
     per_row: usize,
+    quality: u32,
 ) -> MediaResult<Vec<u8>> {
     if cells.is_empty() {
         return Err("no cells".to_owned());
@@ -168,7 +180,15 @@ fn render(
         .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
         .arg(format!("{width}x{height}"))
         .args(["-i", "pipe:0", "-vf", &filters, "-frames:v", "1"])
-        .args(["-q:v", "3", "-c:v", "mjpeg", "-f", "image2", "pipe:1"])
+        .args([
+            "-q:v",
+            &quality.to_string(),
+            "-c:v",
+            "mjpeg",
+            "-f",
+            "image2",
+            "pipe:1",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
