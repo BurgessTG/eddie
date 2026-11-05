@@ -206,6 +206,8 @@ pub(super) struct CaptionChunk {
     pub(super) start: f64,
     pub(super) end: f64,
     pub(super) text: String,
+    /// Source start time of each word in `text`, only from real word timing.
+    pub(super) words: Vec<f64>,
 }
 
 /// A word's letters and apostrophes, lowercased, for comparing repeats.
@@ -336,6 +338,7 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
                         .map(|word| word.2.as_str())
                         .collect::<Vec<_>>()
                         .join(" "),
+                    words: group.iter().map(|word| word.0).collect(),
                 });
             };
             for word in words {
@@ -418,6 +421,7 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
                 start: cursor,
                 end,
                 text,
+                words: Vec::new(),
             };
             cursor = end;
             chunk
@@ -2462,6 +2466,10 @@ mod tests {
             "long speech is split into readable captions"
         );
         assert_eq!(chunks[0].start, 10.0);
+        assert!(chunks
+            .iter()
+            .all(|chunk| { chunk.words.len() == chunk.text.split_whitespace().count() }));
+        assert_eq!(chunks[0].words[..2], [10.0, 10.4]);
         assert!(chunks.iter().all(|chunk| chunk.text.len() <= 42));
         assert!(chunks.windows(2).all(|pair| pair[0].end <= pair[1].start));
 
@@ -2479,6 +2487,7 @@ mod tests {
                 start: 20.0,
                 end: 24.0,
                 text: "A short turn.".to_owned(),
+                words: Vec::new(),
             }]
         );
 

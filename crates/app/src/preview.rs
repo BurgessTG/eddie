@@ -3,7 +3,7 @@
 //! title overlays composited like the export will render them.
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2,
+    Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, TextFormat, TextureHandle, Ui, Vec2,
 };
 use openreel_engine::{ClipKind, Timeline};
 
@@ -93,11 +93,25 @@ pub fn paint(
         let scale = frame.height() / canvas.1.max(1) as f32;
         let (r, g, b) = look.color;
         let color = Color32::from_rgba_unmultiplied(r, g, b, (alpha * 255.0) as u8);
-        let galley = painter.layout_no_wrap(
-            title.name.clone(),
-            FontId::proportional((look.font_size as f32 * scale).max(1.0)),
-            color,
-        );
+        let font = FontId::proportional((look.font_size as f32 * scale).max(1.0));
+        let active = look.highlight.and(title.active_word(playhead));
+        let galley = match (look.highlight, active) {
+            (Some((hr, hg, hb)), Some(active)) => {
+                // The word being spoken in the highlight colour, as export
+                // layers it.
+                let lit = Color32::from_rgba_unmultiplied(hr, hg, hb, (alpha * 255.0) as u8);
+                let mut job = eframe::egui::text::LayoutJob::default();
+                for (index, word) in title.name.split_whitespace().enumerate() {
+                    if index > 0 {
+                        job.append(" ", 0.0, TextFormat::simple(font.clone(), color));
+                    }
+                    let tint = if index == active { lit } else { color };
+                    job.append(word, 0.0, TextFormat::simple(font.clone(), tint));
+                }
+                painter.layout_job(job)
+            }
+            _ => painter.layout_no_wrap(title.name.clone(), font, color),
+        };
         let size = galley.size();
         let x = match look.left {
             Some(left) => frame.left() + left as f32 * scale,

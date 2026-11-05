@@ -742,6 +742,15 @@ impl EditorApp {
                 );
                 if let Some(clip) = self.timeline.clip_mut(caption) {
                     clip.title_style = style;
+                    // Offsets from the caption's start, so word `i` lights
+                    // when its source time plays.
+                    clip.words = chunk
+                        .words
+                        .iter()
+                        .map(|word| {
+                            (target.start + word - source_start - start).clamp(0.0, duration)
+                        })
+                        .collect();
                 }
                 last_added = Some(caption);
                 added += 1;
@@ -6441,6 +6450,35 @@ mod tests {
         assert!(captions
             .iter()
             .all(|clip| clip.start >= 5.0 && clip.end() <= 9.04));
+        // Each word lights when its source time plays: source 10.0 is at 5.0.
+        let source_starts: HashMap<&str, f64> = [
+            ("One", 10.0),
+            ("two", 10.4),
+            ("three", 10.8),
+            ("four", 11.3),
+            ("five", 11.8),
+            ("six", 12.2),
+            ("seven", 12.6),
+            ("eight.", 13.1),
+        ]
+        .into_iter()
+        .collect();
+        for caption in &captions {
+            let times = caption.word_times().expect("one time per caption word");
+            for (word, time) in caption.name.split_whitespace().zip(times) {
+                let expected = 5.0 + source_starts[word] - 10.0;
+                assert!(
+                    (time - expected).abs() < 1e-9,
+                    "{word}: {time} vs {expected}"
+                );
+            }
+        }
+        let three = captions
+            .iter()
+            .find(|clip| clip.name.split_whitespace().any(|word| word == "three"))
+            .unwrap();
+        let index = three.name.split_whitespace().position(|w| w == "three");
+        assert_eq!(three.active_word(5.85), index);
         assert_eq!(
             app.add_captions_for_clip(clip, openreel_engine::TitleStyle::PopCaption)
                 .expect("second caption pass is idempotent"),

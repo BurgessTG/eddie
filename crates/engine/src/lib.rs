@@ -22,14 +22,17 @@ pub enum TitleStyle {
     Caption,
     PopCaption,
     MinimalCaption,
+    /// A caption whose spoken word lights up (needs `Clip::words`).
+    HighlightCaption,
 }
 
 impl TitleStyle {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::LowerThird,
         Self::Caption,
         Self::PopCaption,
         Self::MinimalCaption,
+        Self::HighlightCaption,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -38,6 +41,7 @@ impl TitleStyle {
             Self::Caption => "caption",
             Self::PopCaption => "pop-caption",
             Self::MinimalCaption => "minimal-caption",
+            Self::HighlightCaption => "highlight-caption",
         }
     }
 
@@ -47,6 +51,7 @@ impl TitleStyle {
             Self::Caption => "Caption",
             Self::PopCaption => "Pop caption",
             Self::MinimalCaption => "Minimal caption",
+            Self::HighlightCaption => "Highlight caption",
         }
     }
 
@@ -90,6 +95,11 @@ pub struct Clip {
     /// another audible clip that does not itself duck is talking.
     #[serde(default)]
     pub duck: bool,
+    /// Titles only: when each whitespace-separated word of `name` starts,
+    /// on the clip's source clock (timeline time is
+    /// `start + word - source_in`, so trims and splits keep them aligned).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<f64>,
 }
 
 impl Clip {
@@ -105,6 +115,25 @@ impl Clip {
     /// together they exceed it, both scale down to meet.
     pub fn fade_lengths(&self) -> (f64, f64) {
         fit_fades(self.duration, self.fade_in, self.fade_out)
+    }
+
+    /// Word start times on the timeline, when there is one per word of the
+    /// title text (a renamed title loses its timing).
+    pub fn word_times(&self) -> Option<Vec<f64>> {
+        (!self.words.is_empty() && self.words.len() == self.name.split_whitespace().count()).then(
+            || {
+                self.words
+                    .iter()
+                    .map(|word| self.start + word - self.source_in)
+                    .collect()
+            },
+        )
+    }
+
+    /// The word being spoken at `time`: the last one started by then.
+    pub fn active_word(&self, time: f64) -> Option<usize> {
+        let times = self.word_times()?;
+        times.iter().rposition(|&start| start <= time)
     }
 }
 
@@ -355,6 +384,7 @@ impl Timeline {
             linked_clip: None,
             title_style: TitleStyle::default(),
             duck: false,
+            words: Vec::new(),
         });
         id
     }
@@ -684,6 +714,7 @@ impl Timeline {
             right_clip.linked_clip = None;
             right_clip.title_style = clip.title_style;
             right_clip.duck = clip.duck;
+            right_clip.words = clip.words.clone();
         }
         Some(right)
     }

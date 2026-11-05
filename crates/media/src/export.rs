@@ -489,7 +489,29 @@ fn batch_command(
 /// frames that fall inside it, shifted to its own frame numbers.
 struct Titles<'a> {
     font: Option<String>,
+    /// The font file's bytes, to measure highlight captions.
+    font_data: Option<Vec<u8>>,
+    clock: VideoClock,
     clips: Vec<(&'a Clip, Vec<(i64, i64)>)>,
+}
+
+/// Width of `text` in pixels at `size` (drawtext's em size), from advances
+/// and kerning: centres a highlight caption, whose layers share one left edge.
+fn text_width(font: &[u8], text: &str, size: f32) -> Option<f32> {
+    use ab_glyph::{Font, FontRef};
+    let font = FontRef::try_from_slice_and_index(font, 0).ok()?;
+    let scale = size / font.units_per_em()?;
+    let mut previous = None;
+    let mut width = 0.0;
+    for c in text.chars() {
+        let glyph = font.glyph_id(c);
+        if let Some(previous) = previous {
+            width += font.kern_unscaled(previous, glyph);
+        }
+        width += font.h_advance_unscaled(glyph);
+        previous = Some(glyph);
+    }
+    Some(width * scale)
 }
 
 impl Titles<'_> {
@@ -522,15 +544,68 @@ impl Titles<'_> {
                     .left
                     .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
                 let y = format!("h-{}", look.bottom);
+                let alpha = clip.opacity.clamp(0.0, 1.0);
+                let words: Vec<String> =
+                    clip.name.split_whitespace().map(escape_drawtext).collect();
+                let highlight = look
+                    .highlight
+                    .zip(clip.word_times())
+                    .filter(|_| !words.is_empty());
+                // Every highlight layer starts at the same left edge, so
+                // drawtext lays out each prefix exactly as in the full line.
+                let x = match (&highlight, look.left, &self.font_data) {
+                    (Some(_), None, Some(data)) => {
+                        text_width(data, &words.join(" "), font_size as f32)
+                            .map_or(x, |width| format!("(w-{width:.1})/2"))
+                    }
+                    _ => x,
+                };
                 filters.push(format!(
-                    "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{:.2}:\
+                    "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{alpha:.2}:\
                      fontsize={font_size}:{box_options}:x={x}:y={y}:\
                      enable='{}'[t{i}]",
-                    escape_drawtext(&clip.name),
-                    clip.opacity.clamp(0.0, 1.0),
+                    words.join(" "),
                     enabled_frames(&ranges),
                 ));
                 current = format!("t{i}");
+                let Some(((hr, hg, hb), times)) = highlight else {
+                    continue;
+                };
+                // Word n lights while it is spoken: the words through it in
+                // the highlight colour, then the words before it back in the
+                // text colour on top. No box: the base layer drew it.
+                let outline = match look.box_alpha {
+                    Some(_) => "box=0".to_owned(),
+                    None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
+                };
+                for (n, &from) in times.iter().enumerate() {
+                    let to = times.get(n + 1).copied().unwrap_or(clip.end());
+                    let (a, b) = (self.clock.boundary(from), self.clock.boundary(to));
+                    let active: Vec<_> = ranges
+                        .iter()
+                        .filter_map(|&(ra, rb)| {
+                            let (ra, rb) = (ra.max(a - start), rb.min(b - start));
+                            (ra < rb).then_some((ra, rb))
+                        })
+                        .collect();
+                    if active.is_empty() {
+                        continue;
+                    }
+                    let enable = enabled_frames(&active);
+                    let mut layers =
+                        vec![(words[..=n].join(" "), format!("0x{hr:02X}{hg:02X}{hb:02X}"))];
+                    if n > 0 {
+                        layers.push((words[..n].join(" "), font_color.clone()));
+                    }
+                    for (layer, (text, color)) in layers.into_iter().enumerate() {
+                        filters.push(format!(
+                            "[{current}]drawtext=fontfile={font}:text='{text}':\
+                             fontcolor={color}@{alpha:.2}:fontsize={font_size}:{outline}:\
+                             x={x}:y={y}:enable='{enable}'[t{i}w{n}l{layer}]"
+                        ));
+                        current = format!("t{i}w{n}l{layer}");
+                    }
+                }
             }
         }
         filters.push(format!("[{current}]format=yuv420p[vout]"));
@@ -707,6 +782,8 @@ pub struct TitleLook {
     pub left: Option<u32>,
     /// Distance from the canvas bottom to the text top.
     pub bottom: u32,
+    /// Colour of the word being spoken, for titles with word timing.
+    pub highlight: Option<(u8, u8, u8)>,
 }
 
 pub fn title_look(style: TitleStyle) -> TitleLook {
@@ -719,6 +796,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             border: 14,
             left: Some(42),
             bottom: 110,
+            highlight: None,
         },
         TitleStyle::Caption => TitleLook {
             font_size: 38,
@@ -727,6 +805,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             border: 12,
             left: None,
             bottom: 90,
+            highlight: None,
         },
         TitleStyle::PopCaption => TitleLook {
             font_size: 48,
@@ -735,6 +814,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             border: 14,
             left: None,
             bottom: 100,
+            highlight: None,
         },
         TitleStyle::MinimalCaption => TitleLook {
             font_size: 34,
@@ -743,6 +823,16 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             border: 2,
             left: None,
             bottom: 70,
+            highlight: None,
+        },
+        TitleStyle::HighlightCaption => TitleLook {
+            font_size: 44,
+            color: white,
+            box_alpha: Some(0.65),
+            border: 12,
+            left: None,
+            bottom: 96,
+            highlight: Some((255, 214, 0)),
         },
     }
 }
@@ -837,8 +927,13 @@ pub fn export_timeline(
             .map(|i| (i.width, i.height)),
     );
 
+    let font = font_file();
     let titles = Titles {
-        font: font_file(),
+        font_data: font
+            .as_deref()
+            .and_then(|path| fs::read(path.replace("\\:", ":")).ok()),
+        font,
+        clock,
         clips: title_clips
             .iter()
             .filter(|clip| clip.opacity > 0.0)

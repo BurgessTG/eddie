@@ -937,6 +937,57 @@ fn titles_have_first_inserted_precedence_and_exclusive_ends() {
     );
 }
 
+/// Yellow highlight pixels in an RGB frame: their count and mean x.
+fn highlight_pixels(frame: &[u8], width: usize) -> (usize, f64) {
+    let xs: Vec<usize> = frame
+        .chunks_exact(3)
+        .enumerate()
+        .filter(|(_, rgb)| rgb[0] > 200 && rgb[1] > 160 && rgb[2] < 90)
+        .map(|(index, _)| index % width)
+        .collect();
+    let mean = xs.iter().sum::<usize>() as f64 / xs.len().max(1) as f64;
+    (xs.len(), mean)
+}
+
+#[test]
+fn highlight_captions_light_only_the_word_being_spoken() {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "black.mp4",
+        "color=c=black:s=1280x720:r=10:d=1",
+        "null",
+        None,
+    );
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 1.0, 0.0);
+    let id = timeline.add_clip("LEFTWORD RIGHTWORD", ClipKind::Title, 1, 0.0, 1.0, 0.0);
+    let title = timeline.clip_mut(id).unwrap();
+    title.title_style = TitleStyle::HighlightCaption;
+    title.words = vec![0.0, 0.5];
+    let decoded = frames(&fixture.export("highlight.mp4", &timeline));
+    assert_eq!(decoded.len(), 10);
+    let lit: Vec<_> = decoded.iter().map(|f| highlight_pixels(f, 1280)).collect();
+    eprintln!("highlight pixels and mean x per frame: {lit:?}");
+    assert!(
+        lit.iter().all(|&(count, _)| count > 200),
+        "a word is lit in every frame"
+    );
+    // The first word sits left of centre, the second right of it.
+    assert!(
+        lit[..5].iter().all(|&(_, x)| x < 600.0),
+        "first word lit first"
+    );
+    assert!(
+        lit[5..].iter().all(|&(_, x)| x > 680.0),
+        "second word lit second"
+    );
+
+    // A renamed caption no longer matches its word times and lights nothing.
+    timeline.clip_mut(id).unwrap().name = "ONE TWO THREE".to_owned();
+    let renamed = frames(&fixture.export("renamed.mp4", &timeline));
+    assert!(renamed.iter().all(|f| highlight_pixels(f, 1280).0 == 0));
+}
+
 #[test]
 fn transparent_first_title_hides_its_box_and_blocks_later_titles() {
     let fixture = Fixture::new();

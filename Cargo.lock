@@ -2610,6 +2610,7 @@ dependencies = [
 name = "openreel-media"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "cpal",
  "ffmpeg-next",
  "openreel-engine",
