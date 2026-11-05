@@ -33,7 +33,39 @@ pub(crate) fn ensure_init() {
 }
 
 /// Settings → Hardware decode. Only preview playback lanes use it.
-static HARDWARE_DECODE: AtomicBool = AtomicBool::new(true);
+static HARDWARE_DECODE: AtomicBool = AtomicBool::new(false);
+/// Set by the first hardware failure; software decodes for the session.
+static HARDWARE_BROKEN: AtomicBool = AtomicBool::new(false);
+/// The failure not yet reported to the app.
+static HARDWARE_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Test hook: playback decoders act as hardware ones and fail mid-stream.
+static INJECT_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// Stop using hardware decode for this session after `error`.
+pub(crate) fn hardware_failed(error: &str) {
+    if !HARDWARE_BROKEN.swap(true, Ordering::Relaxed) {
+        *HARDWARE_FAILURE.lock().unwrap() = Some(error.to_owned());
+    }
+}
+
+pub(crate) fn hardware_broken() -> bool {
+    HARDWARE_BROKEN.load(Ordering::Relaxed)
+}
+
+/// The hardware decode failure that switched preview to software, once.
+pub fn take_hardware_failure() -> Option<String> {
+    HARDWARE_FAILURE.lock().unwrap().take()
+}
+
+/// Make playback decoders behave as hardware decoders that fail after a few
+/// pictures, so the software fallback can be tested without a GPU.
+#[doc(hidden)]
+pub fn inject_hardware_fault(on: bool) {
+    INJECT_FAULT.store(on, Ordering::Relaxed);
+    if !on {
+        HARDWARE_BROKEN.store(false, Ordering::Relaxed);
+    }
+}
 
 /// Allow or forbid GPU decode for decoders opened from now on.
 pub fn set_hardware_decode(on: bool) {
@@ -141,7 +173,7 @@ pub fn warm_hardware_decode() {
 /// the profile is supported (NVDEC has no 4:2:2) and silently falls back to
 /// software otherwise.
 fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
-    if !HARDWARE_DECODE.load(Ordering::Relaxed) {
+    if !HARDWARE_DECODE.load(Ordering::Relaxed) || hardware_broken() {
         return false;
     }
     // SAFETY: plain reads of the unopened context's parameters.
@@ -253,6 +285,9 @@ pub struct VideoDecoder {
     /// Consecutive pictures just before `decoded` (references, not copies).
     recent: VecDeque<(f64, ffmpeg::frame::Video)>,
     recent_limit: usize,
+    /// Opened with a VAAPI device (or the test fault), and pictures decoded.
+    pub(crate) hardware: bool,
+    hardware_pictures: u32,
     /// The last downloaded VAAPI surface.
     transfer: ffmpeg::frame::Video,
 }
@@ -338,26 +373,44 @@ impl VideoDecoder {
             0
         };
 
-        let mut context = ffmpeg::codec::context::Context::from_parameters(parameters)
-            .map_err(|e| err("decoder parameters", e))?;
-        context.set_threading(ffmpeg::codec::threading::Config {
-            kind: threading,
-            count: 0, // libavcodec chooses based on CPU cores.
-        });
-        if hardware && attach_vaapi(&mut context) {
-            // The GPU decodes; threads only parse ahead. Each frame thread can
-            // finish a picture before any is synced, which overflows the
-            // driver's ring (see `sync_surface`); 4K HEVC also ran no faster
-            // with 2 threads and slower with 4.
+        let open_codec = |hardware: bool| -> MediaResult<(ffmpeg::decoder::Video, bool)> {
+            let mut context = ffmpeg::codec::context::Context::from_parameters(parameters.clone())
+                .map_err(|e| err("decoder parameters", e))?;
             context.set_threading(ffmpeg::codec::threading::Config {
                 kind: threading,
-                count: 1,
+                count: 0, // libavcodec chooses based on CPU cores.
             });
-        }
-        let decoder = context
-            .decoder()
-            .video()
-            .map_err(|e| err("open video decoder", e))?;
+            let attached = hardware
+                && (attach_vaapi(&mut context)
+                    || (INJECT_FAULT.load(Ordering::Relaxed) && !hardware_broken()));
+            if attached {
+                // The GPU decodes; threads only parse ahead. Each frame thread
+                // can finish a picture before any is synced, which overflows
+                // the driver's ring (see `sync_surface`); 4K HEVC also ran no
+                // faster with 2 threads and slower with 4.
+                context.set_threading(ffmpeg::codec::threading::Config {
+                    kind: threading,
+                    count: 1,
+                });
+            }
+            let decoder = context
+                .decoder()
+                .video()
+                .map_err(|e| err("open video decoder", e))?;
+            Ok((decoder, attached))
+        };
+        // A driver that cannot open the codec falls back to software here,
+        // without reopening the input.
+        let (decoder, attached) = match open_codec(hardware) {
+            Err(error)
+                if hardware && !hardware_broken() && HARDWARE_DECODE.load(Ordering::Relaxed) =>
+            {
+                let software = open_codec(false)?;
+                hardware_failed(&error);
+                software
+            }
+            result => result?,
+        };
 
         let (scaler, target_h) = Scaler::new(
             (decoder.format(), decoder.width(), decoder.height()),
@@ -385,6 +438,8 @@ impl VideoDecoder {
             drained: false,
             recent: VecDeque::new(),
             recent_limit: 0,
+            hardware: attached,
+            hardware_pictures: 0,
             transfer: ffmpeg::frame::Video::empty(),
         })
     }
@@ -474,6 +529,12 @@ impl VideoDecoder {
         loop {
             match self.decoder.receive_frame(&mut self.decoded) {
                 Ok(()) => {
+                    if self.hardware {
+                        self.hardware_pictures += 1;
+                        if INJECT_FAULT.load(Ordering::Relaxed) && self.hardware_pictures > 5 {
+                            return Err("injected hardware decode failure".to_owned());
+                        }
+                    }
                     sync_surface(&self.decoded)?;
                     return Ok(Some(self.frame_seconds(&self.decoded)));
                 }

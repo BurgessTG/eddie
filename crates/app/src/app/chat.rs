@@ -66,7 +66,9 @@ pub(super) struct ChatSettings {
     /// and `inspect()` findings, and may send one fix.
     pub(super) check_edits: bool,
     /// Preview playback of expensive files (HEVC, AV1, VP9, above 1440p)
-    /// decodes on the GPU through VAAPI when one is available.
+    /// decodes on the GPU through VAAPI when one is available. Off by
+    /// default: errors fall back to software, but a driver that hangs
+    /// cannot, and only one NVIDIA driver has been tested.
     pub(super) hardware_decode: bool,
 }
 
@@ -79,7 +81,7 @@ impl Default for ChatSettings {
             contributor_opt_in: false,
             format: Orientation::Landscape,
             check_edits: true,
-            hardware_decode: true,
+            hardware_decode: false,
         }
     }
 }
@@ -1990,7 +1992,7 @@ impl EditorApp {
                         let before = self.chat_settings.hardware_decode;
                         ui.checkbox(&mut self.chat_settings.hardware_decode, "Hardware decode")
                             .on_hover_text(
-                                "Play HEVC, AV1, VP9 and footage above 1440p on the GPU (VAAPI) when available. Scrubbing stays on the CPU.",
+                                "Play HEVC, AV1, VP9 and footage above 1440p on the GPU (VAAPI) when available. Scrubbing stays on the CPU; a GPU error switches back to the CPU.",
                             );
                         if self.chat_settings.hardware_decode != before {
                             openreel_media::set_hardware_decode(self.chat_settings.hardware_decode);

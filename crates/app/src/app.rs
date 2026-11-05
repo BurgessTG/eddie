@@ -3469,6 +3469,9 @@ impl eframe::App for EditorApp {
         self.advance_playback(ctx);
         self.poll_imports(ctx);
         self.poll_frames(ctx);
+        if openreel_media::take_hardware_failure().is_some() {
+            self.status = "Hardware decode failed; playing on the CPU.".to_owned();
+        }
         if self.poll_export() {
             // Flash the taskbar entry so a finished export is noticed.
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(

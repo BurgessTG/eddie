@@ -20,7 +20,10 @@ mod voice;
 pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use beats::{beat_grid, BeatGrid};
 pub(crate) use decode::VideoDecoder;
-pub use decode::{set_hardware_decode, warm_hardware_decode, StillDecoder};
+pub use decode::{
+    inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
+    StillDecoder,
+};
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::{
     export_canvas, export_timeline, title_look, ExportOptions, TitleLook, LOUDNESS_TARGET,

@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::decode::FORWARD_WITHOUT_INDEX;
+use crate::decode::{hardware_broken, hardware_failed, FORWARD_WITHOUT_INDEX};
 use crate::{MediaResult, RawFrame, VideoDecoder};
 
 /// Streaming decoder on its own thread. Paced by presentation timestamps,
@@ -565,6 +565,12 @@ impl Lane {
         }
     }
 
+    fn on_hardware(&self) -> bool {
+        self.decoder
+            .as_ref()
+            .is_some_and(|(_, decoder)| decoder.hardware)
+    }
+
     fn reset(&mut self, pool: &BufferPool) {
         self.release(pool);
         self.decoder = None;
@@ -582,14 +588,19 @@ impl Lane {
         time: f64,
         pool: &BufferPool,
     ) -> MediaResult<()> {
-        if self
-            .decoder
-            .as_ref()
-            .is_none_or(|((open, width), _)| open != path || *width != target_w)
-        {
+        let stale = |lane: &Lane| {
+            lane.decoder
+                .as_ref()
+                .is_none_or(|((open, width), decoder)| {
+                    open != path || *width != target_w || (decoder.hardware && hardware_broken())
+                })
+        };
+        if stale(self) {
             let left = std::mem::take(self);
             *self = mailbox.exchange(left, Some((path, target_w)), pool);
-            if self.decoder.is_none() {
+            if stale(self) {
+                // A hardware decoder after a hardware failure reopens in software.
+                self.reset(pool);
                 let decoder = VideoDecoder::open_playback(path, target_w)?;
                 self.decoder = Some(((path.to_owned(), target_w), decoder));
                 mailbox.state.lock().unwrap().opens += 1;
@@ -696,7 +707,10 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
             LaneWork::Prefetch(target, serial) => {
                 let result =
                     lane.prepare(mailbox, &target.path, target.target_w, target.time, pool);
-                if result.is_err() {
+                if let Err(error) = result {
+                    if lane.on_hardware() {
+                        hardware_failed(&error);
+                    }
                     // The real request reopens and reports the error.
                     lane.reset(pool);
                 } else {
@@ -706,33 +720,51 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                 }
             }
             LaneWork::Show(request) => {
-                let result = (|| {
-                    let Some(start) = mailbox.time(request.generation) else {
-                        return Ok(());
+                // A hardware failure retries once in software, from the clock.
+                for retry in [false, true] {
+                    let result = show(&mut lane, mailbox, &request, pool, wake);
+                    if let Some(held) = &lane.held {
+                        lane.covers = held.0;
+                    }
+                    let Err(error) = result else {
+                        break;
                     };
-                    lane.prepare(mailbox, &request.path, request.target_w, start, pool)?;
-                    let first = lane.held.take().unwrap();
-                    let Lane {
-                        decoder,
-                        held,
-                        pending,
-                        ..
-                    } = &mut lane;
-                    let decoder = &mut decoder.as_mut().unwrap().1;
-                    preview_decode(
-                        decoder, mailbox, &request, start, first, held, pending, pool, wake,
-                    )
-                })();
-                if let Some(held) = &lane.held {
-                    lane.covers = held.0;
-                }
-                if let Err(error) = result {
+                    let hardware = lane.on_hardware();
                     lane.reset(pool);
+                    if hardware && !retry {
+                        hardware_failed(&error);
+                        continue;
+                    }
                     let _ = mailbox.publish_error(request.generation, error, wake);
+                    break;
                 }
             }
         }
     }
+}
+
+fn show(
+    lane: &mut Lane,
+    mailbox: &PreviewMailbox,
+    request: &PreviewRequest,
+    pool: &BufferPool,
+    wake: &dyn Fn(),
+) -> MediaResult<()> {
+    let Some(start) = mailbox.time(request.generation) else {
+        return Ok(());
+    };
+    lane.prepare(mailbox, &request.path, request.target_w, start, pool)?;
+    let first = lane.held.take().unwrap();
+    let Lane {
+        decoder,
+        held,
+        pending,
+        ..
+    } = lane;
+    let decoder = &mut decoder.as_mut().unwrap().1;
+    preview_decode(
+        decoder, mailbox, request, start, first, held, pending, pool, wake,
+    )
 }
 
 impl PreviewMailbox {
