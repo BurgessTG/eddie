@@ -33,6 +33,11 @@ build() {
   cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  # Keep build paths out of the binary (makepkg flags this).
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  # whisper.cpp and QuickJS embed __FILE__ paths.
+  export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$srcdir=/build"
+  export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$srcdir=/build"
   cargo build --frozen --release -p openreel-app --bin eddie
 }
 
