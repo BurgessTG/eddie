@@ -107,8 +107,9 @@ the key and model without running inference.
 
 ### Install on Arch
 
-`packaging/aur/PKGBUILD` builds `eddie-git` from this repository's
-`master` and installs `eddie`, a desktop entry and the icon:
+Install from the AUR with `yay -S eddie` (the latest release) or
+`yay -S eddie-git` (latest `master`). `packaging/aur/PKGBUILD` is the
+release package and installs `eddie`, a desktop entry and the icon:
 
 ```sh
 mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
