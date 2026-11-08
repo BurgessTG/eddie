@@ -191,17 +191,17 @@ fn ducking_dips_under_speech_with_ramps_and_updates_without_restarting() {
         "full before the ramp: {}",
         at(1.5)
     );
-    assert!(
-        (at(1.85) - 0.3125).abs() < 0.02,
-        "halfway down: {}",
-        at(1.85)
-    );
+    // Raised-cosine ramps in decibels: halfway down is -6 dB.
+    assert!((at(1.9) - 0.25).abs() < 0.02, "halfway down: {}", at(1.9));
     assert!(
         (at(2.25) - 0.125).abs() < 0.01,
         "ducked to a quarter: {}",
         at(2.25)
     );
-    assert!((at(3.0) - 0.5).abs() < 0.01, "recovered: {}", at(3.0));
+    // Held 0.3 s past the speech, then 0.8 s back up.
+    assert!((at(2.75) - 0.125).abs() < 0.01, "held: {}", at(2.75));
+    assert!((at(3.2) - 0.25).abs() < 0.01, "halfway back: {}", at(3.2));
+    assert!((at(3.7) - 0.5).abs() < 0.01, "recovered: {}", at(3.7));
 
     // New ranges reach a playing voice without restarting it.
     let mut plain = clip.clone();

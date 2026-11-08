@@ -1024,25 +1024,35 @@ pub fn export_timeline(
         } else {
             String::new()
         };
-        // The same envelope as the preview mixer's `duck_gain`: a trapezoid
-        // per range, evaluated per audio frame on clip-local time.
+        // The preview mixer's `duck_gain` on clip-local time: raised-cosine
+        // ramps in decibels. Merged ranges never share a ramp, so their
+        // amounts add. Short frames keep each step under 6 ms so the ramps
+        // do not zipper.
         let ducks = timeline.duck_ranges(clip, &options.speech);
         if !ducks.is_empty() {
-            let ramp = f(openreel_engine::DUCK_RAMP);
-            let depth: Vec<String> = ducks
+            use openreel_engine::{DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
+            let amount: Vec<String> = ducks
                 .iter()
                 .map(|&(start, end)| {
+                    let (down, hold) = (start - DUCK_ATTACK, end + DUCK_HOLD);
                     format!(
-                        "clip((t-{})/{ramp},0,1)*clip(({}-t)/{ramp},0,1)",
-                        f(start - openreel_engine::DUCK_RAMP),
-                        f(end + openreel_engine::DUCK_RAMP),
+                        "if(gte(t,{})*lt(t,{}),if(lt(t,{}),(1-cos((t-{})/{}*PI))/2,\
+                         if(lt(t,{}),1,(1+cos((t-{})/{}*PI))/2)),0)",
+                        f(down),
+                        f(hold + DUCK_RELEASE),
+                        f(start),
+                        f(down),
+                        f(DUCK_ATTACK),
+                        f(hold),
+                        f(hold),
+                        f(DUCK_RELEASE),
                     )
                 })
                 .collect();
             fades.push_str(&format!(
-                ",volume=volume='1-{}*min(1,{})':eval=frame",
-                f(1.0 - f64::from(openreel_engine::DUCK_LEVEL)),
-                depth.join("+")
+                ",asetnsamples=n=256:p=0,volume=volume='pow({},min(1,{}))':eval=frame",
+                f(f64::from(DUCK_LEVEL)),
+                amount.join("+")
             ));
         }
         filters.push(format!(

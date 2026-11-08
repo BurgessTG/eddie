@@ -192,27 +192,43 @@ pub fn fade_shape(progress: f32, smooth: bool) -> f32 {
 
 /// Ducked sound plays at this gain under speech (about -12 dB).
 pub const DUCK_LEVEL: f32 = 0.25;
-/// Seconds to fall to [`DUCK_LEVEL`] before speech and to recover after.
-pub const DUCK_RAMP: f64 = 0.3;
-/// Pauses shorter than this stay ducked, so music does not pump between
-/// words. Equal to two ramps, so neighbouring dips never overlap.
-const DUCK_HOLD: f64 = 2.0 * DUCK_RAMP;
+/// Seconds before speech over which ducked sound goes down.
+pub const DUCK_ATTACK: f64 = 0.2;
+/// Seconds it stays down after speech ends.
+pub const DUCK_HOLD: f64 = 0.3;
+/// Seconds over which it comes back up.
+pub const DUCK_RELEASE: f64 = 0.8;
+/// Pauses shorter than a full recovery and dip stay down, so music does
+/// not pump between phrases and neighbouring ramps never overlap.
+const DUCK_MERGE: f64 = DUCK_ATTACK + DUCK_HOLD + DUCK_RELEASE;
 
-/// Gain of a ducking envelope `offset` seconds into a clip, given its
-/// sorted, non-overlapping speech ranges from [`Timeline::duck_ranges`].
-/// Unity away from speech, [`DUCK_LEVEL`] inside it, linear ramps between.
+/// How far down a ducking envelope is `offset` seconds into a clip, from 0
+/// (unity) to 1 ([`DUCK_LEVEL`]), with raised-cosine ramps. `ranges` are
+/// the sorted, merged speech ranges from [`Timeline::duck_ranges`].
+pub fn duck_amount(offset: f64, ranges: &[(f64, f64)]) -> f64 {
+    let index = ranges.partition_point(|&(_, end)| end + DUCK_HOLD + DUCK_RELEASE <= offset);
+    let Some(&(start, end)) = ranges.get(index) else {
+        return 0.0;
+    };
+    let ease = |x: f64| (1.0 - (x.clamp(0.0, 1.0) * std::f64::consts::PI).cos()) * 0.5;
+    if offset < start - DUCK_ATTACK {
+        0.0
+    } else if offset < start {
+        ease((offset - start + DUCK_ATTACK) / DUCK_ATTACK)
+    } else if offset < end + DUCK_HOLD {
+        1.0
+    } else {
+        1.0 - ease((offset - end - DUCK_HOLD) / DUCK_RELEASE)
+    }
+}
+
+/// Linear gain of a ducking envelope at `offset` (see [`duck_amount`]).
+/// The curve moves in decibels, so halfway down is half the dip.
 pub fn duck_gain(offset: f64, ranges: &[(f64, f64)]) -> f32 {
-    let first = ranges.partition_point(|&(_, end)| end + DUCK_RAMP <= offset);
-    let depth = ranges[first..]
-        .iter()
-        .take(2)
-        .map(|&(start, end)| {
-            let rise = (offset - (start - DUCK_RAMP)) / DUCK_RAMP;
-            let fall = (end + DUCK_RAMP - offset) / DUCK_RAMP;
-            rise.min(fall).clamp(0.0, 1.0)
-        })
-        .fold(0.0_f64, f64::max);
-    (1.0 - (1.0 - f64::from(DUCK_LEVEL)) * depth) as f32
+    match duck_amount(offset, ranges) {
+        0.0 => 1.0,
+        amount => f64::from(DUCK_LEVEL).powf(amount) as f32,
+    }
 }
 
 /// Project picture format. The canvas never follows the footage: video
@@ -838,7 +854,7 @@ impl Timeline {
         let mut merged: Vec<(f64, f64)> = Vec::new();
         for (start, end) in ranges {
             match merged.last_mut() {
-                Some(last) if start - last.1 < DUCK_HOLD => last.1 = last.1.max(end),
+                Some(last) if start - last.1 < DUCK_MERGE => last.1 = last.1.max(end),
                 _ => merged.push((start, end)),
             }
         }
@@ -1551,18 +1567,18 @@ mod tests {
             // Source time; the talk clip shows source 10..20 at timeline 5..15.
             (
                 "/m/talk.mp4".to_owned(),
-                vec![(11.0, 13.0), (13.4, 14.0), (18.0, 30.0)],
+                vec![(11.0, 13.0), (14.0, 14.5), (18.0, 30.0)],
             ),
             ("/m/bed2.mp3".to_owned(), vec![(0.0, 30.0)]),
             ("/m/muted.wav".to_owned(), vec![(0.0, 30.0)]),
         ]
         .into();
         let bed = tl.clip(music).unwrap().clone();
-        // Timeline 6..8 and 8.4..9 (a 0.4 s pause stays ducked), then 13..15,
+        // Timeline 6..8 and 9..9.5 (a 1 s pause stays down), then 13..15,
         // in the bed's own time (it starts at 2).
         assert_eq!(
             tl.duck_ranges(&bed, &speech),
-            vec![(4.0, 7.0), (11.0, 13.0)]
+            vec![(4.0, 7.5), (11.0, 13.0)]
         );
         let mut plain = bed.clone();
         plain.duck = false;
@@ -1570,11 +1586,17 @@ mod tests {
 
         let ranges = tl.duck_ranges(&bed, &speech);
         let gain = |t: f64| duck_gain(t, &ranges);
-        assert_eq!(gain(2.0), 1.0);
-        assert!((gain(3.85) - 0.625).abs() < 1e-6, "halfway down the ramp");
-        assert_eq!(gain(5.0), DUCK_LEVEL);
-        assert_eq!(gain(7.3), 1.0, "recovered after the ramp");
-        assert_eq!(gain(9.0), 1.0, "a real pause brings the music back");
-        assert_eq!(gain(12.0), DUCK_LEVEL);
+        let near = |t: f64, want: f32| {
+            assert!((gain(t) - want).abs() < 1e-6, "{t}: {} vs {want}", gain(t));
+        };
+        near(2.0, 1.0);
+        // Raised-cosine in decibels: halfway is half the dip (-6 dB).
+        near(3.9, 0.5);
+        near(4.0, DUCK_LEVEL);
+        near(7.7, DUCK_LEVEL);
+        near(8.2, 0.5);
+        near(8.6, 1.0);
+        near(9.5, 1.0);
+        near(12.0, DUCK_LEVEL);
     }
 }

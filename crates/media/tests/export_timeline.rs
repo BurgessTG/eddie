@@ -1405,22 +1405,30 @@ fn ducked_music_dips_only_while_the_speech_source_is_audible() {
     let music = timeline.add_media_clip("bed", ClipKind::Audio, 1, 0.0, 3.0, 0.0, &bed);
     timeline.clip_mut(music).unwrap().duck = true;
     let options = ExportOptions {
-        speech: [(talk.clone(), vec![(1.0, 2.0)])].into(),
+        speech: [(talk.clone(), vec![(0.8, 1.4)])].into(),
         ..Default::default()
     };
     let ducked = fixture.export_with("ducked.mp4", &timeline, &options);
-    let before = tone_window(&ducked, 880.0, 0.1, 0.6);
-    let during = tone_window(&ducked, 880.0, 1.35, 1.65);
-    let after = tone_window(&ducked, 880.0, 2.4, 2.9);
-    eprintln!("bed 880 Hz: before {before}, during {during}, after {after}");
+    // 0.2 s down before speech, 0.3 s held after it, 0.8 s back up.
+    let before = tone_window(&ducked, 880.0, 0.1, 0.5);
+    let during = tone_window(&ducked, 880.0, 0.95, 1.25);
+    let release = tone_window(&ducked, 880.0, 2.05, 2.15);
+    let after = tone_window(&ducked, 880.0, 2.55, 2.95);
+    eprintln!("bed 880 Hz: before {before}, during {during}, release {release}, after {after}");
     assert!(
         (0.2..0.32).contains(&(during / before)),
         "ducked to a quarter"
     );
-    assert!((after / before - 1.0).abs() < 0.1, "recovers after speech");
-    let voice = tone_window(&ducked, 440.0, 1.35, 1.65);
+    // The preview's raised cosine in decibels: halfway back is -6 dB.
     assert!(
-        (voice / tone_window(&ducked, 440.0, 0.1, 0.6) - 1.0).abs() < 0.1,
+        (0.45..0.55).contains(&(release / before)),
+        "halfway through the release: {}",
+        release / before
+    );
+    assert!((after / before - 1.0).abs() < 0.1, "recovers after speech");
+    let voice = tone_window(&ducked, 440.0, 0.95, 1.25);
+    assert!(
+        (voice / tone_window(&ducked, 440.0, 0.1, 0.5) - 1.0).abs() < 0.1,
         "speech is untouched"
     );
 

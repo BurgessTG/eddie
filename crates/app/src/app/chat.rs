@@ -350,7 +350,7 @@ Available functions: state(), clips(), assets(), sweepCandidates(), sceneClips()
 time(spec), timeRange(spec) (the timeline time arguments of seek, split, splitClip, moveClip, insertTime, addTitle and addAsset, and addAssetRange's at, also accept spec strings: '3.2s', '120f', '1:05.5', '50%', 'end', 'clip:7@end', 'clip:7@1.5s', 'clip:7@50%'; ranges are 'a..b' or 'clip:7'; clip specs name snapshot clip IDs, not handles), \
 selectClip(id), split(at), splitClip(id, at), deleteClip(id?), moveClip(id, start), setClipLane(id, lane), \
 trimClip(id, left, right) where -1 keeps an edge, renameClip(id, name), setOpacity(id, v), \
-setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), setSmoothFades(id, bool) (the clip's fades follow an equal-power curve; use it on both clips of an audio crossfade so the sound does not dip), setDuck(id, bool) (music that dips about 12 dB wherever another clip is talking and comes back up in pauses; audio-only adds such as music beds duck by default, so keep the bed's own volume where it sounds right between lines), setCleanVoice(id, bool) (80 Hz high-pass plus a gentle compressor for phone, lapel or roomy speech; not for music), insertTime(at, seconds) (opens empty time: splits every clip crossing at, keeping titles' text on both sides, and moves everything from at on later on every lane; use it to make room for an inserted shot instead of moving clips one by one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
+setVolume(id, v), setFade(id, inSeconds, outSeconds) (linear audio fades; 0 removes one), setSmoothFades(id, bool) (the clip's fades follow an equal-power curve; use it on both clips of an audio crossfade so the sound does not dip), setDuck(id, bool) (music that dips about 12 dB wherever another clip is talking and comes back up in pauses; it follows transcript turns where a source has them, else its waveform; audio-only music adds (a steady beat or a music bed) duck by default and voiceovers do not, so keep the bed's own volume where it sounds right between lines), setCleanVoice(id, bool) (80 Hz high-pass plus a gentle compressor for phone, lapel or roomy speech; not for music), insertTime(at, seconds) (opens empty time: splits every clip crossing at, keeping titles' text on both sides, and moves everything from at on later on every lane; use it to make room for an inserted shot instead of moving clips one by one), detachAudio(id), unlinkClip(id), setEmbeddedAudio(id, bool), tightenSilence(id, threshold?, minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle(id, style), addCaptionsForClip(id, style?), addAsset(nameOrPath, at?), \
 addAssetRange(nameOrPath, at, sourceIn, dur), \
 setMagnet(bool), setMusicBedMuted(bool), setZoom(pxPerSec), closeGaps(). \
 closeGaps() runs when it is reached in the queue. It removes only time that no video or audio clip covers on any lane (titles do not count) and shifts later clips on every lane left by the same amount, so music still spanning a gap keeps it open. To close a picture gap under longer music, shorten the music first or move the later clips yourself with moveClip. \
@@ -3138,7 +3138,11 @@ mod tests {
             size_bytes: 0,
             state: AssetState::Ready,
             peaks: Vec::new(),
-            beats: None,
+            // A steady beat marks it as music.
+            beats: Some(openreel_media::BeatGrid {
+                bpm: 120.0,
+                beats: vec![0.0, 0.5],
+            }),
             thumb_textures: Vec::new(),
             sweep: super::super::sweep::SweepData::default(),
         });

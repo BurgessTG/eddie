@@ -1311,9 +1311,12 @@ impl EditorApp {
             .is_some_and(|audio| !audio.voice_ids().is_empty())
     }
 
-    /// Where each source that a non-ducking clip plays is audible, in
-    /// source seconds: its waveform outside the silences tightenSilence
-    /// uses. Empty when no clip ducks, so playback pays nothing for it.
+    /// Where each source that a non-ducking clip plays has speech, in
+    /// source seconds: its transcript turns, leaving out sparse ambience
+    /// turns. An untranscribed source falls back to its waveform outside the
+    /// silences tightenSilence uses, since missing transcription is
+    /// uncertainty, not silence. Empty when no clip ducks, so playback pays
+    /// nothing for it.
     fn speech_map(&self) -> HashMap<String, Vec<(f64, f64)>> {
         if !self.timeline.clips.iter().any(|clip| clip.duck) {
             return HashMap::new();
@@ -1329,6 +1332,17 @@ impl EditorApp {
             let Some(asset) = self.asset(source) else {
                 continue;
             };
+            if !asset.sweep.transcript.is_empty() {
+                let turns = asset
+                    .sweep
+                    .transcript
+                    .iter()
+                    .filter(|turn| turn.end > turn.start && !turn.is_ambient())
+                    .map(|turn| (turn.start, turn.end))
+                    .collect();
+                map.insert(source.clone(), turns);
+                continue;
+            }
             let duration = asset.info.duration;
             if !asset.info.has_audio || asset.peaks.is_empty() || duration <= 0.0 {
                 continue;
@@ -6658,6 +6672,68 @@ mod tests {
             1.0,
             "an added music track is never muted as a music bed"
         );
+    }
+
+    #[test]
+    fn ducking_follows_transcript_speech_and_only_music_ducks_by_default() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::headless_for_test(&ctx);
+        let turn = |start: f64, end: f64, text: &str| sweep::TranscriptSegment {
+            start,
+            end,
+            speaker: None,
+            text: text.to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        let asset = |path: &str, has_video: bool, transcript| media::BinAsset {
+            info: MediaInfo {
+                path: path.to_owned(),
+                name: path.to_owned(),
+                duration: 60.0,
+                width: if has_video { 1280 } else { 0 },
+                height: if has_video { 720 } else { 0 },
+                fps: 30.0,
+                has_video,
+                has_audio: true,
+            },
+            size_bytes: 0,
+            state: media::AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumb_textures: Vec::new(),
+            sweep: sweep::SweepData {
+                transcript,
+                ..Default::default()
+            },
+        };
+        app.assets.push(asset(
+            "talk.mp4",
+            true,
+            vec![
+                turn(10.0, 12.0, "Hello there, welcome back."),
+                // Crowd ambience across 10 s: not speech.
+                turn(20.0, 30.0, "LT"),
+            ],
+        ));
+        app.assets.push(asset("song.wav", false, Vec::new()));
+        app.timeline
+            .add_media_clip("talk", ClipKind::Video, 0, 0.0, 30.0, 0.0, "talk.mp4");
+        assert!(app.speech_map().is_empty(), "nothing ducks yet");
+
+        // Music (a steady beat) ducks by default; a voiceover does not.
+        app.assets[1].beats = Some(openreel_media::BeatGrid {
+            bpm: 120.0,
+            beats: vec![0.0, 0.5],
+        });
+        app.add_asset_range_to_timeline("song.wav", "music", None, 0.0, 0.0, 30.0);
+        assert!(app.timeline.clips.last().unwrap().duck, "music ducks");
+        app.assets[1].beats = None;
+        app.add_asset_range_to_timeline("song.wav", "voiceover", None, 30.0, 0.0, 5.0);
+        assert!(!app.timeline.clips.last().unwrap().duck, "voice does not");
+
+        let speech = app.speech_map();
+        assert_eq!(speech["talk.mp4"], vec![(10.0, 12.0)]);
     }
 
     #[test]
