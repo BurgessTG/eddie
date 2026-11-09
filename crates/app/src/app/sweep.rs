@@ -26,12 +26,13 @@ mod curation;
 mod curation_tests;
 mod store;
 mod subjects;
+pub(super) mod transcribe;
 pub(super) use curation::{ClipReview, ReviewStatus, ReviewUsage};
 pub(super) use store::{
-    default_dir as default_curation_dir, load as load_curation, load_shots, save_shots,
+    default_dir as default_curation_dir, load as load_curation, load_shots, load_transcript,
+    save_shots,
 };
 
-const TRANSCRIBE_MODEL: &str = "muse-voice-transcribe-1.0";
 const SAM_MODEL: &str = "sam-3.1";
 
 /// Clip type stays distinct from the app-assigned `prime` quality tag.
@@ -86,12 +87,6 @@ fn is_music_bed(segment: &SweepSegment) -> bool {
 /// only at or above `PRIME_MIN_SCORE`.
 const PRIME_SHARE: f32 = 0.2;
 const PRIME_MIN_SCORE: f32 = 75.0;
-// Voice Transcribe accepts WAV mono 16-bit PCM at 16/24 kHz, at most
-// 10 minutes / 32 MB per request (see `openreel_media::write_wav_24k`),
-// and returns turn-level timestamps only — one speaker label per
-// turn, no word timing. Reaction/speech logic is built on turns.
-const ASR_CHUNK_SECONDS: f64 = 540.0;
-const ASR_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const SPEECH_HANDLE_SECONDS: f64 = 0.12;
 
 /// Files curated at once. Review mostly waits on the provider, but local
@@ -807,7 +802,7 @@ impl EditorApp {
                     ctx.request_repaint();
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_sweep(&info, &peaks, &settings, progress)
+                    run_sweep(&info, &peaks, &settings, store_dir.as_deref(), progress)
                 }))
                 .unwrap_or_else(|_| {
                     Err("Curation stopped unexpectedly; retry this video.".to_owned())
@@ -1074,15 +1069,24 @@ fn run_sweep(
     info: &MediaInfo,
     peaks: &[f32],
     settings: &ChatSettings,
+    store_dir: Option<&std::path::Path>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<SweepData, String> {
-    run_sweep_with_mode(info, peaks, settings, progress, subjects::Mode::Automatic)
+    run_sweep_with_mode(
+        info,
+        peaks,
+        settings,
+        store_dir,
+        progress,
+        subjects::Mode::Automatic,
+    )
 }
 
 fn run_sweep_with_mode(
     info: &MediaInfo,
     peaks: &[f32],
     settings: &ChatSettings,
+    store_dir: Option<&std::path::Path>,
     progress: &mut dyn FnMut(&str),
     mode: subjects::Mode,
 ) -> Result<SweepData, String> {
@@ -1122,29 +1126,21 @@ fn run_sweep_with_mode(
         stage_notes.push("Local analysis only; add a Meta API key for visual review.".to_owned());
         false
     };
-    let (transcript, transcript_available) = if model_ready && info.has_audio {
-        // Waveform coverage cannot distinguish a soundtrack from continuous
-        // speech. It may discount energy, but must not suppress transcription.
+    // Transcription has its own provider (local by default), so it does not
+    // need model access. Waveform coverage cannot tell a soundtrack from
+    // continuous speech, so it never suppresses transcription.
+    let (transcript, transcript_available) = if info.has_audio {
         progress("Transcribing audio…");
-        match transcribe_asset(settings, info) {
-            Ok(mut transcript) => {
-                stage_notes.push(format!(
-                    "Transcription: {} speaker turns.",
-                    transcript.len()
-                ));
-                // Voice Transcribe has no word timing. A local model adds it
-                // to multi-sentence turns so cuts can fall between sentences.
-                if align::model_path().is_some() {
-                    progress("Aligning words…");
-                }
-                match align::align_transcript(info, &mut transcript) {
-                    Ok((_, 0)) => {}
-                    Ok((aligned, candidates)) => stage_notes.push(format!(
-                        "Word timing: {aligned}/{candidates} multi-sentence turns aligned locally."
-                    )),
-                    Err(error) => stage_notes.push(format!("Word timing: {error}.")),
-                }
-                (transcript, true)
+        match transcribe::transcribe_cached(
+            &settings.transcription(),
+            store_dir,
+            info,
+            false,
+            progress,
+        ) {
+            Ok(transcript) => {
+                stage_notes.push(transcript.note);
+                (transcript.segments, true)
             }
             Err(error) => {
                 stage_notes.push(format!("Transcription failed: {error}"));
@@ -1152,15 +1148,8 @@ fn run_sweep_with_mode(
             }
         }
     } else {
-        stage_notes.push(
-            if info.has_audio {
-                "Transcription: unavailable without model access."
-            } else {
-                "Transcription: no audio stream."
-            }
-            .to_owned(),
-        );
-        (Vec::new(), !info.has_audio)
+        stage_notes.push("Transcription: no audio stream.".to_owned());
+        (Vec::new(), true)
     };
 
     // Model selections never remove shots from the source inventory.
@@ -1895,96 +1884,6 @@ fn apply_sam_face_evidence(candidate: &mut SweepCandidate, boxes: &[SamBox]) {
     }
 }
 
-fn transcribe_asset(
-    settings: &ChatSettings,
-    info: &MediaInfo,
-) -> Result<Vec<TranscriptSegment>, String> {
-    if !info.has_audio || info.duration <= 0.0 {
-        return Ok(Vec::new());
-    }
-    if !settings.can_call_model() {
-        return Err("Add an API key for transcription.".to_owned());
-    }
-    let url = api_endpoint(settings, "asr/transcribe");
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(180)))
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-
-    let mut transcript = Vec::new();
-    let mut start = 0.0;
-    while start < info.duration {
-        let duration = ASR_CHUNK_SECONDS.min(info.duration - start);
-        // Concurrent curations in one process must not share or delete a chunk.
-        static CHUNK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let temp = std::env::temp_dir().join(format!(
-            "openreel-asr-{}-{}-{}.wav",
-            std::process::id(),
-            CHUNK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            (start * 1000.0) as u64
-        ));
-        let result = openreel_media::write_wav_24k(&info.path, start, duration, &temp)
-            .map_err(|_| "Transcription audio could not be prepared.".to_owned())
-            .and_then(|_| transcribe_chunk(&agent, &url, settings, &temp, start));
-        let _ = std::fs::remove_file(&temp);
-        transcript.extend(result?);
-        start += duration;
-    }
-    Ok(transcript)
-}
-
-fn transcribe_chunk(
-    agent: &ureq::Agent,
-    url: &str,
-    settings: &ChatSettings,
-    wav_path: &std::path::Path,
-    offset: f64,
-) -> Result<Vec<TranscriptSegment>, String> {
-    if std::fs::metadata(wav_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0)
-        > ASR_MAX_BYTES
-    {
-        return Err("Transcription chunk was too large.".to_owned());
-    }
-    let request = serde_json::json!({
-        "mode": "DIARIZATION",
-        "model": TRANSCRIBE_MODEL,
-        "audioEncoding": "WAV",
-    })
-    .to_string();
-    let audio = ureq::unversioned::multipart::Part::file(wav_path)
-        .map_err(|_| "Transcription audio could not be opened.".to_owned())?
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|_| "Transcription audio could not be prepared.".to_owned())?;
-    let form = ureq::unversioned::multipart::Form::new()
-        .text("request", &request)
-        .part("audio", audio);
-    let mut call = agent.post(url);
-    if !settings.api_key.trim().is_empty() {
-        call = call.header(
-            "Authorization",
-            format!("Bearer {}", settings.api_key.trim()),
-        );
-    }
-    let mut response = call
-        .send(form)
-        .map_err(|_| "Couldn't reach transcription.".to_owned())?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(api_error_for_status(status));
-    }
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|_| "Couldn't read the transcript.".to_owned())?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| "Couldn't read the transcript.".to_owned())?;
-    Ok(parse_transcript_response(&value, offset))
-}
-
 fn transcript_time(
     row: &serde_json::Value,
     millisecond_key: &str,
@@ -2208,7 +2107,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let info = openreel_media::probe(path.to_str().unwrap()).expect("probe source");
-        let result = run_sweep(&info, &[], &ChatSettings::default(), &mut |_| {});
+        let result = run_sweep(&info, &[], &ChatSettings::default(), None, &mut |_| {});
         let _ = std::fs::remove_file(&path);
         let result = result.expect("local curation");
         for pair in result.scene_clips.windows(2) {
@@ -2269,6 +2168,7 @@ mod tests {
             &info,
             &vec![0.5; 250],
             &ChatSettings::default(),
+            None,
             &mut |_| {},
         )
         .expect("local audio evidence");

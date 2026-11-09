@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{SweepData, SweepStatus};
+use super::{SweepData, SweepStatus, TranscriptSegment};
 
 const VERSION: u64 = 1;
 
@@ -160,4 +160,50 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// A finished transcript beside the file's curation (`<hash>.transcript.json`),
+/// so a file is transcribed once. `source` names the provider and model.
+pub(in crate::app) fn save_transcript(
+    dir: &Path,
+    path: &str,
+    segments: &[TranscriptSegment],
+    source: &str,
+) -> Result<(), String> {
+    let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
+    let body = json!({
+        "version": VERSION,
+        "path": path,
+        "size": size,
+        "modified": modified.to_string(),
+        "source": source,
+        "segments": segments,
+    });
+    write_private(
+        dir,
+        &file_for(dir, path).with_extension("transcript.json"),
+        &body,
+    )
+}
+
+/// The saved transcript of this exact file and its source, if any.
+pub(in crate::app) fn load_transcript(
+    dir: &Path,
+    path: &str,
+) -> Option<(Vec<TranscriptSegment>, String)> {
+    let (size, modified) = identity(path)?;
+    let raw = std::fs::read(file_for(dir, path).with_extension("transcript.json")).ok()?;
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if value["version"].as_u64() != Some(VERSION)
+        || value["path"].as_str() != Some(path)
+        || value["size"].as_u64() != Some(size)
+        || value["modified"].as_str() != Some(modified.to_string().as_str())
+    {
+        return None;
+    }
+    let segments = serde_json::from_value(value["segments"].take()).ok()?;
+    Some((
+        segments,
+        value["source"].as_str().unwrap_or("saved").to_owned(),
+    ))
 }

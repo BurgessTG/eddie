@@ -77,9 +77,15 @@ results are saved per file.
 - Optional: a Meta Model API key for model review, transcription and SAM.
   Without one, curation runs locally and chat needs a keyless localhost
   endpoint.
-- Optional: whisper.cpp's multilingual base model (`ggml-base.bin`) in
-  `whisper/` beside the settings file, or set `EDDIE_WHISPER_MODEL`. It
-  adds word timing so speech can be cut between sentences.
+- For transcription: a whisper.cpp model in `whisper/` beside the settings
+  file (or `EDDIE_WHISPER_DIR`), from
+  [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
+  `ggml-large-v3-turbo.bin` (1.6 GB) is the CPU default; GPU builds
+  (`--features cuda` or `--features vulkan`) prefer `ggml-large-v3.bin`
+  (3.1 GB). Add `ggml-silero-v5.1.2.bin` from
+  [ggml-org/whisper-vad](https://huggingface.co/ggml-org/whisper-vad) so
+  music and room tone are skipped instead of misheard. `ggml-base.bin`
+  times the words of turn-only cloud transcripts.
 
 Settings live in `~/.config/openreel/config.json` on Linux,
 `~/Library/Application Support/OpenReel/` on macOS and
@@ -133,6 +139,15 @@ eddie export talk.eddie out.mp4
 eddie help                                      # commands and the script API
 ```
 
+`eddie transcribe talk.eddie [asset...]` transcribes media with the
+provider in Settings (Speech): **Local** whisper by default, needing no key,
+or **Meta Voice Transcribe**, or any **OpenAI-compatible**
+`/audio/transcriptions` endpoint (OpenAI, Groq, a local server). Override
+with `--provider local|meta|openai`, `--model`, `--language`,
+`--vocabulary "Eddie, Bothell"` (names to spell right; optional, it can
+also make other words worse), and `EDDIE_TRANSCRIBE_API_KEY`. Transcripts are saved per file, so a file is
+transcribed once unless you pass `--force`; Curate uses the same ones.
+
 `run` uses the same JavaScript API as the in-app console (View → JS
 console), as one edit: every command applies, or none does. It prints the
 script's `return` value, `console.log` lines, the clip IDs its handles
@@ -169,7 +184,9 @@ macOS.
 
 ## Limitations
 
-- Meta's ASR returns speaker turns only. Without the local whisper model,
+- Local whisper does not label speakers; Meta's transcription does.
+  Proper nouns it can't know (product names) may be misspelled.
+- Meta's ASR returns speaker turns only. Without `ggml-base.bin`, its
   speech edges are turn-level.
 - SAM mask payloads are not decoded; subject evidence uses boxes only.
 - Burned-in text (title cards, news bars) is tagged by the model, not

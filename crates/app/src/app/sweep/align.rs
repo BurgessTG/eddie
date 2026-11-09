@@ -124,7 +124,7 @@ pub(super) fn align_transcript(
 
 /// Move each heard sentence break to the quietest 20 ms frame near it, so a
 /// cut there falls in the pause rather than on a word edge.
-fn snap_breaks(words: &mut [TranscriptWord], pcm: &[f32], offset: f64) {
+pub(super) fn snap_breaks(words: &mut [TranscriptWord], pcm: &[f32], offset: f64) {
     const FRAME: usize = SAMPLE_RATE / 50;
     for k in 0..words.len().saturating_sub(1) {
         if !ends_sentence(&words[k].text) || words[k].estimated || words[k + 1].estimated {

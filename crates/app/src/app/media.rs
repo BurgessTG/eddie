@@ -177,7 +177,9 @@ impl EditorApp {
                         thumbs,
                         sweep,
                     } = *imported;
-                    let restored = sweep.is_some();
+                    let restored = sweep
+                        .as_ref()
+                        .is_some_and(|sweep| sweep.status == SweepStatus::Ready);
                     let sweep = sweep.unwrap_or_default();
                     let thumb_textures = thumbs
                         .into_iter()
@@ -1114,7 +1116,16 @@ fn import_one(
                     )
                 })
                 .flatten();
-            let sweep = store_dir.and_then(|dir| load_curation(dir, &path_str));
+            // A saved transcript is the latest one (curation saves its own
+            // there too), and gives scripts the speech without a curation.
+            let sweep = store_dir.and_then(|dir| {
+                let transcript = super::sweep::load_transcript(dir, &path_str);
+                let mut sweep = load_curation(dir, &path_str);
+                if let Some((segments, _)) = transcript {
+                    sweep.get_or_insert_with(SweepData::default).transcript = segments;
+                }
+                sweep
+            });
             ImportMsg::Ready(Box::new(ImportedAsset {
                 info,
                 peaks,

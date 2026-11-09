@@ -181,3 +181,128 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     let length = duration(&dir.0.join("out.mp4"));
     assert!((length - 3.0).abs() < 0.1, "exported {length} s");
 }
+
+/// An OpenAI-style transcription server: answers each upload with two
+/// segments and word timings, and records every request it receives.
+fn fake_transcriber() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            seen.lock()
+                .unwrap()
+                .push(head + &String::from_utf8_lossy(&body));
+            let reply = serde_json::json!({
+                "text": "Hello there. Second line.",
+                "duration": 3.0,
+                "segments": [
+                    {"start": 0.2, "end": 1.4, "text": " Hello there."},
+                    {"start": 1.6, "end": 2.8, "text": " Second line."}
+                ],
+                "words": [
+                    {"word": "Hello", "start": 0.2, "end": 0.6},
+                    {"word": "there.", "start": 0.7, "end": 1.4},
+                    {"word": "Second", "start": 1.6, "end": 2.1},
+                    {"word": "line.", "start": 2.2, "end": 2.8}
+                ]
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+    });
+    (base, requests)
+}
+
+#[test]
+fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
+    let dir = Dir::new("transcribe");
+    dir.ffmpeg(&["-f", "lavfi", "-i", "sine=f=300:d=3", "voice.wav"]);
+    let (base, requests) = fake_transcriber();
+    // A loopback endpoint needs no key.
+    std::fs::create_dir_all(dir.0.join("config/openreel")).unwrap();
+    std::fs::write(
+        dir.0.join("config/openreel/config.json"),
+        serde_json::json!({"transcription": {"provider": "openai", "base_url": base}}).to_string(),
+    )
+    .unwrap();
+    let (code, _) = dir.eddie(&["new", "p.eddie", "voice.wav"]);
+    assert_eq!(code, 0);
+
+    let (code, first) = dir.eddie(&["transcribe", "p.eddie", "--language", "en"]);
+    assert_eq!(code, 0, "{first}");
+    let entry = &first["assets"][0];
+    assert_eq!(
+        (&entry["turns"], &entry["words"], &entry["saved"]),
+        (&2.into(), &4.into(), &false.into()),
+        "{first}"
+    );
+    assert_eq!(entry["source"], "openai:whisper-1");
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(
+            request.starts_with("POST /v1/audio/transcriptions "),
+            "{request}"
+        );
+        for field in [
+            "name=\"model\"\r\n\r\nwhisper-1",
+            "name=\"response_format\"\r\n\r\nverbose_json",
+            "name=\"timestamp_granularities[]\"\r\n\r\nword",
+            "name=\"timestamp_granularities[]\"\r\n\r\nsegment",
+            "name=\"language\"\r\n\r\nen",
+            "filename=\"audio.wav\"",
+        ] {
+            assert!(request.contains(field), "missing {field}");
+        }
+    }
+
+    // Saved per file: the second run uploads nothing.
+    let (code, again) = dir.eddie(&["transcribe", "p.eddie"]);
+    assert_eq!(
+        (code, &again["assets"][0]["saved"]),
+        (0, &true.into()),
+        "{again}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    // Scripts see the saved transcript with word timing after a reopen.
+    let (code, run) = dir.eddie(&[
+        "run",
+        "p.eddie",
+        "-e",
+        "const s = transcriptSegments(); \
+         return s.length + ' ' + s[1].timingPrecision + ' ' + s[1].words[0].text + ' ' + s[1].words[0].start",
+    ]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["output"], "2 word Second 1.6");
+
+    // An unknown asset is an error, not an empty success.
+    let (code, missing) = dir.eddie(&["transcribe", "p.eddie", "nope.wav"]);
+    assert_eq!((code, &missing["ok"]), (1, &false.into()));
+}

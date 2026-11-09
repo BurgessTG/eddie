@@ -105,7 +105,7 @@ impl Footage {
     }
 
     fn curate(&self, settings: &ChatSettings) -> SweepData {
-        run_sweep(&self.info, &self.peaks, settings, &mut |_| {}).expect("curation result")
+        run_sweep(&self.info, &self.peaks, settings, None, &mut |_| {}).expect("curation result")
     }
 }
 
@@ -154,6 +154,11 @@ impl Api {
                 listener.local_addr().unwrap()
             ),
             api_key: "curation-fixture-key".to_owned(),
+            // The fixture serves Meta's transcription endpoint.
+            transcription: super::transcribe::TranscribeSettings {
+                provider: super::transcribe::Provider::Meta,
+                ..Default::default()
+            },
             ..ChatSettings::default()
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -1633,6 +1638,7 @@ fn comparison_mode_uses_the_same_orientation_without_subject_requests() {
         &source.info,
         &source.peaks,
         &api.settings,
+        None,
         &mut |_| {},
         super::subjects::Mode::Disabled,
     )

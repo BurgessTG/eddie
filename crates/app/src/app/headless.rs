@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use serde_json::{json, Value};
 
+use super::sweep::transcribe::{self, Provider};
 use super::{inspect, EditorApp};
 use crate::scripting::{ScriptCommand, ScriptEngine};
 
@@ -26,13 +27,28 @@ Usage: eddie <command> <project.eddie> ...
                                      applies, or none does. Each run starts
                                      fresh, and importMedia/exportTo are
                                      refused: use import and export
+  transcribe <project> [asset...] [--provider local|meta|openai]
+             [--model M] [--language en] [--vocabulary \"Eddie, Wonder\"]
+             [--force]
+                                     transcribe media (all with sound when
+                                     none is named); saved per file, so only
+                                     --force transcribes again
   export <project> <out.mp4>         render the timeline
   help                               this text and the script API
 
-Every command prints one JSON object. Errors print {\"ok\":false,\"error\":...}
-and exit 1. Without a command, eddie opens the editor window.";
+Every command prints one JSON object. Errors print {\"ok\":false,...} and
+exit 1. Without a command, eddie opens the editor window.";
 
-const COMMANDS: &[&str] = &["new", "import", "state", "inspect", "run", "export", "help"];
+const COMMANDS: &[&str] = &[
+    "new",
+    "import",
+    "state",
+    "inspect",
+    "run",
+    "transcribe",
+    "export",
+    "help",
+];
 
 /// Run a command-line command, or `None` when `args` (without the program
 /// name) do not start with one, so the window should open instead.
@@ -55,11 +71,12 @@ pub(crate) fn cli_main(args: &[OsString]) -> Option<i32> {
         "state" => state(&args),
         "inspect" => inspect_project(&args),
         "run" => run(&args),
+        "transcribe" => transcribe(&args),
         "export" => export(&args),
         _ => unreachable!(),
     };
     let (code, value) = match result {
-        Ok(value) => (0, value),
+        Ok(value) => (if value["ok"] == false { 1 } else { 0 }, value),
         Err(error) => (1, json!({ "ok": false, "error": error })),
     };
     println!("{value}");
@@ -245,6 +262,104 @@ fn apply_edit(
         .map(|(handle, clip)| (handle.to_string(), clip))
         .collect();
     Ok((notes, handles))
+}
+
+/// Transcribe with the saved settings, overridden by flags and by
+/// `EDDIE_TRANSCRIBE_API_KEY`. One file failing does not stop the rest.
+fn transcribe(args: &[String]) -> Result<Value, String> {
+    let path = project_arg(args)?;
+    let mut settings = super::chat::ChatSettings::load().transcription();
+    if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
+        settings.api_key = key.trim().to_owned();
+    }
+    let mut force = false;
+    let mut wanted = Vec::new();
+    let mut rest = args[1..].iter();
+    while let Some(arg) = rest.next() {
+        let mut value = |flag: &str| {
+            rest.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match arg.as_str() {
+            "--force" => force = true,
+            "--provider" => {
+                let name = value("--provider")?;
+                let provider = Provider::from_name(&name)
+                    .ok_or_else(|| format!("unknown provider '{name}' (local, meta, openai)"))?;
+                if provider != settings.provider {
+                    // Another provider's key and endpoint do not carry over.
+                    settings = transcribe::TranscribeSettings {
+                        provider,
+                        ..Default::default()
+                    };
+                    if provider == Provider::Meta {
+                        settings = super::chat::ChatSettings {
+                            transcription: settings,
+                            ..super::chat::ChatSettings::load()
+                        }
+                        .transcription();
+                    }
+                    if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
+                        settings.api_key = key.trim().to_owned();
+                    }
+                }
+            }
+            "--model" => settings.model = value("--model")?,
+            "--language" => settings.language = value("--language")?,
+            "--vocabulary" => settings.vocabulary = value("--vocabulary")?,
+            flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
+            asset => wanted.push(asset.to_owned()),
+        }
+    }
+    let (_ctx, app) = open(&path)?;
+    let mut targets = Vec::new();
+    for name in &wanted {
+        let asset = app
+            .assets
+            .iter()
+            .find(|asset| asset.info.path == *name || asset.info.name == *name)
+            .ok_or_else(|| format!("no asset '{name}' in the project"))?;
+        targets.push(asset.info.clone());
+    }
+    if wanted.is_empty() {
+        targets = app
+            .assets
+            .iter()
+            .filter(|asset| asset.info.has_audio)
+            .map(|asset| asset.info.clone())
+            .collect();
+    }
+    let store = app.curation_dir.clone();
+    let mut results = Vec::new();
+    let mut failed = false;
+    for info in targets {
+        let started = Instant::now();
+        let mut progress = |message: &str| eprintln!("{}: {message}", info.name);
+        let result =
+            transcribe::transcribe_cached(&settings, store.as_deref(), &info, force, &mut progress);
+        let seconds = started.elapsed().as_secs_f64();
+        results.push(match result {
+            Ok(transcript) => {
+                let words: usize = transcript.segments.iter().map(|s| s.words.len()).sum();
+                let entry = json!({
+                    "asset": info.name,
+                    "turns": transcript.segments.len(),
+                    "words": words,
+                    "source": transcript.source,
+                    "saved": transcript.cached,
+                    "seconds": seconds,
+                    "note": transcript.note,
+                });
+                entry
+            }
+            Err(error) => {
+                failed = true;
+                json!({ "asset": info.name, "error": error })
+            }
+        });
+    }
+    Ok(json!({ "ok": !failed, "assets": results }))
 }
 
 fn export(args: &[String]) -> Result<Value, String> {

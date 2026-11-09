@@ -29,6 +29,7 @@ use super::session::{
     build_pinned_summary, estimate_tokens, pinned_fingerprint, transcript_segment_id, ChatMessage,
     ChatRole, ChatSession, PinnedAsset, PinnedCandidate, PinnedTranscriptSegment, TOKEN_BUDGET,
 };
+use super::sweep::transcribe::{Provider, TranscribeSettings};
 use super::EditorApp;
 use crate::scripting::ScriptCommand;
 use crate::theme;
@@ -70,6 +71,8 @@ pub(super) struct ChatSettings {
     /// default: errors fall back to software, but a driver that hangs
     /// cannot, and only one NVIDIA driver has been tested.
     pub(super) hardware_decode: bool,
+    /// Where speech becomes text: local whisper by default, or a cloud API.
+    pub(super) transcription: TranscribeSettings,
 }
 
 impl Default for ChatSettings {
@@ -82,6 +85,7 @@ impl Default for ChatSettings {
             format: Orientation::Landscape,
             check_edits: true,
             hardware_decode: false,
+            transcription: TranscribeSettings::default(),
         }
     }
 }
@@ -258,6 +262,7 @@ impl ChatSettings {
         if let Some(v) = value["hardware_decode"].as_bool() {
             settings.hardware_decode = v;
         }
+        settings.transcription = TranscribeSettings::from_json(&value["transcription"]);
         settings
     }
 
@@ -274,6 +279,7 @@ impl ChatSettings {
             "format": self.format.as_str(),
             "check_edits": self.check_edits,
             "hardware_decode": self.hardware_decode,
+            "transcription": self.transcription.to_json(),
         });
         static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
         let (temporary, mut file) = loop {
@@ -323,19 +329,38 @@ impl ChatSettings {
     }
 
     fn allows_missing_key(&self) -> bool {
-        let Ok(uri) = self.base_url.trim().parse::<ureq::http::Uri>() else {
-            return false;
-        };
-        let Some(host) = uri.host() else {
-            return false;
-        };
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .trim_matches(['[', ']'])
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
+        is_local_endpoint(&self.base_url)
     }
+
+    /// Transcription settings, with Meta falling back to the main key and
+    /// endpoint when it has none of its own.
+    pub(super) fn transcription(&self) -> TranscribeSettings {
+        let mut settings = self.transcription.clone();
+        if settings.provider == Provider::Meta && settings.api_key.is_empty() {
+            settings.api_key = self.api_key.trim().to_owned();
+            if settings.base_url.is_empty() {
+                settings.base_url = self.base_url.trim().to_owned();
+            }
+        }
+        settings
+    }
+}
+
+/// Keyless endpoints must be parsed localhost or loopback addresses, not
+/// hostname-prefix matches.
+pub(super) fn is_local_endpoint(base_url: &str) -> bool {
+    let Ok(uri) = base_url.trim().parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 /// The developer-role contract. Sent first in every request and
@@ -1871,6 +1896,7 @@ impl EditorApp {
         let mut open = true;
         let mut dirty = false;
         let mut check_connection = false;
+        let mut speech_changed = false;
         let mut format_choice = None;
         let mut close_clicked = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Settings")
@@ -2005,6 +2031,98 @@ impl EditorApp {
                         }
                         ui.end_row();
 
+                        ui.label(RichText::new("Speech").color(theme::MUTED_FG));
+                        let speech = &mut self.chat_settings.transcription;
+                        let before = speech.clone();
+                        egui::ComboBox::from_id_salt("speech_provider")
+                            .width(field_w + 16.0)
+                            .selected_text(speech.provider.label())
+                            .show_ui(ui, |ui| {
+                                for provider in Provider::ALL {
+                                    ui.selectable_value(
+                                        &mut speech.provider,
+                                        provider,
+                                        provider.label(),
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Who turns speech into text. Local runs whisper on this computer with no key; cloud providers upload the audio.",
+                            );
+                        ui.end_row();
+
+                        let (model_hint, model_tip) = match speech.provider {
+                            Provider::Local => (
+                                "Best installed",
+                                "A whisper model name such as large-v3 or large-v3-turbo, or a path to a ggml file. Empty uses the most accurate one installed.",
+                            ),
+                            Provider::Meta => ("muse-voice-transcribe-1.0", "Meta transcription model ID"),
+                            Provider::OpenAi => (
+                                "whisper-1",
+                                "Model ID. Word timing needs a whisper model, such as whisper-1 or Groq's whisper-large-v3.",
+                            ),
+                        };
+                        ui.label(RichText::new("Speech model").color(theme::MUTED_FG));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut speech.model)
+                                .hint_text(model_hint)
+                                .margin(egui::Margin::symmetric(8, 6))
+                                .desired_width(field_w),
+                        )
+                        .on_hover_text(model_tip);
+                        ui.end_row();
+
+                        if speech.provider != Provider::Local {
+                            let (url_hint, key_hint) = match speech.provider {
+                                Provider::Meta => ("Same as Base URL", "Same as API key"),
+                                _ => ("https://api.openai.com/v1", "Not set"),
+                            };
+                            ui.label(RichText::new("Speech URL").color(theme::MUTED_FG));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut speech.base_url)
+                                    .hint_text(url_hint)
+                                    .margin(egui::Margin::symmetric(8, 6))
+                                    .desired_width(field_w),
+                            )
+                            .on_hover_text("Transcription API base URL, such as https://api.groq.com/openai/v1");
+                            ui.end_row();
+
+                            ui.label(RichText::new("Speech key").color(theme::MUTED_FG));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut speech.api_key)
+                                    .password(true)
+                                    .hint_text(key_hint)
+                                    .margin(egui::Margin::symmetric(8, 6))
+                                    .desired_width(field_w),
+                            )
+                            .on_hover_text("Transcription API key. Stored only in the local app config.");
+                            ui.end_row();
+                        }
+
+                        ui.label(RichText::new("Language").color(theme::MUTED_FG));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut speech.language)
+                                .hint_text("Detect")
+                                .margin(egui::Margin::symmetric(8, 6))
+                                .desired_width(field_w),
+                        )
+                        .on_hover_text("Spoken language as a code such as en or es. Empty detects it.");
+                        ui.end_row();
+
+                        ui.label(RichText::new("Vocabulary").color(theme::MUTED_FG));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut speech.vocabulary)
+                                .hint_text("Names to spell right")
+                                .margin(egui::Margin::symmetric(8, 6))
+                                .desired_width(field_w),
+                        )
+                        .on_hover_text(
+                            "A short, comma-separated list of names and terms, such as Eddie, Muse Wonder. Local and OpenAI-compatible providers use it.",
+                        );
+                        ui.end_row();
+                        speech_changed = *speech != before;
+
                         ui.label(RichText::new("Format").color(theme::MUTED_FG));
                         format_choice = theme::segmented(
                             ui,
@@ -2075,6 +2193,14 @@ impl EditorApp {
             if let Err(error) = self.chat_settings.save() {
                 self.status = error;
             }
+        }
+        if speech_changed && !dirty {
+            // Not a connection setting: keep any check result.
+            if let Err(error) = self.chat_settings.save() {
+                self.status = error;
+                return;
+            }
+            self.status = "Settings saved.".to_owned();
         }
         if dirty {
             self.connection_check = None;
@@ -2604,7 +2730,8 @@ mod tests {
                     assert!(ChatSettings::load() == settings, "settings round-trip");
                     let value: serde_json::Value =
                         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                    assert_eq!(value.as_object().unwrap().len(), 7);
+                    assert_eq!(value.as_object().unwrap().len(), 8);
+                    assert_eq!(value["transcription"]["provider"], "local");
                     assert_eq!(value["check_edits"], check);
                     assert_eq!(value["hardware_decode"], hardware);
                     assert_eq!(value["model"], "muse-wonder-1.0");
