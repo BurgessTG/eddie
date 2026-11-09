@@ -2502,7 +2502,7 @@ mod tests {
                 (status, catalog(&[MODEL_WONDER]))
             });
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             app.chat_settings = settings;
             app.show_chat_settings = true;
             click_settings_label(&ctx, &mut app, "Check connection");
@@ -2539,7 +2539,7 @@ mod tests {
         for field in ["key", "base", "model", "contributor"] {
             for result in [Ok(()), Err("Check your API key in Settings.".to_owned())] {
                 let ctx = egui::Context::default();
-                let mut app = EditorApp::headless_for_test(&ctx);
+                let mut app = EditorApp::headless(&ctx);
                 let (tx, rx) = channel();
                 app.connection_check = Some(PendingConnectionCheck {
                     settings: app.chat_settings.clone(),
@@ -2668,7 +2668,7 @@ mod tests {
                 assert_eq!(error, "Couldn't save settings.");
 
                 let ctx = egui::Context::default();
-                let mut app = EditorApp::headless_for_test(&ctx);
+                let mut app = EditorApp::headless(&ctx);
                 app.show_chat_settings = true;
                 click_settings_label(&ctx, &mut app, "Contributor models");
                 assert!(app.chat_settings.contributor_opt_in);
@@ -2737,7 +2737,7 @@ mod tests {
             "app::chat::tests::settings_edits_invalidate_checks_even_after_changing_back",
             |_| {
                 let ctx = egui::Context::default();
-                let mut app = EditorApp::headless_for_test(&ctx);
+                let mut app = EditorApp::headless(&ctx);
                 app.show_chat_settings = true;
                 let original = app.chat_settings.clone();
                 let (tx, rx) = channel();
@@ -2762,7 +2762,7 @@ mod tests {
     #[test]
     fn missing_key_check_reads_right_inside_settings() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.chat_settings.api_key.clear();
         app.show_chat_settings = true;
         click_settings_label(&ctx, &mut app, "Check connection");
@@ -2800,7 +2800,7 @@ mod tests {
     #[test]
     fn settings_window_offers_connection_check() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.show_chat_settings = true;
         let mut output = None;
         for _ in 0..2 {
@@ -2877,7 +2877,7 @@ mod tests {
     #[test]
     fn edit_requests_carry_word_timings_only_for_segments_they_mention() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let segment = |start: f64, text: &str, word: &str| super::super::sweep::TranscriptSegment {
             start,
             end: start + 1.0,
@@ -2938,7 +2938,7 @@ mod tests {
     #[test]
     fn applied_edits_are_checked_against_a_contact_sheet_and_fixed() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.assets.push(super::super::media::BinAsset {
             info: openreel_media::MediaInfo {
                 path: "ready.mp4".to_owned(),
@@ -3036,7 +3036,7 @@ mod tests {
     #[test]
     fn a_reply_without_edits_shows_the_models_questions() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let tx = queue_reply(&mut app);
         deliver_reply(
             &mut app,
@@ -3057,7 +3057,7 @@ mod tests {
     #[test]
     fn a_cutaway_moved_to_lane_zero_shows_over_the_base_clip() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         for name in ["talk.mp4", "broll.mp4"] {
             app.assets.push(super::super::media::BinAsset {
                 info: openreel_media::MediaInfo {
@@ -3180,7 +3180,7 @@ mod tests {
     #[test]
     fn generated_additions_return_handles_for_later_commands() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.assets.push(super::super::media::BinAsset {
             info: openreel_media::MediaInfo {
                 path: "ready.mp4".to_owned(),
@@ -3251,7 +3251,7 @@ mod tests {
             ),
         ] {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             app.assets.push(super::super::media::BinAsset {
                 info: openreel_media::MediaInfo {
                     path: "ready.mp4".to_owned(),
@@ -3304,7 +3304,7 @@ mod tests {
     fn generated_reply_cannot_delete_replacement_after_clear() {
         for console_clear in [false, true] {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let old = app
                 .timeline
                 .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
@@ -3332,7 +3332,7 @@ mod tests {
     #[test]
     fn generated_reply_rejects_manual_timeline_changes() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let id = app
             .timeline
             .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
@@ -3347,7 +3347,7 @@ mod tests {
     #[test]
     fn generated_defaults_use_the_requested_selection_and_playhead() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let first = app
             .timeline
             .add_clip("First", ClipKind::Title, 0, 0.0, 5.0, 0.0);
@@ -3373,7 +3373,7 @@ mod tests {
     fn generated_filesystem_commands_are_rejected_before_editing() {
         for operation in ["importMedia", "exportTo"] {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let id = app
                 .timeline
                 .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
@@ -3406,7 +3406,7 @@ mod tests {
     #[test]
     fn successful_edit_is_undoable_after_a_log_only_reply() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let id = app
             .timeline
             .add_clip("Before", ClipKind::Title, 0, 0.0, 5.0, 0.0);
@@ -3625,7 +3625,7 @@ mod tests {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 listener.set_nonblocking(true).unwrap();
                 let ctx = egui::Context::default();
-                let mut app = EditorApp::headless_for_test(&ctx);
+                let mut app = EditorApp::headless(&ctx);
                 app.chat_settings.base_url =
                     format!("http://{}/v1", listener.local_addr().unwrap());
                 app.submit_chat(&ctx, "x".repeat(TOKEN_BUDGET * 4 + 100));

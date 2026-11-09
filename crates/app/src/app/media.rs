@@ -113,6 +113,7 @@ impl EditorApp {
         self.import_rx = Some(rx);
         let ctx = ctx.clone();
         let store_dir = self.curation_dir.clone();
+        let thumbnails = self.make_thumbnails;
         thread::spawn(move || {
             // Files import concurrently; placeholders already hold bin
             // order. Each 4K thumbnail pass uses several slice threads.
@@ -122,7 +123,7 @@ impl EditorApp {
                 for _ in 0..workers {
                     scope.spawn(|| {
                         while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            if !import_one(path, &tx, &ctx, store_dir.as_deref()) {
+                            if !import_one(path, &tx, &ctx, store_dir.as_deref(), thumbnails) {
                                 return;
                             }
                         }
@@ -1080,6 +1081,7 @@ fn import_one(
     tx: &std::sync::mpsc::Sender<ImportMsg>,
     ctx: &egui::Context,
     store_dir: Option<&std::path::Path>,
+    thumbnails: bool,
 ) -> bool {
     let path_str = path.to_string_lossy().into_owned();
     let msg = match openreel_media::probe(&path_str) {
@@ -1098,7 +1100,7 @@ fn import_one(
             } else {
                 Vec::new()
             };
-            let thumbs = if info.has_video {
+            let thumbs = if thumbnails && info.has_video {
                 openreel_media::thumbnails(&path_str, info.width, info.height, info.duration)
                     .unwrap_or_default()
             } else {

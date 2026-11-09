@@ -283,7 +283,7 @@ fn render_slice6_screenshots() {
         return;
     }
     let ctx = egui::Context::default();
-    let mut app = EditorApp::headless_for_test(&ctx);
+    let mut app = EditorApp::headless(&ctx);
     // A small representative edit so timeline/inspector have content.
     let video = app
         .timeline

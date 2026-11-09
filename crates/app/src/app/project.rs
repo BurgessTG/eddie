@@ -60,7 +60,13 @@ impl EditorApp {
         let body = json!({
             "version": VERSION,
             "timeline": self.timeline,
-            "media": self.assets.iter().map(|asset| &asset.info.path).collect::<Vec<_>>(),
+            // Missing files stay listed until they are located.
+            "media": self
+                .assets
+                .iter()
+                .map(|asset| &asset.info.path)
+                .chain(&self.missing_media)
+                .collect::<Vec<_>>(),
             "projectDir": path.parent(),
             "muteMusicBeds": self.mute_music_beds,
         });

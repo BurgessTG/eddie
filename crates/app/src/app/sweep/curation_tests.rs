@@ -613,7 +613,7 @@ fn speech_fragments_expose_their_source_turn_and_asr_session() {
     api.finish();
     assert_inventory(&data, 8, 2.0);
     let ctx = eframe::egui::Context::default();
-    let mut app = crate::app::EditorApp::headless_for_test(&ctx);
+    let mut app = crate::app::EditorApp::headless(&ctx);
     app.assets.push(crate::app::BinAsset {
         info: source.info.clone(),
         size_bytes: 0,

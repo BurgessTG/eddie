@@ -20,6 +20,8 @@ use crate::theme;
 
 pub(crate) mod chat;
 mod gallery;
+mod headless;
+pub(crate) use headless::cli_main;
 mod history;
 mod inspect;
 mod media;
@@ -210,6 +212,8 @@ pub struct EditorApp {
     persist_session: bool,
     /// Saved curations; `None` keeps tests away from the user's config.
     curation_dir: Option<PathBuf>,
+    /// Imports decode filmstrip thumbnails; the command line has no bin.
+    make_thumbnails: bool,
     chat_input: String,
     chat_rx: Option<Receiver<(u64, ChatWorkerResult)>>,
     chat_pending: Option<PendingChat>,
@@ -328,6 +332,7 @@ impl EditorApp {
             chat_session: ChatSession::load(),
             persist_session: true,
             curation_dir: sweep::default_curation_dir(),
+            make_thumbnails: true,
             chat_input: String::new(),
             chat_rx: None,
             chat_pending: None,
@@ -354,10 +359,9 @@ impl EditorApp {
         }
     }
 
-    /// Headless constructor for the screenshot test: same defaults
+    /// Headless constructor for tests and the command line: same defaults
     /// as `new`, but without a window or persisted user config.
-    #[cfg(test)]
-    fn headless_for_test(ctx: &egui::Context) -> Self {
+    fn headless(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
         let wake_ctx = ctx.clone();
         let (still_decoder, still_rx) = StillDecoder::spawn(move || wake_ctx.request_repaint());
@@ -434,6 +438,7 @@ impl EditorApp {
             chat_session: ChatSession::new("screenshot"),
             persist_session: false,
             curation_dir: None,
+            make_thumbnails: true,
             chat_input: String::new(),
             chat_rx: None,
             chat_pending: None,
@@ -4285,7 +4290,7 @@ mod tests {
             assert!(output.status.success());
             let tone = tone.to_string_lossy().into_owned();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             app.match_export_loudness = true;
             add_asset(&mut app, &tone);
             let clip =
@@ -4375,7 +4380,7 @@ mod tests {
         fn continuous_scrub_shows_pictures_while_the_pointer_moves() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             app.timeline
                 .add_media_clip("Scrub", ClipKind::Video, 0, 0.0, 2.0, 0.0, &fixture.path);
@@ -4403,7 +4408,7 @@ mod tests {
         fn paused_arrow_steps_show_prefetched_neighbors_at_once() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             app.timeline
                 .add_media_clip("Steps", ClipKind::Video, 0, 0.0, 2.0, 0.0, &fixture.path);
@@ -4447,7 +4452,7 @@ mod tests {
         #[test]
         fn preview_uploads_reuse_released_pixels() {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let mut uploaded = Vec::new();
             for value in [10_u8, 200] {
                 let frame = RawFrame {
@@ -4468,7 +4473,7 @@ mod tests {
         fn preview_boundary_never_uploads_the_previous_clip() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             for (start, source_in) in [(0.0, 0.0), (0.2, 1.0)] {
                 app.timeline.add_media_clip(
@@ -4502,7 +4507,7 @@ mod tests {
         fn preview_transport_waits_for_each_short_clips_first_picture() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             for (start, source_in) in [(0.0, 0.0), (0.05, 1.0)] {
                 app.timeline.add_media_clip(
@@ -4548,7 +4553,7 @@ mod tests {
         fn preview_prerolls_the_next_cut_before_the_playhead_reaches_it() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             // Red is source [0, 1), blue [1, 2), with one keyframe at 0. The
             // backward cuts need the idle lane's preroll; the forward cut
@@ -4607,7 +4612,7 @@ mod tests {
         fn preview_reentering_a_file_reuses_its_parked_decoder() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let mut paths = vec![fixture.path.clone()];
             for name in ["b.mp4", "c.mp4"] {
                 let copy = fixture.dir.join(name);
@@ -4678,7 +4683,7 @@ mod tests {
             std::fs::copy(&fixture.path, &other).unwrap();
             let other = other.to_string_lossy().into_owned();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             add_asset(&mut app, &other);
             for (start, path) in [(0.0, &fixture.path), (0.2, &other)] {
@@ -4742,7 +4747,7 @@ mod tests {
             assert!(output.status.success(), "{:?}", output.stderr);
             let path = path.to_str().unwrap();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, path);
             let video =
                 app.timeline
@@ -4789,7 +4794,7 @@ mod tests {
         fn preview_source_remap_restarts_the_same_clip_and_invalidates_its_picture() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             let clip = app.timeline.add_media_clip(
                 "Excerpt",
@@ -4825,7 +4830,7 @@ mod tests {
         fn preview_late_still_cannot_overwrite_playback_after_a_seek() {
             let fixture = Fixture::new();
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             app.timeline.add_media_clip(
                 "Picture",
@@ -4880,7 +4885,7 @@ mod tests {
                     .unwrap();
             });
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             add_asset(&mut app, &fixture.path);
             app.assets[0].info.path = fifo.to_string_lossy().into_owned();
             app.timeline.add_media_clip(
@@ -4954,7 +4959,7 @@ mod tests {
             paths.sort();
             assert!(!paths.is_empty());
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             for path in &paths {
                 add_asset(&mut app, path.to_str().unwrap());
             }
@@ -5111,7 +5116,7 @@ mod tests {
     #[test]
     fn jkl_shuttle_doubles_speed_runs_backward_and_stops_at_the_start() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.timeline
             .add_clip("Card", ClipKind::Title, 0, 0.0, 10.0, 0.0);
         let mut time = 0.0;
@@ -5166,7 +5171,7 @@ mod tests {
     #[test]
     fn finished_export_offers_open_folder_until_the_status_moves_on() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let (tx, rx) = channel();
         app.export_rx = Some(rx);
         tx.send(ExportMsg::Done(Ok(PathBuf::from(
@@ -5191,7 +5196,7 @@ mod tests {
     #[test]
     fn double_clicking_a_monitor_caption_opens_its_text_for_editing() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let text = "A person talking stays a person talking";
         let title = app
             .timeline
@@ -5253,7 +5258,7 @@ mod tests {
     #[test]
     fn console_enter_runs_edits_and_keeps_input_ready() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.show_console = true;
         let mut time = 0.0;
         let mut render = |app: &mut EditorApp, events: Vec<egui::Event>| {
@@ -5339,7 +5344,7 @@ mod tests {
     fn inspecting_media_does_not_change_scene_timing() {
         for (start, duration) in [(0.157, 0.001), (2.135, 3.2866666666666666 - 2.135)] {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let video = app.timeline.add_media_clip(
                 "Scene",
                 ClipKind::Video,
@@ -5380,7 +5385,7 @@ mod tests {
     fn inspector_start_moves_both_members_of_a_linked_pair() {
         for edit_audio in [false, true] {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             let video = app.timeline.add_media_clip(
                 "Picture",
                 ClipKind::Video,
@@ -5485,7 +5490,7 @@ mod tests {
     #[test]
     fn left_trim_survives_app_frame_with_magnet_on() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         assert!(app.timeline_view.magnet);
         let a_id = app.timeline.add_media_clip(
             "a.mp4",
@@ -5546,7 +5551,7 @@ mod tests {
     #[test]
     fn delete_with_magnet_keeps_gap() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         assert!(app.timeline_view.magnet);
         app.timeline
             .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 0.0);
@@ -5572,7 +5577,7 @@ mod tests {
     #[test]
     fn split_at_playhead_cuts_clip_under_playhead_without_selection() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let clip_id = app
             .timeline
             .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 2.0);
@@ -5593,7 +5598,7 @@ mod tests {
     #[test]
     fn import_while_busy_queues_instead_of_dropping() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let first = sample_media()[0].clone();
         let second = sample_media()[1].clone();
         app.spawn_import(&ctx, vec![first]);
@@ -5608,7 +5613,7 @@ mod tests {
     #[test]
     fn playhead_readout_jumps_to_a_typed_time_spec() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.timeline
             .add_clip("Intro", ClipKind::Title, 0, 0.0, 8.0, 0.0);
         let outro = app
@@ -5676,7 +5681,7 @@ mod tests {
     #[test]
     fn transport_scrubber_click_seeks_proportionally() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.timeline
             .add_clip("Intro", ClipKind::Title, 0, 0.0, 8.0, 0.0);
         let mut time = 0.0;
@@ -5732,7 +5737,7 @@ mod tests {
     #[test]
     fn finished_import_keeps_the_users_selection() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let music = sample_media()[1].to_str().expect("utf-8 sample path");
         let import = |app: &mut EditorApp| {
             app.spawn_import(&ctx, vec![PathBuf::from(music)]);
@@ -5788,7 +5793,7 @@ mod tests {
     #[ignore = "needs downloaded clips in /tmp/clips and /tmp/rockets"]
     fn js_console_fast_cuts_export_e2e() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let batch1 = vec![
             PathBuf::from("/tmp/clips/ocean02.webm"),
             PathBuf::from("/tmp/clips/interview60.mp4"),
@@ -5978,7 +5983,7 @@ mod tests {
     #[ignore = "needs rendered pieces in /tmp plus downloads"]
     fn recap_rehearsal_from_finished_pieces_e2e() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let pieces = vec![
             PathBuf::from("/tmp/spacex_countdown.mp4"),
             PathBuf::from("/tmp/js_fastcuts.mp4"),
@@ -6110,7 +6115,7 @@ mod tests {
         println!("montage corpus: {} file(s) in {dir}", pieces.len());
 
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let expected_assets = pieces.len();
         app.spawn_import(&ctx, pieces);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
@@ -6300,7 +6305,7 @@ mod tests {
     #[test]
     fn video_of_the_other_orientation_is_never_added_to_the_project() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         // Displayed sizes: a rotated phone clip probes as portrait.
         for (name, width, height) in [("wide.mp4", 1920, 1080), ("phone.mov", 1080, 1920)] {
             let path = format!("/media/{name}");
@@ -6388,7 +6393,7 @@ mod tests {
     #[test]
     fn adding_all_scene_clips_reconstructs_the_source_in_order() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let scene =
             |index: usize, source_in: f64, duration: f64, score: f32| sweep::SweepCandidate {
                 id: format!("/media/montage.mp4#scene-{index}"),
@@ -6566,7 +6571,7 @@ mod tests {
     #[test]
     fn adding_a_music_bed_range_starts_muted() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let candidate = |music_bed: bool| sweep::SweepCandidate {
             id: "/media/montage.mp4#0".to_owned(),
             asset_path: "/media/montage.mp4".to_owned(),
@@ -6677,7 +6682,7 @@ mod tests {
     #[test]
     fn ducking_follows_transcript_speech_and_only_music_ducks_by_default() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let turn = |start: f64, end: f64, text: &str| sweep::TranscriptSegment {
             start,
             end,
@@ -6739,7 +6744,7 @@ mod tests {
     #[test]
     fn adding_captions_maps_transcript_chunks_onto_a_timeline_clip() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let words = [
             ("One", 10.0, 10.3),
             ("two", 10.4, 10.7),
@@ -6870,7 +6875,7 @@ mod tests {
     #[test]
     fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let mut peaks = vec![0.0; 25];
         peaks.extend([0.8; 25]);
         peaks.extend([0.0; 25]);
@@ -6936,7 +6941,7 @@ mod tests {
     #[test]
     fn tightening_silence_keeps_detached_audio_in_linked_phrases() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let mut peaks = vec![0.0; 25];
         peaks.extend([0.8; 25]);
         peaks.extend([0.0; 25]);
@@ -7012,7 +7017,7 @@ mod tests {
     #[test]
     fn curator_add_shown_uses_the_selected_source_and_filter_but_all_scenes_stays_complete() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         for path in ["/media/a.mp4", "/media/b.mp4"] {
             let candidates: Vec<_> = ["action", "reaction", "reaction", "talking"]
                 .into_iter()
@@ -7126,7 +7131,7 @@ mod tests {
         use gallery::{GalleryDuration, GalleryFilters, GalleryQuality, GallerySort};
 
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         for (path, name) in [
             ("/media/expo.mp4", "Expo.mp4"),
             ("/media/interview.mov", "Interview.mov"),
@@ -7556,7 +7561,7 @@ mod tests {
     #[test]
     fn curation_waits_for_explicit_curate_action() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.assets.push(media::BinAsset {
             info: MediaInfo {
                 path: "/media/not-curated-yet.mp4".to_owned(),
@@ -7652,7 +7657,7 @@ mod tests {
         let media = path.to_string_lossy().into_owned();
         let session = |curate: bool| {
             let ctx = egui::Context::default();
-            let mut app = EditorApp::headless_for_test(&ctx);
+            let mut app = EditorApp::headless(&ctx);
             app.curation_dir = Some(dir.join("store"));
             app.spawn_import(&ctx, vec![path.clone()]);
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
@@ -7736,7 +7741,7 @@ mod tests {
         };
 
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.spawn_import(&ctx, vec![media.clone()]);
         settle(&mut app, &ctx);
         app.run_console(
@@ -7748,7 +7753,7 @@ mod tests {
         app.save_project_to(&dir.join("expo")).unwrap();
         assert!(dir.join("expo.eddie").exists(), "the extension is added");
 
-        let mut reopened = EditorApp::headless_for_test(&ctx);
+        let mut reopened = EditorApp::headless(&ctx);
         reopened
             .open_project(&ctx, &dir.join("expo.eddie"))
             .unwrap();
@@ -7802,7 +7807,7 @@ mod tests {
         let moved = dir.with_extension("moved");
         let _ = std::fs::remove_dir_all(&moved);
         std::fs::rename(&dir, &moved).unwrap();
-        let mut relocated = EditorApp::headless_for_test(&ctx);
+        let mut relocated = EditorApp::headless(&ctx);
         relocated
             .open_project(&ctx, &moved.join("expo.eddie"))
             .unwrap();
@@ -7823,7 +7828,7 @@ mod tests {
         let elsewhere = moved.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::rename(moved.join("shot.mp4"), elsewhere.join("shot.mp4")).unwrap();
-        let mut missing = EditorApp::headless_for_test(&ctx);
+        let mut missing = EditorApp::headless(&ctx);
         missing
             .open_project(&ctx, &moved.join("expo.eddie"))
             .unwrap();
@@ -7857,7 +7862,7 @@ mod tests {
     #[test]
     fn undo_and_redo_step_through_console_edits() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let track = |app: &mut EditorApp| {
             app.history
                 .track(&app.timeline, app.selected, 0.0, false, false);
@@ -7897,7 +7902,7 @@ mod tests {
             std::env::temp_dir().join(format!("eddie-parallel-curation-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let colors = ["red", "green", "blue", "yellow"];
         for color in colors {
             let path = dir.join(format!("{color}.mp4"));
@@ -7955,7 +7960,7 @@ mod tests {
     #[test]
     fn right_dock_switches_to_details_on_selection() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         let id = app
             .timeline
             .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 5.0, 0.0);
@@ -7984,7 +7989,7 @@ mod tests {
     #[test]
     fn delete_without_magnet_keeps_gap() {
         let ctx = egui::Context::default();
-        let mut app = EditorApp::headless_for_test(&ctx);
+        let mut app = EditorApp::headless(&ctx);
         app.timeline_view.magnet = false;
         app.timeline
             .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 10.0, 0.0);

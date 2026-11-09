@@ -9,6 +9,10 @@ mod timeline_ui;
 use app::EditorApp;
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = app::cli_main(&args) {
+        std::process::exit(code);
+    }
     let initial_imports: Vec<std::path::PathBuf> = std::env::args_os()
         .skip(1)
         .filter(|arg| !arg.to_string_lossy().starts_with('-'))

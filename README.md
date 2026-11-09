@@ -116,6 +116,28 @@ mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/
 makepkg -si
 ```
 
+## Command line
+
+Agents and scripts drive Eddie without a window. Each command opens a
+project file, does one thing, saves if it changed the project, and prints
+one JSON object; errors print `{"ok":false,"error":...}` and exit 1.
+
+```sh
+eddie new talk.eddie footage/*.mp4 music.wav    # create, importing media
+eddie import talk.eddie more.mov                # add to the bin
+eddie state talk.eddie                          # the JSON scripts see
+eddie inspect talk.eddie                        # measured timeline problems
+eddie run talk.eddie -e "addAssetRange('a.mp4', 0, 12.5, 4)"
+eddie run talk.eddie edit.js --dry-run          # report without saving
+eddie export talk.eddie out.mp4
+eddie help                                      # commands and the script API
+```
+
+`run` uses the same JavaScript API as the in-app console (View → JS
+console), as one edit: every command applies, or none does. It prints the
+script's `return` value, `console.log` lines, the clip IDs its handles
+became, and the inspection findings the edit introduced.
+
 ## Shortcuts
 
 Press F1 or Ctrl+/ in the app for the full list. Cmd replaces Ctrl on
