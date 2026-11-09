@@ -1,147 +1,12 @@
-//! App settings: project format, hardware decode and the transcription
-//! provider, saved privately beside curations and transcripts.
+//! The Settings window: project format, hardware decode and the
+//! transcription provider. `eddie_core` owns loading and saving.
 
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
+use eddie_core::editor::sweep::transcribe::Provider;
 use eframe::egui::{self, RichText};
 use openreel_engine::Orientation;
 
-use super::sweep::transcribe::{Provider, TranscribeSettings};
 use super::EditorApp;
 use crate::theme;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Settings {
-    /// Picture format for new and cleared projects; Settings also
-    /// applies it to the open project.
-    pub(super) format: Orientation,
-    /// Preview playback of expensive files (HEVC, AV1, VP9, above 1440p)
-    /// decodes on the GPU through VAAPI when one is available. Off by
-    /// default: errors fall back to software, but a driver that hangs
-    /// cannot, and only one NVIDIA driver has been tested.
-    pub(super) hardware_decode: bool,
-    /// Where speech becomes text: local whisper by default, or a cloud API.
-    pub(super) transcription: TranscribeSettings,
-    /// The Meta key and endpoint the removed built-in AI saved at the top
-    /// level (`api_key`, `base_url`). Kept so Meta transcription without its
-    /// own key still works; there is no field for them any more.
-    meta_api_key: String,
-    meta_base_url: String,
-}
-
-pub(super) fn config_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("APPDATA")
-            .map(|dir| PathBuf::from(dir).join("OpenReel").join("config.json"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME").map(|home| {
-            PathBuf::from(home).join("Library/Application Support/OpenReel/config.json")
-        })
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-            Some(PathBuf::from(dir).join("openreel/config.json"))
-        } else {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".config/openreel/config.json"))
-        }
-    }
-    #[cfg(not(any(unix, target_os = "windows", target_os = "macos")))]
-    {
-        None
-    }
-}
-
-impl Settings {
-    pub(super) fn load() -> Self {
-        let Some(value) = config_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        else {
-            return Self::default();
-        };
-        let text = |key: &str| value[key].as_str().unwrap_or_default().trim().to_owned();
-        Self {
-            format: value["format"]
-                .as_str()
-                .and_then(Orientation::from_name)
-                .unwrap_or_default(),
-            hardware_decode: value["hardware_decode"].as_bool().unwrap_or(false),
-            transcription: TranscribeSettings::from_json(&value["transcription"]),
-            meta_api_key: text("api_key"),
-            meta_base_url: text("base_url"),
-        }
-    }
-
-    pub(super) fn save(&self) -> Result<(), String> {
-        let save_error = || "Couldn't save settings.".to_owned();
-        let path = config_path().ok_or_else(save_error)?;
-        let parent = path.parent().ok_or_else(save_error)?;
-        std::fs::create_dir_all(parent).map_err(|_| save_error())?;
-        let mut body = serde_json::json!({
-            "format": self.format.as_str(),
-            "hardware_decode": self.hardware_decode,
-            "transcription": self.transcription.to_json(),
-        });
-        if !self.meta_api_key.is_empty() {
-            body["api_key"] = self.meta_api_key.clone().into();
-        }
-        if !self.meta_base_url.is_empty() {
-            body["base_url"] = self.meta_base_url.clone().into();
-        }
-        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-        let (temporary, mut file) = loop {
-            let temporary = parent.join(format!(
-                ".config-{}-{}.tmp",
-                std::process::id(),
-                NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
-            ));
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(&temporary) {
-                Ok(file) => break (temporary, file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return Err(save_error()),
-            }
-        };
-        let result = (|| -> std::io::Result<()> {
-            file.write_all(body.to_string().as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temporary, &path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temporary);
-        }
-        result.map_err(|_| save_error())
-    }
-
-    /// Transcription settings, with Meta falling back to the saved Meta key
-    /// and endpoint when it has none of its own.
-    pub(super) fn transcription(&self) -> TranscribeSettings {
-        let mut settings = self.transcription.clone();
-        if settings.provider == Provider::Meta {
-            if settings.api_key.is_empty() {
-                settings.api_key.clone_from(&self.meta_api_key);
-            }
-            if settings.base_url.is_empty() {
-                settings.base_url.clone_from(&self.meta_base_url);
-            }
-        }
-        settings
-    }
-}
 
 impl EditorApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -150,7 +15,7 @@ impl EditorApp {
         }
         let mut open = true;
         let mut format_choice = None;
-        let before = self.settings.clone();
+        let before = self.editor.settings.clone();
         let mut close_clicked = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         egui::Window::new("Settings")
             .open(&mut open)
@@ -193,14 +58,14 @@ impl EditorApp {
                     .min_col_width(84.0)
                     .show(ui, |ui| {
                         ui.label(RichText::new("Playback").color(theme::MUTED_FG));
-                        ui.checkbox(&mut self.settings.hardware_decode, "Hardware decode")
+                        ui.checkbox(&mut self.editor.settings.hardware_decode, "Hardware decode")
                             .on_hover_text(
                                 "Play HEVC, AV1, VP9 and footage above 1440p on the GPU (VAAPI) when available. Scrubbing stays on the CPU; a GPU error switches back to the CPU.",
                             );
                         ui.end_row();
 
-                        let has_meta_key = !self.settings.meta_api_key.is_empty();
-                        let speech = &mut self.settings.transcription;
+                        let has_meta_key = self.editor.settings.has_meta_key();
+                        let speech = &mut self.editor.settings.transcription;
                         ui.label(RichText::new("Speech").color(theme::MUTED_FG));
                         egui::ComboBox::from_id_salt("speech_provider")
                             .width(FIELD_W + 16.0)
@@ -276,7 +141,7 @@ impl EditorApp {
                         ui.label(RichText::new("Format").color(theme::MUTED_FG));
                         format_choice = theme::segmented(
                             ui,
-                            self.settings.format,
+                            self.editor.settings.format,
                             &[
                                 (
                                     Orientation::Landscape,
@@ -305,15 +170,15 @@ impl EditorApp {
                 });
             });
         self.show_settings = open && !close_clicked;
-        if let Some(format) = format_choice.filter(|f| *f != self.settings.format) {
-            self.settings.format = format;
-            self.set_format(format);
+        if let Some(format) = format_choice.filter(|f| *f != self.editor.settings.format) {
+            self.editor.settings.format = format;
+            self.editor.set_format(format);
         }
-        if self.settings.hardware_decode != before.hardware_decode {
-            openreel_media::set_hardware_decode(self.settings.hardware_decode);
+        if self.editor.settings.hardware_decode != before.hardware_decode {
+            openreel_media::set_hardware_decode(self.editor.settings.hardware_decode);
         }
-        if self.settings != before {
-            self.status = match self.settings.save() {
+        if self.editor.settings != before {
+            self.editor.status = match self.editor.settings.save() {
                 Ok(()) => "Settings saved.".to_owned(),
                 Err(error) => error,
             };
@@ -355,9 +220,12 @@ fn close_icon_button(ui: &mut egui::Ui) -> egui::Response {
     );
     response
 }
-
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use eddie_core::editor::settings::{config_path, Settings};
+
     use super::*;
 
     struct TestDir(PathBuf);
@@ -462,91 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_save_atomically_replaces_previous_file() {
-        with_isolated_config(
-            "app::settings::tests::settings_save_atomically_replaces_previous_file",
-            |path| {
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                let original = r#"{"format":"portrait"}"#;
-                std::fs::write(&path, original).unwrap();
-                let previous = path.with_file_name("previous.json");
-                std::fs::hard_link(&path, &previous).unwrap();
-                Settings::default().save().unwrap();
-                assert_eq!(Settings::load().format, Orientation::Landscape);
-                assert_eq!(
-                    std::fs::read_to_string(previous).unwrap(),
-                    original,
-                    "a reader of the previous file must never see a partial replacement"
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn settings_round_trip_privately_and_keep_the_saved_meta_key() {
-        with_isolated_config(
-            "app::settings::tests::settings_round_trip_privately_and_keep_the_saved_meta_key",
-            |path| {
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                // A config written by the removed built-in AI.
-                std::fs::write(
-                    &path,
-                    serde_json::json!({"api_key": "fixture-key-only",
-                        "base_url": "https://api.meta.ai/v1", "model": "muse-wonder-1.0",
-                        "check_edits": true, "contributor_opt_in": false})
-                    .to_string(),
-                )
-                .unwrap();
-                let mut settings = Settings::load();
-                assert_eq!(settings.transcription().api_key, "", "local needs no key");
-                settings.transcription.provider = Provider::Meta;
-                assert_eq!(settings.transcription().api_key, "fixture-key-only");
-                assert_eq!(settings.transcription().base_url, "https://api.meta.ai/v1");
-                for (format, hardware) in [
-                    (Orientation::Landscape, false),
-                    (Orientation::Portrait, true),
-                ] {
-                    settings.format = format;
-                    settings.hardware_decode = hardware;
-                    settings.save().unwrap();
-                    assert_eq!(Settings::load(), settings, "settings round-trip");
-                    let value: serde_json::Value =
-                        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                    let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-                    keys.sort();
-                    assert_eq!(
-                        keys,
-                        [
-                            "api_key",
-                            "base_url",
-                            "format",
-                            "hardware_decode",
-                            "transcription"
-                        ],
-                        "the removed model settings are dropped, the Meta key is kept"
-                    );
-                    assert_eq!(value["transcription"]["provider"], "meta");
-                    assert_eq!(value["transcription"]["api_key"], "", "not copied");
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        assert_eq!(
-                            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                            0o600,
-                        );
-                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-                            .unwrap();
-                    }
-                }
-                assert_eq!(
-                    std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
-                    1
-                );
-            },
-        );
-    }
-
-    #[test]
     fn settings_save_failure_is_displayed_and_cleans_temporary_file() {
         with_isolated_config(
             "app::settings::tests::settings_save_failure_is_displayed_and_cleans_temporary_file",
@@ -562,8 +345,8 @@ mod tests {
                 let mut app = EditorApp::headless(&ctx);
                 app.show_settings = true;
                 click_settings_label(&ctx, &mut app, "Hardware decode");
-                assert!(app.settings.hardware_decode);
-                assert_eq!(app.status, error);
+                assert!(app.editor.settings.hardware_decode);
+                assert_eq!(app.editor.status, error);
                 openreel_media::set_hardware_decode(false);
                 assert_eq!(std::fs::read_to_string(previous).unwrap(), "keep this file");
                 assert_eq!(

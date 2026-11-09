@@ -48,7 +48,7 @@ const OPENAI_CHUNK_SECONDS: f64 = 400.0;
 const OPENAI_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in crate::app) enum Provider {
+pub enum Provider {
     #[default]
     Local,
     Meta,
@@ -56,9 +56,9 @@ pub(in crate::app) enum Provider {
 }
 
 impl Provider {
-    pub(in crate::app) const ALL: [Self; 3] = [Self::Local, Self::Meta, Self::OpenAi];
+    pub const ALL: [Self; 3] = [Self::Local, Self::Meta, Self::OpenAi];
 
-    pub(in crate::app) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Meta => "meta",
@@ -66,13 +66,13 @@ impl Provider {
         }
     }
 
-    pub(in crate::app) fn from_name(name: &str) -> Option<Self> {
+    pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|provider| provider.as_str() == name)
     }
 
-    pub(in crate::app) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Local => "Local (whisper)",
             Self::Meta => "Meta Voice Transcribe",
@@ -84,23 +84,27 @@ impl Provider {
 /// Saved in the settings file under `transcription`. Empty strings mean the
 /// provider's default; a Meta provider without its own key uses the main one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(in crate::app) struct TranscribeSettings {
-    pub(in crate::app) provider: Provider,
+pub struct TranscribeSettings {
+    pub provider: Provider,
     /// Local: a model name such as `large-v3` or a path to a ggml file.
     /// Cloud: the provider's model ID.
-    pub(in crate::app) model: String,
+    pub model: String,
     /// An ISO code such as `en`; empty detects the language.
-    pub(in crate::app) language: String,
+    pub language: String,
     /// Names and terms to spell right, such as "Eddie, Muse Wonder". Sent
     /// as whisper's prompt; a short list, never a script, since a long
     /// prompt makes whisper repeat it instead of listening.
-    pub(in crate::app) vocabulary: String,
-    pub(in crate::app) base_url: String,
-    pub(in crate::app) api_key: String,
+    pub vocabulary: String,
+    pub base_url: String,
+    pub api_key: String,
+    /// Where installed local models are looked up; never saved. `None`
+    /// leaves only `EDDIE_WHISPER_DIR` and `EDDIE_WHISPER_MODEL`, which
+    /// keeps tests off whatever the user has installed.
+    pub model_dir: Option<PathBuf>,
 }
 
 impl TranscribeSettings {
-    pub(in crate::app) fn from_json(value: &serde_json::Value) -> Self {
+    pub fn from_json(value: &serde_json::Value) -> Self {
         let text = |key: &str| value[key].as_str().unwrap_or_default().trim().to_owned();
         Self {
             provider: Provider::from_name(&text("provider")).unwrap_or_default(),
@@ -109,10 +113,11 @@ impl TranscribeSettings {
             vocabulary: text("vocabulary"),
             base_url: text("base_url"),
             api_key: text("api_key"),
+            model_dir: None,
         }
     }
 
-    pub(in crate::app) fn to_json(&self) -> serde_json::Value {
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "provider": self.provider.as_str(),
             "model": self.model,
@@ -126,7 +131,7 @@ impl TranscribeSettings {
 
 /// Keyless endpoints must be parsed localhost or loopback addresses, not
 /// hostname-prefix matches.
-pub(in crate::app) fn is_local_endpoint(base_url: &str) -> bool {
+pub fn is_local_endpoint(base_url: &str) -> bool {
     let Ok(uri) = base_url.trim().parse::<ureq::http::Uri>() else {
         return false;
     };
@@ -152,18 +157,18 @@ fn api_error_for_status(status: u16) -> String {
 }
 
 /// A finished transcript and how it was made.
-pub(in crate::app) struct Transcript {
-    pub(in crate::app) segments: Vec<TranscriptSegment>,
+pub struct Transcript {
+    pub segments: Vec<TranscriptSegment>,
     /// Provider and model, such as `local:ggml-large-v3.bin`.
-    pub(in crate::app) source: String,
+    pub source: String,
     /// One short line for curation notes and the command line.
-    pub(in crate::app) note: String,
-    pub(in crate::app) cached: bool,
+    pub note: String,
+    pub cached: bool,
 }
 
 /// The saved transcript of this exact file, else a new one from the
 /// provider, saved for next time. `force` skips the saved one.
-pub(in crate::app) fn transcribe_cached(
+pub fn transcribe_cached(
     settings: &TranscribeSettings,
     store_dir: Option<&Path>,
     info: &MediaInfo,
@@ -192,7 +197,7 @@ pub(in crate::app) fn transcribe_cached(
     Ok(transcript)
 }
 
-pub(in crate::app) fn transcribe(
+pub fn transcribe(
     settings: &TranscribeSettings,
     info: &MediaInfo,
     progress: &mut dyn FnMut(&str),
@@ -213,10 +218,11 @@ pub(in crate::app) fn transcribe(
     let mut note = format!("Transcription: {} turns ({source}).", segments.len());
     // Turn-level providers gain word timing from local alignment.
     if segments.iter().any(|segment| segment.words.is_empty()) {
-        if align::model_path().is_some() {
+        let model = align::model_path(settings.model_dir.as_deref());
+        if model.is_some() {
             progress("Aligning words…");
         }
-        match align::align_transcript(info, &mut segments) {
+        match align::align_transcript(info, model.as_deref(), &mut segments) {
             Ok((_, 0)) => {}
             Ok((aligned, candidates)) => note.push_str(&format!(
                 " Word timing: {aligned}/{candidates} multi-sentence turns aligned locally."
@@ -234,18 +240,21 @@ pub(in crate::app) fn transcribe(
 
 // -- local -------------------------------------------------------------------
 
-/// Where local models live: `EDDIE_WHISPER_DIR`, else `whisper/` beside the
+/// Where the user's local models are installed: `whisper/` beside the
 /// settings file.
-pub(in crate::app) fn model_dir() -> Option<PathBuf> {
+pub fn installed_model_dir() -> Option<PathBuf> {
+    Some(
+        crate::editor::settings::config_path()?
+            .parent()?
+            .join("whisper"),
+    )
+}
+
+/// Where local models are looked up: `EDDIE_WHISPER_DIR`, else `installed`.
+fn model_dir(installed: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("EDDIE_WHISPER_DIR")
         .map(PathBuf::from)
-        .or_else(|| {
-            Some(
-                crate::app::settings::config_path()?
-                    .parent()?
-                    .join("whisper"),
-            )
-        })
+        .or_else(|| installed.map(Path::to_path_buf))
 }
 
 /// Most accurate first, for what this build can run in reasonable time:
@@ -274,8 +283,9 @@ fn preferred_models() -> &'static [&'static str] {
 }
 
 /// The model file to use: a configured name or path, else the best installed.
-pub(in crate::app) fn local_model(requested: &str) -> Result<PathBuf, String> {
-    let dir = model_dir();
+pub fn local_model(settings: &TranscribeSettings) -> Result<PathBuf, String> {
+    let requested = settings.model.as_str();
+    let dir = model_dir(settings.model_dir.as_deref());
     let file = |name: &str| dir.as_ref().map(|dir| dir.join(format!("ggml-{name}.bin")));
     if !requested.is_empty() {
         let path = PathBuf::from(requested);
@@ -326,7 +336,7 @@ fn local(
     info: &MediaInfo,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Vec<TranscriptSegment>, String), String> {
-    let model = local_model(&settings.model)?;
+    let model = local_model(settings)?;
     // One local model at a time: each holds 1.6-3 GB and already uses every
     // core (or the GPU), so parallel curations wait their turn here.
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -859,6 +869,7 @@ mod tests {
             vocabulary: "Eddie, Muse Wonder".to_owned(),
             base_url: "https://api.groq.com/openai/v1".to_owned(),
             api_key: "k".to_owned(),
+            model_dir: None,
         };
         assert_eq!(TranscribeSettings::from_json(&settings.to_json()), settings);
     }

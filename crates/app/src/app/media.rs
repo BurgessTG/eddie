@@ -1,474 +1,22 @@
-//! Media bin and import pipeline: placeholders, background probe and
-//! thumbnail/waveform processing, and the image grid.
+//! The media bin: an image grid of imported files, with drag to the
+//! timeline and the Curate controls.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, TryRecvError};
-use std::thread;
+use eddie_core::editor::media::{asset_meta, count, AssetState};
+use eddie_core::editor::sweep::{ReviewStatus, SweepStatus};
+use eddie_core::Action;
+use eframe::egui::{self, CornerRadius, RichText, Sense, Shape, Stroke, Vec2};
 
-use eframe::egui::{
-    self, ColorImage, CornerRadius, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions,
-    Vec2,
-};
-use openreel_engine::{format_timecode, ClipKind, Orientation};
-use openreel_media::{BeatGrid, MediaInfo, RawFrame};
-
-use super::sweep::{load_curation, ReviewStatus, SweepData, SweepStatus};
-use super::{EditorApp, UiAction};
+use super::EditorApp;
 use crate::theme;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum AssetState {
-    Probing,
-    Processing,
-    Ready,
-}
-
-pub(super) struct BinAsset {
-    pub(super) info: MediaInfo,
-    pub(super) size_bytes: u64,
-    pub(super) state: AssetState,
-    pub(super) peaks: Vec<f32>,
-    /// Music only: the steady beat of an audio-only file, if it has one.
-    pub(super) beats: Option<BeatGrid>,
-    pub(super) thumb_textures: Vec<(f64, TextureHandle)>,
-    pub(super) sweep: SweepData,
-}
-
-pub(super) struct ImportedAsset {
-    pub(super) info: MediaInfo,
-    pub(super) peaks: Vec<f32>,
-    beats: Option<BeatGrid>,
-    thumbs: Vec<(f64, RawFrame)>,
-    /// A saved curation of this exact file. Restoring it is not curating.
-    sweep: Option<SweepData>,
-}
-
-pub(super) enum ImportMsg {
-    Probed(Box<MediaInfo>),
-    Ready(Box<ImportedAsset>),
-    Failed(String, String),
-    Finished,
-}
-
 impl EditorApp {
-    pub(super) fn asset(&self, path: &str) -> Option<&BinAsset> {
-        self.assets.iter().find(|a| a.info.path == path)
-    }
-
-    // -- import pipeline ------------------------------------------------------
-
-    fn insert_placeholder(&mut self, path: &std::path::Path) {
-        let path_str = path.to_string_lossy().into_owned();
-        let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if let Some(existing) = self.assets.iter_mut().find(|a| a.info.path == path_str) {
-            existing.size_bytes = size_bytes;
-            existing.state = AssetState::Processing;
-            return;
-        }
-        self.assets.push(BinAsset {
-            info: MediaInfo {
-                name: path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path_str.clone()),
-                path: path_str,
-                duration: 0.0,
-                width: 0,
-                height: 0,
-                fps: 0.0,
-                has_video: false,
-                has_audio: false,
-            },
-            size_bytes,
-            state: AssetState::Probing,
-            peaks: Vec::new(),
-            beats: None,
-            thumb_textures: Vec::new(),
-            sweep: SweepData::default(),
-        });
-    }
-
-    /// Import files into the bin. Batches queue: asking for more
-    /// files while a batch runs adds placeholders now and processes
-    /// them when the current batch finishes, instead of dropping
-    /// the request.
-    pub(super) fn spawn_import(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        for path in &paths {
-            self.insert_placeholder(path);
-        }
-        if self.import_rx.is_some() {
-            self.status = format!("Queued {} file(s) to import.", paths.len());
-            self.import_queue.extend(paths);
-            return;
-        }
-        self.start_import_batch(ctx, paths);
-    }
-
-    fn start_import_batch(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
-        let (tx, rx) = channel::<ImportMsg>();
-        self.import_rx = Some(rx);
-        let ctx = ctx.clone();
-        let store_dir = self.curation_dir.clone();
-        let thumbnails = self.make_thumbnails;
-        thread::spawn(move || {
-            // Files import concurrently; placeholders already hold bin
-            // order. Each 4K thumbnail pass uses several slice threads.
-            let next = AtomicUsize::new(0);
-            let workers = paths.len().min(4);
-            thread::scope(|scope| {
-                for _ in 0..workers {
-                    scope.spawn(|| {
-                        while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            if !import_one(path, &tx, &ctx, store_dir.as_deref(), thumbnails) {
-                                return;
-                            }
-                        }
-                    });
-                }
-            });
-            let _ = tx.send(ImportMsg::Finished);
-            ctx.request_repaint();
-        });
-    }
-
-    pub(super) fn poll_imports(&mut self, ctx: &egui::Context) {
-        let mut finished = false;
-        loop {
-            let msg = match self.import_rx.as_ref().map(|rx| rx.try_recv()) {
-                Some(Ok(msg)) => msg,
-                Some(Err(TryRecvError::Empty)) => break,
-                Some(Err(TryRecvError::Disconnected)) => {
-                    finished = true;
-                    break;
-                }
-                None => break,
-            };
-            match msg {
-                ImportMsg::Probed(info) => {
-                    let info = *info;
-                    if let Some(existing) =
-                        self.assets.iter_mut().find(|a| a.info.path == info.path)
-                    {
-                        existing.info = info;
-                        existing.state = AssetState::Processing;
-                    } else {
-                        let size_bytes =
-                            std::fs::metadata(&info.path).map(|m| m.len()).unwrap_or(0);
-                        self.assets.push(BinAsset {
-                            info,
-                            size_bytes,
-                            state: AssetState::Processing,
-                            peaks: Vec::new(),
-                            beats: None,
-                            thumb_textures: Vec::new(),
-                            sweep: SweepData::default(),
-                        });
-                    }
-                }
-                ImportMsg::Ready(imported) => {
-                    let ImportedAsset {
-                        info,
-                        peaks,
-                        beats,
-                        thumbs,
-                        sweep,
-                    } = *imported;
-                    let restored = sweep
-                        .as_ref()
-                        .is_some_and(|sweep| sweep.status == SweepStatus::Ready);
-                    let sweep = sweep.unwrap_or_default();
-                    let thumb_textures = thumbs
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (t, frame))| {
-                            let image = ColorImage::from_rgba_unmultiplied(
-                                [frame.width as usize, frame.height as usize],
-                                &frame.rgba,
-                            );
-                            let handle = ctx.load_texture(
-                                format!("thumb-{}-{i}", info.name),
-                                image,
-                                TextureOptions::LINEAR,
-                            );
-                            (t, handle)
-                        })
-                        .collect();
-                    self.status = if restored {
-                        format!("Imported {} with its saved curation.", info.name)
-                    } else {
-                        format!("Imported {}", info.name)
-                    };
-                    let ready_path = info.path.clone();
-                    // Fill an empty selection only; a background batch
-                    // must not take the curator card from the user.
-                    let keep_selection = self
-                        .selected_asset
-                        .as_deref()
-                        .is_some_and(|path| self.assets.iter().any(|a| a.info.path == path));
-                    if !keep_selection {
-                        self.selected_asset = Some(ready_path.clone());
-                    }
-                    let size_bytes = std::fs::metadata(&info.path).map(|m| m.len()).unwrap_or(0);
-                    if let Some(existing) =
-                        self.assets.iter_mut().find(|a| a.info.path == info.path)
-                    {
-                        *existing = BinAsset {
-                            info,
-                            size_bytes,
-                            state: AssetState::Ready,
-                            peaks,
-                            beats,
-                            thumb_textures,
-                            sweep,
-                        };
-                    } else {
-                        self.assets.push(BinAsset {
-                            info,
-                            size_bytes,
-                            state: AssetState::Ready,
-                            peaks,
-                            beats,
-                            thumb_textures,
-                            sweep,
-                        });
-                    }
-                    // Import only makes the asset ready. Curation is
-                    // an explicit Curate action in the media bin.
-                    let _ = ready_path;
-                }
-                ImportMsg::Failed(path, err) => {
-                    self.assets
-                        .retain(|a| !(a.info.path == path && a.state != AssetState::Ready));
-                    self.status = format!("Could not import {path}: {err}");
-                }
-                ImportMsg::Finished => finished = true,
-            }
-        }
-        if finished {
-            self.assets.retain(|a| a.state != AssetState::Probing);
-            self.import_rx = None;
-            // Imports overwrite the open message; keep the missing count seen.
-            if !self.missing_media.is_empty() {
-                let count = self.missing_media.len();
-                self.status = format!(
-                    "{count} project media file{} missing. Use File → Locate missing media.",
-                    if count == 1 { " is" } else { "s are" }
-                );
-            }
-            if !self.import_queue.is_empty() {
-                let next = std::mem::take(&mut self.import_queue);
-                self.start_import_batch(ctx, next);
-            }
-        }
-    }
-
-    /// First lane with no clip overlapping [at, at+duration), or a
-    /// freshly appended lane. Lanes are kind-agnostic.
-    /// Take a file out of the bin. The file and its saved curation stay on
-    /// disk, so importing it again restores both.
-    pub(super) fn remove_asset(&mut self, path: &str) {
-        let Some(index) = self.assets.iter().position(|a| a.info.path == path) else {
-            return;
-        };
-        let name = self.assets[index].info.name.clone();
-        let used = self
-            .timeline
-            .clips
-            .iter()
-            .filter(|clip| clip.source.as_deref() == Some(path))
-            .count();
-        if used > 0 {
-            self.status = format!(
-                "{name} is in {used} timeline clip{}; delete {} first.",
-                if used == 1 { "" } else { "s" },
-                if used == 1 { "it" } else { "them" }
-            );
-            return;
-        }
-        if self.assets[index].state != AssetState::Ready {
-            self.status = format!("{name} is still importing.");
-            return;
-        }
-        if self.sweep_running.iter().any(|running| running == path) {
-            self.status = format!("{name} is being curated; wait for it to finish.");
-            return;
-        }
-        self.sweep_queue.retain(|queued| queued != path);
-        self.assets.remove(index);
-        if self.selected_asset.as_deref() == Some(path) {
-            self.selected_asset = None;
-        }
-        self.status = format!("Removed {name} from the bin.");
-    }
-
-    pub(super) fn first_free_track(&mut self, at: f64, duration: f64) -> usize {
-        let end = at + duration;
-        for track in 0..self.timeline.track_labels.len() {
-            let blocked = self
-                .timeline
-                .clips
-                .iter()
-                .any(|c| c.track == track && c.start < end && at < c.end());
-            if !blocked {
-                return track;
-            }
-        }
-        self.timeline.append_track()
-    }
-
-    /// Video of the other orientation never mixes into the project.
-    /// Audio-only media fits any format.
-    pub(super) fn clashes_with_format(&self, info: &MediaInfo) -> bool {
-        info.has_video && Orientation::of(info.width, info.height) != self.timeline.orientation
-    }
-
-    pub(super) fn set_format(&mut self, format: Orientation) {
-        self.timeline.orientation = format;
-        let clashing = self
-            .timeline
-            .clips
-            .iter()
-            .filter(|clip| clip.kind == ClipKind::Video)
-            .filter_map(|clip| self.asset(clip.source.as_deref()?))
-            .filter(|asset| self.clashes_with_format(&asset.info))
-            .count();
-        self.status = match clashing {
-            0 => format!("Format set to {}.", format.as_str()),
-            1 => "1 clip doesn't match the new format.".to_owned(),
-            n => format!("{n} clips don't match the new format."),
-        };
-    }
-
-    pub(super) fn add_asset_to_timeline(&mut self, path: &str, track: Option<usize>, at: f64) {
-        let Some(asset) = self.asset(path) else {
-            return;
-        };
-        let (name, duration) = (asset.info.name.clone(), asset.info.duration);
-        self.add_asset_range_to_timeline(path, &name, track, at, 0.0, duration);
-    }
-
-    pub(super) fn add_asset_range_to_timeline(
-        &mut self,
-        path: &str,
-        title: &str,
-        track: Option<usize>,
-        at: f64,
-        source_in: f64,
-        duration: f64,
-    ) {
-        if let Err(error) =
-            self.try_add_asset_range_to_timeline(path, title, track, at, source_in, duration)
-        {
-            self.status = error;
-        }
-    }
-
-    /// The command path needs a typed failure, not a status that
-    /// its caller can accidentally replace with a success message.
-    pub(super) fn try_add_asset_range_to_timeline(
-        &mut self,
-        path: &str,
-        title: &str,
-        track: Option<usize>,
-        at: f64,
-        source_in: f64,
-        duration: f64,
-    ) -> Result<openreel_engine::ClipId, String> {
-        let Some(asset) = self.asset(path) else {
-            return Err("That media is no longer in the bin.".to_owned());
-        };
-        if asset.state != AssetState::Ready {
-            return Err(format!("Still importing {}", asset.info.name));
-        }
-        if self.clashes_with_format(&asset.info) {
-            let other = Orientation::of(asset.info.width, asset.info.height);
-            return Err(format!(
-                "{} is {}; the project is {}.",
-                asset.info.name,
-                other.as_str(),
-                self.timeline.orientation.as_str()
-            ));
-        }
-        let asset_name = asset.info.name.clone();
-        let source_duration = asset.info.duration;
-        let has_video = asset.info.has_video;
-        // Baked-in montage music must not ride into a new edit, so the
-        // add path mutes video whose added range is mostly curator-flagged
-        // music bed. Audio-only media is the new soundtrack itself and is
-        // never muted. The volume slider in Details brings it back.
-        let range_end = source_in + duration;
-        let bed_overlap = asset.sweep.music_bed_overlap(source_in, range_end);
-        let starts_muted =
-            self.mute_music_beds && has_video && duration > 0.0 && bed_overlap >= duration * 0.5;
-        // Audio-only music ducks under speech by default. A steady beat or a
-        // curator music-bed flag marks it as music; a voiceover has neither
-        // and must stay unducked, or it would stop counting as speech.
-        let ducks = !has_video
-            && (asset.beats.is_some() || (duration > 0.0 && bed_overlap >= duration * 0.5));
-        let source_in = source_in.clamp(0.0, source_duration.max(0.0));
-        let duration = duration.min((source_duration - source_in).max(0.0));
-        if duration <= 0.0 {
-            return Err("That clip range is outside the media.".to_owned());
-        }
-        let name = if title.trim().is_empty() {
-            asset_name
-        } else {
-            title.to_owned()
-        };
-        let kind = if has_video {
-            ClipKind::Video
-        } else {
-            ClipKind::Audio
-        };
-        // An explicit drop lane wins (one past the end appends a
-        // lane); otherwise the first lane free at that span.
-        let track = match track {
-            Some(requested) => {
-                let track = requested.min(self.timeline.track_labels.len());
-                self.timeline.ensure_track(track);
-                track
-            }
-            None => self.first_free_track(at.max(0.0), duration),
-        };
-        let id = self.timeline.add_media_clip(
-            &name,
-            kind,
-            track,
-            at.max(0.0),
-            duration,
-            source_in,
-            path,
-        );
-        if let Some(clip) = self.timeline.clip_mut(id) {
-            if starts_muted {
-                clip.volume = 0.0;
-            }
-            clip.duck = ducks;
-        }
-        self.selected = Some(id);
-        self.status = format!(
-            "Added {name} at {}{}",
-            format_timecode(at, self.timeline.fps),
-            if starts_muted {
-                " (muted: music bed)"
-            } else {
-                ""
-            }
-        );
-        Ok(id)
-    }
-
     // -- playback --------------------------------------------------------------
 
-    pub(super) fn media_bin(&mut self, ctx: &egui::Context) -> Option<UiAction> {
+    pub(super) fn media_bin(&mut self, ctx: &egui::Context) -> Option<Action> {
         if !self.show_media {
             return None;
         }
-        let mut action: Option<UiAction> = None;
+        let mut action: Option<Action> = None;
         let mut add_request: Option<(String, Option<usize>, f64)> = None;
         let mut remove_request: Option<String> = None;
         let mut open_gallery = false;
@@ -482,9 +30,9 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     theme::panel_title(ui, "Media");
-                    if !self.assets.is_empty() {
+                    if !self.editor.assets.is_empty() {
                         ui.label(
-                            RichText::new(self.assets.len().to_string())
+                            RichText::new(self.editor.assets.len().to_string())
                                 .size(11.5)
                                 .color(theme::SUBTLE_FG),
                         );
@@ -494,13 +42,13 @@ impl EditorApp {
                             .on_hover_text("Import video or audio files")
                             .clicked()
                         {
-                            action = Some(UiAction::Import);
+                            action = Some(Action::Import);
                         }
                     });
                 });
                 ui.add_space(8.0);
 
-                if self.assets.is_empty() {
+                if self.editor.assets.is_empty() {
                     ui.add_space(8.0);
                     let (drop, _) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), 132.0),
@@ -532,7 +80,7 @@ impl EditorApp {
                         .on_hover_text("Import files, or drop them onto this window")
                         .clicked()
                     {
-                        action = Some(UiAction::Import);
+                        action = Some(Action::Import);
                     }
                     return;
                 }
@@ -548,6 +96,7 @@ impl EditorApp {
 
                 let query = self.search.to_lowercase();
                 let has_ready_assets = self
+                    .editor
                     .assets
                     .iter()
                     .any(|asset| asset.state == AssetState::Ready);
@@ -565,6 +114,7 @@ impl EditorApp {
                     const GAP: f32 = 8.0;
                     const MIN_TILE_W: f32 = 112.0;
                     let filtered: Vec<usize> = self
+                        .editor
                         .assets
                         .iter()
                         .enumerate()
@@ -586,8 +136,8 @@ impl EditorApp {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = GAP;
                             for &asset_idx in row {
-                                let asset = &self.assets[asset_idx];
-                                let is_selected = self.selected_asset.as_deref()
+                                let asset = &self.editor.assets[asset_idx];
+                                let is_selected = self.editor.selected_asset.as_deref()
                                     == Some(asset.info.path.as_str());
                                 let (rect, response) = ui.allocate_exact_size(
                                     Vec2::new(tile_w, tile_h),
@@ -603,7 +153,7 @@ impl EditorApp {
                                 };
                                 let painter = ui.painter().clone();
                                 let is_ready = asset.state == AssetState::Ready;
-                                let clashes = self.clashes_with_format(&asset.info);
+                                let clashes = self.editor.clashes_with_format(&asset.info);
                                 // Placeholders read as a grey card until
                                 // their thumbnails or peaks arrive.
                                 painter.rect_filled(
@@ -612,9 +162,9 @@ impl EditorApp {
                                     if is_ready { theme::CARD } else { theme::SECONDARY },
                                 );
                                 let thumb_rect = rect;
-                                let has_preview =
-                                    !asset.thumb_textures.is_empty() || !asset.peaks.is_empty();
-                                if let Some((_, thumb)) = asset.thumb_textures.first() {
+                                let has_preview = !self.thumbs(&asset.info.path).is_empty()
+                                    || !asset.peaks.is_empty();
+                                if let Some((_, thumb)) = self.thumbs(&asset.info.path).first() {
                                     // Dimmed: importing, or the other format.
                                     let tint = if is_ready && !clashes {
                                         egui::Color32::WHITE
@@ -678,11 +228,11 @@ impl EditorApp {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
                                 if response.clicked() {
-                                    self.selected_asset = Some(asset.info.path.clone());
+                                    self.editor.selected_asset = Some(asset.info.path.clone());
                                 }
                                 if response.double_clicked() {
                                     add_request =
-                                        Some((asset.info.path.clone(), None, self.playhead));
+                                        Some((asset.info.path.clone(), None, self.editor.playhead));
                                 }
                                 if response.dragged() {
                                     // Carry a grid-size preview at the
@@ -699,7 +249,7 @@ impl EditorApp {
                                             self.timeline_view.drop_target(pos)
                                         {
                                             let lane_track =
-                                                track.min(self.timeline.track_labels.len());
+                                                track.min(self.editor.timeline.track_labels.len());
                                             if let Some(lane) =
                                                 self.timeline_view.lane_rect(lane_track)
                                             {
@@ -721,7 +271,7 @@ impl EditorApp {
                                             CornerRadius::same(theme::R_MD),
                                             theme::CARD,
                                         );
-                                        if let Some((_, thumb)) = asset.thumb_textures.first() {
+                                        if let Some((_, thumb)) = self.thumbs(&asset.info.path).first() {
                                             ghost_painter.image(
                                                 thumb.id(),
                                                 ghost,
@@ -755,7 +305,7 @@ impl EditorApp {
                                         asset.info.name,
                                         asset_meta(asset),
                                         asset.info.path,
-                                        self.timeline.orientation.as_str()
+                                        self.editor.timeline.orientation.as_str()
                                     )
                                 } else if asset.state == AssetState::Ready {
                                     format!(
@@ -802,6 +352,7 @@ impl EditorApp {
                         ui.horizontal(|ui| {
                             theme::panel_title(ui, "Curator");
                             let running = self
+                                .editor
                                 .assets
                                 .iter()
                                 .filter(|asset| asset.sweep.status == SweepStatus::Running)
@@ -816,8 +367,8 @@ impl EditorApp {
                                 );
                             }
                         });
-                        let selected_asset = self.selected_asset.as_deref().and_then(|path| {
-                            self.assets.iter().find(|asset| asset.info.path == path)
+                        let selected_asset = self.editor.selected_asset.as_deref().and_then(|path| {
+                            self.editor.assets.iter().find(|asset| asset.info.path == path)
                         });
                         let half = ((ui.available_width() - 6.0) / 2.0).floor();
                         let Some(asset) = selected_asset else {
@@ -838,7 +389,7 @@ impl EditorApp {
                                 "Importing…".to_owned()
                             }
                             SweepStatus::NotStarted => "Not curated yet".to_owned(),
-                            SweepStatus::Running if self.sweep_queue.contains(&asset.info.path) => {
+                            SweepStatus::Running if self.editor.sweep_queue.contains(&asset.info.path) => {
                                 "Queued".to_owned()
                             }
                             SweepStatus::Running => asset.sweep.note.clone(),
@@ -864,7 +415,7 @@ impl EditorApp {
                                 CornerRadius::same(theme::R_SM),
                                 theme::SECONDARY,
                             );
-                            if let Some((_, thumb)) = asset.thumb_textures.first() {
+                            if let Some((_, thumb)) = self.thumbs(&asset.info.path).first() {
                                 egui::Image::from_texture(thumb)
                                     .uv(cover_uv(thumb.size_vec2(), thumb_rect.size()))
                                     .corner_radius(theme::R_SM)
@@ -936,6 +487,7 @@ impl EditorApp {
                             });
                         });
                         let uncurated = self
+                            .editor
                             .assets
                             .iter()
                             .filter(|asset| {
@@ -959,19 +511,19 @@ impl EditorApp {
                 }
             });
         if let Some((path, track, at)) = add_request {
-            self.add_asset_to_timeline(&path, track, at);
+            self.editor.add_asset_to_timeline(&path, track, at);
         }
         if let Some(path) = remove_request {
-            self.remove_asset(&path);
+            self.editor.remove_asset(&path);
         }
         if open_gallery {
-            self.open_curator_gallery();
+            self.editor.open_curator_gallery();
         }
         if let Some(path) = curate_selected {
-            self.curate_asset(ctx, path);
+            self.editor.curate_asset(path);
         }
         if curate_all_new {
-            self.curate_all_new(ctx);
+            self.editor.curate_all_new();
         }
         action
     }
@@ -1030,112 +582,4 @@ pub(super) fn cover_uv(source: Vec2, target: Vec2) -> egui::Rect {
             egui::Pos2::new(1.0, y0 + fraction),
         )
     }
-}
-
-fn asset_meta(asset: &BinAsset) -> String {
-    let info = &asset.info;
-    let size = format_file_size(asset.size_bytes);
-    match asset.state {
-        AssetState::Probing => format!("{} · {size}", file_extension(&info.name)),
-        AssetState::Processing | AssetState::Ready => {
-            let dur = format_duration(info.duration);
-            if info.has_video {
-                format!("{}×{} · {dur} · {size}", info.width, info.height)
-            } else {
-                format!("Audio · {dur} · {size}")
-            }
-        }
-    }
-}
-
-fn file_extension(name: &str) -> String {
-    name.rsplit('.')
-        .next()
-        .filter(|ext| ext.len() <= 5 && !ext.is_empty())
-        .map(|ext| ext.to_uppercase())
-        .unwrap_or_else(|| "FILE".to_owned())
-}
-
-fn format_file_size(bytes: u64) -> String {
-    if bytes >= 1_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-    } else if bytes >= 1_000 {
-        format!("{} KB", bytes / 1_000)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn format_duration(seconds: f64) -> String {
-    let total = seconds.max(0.0) as u64;
-    format!("{:02}:{:02}", total / 60, total % 60)
-}
-
-fn count(n: usize, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
-}
-
-/// Probe, waveform and thumbnails for one file. False once the app has
-/// dropped the receiver.
-fn import_one(
-    path: &PathBuf,
-    tx: &std::sync::mpsc::Sender<ImportMsg>,
-    ctx: &egui::Context,
-    store_dir: Option<&std::path::Path>,
-    thumbnails: bool,
-) -> bool {
-    let path_str = path.to_string_lossy().into_owned();
-    let msg = match openreel_media::probe(&path_str) {
-        Ok(info) => {
-            if tx.send(ImportMsg::Probed(Box::new(info.clone()))).is_err() {
-                return false;
-            }
-            ctx.request_repaint();
-            let peaks = if info.has_audio {
-                openreel_media::waveform_peaks(
-                    &path_str,
-                    info.duration,
-                    openreel_media::WAVEFORM_PEAKS_PER_SEC,
-                )
-                .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let thumbs = if thumbnails && info.has_video {
-                openreel_media::thumbnails(&path_str, info.width, info.height, info.duration)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let beats = (!info.has_video)
-                .then(|| {
-                    openreel_media::beat_grid(
-                        &peaks,
-                        f64::from(openreel_media::WAVEFORM_PEAKS_PER_SEC),
-                    )
-                })
-                .flatten();
-            // A saved transcript is the latest one (curation saves its own
-            // there too), and gives scripts the speech without a curation.
-            let sweep = store_dir.and_then(|dir| {
-                let transcript = super::sweep::load_transcript(dir, &path_str);
-                let mut sweep = load_curation(dir, &path_str);
-                if let Some((segments, _)) = transcript {
-                    sweep.get_or_insert_with(SweepData::default).transcript = segments;
-                }
-                sweep
-            });
-            ImportMsg::Ready(Box::new(ImportedAsset {
-                info,
-                peaks,
-                beats,
-                thumbs,
-                sweep,
-            }))
-        }
-        Err(e) => ImportMsg::Failed(path_str, e),
-    };
-    let sent = tx.send(msg).is_ok();
-    ctx.request_repaint();
-    sent
 }

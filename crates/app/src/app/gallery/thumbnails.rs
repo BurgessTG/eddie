@@ -26,7 +26,7 @@ enum DecoderState {
     Disconnected,
 }
 
-pub(super) struct GalleryThumbnails {
+pub(crate) struct GalleryThumbnails {
     decoder: StillDecoder,
     results: Receiver<(u64, Result<RawFrame, String>)>,
     state: DecoderState,
@@ -35,7 +35,7 @@ pub(super) struct GalleryThumbnails {
 }
 
 impl GalleryThumbnails {
-    pub(super) fn new(ctx: &egui::Context) -> Self {
+    pub(crate) fn new(ctx: &egui::Context) -> Self {
         let wake_ctx = ctx.clone();
         let (decoder, results) = StillDecoder::spawn(move || wake_ctx.request_repaint());
         Self {
@@ -47,7 +47,7 @@ impl GalleryThumbnails {
         }
     }
 
-    pub(super) fn texture(
+    pub(crate) fn texture(
         &mut self,
         ctx: &egui::Context,
         info: &MediaInfo,

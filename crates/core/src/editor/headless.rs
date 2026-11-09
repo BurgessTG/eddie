@@ -6,11 +6,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use eframe::egui;
 use serde_json::{json, Value};
 
 use super::sweep::transcribe::{self, Provider};
-use super::{inspect, EditorApp};
+use super::{inspect, Editor};
 use crate::scripting::ScriptEngine;
 
 const USAGE: &str = "\
@@ -51,7 +50,7 @@ const COMMANDS: &[&str] = &[
 
 /// Run a command-line command, or `None` when `args` (without the program
 /// name) do not start with one, so the window should open instead.
-pub(crate) fn cli_main(args: &[OsString]) -> Option<i32> {
+pub fn cli_main(args: &[OsString]) -> Option<i32> {
     let command = args.first()?.to_str()?;
     if !COMMANDS.contains(&command) && command != "--help" && command != "-h" {
         return None;
@@ -89,12 +88,12 @@ fn script_help() -> String {
 }
 
 /// A windowless editor. Saved curation returns on import, as in the window.
-fn editor() -> (egui::Context, EditorApp) {
-    let ctx = egui::Context::default();
-    let mut app = EditorApp::headless(&ctx);
+fn editor() -> Editor {
+    let mut app = Editor::headless();
     app.curation_dir = super::sweep::default_curation_dir();
+    app.model_dir = transcribe::installed_model_dir();
     app.make_thumbnails = false;
-    (ctx, app)
+    app
 }
 
 fn project_arg(args: &[String]) -> Result<PathBuf, String> {
@@ -102,32 +101,32 @@ fn project_arg(args: &[String]) -> Result<PathBuf, String> {
     Ok(std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
 }
 
-fn open(path: &Path) -> Result<(egui::Context, EditorApp), String> {
-    let (ctx, mut app) = editor();
-    app.open_project(&ctx, path)?;
-    wait_for_imports(&ctx, &mut app);
-    Ok((ctx, app))
+fn open(path: &Path) -> Result<Editor, String> {
+    let mut app = editor();
+    app.open_project(path)?;
+    wait_for_imports(&mut app);
+    Ok(app)
 }
 
-fn wait_for_imports(ctx: &egui::Context, app: &mut EditorApp) {
+fn wait_for_imports(app: &mut Editor) {
     while app.import_rx.is_some() || !app.import_queue.is_empty() {
-        app.poll_imports(ctx);
+        app.poll_imports();
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn save(app: &mut EditorApp, path: &Path) -> Result<(), String> {
+fn save(app: &mut Editor, path: &Path) -> Result<(), String> {
     app.save_project_to(path)
 }
 
 /// Import `media` into the bin and report what came in and what did not.
-fn import_media(ctx: &egui::Context, app: &mut EditorApp, media: &[String]) -> Value {
+fn import_media(app: &mut Editor, media: &[String]) -> Value {
     let paths: Vec<PathBuf> = media
         .iter()
         .map(|path| std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
         .collect();
-    app.spawn_import(ctx, paths.clone());
-    wait_for_imports(ctx, app);
+    app.spawn_import(paths.clone());
+    wait_for_imports(app);
     let (imported, failed): (Vec<_>, Vec<_>) = paths
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -135,7 +134,7 @@ fn import_media(ctx: &egui::Context, app: &mut EditorApp, media: &[String]) -> V
     json!({ "imported": imported, "failed": failed })
 }
 
-fn summary(app: &EditorApp, path: &Path) -> Value {
+fn summary(app: &Editor, path: &Path) -> Value {
     json!({
         "project": path,
         "clips": app.timeline.clips.len(),
@@ -150,8 +149,8 @@ fn new(args: &[String]) -> Result<Value, String> {
     if path.exists() {
         return Err(format!("{} already exists", path.display()));
     }
-    let (ctx, mut app) = editor();
-    let media = import_media(&ctx, &mut app, &args[1..]);
+    let mut app = editor();
+    let media = import_media(&mut app, &args[1..]);
     save(&mut app, &path)?;
     let path = app.project_path.clone().unwrap_or(path);
     Ok(json!({ "ok": true, "media": media, "summary": summary(&app, &path) }))
@@ -162,19 +161,19 @@ fn import(args: &[String]) -> Result<Value, String> {
     if args.len() < 2 {
         return Err("missing <media...>".to_owned());
     }
-    let (ctx, mut app) = open(&path)?;
-    let media = import_media(&ctx, &mut app, &args[1..]);
+    let mut app = open(&path)?;
+    let media = import_media(&mut app, &args[1..]);
     save(&mut app, &path)?;
     Ok(json!({ "ok": true, "media": media, "summary": summary(&app, &path) }))
 }
 
 fn state(args: &[String]) -> Result<Value, String> {
-    let (_ctx, app) = open(&project_arg(args)?)?;
+    let app = open(&project_arg(args)?)?;
     serde_json::from_str(&app.script_state_json()).map_err(|error| error.to_string())
 }
 
 fn inspect_project(args: &[String]) -> Result<Value, String> {
-    let (_ctx, app) = open(&project_arg(args)?)?;
+    let app = open(&project_arg(args)?)?;
     Ok(json!({
         "ok": true,
         "findings": inspect::inspect(&app.timeline, &app.assets),
@@ -191,12 +190,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             .map_err(|error| format!("couldn't read {file}: {error}"))?,
         _ => return Err("run needs <file.js> or -e <code>".to_owned()),
     };
-    let (ctx, mut app) = open(&path)?;
+    let mut app = open(&path)?;
     let before = inspect::inspect(&app.timeline, &app.assets);
     let saved = app.timeline.clone();
     let mut engine = ScriptEngine::new()?;
     let (output, commands) = engine.eval_checked(&code, &app.script_state_json())?;
-    let (notes, handles) = app.apply_edit(&ctx, commands)?;
+    let (notes, handles) = app.apply_edit(commands)?;
     let changed = app.timeline != saved;
     let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
         .into_iter()
@@ -222,7 +221,8 @@ fn run(args: &[String]) -> Result<Value, String> {
 fn transcribe(args: &[String]) -> Result<Value, String> {
     let path = project_arg(args)?;
     let saved = super::Settings::load();
-    let mut settings = saved.transcription();
+    let models = transcribe::installed_model_dir();
+    let mut settings = saved.transcription(models.as_deref());
     if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
         settings.api_key = key.trim().to_owned();
     }
@@ -243,15 +243,12 @@ fn transcribe(args: &[String]) -> Result<Value, String> {
                     .ok_or_else(|| format!("unknown provider '{name}' (local, meta, openai)"))?;
                 if provider != settings.provider {
                     // Another provider's key and endpoint do not carry over.
-                    settings = transcribe::TranscribeSettings {
+                    let mut other = saved.clone();
+                    other.transcription = transcribe::TranscribeSettings {
                         provider,
                         ..Default::default()
                     };
-                    if provider == Provider::Meta {
-                        let mut meta = saved.clone();
-                        meta.transcription = settings;
-                        settings = meta.transcription();
-                    }
+                    settings = other.transcription(models.as_deref());
                     if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
                         settings.api_key = key.trim().to_owned();
                     }
@@ -264,7 +261,7 @@ fn transcribe(args: &[String]) -> Result<Value, String> {
             asset => wanted.push(asset.to_owned()),
         }
     }
-    let (_ctx, app) = open(&path)?;
+    let app = open(&path)?;
     let mut targets = Vec::new();
     for name in &wanted {
         let asset = app
@@ -318,7 +315,7 @@ fn export(args: &[String]) -> Result<Value, String> {
     let path = project_arg(args)?;
     let output = args.get(1).ok_or("missing <out.mp4>")?;
     let output = std::path::absolute(output).unwrap_or_else(|_| PathBuf::from(output));
-    let (ctx, mut app) = open(&path)?;
+    let mut app = open(&path)?;
     if !app.missing_media.is_empty() {
         return Err(format!(
             "{} media file(s) are missing: {}",
@@ -326,7 +323,7 @@ fn export(args: &[String]) -> Result<Value, String> {
             app.missing_media.join(", ")
         ));
     }
-    app.start_export(&ctx, output);
+    app.start_export(output);
     if app.export_rx.is_none() {
         return Err(app.status.clone());
     }

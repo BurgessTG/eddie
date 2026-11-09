@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
 
-use super::UiAction;
+use super::Action;
 use crate::theme;
 
 const NONE: Modifiers = Modifiers::NONE;
@@ -19,7 +19,7 @@ const fn key(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
 }
 
 pub(super) struct Binding {
-    pub action: UiAction,
+    pub action: Action,
     pub group: &'static str,
     pub label: &'static str,
     /// The first chord is the one menus and tooltips show.
@@ -32,7 +32,7 @@ pub(super) struct Binding {
 }
 
 const fn bind(
-    action: UiAction,
+    action: Action,
     group: &'static str,
     label: &'static str,
     keys: &'static [KeyboardShortcut],
@@ -63,153 +63,148 @@ const fn anywhere(binding: Binding) -> Binding {
 
 pub(super) const BINDINGS: &[Binding] = &[
     anywhere(bind(
-        UiAction::NewProject,
+        Action::NewProject,
         "Project",
         "New project",
         &[key(CMD, Key::N)],
     )),
     anywhere(bind(
-        UiAction::OpenProject,
+        Action::OpenProject,
         "Project",
         "Open project",
         &[key(CMD, Key::O)],
     )),
     anywhere(bind(
-        UiAction::SaveProject,
+        Action::SaveProject,
         "Project",
         "Save project",
         &[key(CMD, Key::S)],
     )),
     anywhere(bind(
-        UiAction::SaveProjectAs,
+        Action::SaveProjectAs,
         "Project",
         "Save project as",
         &[key(CMD_SHIFT, Key::S)],
     )),
     anywhere(bind(
-        UiAction::Import,
+        Action::Import,
         "Project",
         "Import media",
         &[key(CMD, Key::I)],
     )),
     anywhere(bind(
-        UiAction::Export,
+        Action::Export,
         "Project",
         "Export MP4",
         &[key(CMD, Key::E)],
     )),
-    bind(UiAction::Undo, "Edit", "Undo", &[key(CMD, Key::Z)]),
+    bind(Action::Undo, "Edit", "Undo", &[key(CMD, Key::Z)]),
     bind(
-        UiAction::Redo,
+        Action::Redo,
         "Edit",
         "Redo",
         &[key(CMD_SHIFT, Key::Z), key(CMD, Key::Y)],
     ),
     bind(
-        UiAction::SplitSelected,
+        Action::SplitSelected,
         "Edit",
         "Split at playhead",
         &[key(NONE, Key::S), key(NONE, Key::B)],
     ),
     bind(
-        UiAction::DeleteSelected,
+        Action::DeleteSelected,
         "Edit",
         "Delete clip",
         &[key(NONE, Key::Delete), key(NONE, Key::Backspace)],
     ),
+    bind(Action::AddTitle, "Edit", "Add title", &[key(NONE, Key::T)]),
     bind(
-        UiAction::AddTitle,
-        "Edit",
-        "Add title",
-        &[key(NONE, Key::T)],
-    ),
-    bind(
-        UiAction::ToggleMagnet,
+        Action::ToggleMagnet,
         "Edit",
         "Magnet on or off",
         &[key(NONE, Key::M)],
     ),
     bind(
-        UiAction::Deselect,
+        Action::Deselect,
         "Edit",
         "Deselect",
         &[key(NONE, Key::Escape)],
     ),
     bind(
-        UiAction::PlayPause,
+        Action::PlayPause,
         "Playback",
         "Play or pause",
         &[key(NONE, Key::Space)],
     ),
     bind(
-        UiAction::ShuttleReverse,
+        Action::ShuttleReverse,
         "Playback",
         "Reverse, faster each press",
         &[key(NONE, Key::J)],
     ),
     bind(
-        UiAction::ShuttleStop,
+        Action::ShuttleStop,
         "Playback",
         "Stop",
         &[key(NONE, Key::K)],
     ),
     bind(
-        UiAction::ShuttleForward,
+        Action::ShuttleForward,
         "Playback",
         "Forward, faster each press",
         &[key(NONE, Key::L)],
     ),
     repeating(bind(
-        UiAction::StepBack,
+        Action::StepBack,
         "Playback",
         "Back one frame",
         &[key(NONE, Key::ArrowLeft)],
     )),
     repeating(bind(
-        UiAction::StepForward,
+        Action::StepForward,
         "Playback",
         "Forward one frame",
         &[key(NONE, Key::ArrowRight)],
     )),
     repeating(bind(
-        UiAction::StepBackSecond,
+        Action::StepBackSecond,
         "Playback",
         "Back one second",
         &[key(SHIFT, Key::ArrowLeft)],
     )),
     repeating(bind(
-        UiAction::StepForwardSecond,
+        Action::StepForwardSecond,
         "Playback",
         "Forward one second",
         &[key(SHIFT, Key::ArrowRight)],
     )),
     repeating(bind(
-        UiAction::PrevEdit,
+        Action::PrevEdit,
         "Playback",
         "Previous cut",
         &[key(NONE, Key::ArrowUp), key(NONE, Key::OpenBracket)],
     )),
     repeating(bind(
-        UiAction::NextEdit,
+        Action::NextEdit,
         "Playback",
         "Next cut",
         &[key(NONE, Key::ArrowDown), key(NONE, Key::CloseBracket)],
     )),
     bind(
-        UiAction::GoStart,
+        Action::GoStart,
         "Playback",
         "Go to start",
         &[key(NONE, Key::Home)],
     ),
     bind(
-        UiAction::GoEnd,
+        Action::GoEnd,
         "Playback",
         "Go to end",
         &[key(NONE, Key::End)],
     ),
     // Ctrl and + is Shift+= on most layouts, so accept both spellings.
     repeating(anywhere(bind(
-        UiAction::ZoomIn,
+        Action::ZoomIn,
         "View",
         "Zoom in",
         &[
@@ -220,32 +215,32 @@ pub(super) const BINDINGS: &[Binding] = &[
         ],
     ))),
     repeating(anywhere(bind(
-        UiAction::ZoomOut,
+        Action::ZoomOut,
         "View",
         "Zoom out",
         &[key(CMD, Key::Minus)],
     ))),
     bind(
-        UiAction::ZoomFit,
+        Action::ZoomFit,
         "View",
         "Fit timeline",
         &[key(SHIFT, Key::Z)],
     ),
     anywhere(bind(
-        UiAction::OpenSettings,
+        Action::OpenSettings,
         "View",
         "Settings",
         &[key(CMD, Key::Comma)],
     )),
     anywhere(bind(
-        UiAction::ShowShortcuts,
+        Action::ShowShortcuts,
         "View",
         "Keyboard shortcuts",
         &[key(CMD, Key::Slash), key(NONE, Key::F1)],
     )),
 ];
 
-fn binding(action: UiAction) -> Option<&'static Binding> {
+fn binding(action: Action) -> Option<&'static Binding> {
     BINDINGS.iter().find(|binding| binding.action == action)
 }
 
@@ -278,7 +273,7 @@ fn format(ctx: &egui::Context, shortcut: &KeyboardShortcut) -> String {
 }
 
 /// The chord a menu shows for `action`, or "" when it has none.
-pub(super) fn label(ctx: &egui::Context, action: UiAction) -> String {
+pub(super) fn label(ctx: &egui::Context, action: Action) -> String {
     binding(action)
         .and_then(|binding| binding.keys.first())
         .map(|shortcut| format(ctx, shortcut))
@@ -286,7 +281,7 @@ pub(super) fn label(ctx: &egui::Context, action: UiAction) -> String {
 }
 
 /// `text` followed by the action's chord in parentheses, for tooltips.
-pub(super) fn tip(ctx: &egui::Context, text: &str, action: UiAction) -> String {
+pub(super) fn tip(ctx: &egui::Context, text: &str, action: Action) -> String {
     match label(ctx, action) {
         chord if chord.is_empty() => text.to_owned(),
         chord => format!("{text} ({chord})"),
@@ -295,7 +290,7 @@ pub(super) fn tip(ctx: &egui::Context, text: &str, action: UiAction) -> String {
 
 /// Consume the first key press this frame that a binding owns. `typing`
 /// leaves plain keys and text undo to the focused text field.
-pub(super) fn take_action(ctx: &egui::Context, typing: bool) -> Option<UiAction> {
+pub(super) fn take_action(ctx: &egui::Context, typing: bool) -> Option<Action> {
     ctx.input_mut(|input| {
         let mut found = None;
         input.events.retain(|event| {
@@ -395,12 +390,7 @@ pub(super) fn window(ctx: &egui::Context, open: &mut bool) {
 mod tests {
     use super::*;
 
-    fn press(
-        ctx: &egui::Context,
-        modifiers: Modifiers,
-        key: Key,
-        typing: bool,
-    ) -> Option<UiAction> {
+    fn press(ctx: &egui::Context, modifiers: Modifiers, key: Key, typing: bool) -> Option<Action> {
         let mut found = None;
         // Release in the same frame, or egui reads the next press as a repeat.
         let event = |pressed| egui::Event::Key {
@@ -436,12 +426,12 @@ mod tests {
         let ctx = egui::Context::default();
         assert_eq!(
             press(&ctx, NONE, Key::S, false),
-            Some(UiAction::SplitSelected)
+            Some(Action::SplitSelected)
         );
-        assert_eq!(press(&ctx, CMD, Key::S, false), Some(UiAction::SaveProject));
+        assert_eq!(press(&ctx, CMD, Key::S, false), Some(Action::SaveProject));
         assert_eq!(
             press(&ctx, CMD_SHIFT, Key::S, false),
-            Some(UiAction::SaveProjectAs)
+            Some(Action::SaveProjectAs)
         );
         assert_eq!(
             press(&ctx, SHIFT, Key::S, false),
@@ -450,29 +440,29 @@ mod tests {
         );
         assert_eq!(
             press(&ctx, SHIFT, Key::ArrowLeft, false),
-            Some(UiAction::StepBackSecond)
+            Some(Action::StepBackSecond)
         );
         assert_eq!(
             press(&ctx, CMD_SHIFT, Key::Plus, false),
-            Some(UiAction::ZoomIn)
+            Some(Action::ZoomIn)
         );
         // fframes' bracket keys reach the same cut navigation as the arrows.
         assert_eq!(
             press(&ctx, NONE, Key::OpenBracket, false),
-            Some(UiAction::PrevEdit)
+            Some(Action::PrevEdit)
         );
         assert_eq!(
             press(&ctx, NONE, Key::CloseBracket, false),
-            Some(UiAction::NextEdit)
+            Some(Action::NextEdit)
         );
         // A focused text field owns letters, arrows and its own undo.
         assert_eq!(press(&ctx, NONE, Key::S, true), None);
         assert_eq!(press(&ctx, NONE, Key::Space, true), None);
         assert_eq!(press(&ctx, CMD, Key::Z, true), None);
-        assert_eq!(press(&ctx, CMD, Key::S, true), Some(UiAction::SaveProject));
+        assert_eq!(press(&ctx, CMD, Key::S, true), Some(Action::SaveProject));
         assert_eq!(
             press(&ctx, CMD, Key::Comma, true),
-            Some(UiAction::OpenSettings)
+            Some(Action::OpenSettings)
         );
     }
 }

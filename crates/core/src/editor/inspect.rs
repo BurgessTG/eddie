@@ -17,28 +17,28 @@ use super::media::BinAsset;
 const SHEET_CELLS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(super) struct Finding {
-    pub(super) kind: &'static str,
+pub struct Finding {
+    pub kind: &'static str,
     /// "error" breaks the program; "warning" is probably unintended.
-    pub(super) severity: &'static str,
-    pub(super) message: String,
-    pub(super) clips: Vec<ClipId>,
-    pub(super) start: f64,
-    pub(super) end: f64,
+    pub severity: &'static str,
+    pub message: String,
+    pub clips: Vec<ClipId>,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A stretch of program time with one visible picture and one title.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Segment {
-    pub(super) start: f64,
-    pub(super) end: f64,
-    pub(super) video: Option<ClipId>,
-    pub(super) title: Option<ClipId>,
+pub struct Segment {
+    pub start: f64,
+    pub end: f64,
+    pub video: Option<ClipId>,
+    pub title: Option<ClipId>,
 }
 
 /// The program as preview and export show it, from 0 to the timeline end,
 /// split wherever the visible picture or title changes.
-pub(super) fn program_segments(timeline: &Timeline) -> Vec<Segment> {
+pub fn program_segments(timeline: &Timeline) -> Vec<Segment> {
     let mut edges: Vec<f64> = vec![0.0, timeline.end()];
     for clip in &timeline.clips {
         if matches!(clip.kind, ClipKind::Video | ClipKind::Title) {
@@ -67,7 +67,7 @@ pub(super) fn program_segments(timeline: &Timeline) -> Vec<Segment> {
     segments
 }
 
-pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
+pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     let frame = 1.0 / timeline.fps.max(1.0);
     let asset = |source: &str| assets.iter().find(|asset| asset.info.path == source);
     let mut findings = Vec::new();
@@ -284,7 +284,7 @@ pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> 
 
 #[allow(dead_code)]
 /// Pictures sampled per source in a check's source strip.
-pub(super) const STRIP_CELLS: usize = 16;
+pub const STRIP_CELLS: usize = 16;
 #[allow(dead_code)]
 /// At most this many sources get a strip, in program order.
 const STRIP_SOURCES: usize = 3;
@@ -295,15 +295,15 @@ const STRIP_SCAN_LIMIT: f64 = 600.0;
 #[allow(dead_code)]
 /// Sources sampled whole, so a check can see where a described shot
 /// actually is instead of guessing a source time.
-pub(super) struct SourceStrip {
-    pub(super) sources: Vec<StripSource>,
+pub struct SourceStrip {
+    pub sources: Vec<StripSource>,
     /// One line per source: its tag (`S1`), path, length and what the edit
     /// placed from it.
-    pub(super) legend: Vec<String>,
+    pub legend: Vec<String>,
 }
 
 #[allow(dead_code)]
-pub(super) struct StripSource {
+pub struct StripSource {
     tag: String,
     info: openreel_media::MediaInfo,
     /// Source ranges the edit shows.
@@ -319,7 +319,7 @@ impl StripSource {
     /// The source's shots: curated scenes, else cuts detected in its
     /// picture (cached per file; this decodes the whole file at 64 px, so
     /// call it off the UI thread). `None` when they cannot be measured.
-    pub(super) fn shots(&self) -> Option<Vec<(f64, f64)>> {
+    pub fn shots(&self) -> Option<Vec<(f64, f64)>> {
         type Cache = HashMap<(String, u64), Vec<(f64, f64)>>;
         static DETECTED: Mutex<Option<Cache>> = Mutex::new(None);
         if let Some(shots) = &self.shots {
@@ -368,7 +368,7 @@ impl StripSource {
 
     /// `STRIP_CELLS` pictures labelled `S1 12.30s`, with `*` on those inside
     /// a placed range, and the line listing the shots they fall in.
-    pub(super) fn cells(&self, shots: Option<&[(f64, f64)]>) -> (Vec<SheetCell>, String) {
+    pub fn cells(&self, shots: Option<&[(f64, f64)]>) -> (Vec<SheetCell>, String) {
         let times = strip_times(self.info.duration, shots);
         let cells = times
             .iter()
@@ -526,7 +526,7 @@ fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<(f64, (f64, f
 #[allow(dead_code)]
 /// A strip source for each source whose visible picture the edit placed
 /// or changed, at most `STRIP_SOURCES`, in program order.
-pub(super) fn source_strip(
+pub fn source_strip(
     before: &Timeline,
     after: &Timeline,
     assets: &[BinAsset],
@@ -614,7 +614,7 @@ pub(super) fn source_strip(
 #[allow(dead_code)]
 /// One cell per visible shot (sampled evenly beyond `SHEET_CELLS`), each
 /// at the middle of its stretch, labelled with its time and clip.
-pub(super) fn sheet_cells(timeline: &Timeline) -> Vec<SheetCell> {
+pub fn sheet_cells(timeline: &Timeline) -> Vec<SheetCell> {
     let segments = program_segments(timeline);
     let picked: Vec<Segment> = if segments.len() <= SHEET_CELLS {
         segments
@@ -663,8 +663,8 @@ pub(super) fn sheet_cells(timeline: &Timeline) -> Vec<SheetCell> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::media::{AssetState, BinAsset};
-    use crate::app::sweep::SweepData;
+    use crate::editor::media::{AssetState, BinAsset};
+    use crate::editor::sweep::SweepData;
 
     fn asset(path: &str, width: u32, height: u32) -> BinAsset {
         BinAsset {
@@ -682,7 +682,7 @@ mod tests {
             state: AssetState::Ready,
             peaks: Vec::new(),
             beats: None,
-            thumb_textures: Vec::new(),
+            thumbs: Vec::new(),
             sweep: SweepData::default(),
         }
     }
@@ -728,7 +728,7 @@ mod tests {
         let mut text = asset("a.mp4", 1920, 1080);
         text.sweep
             .candidates
-            .push(crate::app::sweep::SweepCandidate {
+            .push(crate::editor::sweep::SweepCandidate {
                 id: "a.mp4#5.5".to_owned(),
                 asset_path: "a.mp4".to_owned(),
                 asset_name: "a.mp4".to_owned(),
@@ -748,7 +748,7 @@ mod tests {
                 visual: None,
                 has_video: true,
                 transcript: Vec::new(),
-                review: crate::app::sweep::ClipReview::default(),
+                review: crate::editor::sweep::ClipReview::default(),
                 dismissed: false,
             });
         let assets = [text, asset("tall.mp4", 1080, 1920)];

@@ -18,10 +18,10 @@ const DANGLING_WORDS: &[&str] = &[
 
 /// One utterance: speech that should not be cut inside.
 #[derive(Clone, Debug, PartialEq)]
-pub(in crate::app) struct Utterance {
-    pub(in crate::app) start: f64,
-    pub(in crate::app) end: f64,
-    pub(in crate::app) text: String,
+pub struct Utterance {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
 }
 
 /// A turn, or one sentence of a turn with heard word timing.
@@ -128,7 +128,7 @@ fn turn_complete(text: &str) -> bool {
 /// unpunctuated conversation does not chain into one long utterance. A heard
 /// sentence end inside a turn is a cut point too. Sparse ambience turns
 /// ("[Music]", crowd noise) are not speech.
-pub(in crate::app) fn utterances(transcript: &[TranscriptSegment]) -> Vec<Utterance> {
+pub fn utterances(transcript: &[TranscriptSegment]) -> Vec<Utterance> {
     let mut turns: Vec<_> = transcript
         .iter()
         .filter(|turn| turn.end > turn.start && !turn.is_ambient())

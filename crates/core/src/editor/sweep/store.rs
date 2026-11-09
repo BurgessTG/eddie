@@ -12,9 +12,9 @@ use super::{SweepData, SweepStatus, TranscriptSegment};
 const VERSION: u64 = 1;
 
 /// Where curations live for this config: `<config dir>/curation`.
-pub(in crate::app) fn default_dir() -> Option<PathBuf> {
+pub fn default_dir() -> Option<PathBuf> {
     Some(
-        crate::app::settings::config_path()?
+        crate::editor::settings::config_path()?
             .parent()?
             .join("curation"),
     )
@@ -40,7 +40,7 @@ fn file_for(dir: &Path, path: &str) -> PathBuf {
 }
 
 /// Write a finished curation. Failures only cost a later re-curate.
-pub(in crate::app) fn save(dir: &Path, path: &str, data: &SweepData) -> Result<(), String> {
+pub fn save(dir: &Path, path: &str, data: &SweepData) -> Result<(), String> {
     let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
     let body = json!({
         "version": VERSION,
@@ -77,7 +77,7 @@ fn write_private(dir: &Path, target: &Path, body: &serde_json::Value) -> Result<
 }
 
 /// The saved curation for this exact file, if one exists.
-pub(in crate::app) fn load(dir: &Path, path: &str) -> Option<SweepData> {
+pub fn load(dir: &Path, path: &str) -> Option<SweepData> {
     let (size, modified) = identity(path)?;
     let raw = std::fs::read(file_for(dir, path)).ok()?;
     let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
@@ -99,11 +99,7 @@ pub(in crate::app) fn load(dir: &Path, path: &str) -> Option<SweepData> {
 
 /// Shots detected in a source for edit-check strips, beside its curation
 /// (`<hash>.shots.json`), so a restart does not decode the file again.
-pub(in crate::app) fn save_shots(
-    dir: &Path,
-    path: &str,
-    shots: &[(f64, f64)],
-) -> Result<(), String> {
+pub fn save_shots(dir: &Path, path: &str, shots: &[(f64, f64)]) -> Result<(), String> {
     let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
     let body = json!({
         "version": VERSION,
@@ -120,7 +116,7 @@ pub(in crate::app) fn save_shots(
 }
 
 /// Saved shots for this exact file (same path, size and modification time).
-pub(in crate::app) fn load_shots(dir: &Path, path: &str) -> Option<Vec<(f64, f64)>> {
+pub fn load_shots(dir: &Path, path: &str) -> Option<Vec<(f64, f64)>> {
     let (size, modified) = identity(path)?;
     let raw = std::fs::read(file_for(dir, path).with_extension("shots.json")).ok()?;
     let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
@@ -168,7 +164,7 @@ mod tests {
 
 /// A finished transcript beside the file's curation (`<hash>.transcript.json`),
 /// so a file is transcribed once. `source` names the provider and model.
-pub(in crate::app) fn save_transcript(
+pub fn save_transcript(
     dir: &Path,
     path: &str,
     segments: &[TranscriptSegment],
@@ -191,10 +187,7 @@ pub(in crate::app) fn save_transcript(
 }
 
 /// The saved transcript of this exact file and its source, if any.
-pub(in crate::app) fn load_transcript(
-    dir: &Path,
-    path: &str,
-) -> Option<(Vec<TranscriptSegment>, String)> {
+pub fn load_transcript(dir: &Path, path: &str) -> Option<(Vec<TranscriptSegment>, String)> {
     let (size, modified) = identity(path)?;
     let raw = std::fs::read(file_for(dir, path).with_extension("transcript.json")).ok()?;
     let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;

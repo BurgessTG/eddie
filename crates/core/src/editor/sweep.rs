@@ -7,32 +7,31 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use eframe::egui;
 use openreel_media::{MediaInfo, SegmentVisualEvidence, SweepSegment};
 use serde::{Deserialize, Serialize};
 
 use super::media::AssetState;
-use super::EditorApp;
+use super::Editor;
 
 mod align;
 mod speech;
 mod store;
-pub(super) mod transcribe;
-pub(super) use speech::utterances;
-pub(super) use store::{
+pub mod transcribe;
+pub use speech::utterances;
+pub use store::{
     default_dir as default_curation_dir, load as load_curation, load_shots, load_transcript,
     save_shots,
 };
 
 /// Clip type stays distinct from the app-assigned `prime` quality tag.
-pub(super) const CURATOR_CATEGORIES: [&str; 5] =
+pub const CURATOR_CATEGORIES: [&str; 5] =
     ["reaction", "talking", "action", "broll", "establishing"];
 
 /// Controlled tag vocabulary. Local classification derives a subset from
 /// measured signals; curations saved by the removed model reviewer can
 /// carry the rest, so scripts can filter on stable words.
 #[allow(dead_code)] // Read by the classifier's vocabulary test.
-pub(super) const CURATOR_TAGS: [&str; 27] = [
+pub const CURATOR_TAGS: [&str; 27] = [
     "prime",
     "speech",
     "quiet",
@@ -81,7 +80,7 @@ fn parallel_sweeps() -> usize {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(super) struct TranscriptSession {
+pub struct TranscriptSession {
     id: String,
     start: f64,
     end: Option<f64>,
@@ -89,7 +88,7 @@ pub(super) struct TranscriptSession {
 
 /// Whether a word or turn text ends on a sentence mark. A trailing ellipsis
 /// leaves the thought open.
-pub(super) fn ends_sentence(text: &str) -> bool {
+pub fn ends_sentence(text: &str) -> bool {
     let text = text
         .trim_end()
         .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}']);
@@ -99,27 +98,27 @@ pub(super) fn ends_sentence(text: &str) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(super) struct TranscriptWord {
-    pub(super) start: f64,
-    pub(super) end: f64,
-    pub(super) text: String,
-    pub(super) confidence: Option<f32>,
+pub struct TranscriptWord {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub confidence: Option<f32>,
     /// Interpolated between heard words by local alignment; good enough for
     /// captions, never a cut point.
-    pub(super) estimated: bool,
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(super) struct TranscriptSegment {
-    pub(super) start: f64,
-    pub(super) end: f64,
-    pub(super) speaker: Option<String>,
-    pub(super) text: String,
+pub struct TranscriptSegment {
+    pub start: f64,
+    pub end: f64,
+    pub speaker: Option<String>,
+    pub text: String,
     /// Word timings. Voice Transcribe is turn-level only; these come from
     /// a provider that returns words, or from local alignment (`align`).
-    pub(super) words: Vec<TranscriptWord>,
+    pub words: Vec<TranscriptWord>,
     /// Speaker labels only identify speakers inside this upload/session.
-    pub(super) session: Option<Arc<TranscriptSession>>,
+    pub session: Option<Arc<TranscriptSession>>,
 }
 
 /// A turn this long with fewer letters per second than this carries no
@@ -129,7 +128,7 @@ const AMBIENT_MIN_SECONDS: f64 = 2.0;
 const AMBIENT_LETTERS_PER_SECOND: f64 = 1.5;
 
 impl TranscriptSegment {
-    pub(super) fn timing_precision(&self) -> &'static str {
+    pub fn timing_precision(&self) -> &'static str {
         if self.words.is_empty() {
             "turn"
         } else {
@@ -137,7 +136,7 @@ impl TranscriptSegment {
         }
     }
 
-    pub(super) fn session_json(&self) -> serde_json::Value {
+    pub fn session_json(&self) -> serde_json::Value {
         self.session
             .as_ref()
             .map_or(serde_json::Value::Null, |session| {
@@ -148,7 +147,7 @@ impl TranscriptSegment {
 
     /// Whether a turn's text is too sparse for its span to be evidence that
     /// someone speaks throughout it.
-    pub(super) fn is_ambient(&self) -> bool {
+    pub fn is_ambient(&self) -> bool {
         let seconds = self.end - self.start;
         seconds >= AMBIENT_MIN_SECONDS
             && (self.text.chars().filter(|c| c.is_alphanumeric()).count() as f64)
@@ -174,12 +173,12 @@ fn release_freed_memory() {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct CaptionChunk {
-    pub(super) start: f64,
-    pub(super) end: f64,
-    pub(super) text: String,
+pub struct CaptionChunk {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
     /// Source start time of each word in `text`, only from real word timing.
-    pub(super) words: Vec<f64>,
+    pub words: Vec<f64>,
 }
 
 /// A word's letters and apostrophes, lowercased, for comparing repeats.
@@ -269,7 +268,7 @@ fn caption_break(group: &[(f64, f64, String)]) -> usize {
 /// Split one transcript turn into readable caption chunks. Real
 /// word timings are used when present; turn-only text is allocated
 /// proportionally and therefore remains an estimate.
-pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
+pub fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
     const MAX_CHARS: usize = 42;
     const MAX_DURATION: f64 = 3.5;
     if segment.text.trim().is_empty() || segment.end <= segment.start || segment.is_ambient() {
@@ -402,42 +401,42 @@ pub(super) fn caption_chunks(segment: &TranscriptSegment) -> Vec<CaptionChunk> {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct SweepCandidate {
-    pub(super) id: String,
-    pub(super) asset_path: String,
-    pub(super) asset_name: String,
-    pub(super) title: String,
-    pub(super) source_in: f64,
-    pub(super) duration: f64,
-    pub(super) score: f32,
-    pub(super) reason: String,
-    pub(super) stability: f32,
-    pub(super) audio_energy: f32,
-    pub(super) audio_peak: f32,
+pub struct SweepCandidate {
+    pub id: String,
+    pub asset_path: String,
+    pub asset_name: String,
+    pub title: String,
+    pub source_in: f64,
+    pub duration: f64,
+    pub score: f32,
+    pub reason: String,
+    pub stability: f32,
+    pub audio_energy: f32,
+    pub audio_peak: f32,
     /// One of `CURATOR_CATEGORIES`.
-    pub(super) category: String,
+    pub category: String,
     /// Subset of `CURATOR_TAGS`.
-    pub(super) tags: Vec<String>,
+    pub tags: Vec<String>,
     /// Quality subscores, 0..1 per asset: normalized mean motion
     /// and a blended audio score (energy + peak).
-    pub(super) motion_score: f32,
-    pub(super) audio_score: f32,
+    pub motion_score: f32,
+    pub audio_score: f32,
     /// Baked-in music bed suspected: audio signals were discounted
     /// for this candidate and JS can filter on it.
-    pub(super) music_bed: bool,
-    pub(super) visual: Option<SegmentVisualEvidence>,
-    pub(super) has_video: bool,
-    pub(super) transcript: Vec<TranscriptSegment>,
-    pub(super) review: ClipReview,
-    pub(super) dismissed: bool,
+    pub music_bed: bool,
+    pub visual: Option<SegmentVisualEvidence>,
+    pub has_video: bool,
+    pub transcript: Vec<TranscriptSegment>,
+    pub review: ClipReview,
+    pub dismissed: bool,
 }
 
 impl SweepCandidate {
-    pub(super) fn end(&self) -> f64 {
+    pub fn end(&self) -> f64 {
         self.source_in + self.duration
     }
 
-    pub(super) fn reaction_score(&self) -> f32 {
+    pub fn reaction_score(&self) -> f32 {
         if !self.is_reaction() {
             return 0.0;
         }
@@ -447,26 +446,26 @@ impl SweepCandidate {
         (0.6 * self.audio_peak + 0.4 * (self.audio_energy * 1.5).clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }
 
-    pub(super) fn is_reaction(&self) -> bool {
+    pub fn is_reaction(&self) -> bool {
         self.category == "reaction"
     }
 
-    pub(super) fn is_prime(&self) -> bool {
+    pub fn is_prime(&self) -> bool {
         self.tags.iter().any(|tag| tag == "prime")
     }
 
     /// Cross-modal talking evidence: transcript speech is primary;
     /// a centered, comparatively still foreground raises it. This
     /// does not claim lip movement or active-speaker detection.
-    pub(super) fn talking_score(&self) -> f32 {
+    pub fn talking_score(&self) -> f32 {
         talking_score(!self.transcript.is_empty(), self.visual.as_ref())
     }
 
-    pub(super) fn visual_json(&self) -> serde_json::Value {
+    pub fn visual_json(&self) -> serde_json::Value {
         visual_evidence_json(self.visual.as_ref(), self.talking_score())
     }
 
-    pub(super) fn review_json(&self) -> serde_json::Value {
+    pub fn review_json(&self) -> serde_json::Value {
         let mut review = self.review.json();
         review["speech"] = serde_json::json!(self
             .transcript
@@ -483,7 +482,7 @@ impl SweepCandidate {
         review
     }
 
-    pub(super) fn transcript_text(&self) -> String {
+    pub fn transcript_text(&self) -> String {
         self.transcript
             .iter()
             .map(|segment| segment.text.trim())
@@ -522,7 +521,7 @@ fn talking_score(has_speech: bool, visual: Option<&SegmentVisualEvidence>) -> f3
 
 /// Stable evidence shape for scripts. Every value is a measured proxy from
 /// local frame analysis, not a person, face or expression detector.
-pub(super) fn visual_evidence_json(
+pub fn visual_evidence_json(
     visual: Option<&SegmentVisualEvidence>,
     talking_score: f32,
 ) -> serde_json::Value {
@@ -558,7 +557,7 @@ pub(super) fn visual_evidence_json(
 /// Whether a range was judged by anyone. Every new range is `Local`; the
 /// others survive in curations saved by the removed model reviewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum ReviewStatus {
+pub enum ReviewStatus {
     #[default]
     Local,
     Reviewed,
@@ -567,7 +566,7 @@ pub(super) enum ReviewStatus {
 }
 
 impl ReviewStatus {
-    pub(super) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Reviewed => "reviewed",
@@ -580,10 +579,10 @@ impl ReviewStatus {
 /// Fields the removed reviewer also saved (frames, SAM evidence, coverage,
 /// usage) are ignored on load.
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub(super) struct ClipReview {
-    pub(super) status: ReviewStatus,
+pub struct ClipReview {
+    pub status: ReviewStatus,
     /// The model that reviewed a saved range, if one did.
-    pub(super) model: Option<String>,
+    pub model: Option<String>,
 }
 
 impl ClipReview {
@@ -593,12 +592,12 @@ impl ClipReview {
 }
 
 /// Transcript segment IDs in script state: `tx:<asset path>#<index>`.
-pub(super) fn transcript_segment_id(asset_path: &str, index: usize) -> String {
+pub fn transcript_segment_id(asset_path: &str, index: usize) -> String {
     format!("tx:{asset_path}#{index}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum SweepStatus {
+pub enum SweepStatus {
     NotStarted,
     Running,
     Ready,
@@ -606,15 +605,15 @@ pub(super) enum SweepStatus {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct SweepData {
-    pub(super) status: SweepStatus,
-    pub(super) note: String,
-    pub(super) transcript: Vec<TranscriptSegment>,
-    pub(super) candidates: Vec<SweepCandidate>,
+pub struct SweepData {
+    pub status: SweepStatus,
+    pub note: String,
+    pub transcript: Vec<TranscriptSegment>,
+    pub candidates: Vec<SweepCandidate>,
     /// Complete source-ordered scene breakdown. Unlike the
     /// ranked `candidates` picks, these spans are meant to cover
     /// the whole asset so an edited video can be deconstructed.
-    pub(super) scene_clips: Vec<SweepCandidate>,
+    pub scene_clips: Vec<SweepCandidate>,
 }
 
 impl Default for SweepData {
@@ -631,7 +630,7 @@ impl Default for SweepData {
 
 impl SweepData {
     /// Reviewed ranges override whole-shot hints only where they overlap.
-    pub(super) fn music_bed_overlap(&self, start: f64, end: f64) -> f64 {
+    pub fn music_bed_overlap(&self, start: f64, end: f64) -> f64 {
         let overlap = |clip: &SweepCandidate, start: f64, end: f64| {
             (clip.end().min(end) - clip.source_in.max(start)).max(0.0)
         };
@@ -667,16 +666,16 @@ impl SweepData {
     }
 }
 
-pub(super) enum SweepMsg {
+pub enum SweepMsg {
     Progress { path: String, message: String },
     Done { path: String, data: SweepData },
     Failed { path: String, message: String },
 }
 
-impl EditorApp {
+impl Editor {
     /// Explicit user-triggered curation for one ready asset.
     /// Re-curation replaces the previous transcript and candidates.
-    pub(super) fn curate_asset(&mut self, ctx: &egui::Context, path: String) {
+    pub fn curate_asset(&mut self, path: String) {
         let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) else {
             return;
         };
@@ -693,11 +692,11 @@ impl EditorApp {
         asset.sweep.note = "Curating…".to_owned();
         self.sweep_queue.push(path);
         self.open_curator_gallery();
-        self.start_next_sweep(ctx);
+        self.start_next_sweep();
     }
 
     /// Queue every ready asset that has never been curated.
-    pub(super) fn curate_all_new(&mut self, ctx: &egui::Context) {
+    pub fn curate_all_new(&mut self) {
         let paths: Vec<String> = self
             .assets
             .iter()
@@ -707,12 +706,12 @@ impl EditorApp {
             .map(|asset| asset.info.path.clone())
             .collect();
         for path in paths {
-            self.curate_asset(ctx, path);
+            self.curate_asset(path);
         }
     }
 
     /// Start queued curations up to `parallel_sweeps()` at once.
-    fn start_next_sweep(&mut self, ctx: &egui::Context) {
+    fn start_next_sweep(&mut self) {
         while self.sweep_running.len() < parallel_sweeps() && !self.sweep_queue.is_empty() {
             let path = self.sweep_queue.remove(0);
             let Some(asset) = self.assets.iter().find(|asset| asset.info.path == path) else {
@@ -720,7 +719,7 @@ impl EditorApp {
             };
             let info = asset.info.clone();
             let peaks = asset.peaks.clone();
-            let settings = self.settings.transcription();
+            let settings = self.settings.transcription(self.model_dir.as_deref());
             let store_dir = self.curation_dir.clone();
             let tx = match &self.sweep_tx {
                 Some(tx) => tx.clone(),
@@ -732,14 +731,14 @@ impl EditorApp {
                 }
             };
             self.sweep_running.push(path);
-            let ctx = ctx.clone();
+            let wake = self.wake.clone();
             thread::spawn(move || {
                 let progress = &mut |message: &str| {
                     let _ = tx.send(SweepMsg::Progress {
                         path: info.path.clone(),
                         message: message.to_owned(),
                     });
-                    ctx.request_repaint();
+                    wake.wake();
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_sweep(&info, &peaks, &settings, store_dir.as_deref(), progress)
@@ -765,12 +764,12 @@ impl EditorApp {
                     },
                 };
                 let _ = tx.send(msg);
-                ctx.request_repaint();
+                wake.wake();
             });
         }
     }
 
-    pub(super) fn poll_sweeps(&mut self, ctx: &egui::Context) {
+    pub fn poll_sweeps(&mut self) {
         let mut finished = false;
         loop {
             let Some(receiver) = self.sweep_rx.as_ref() else {
@@ -835,7 +834,7 @@ impl EditorApp {
             }
         }
         if !finished {
-            ctx.request_repaint_after(Duration::from_millis(180));
+            self.frame_within(Duration::from_millis(180));
             return;
         }
         if self.sweep_running.is_empty() {
@@ -843,13 +842,13 @@ impl EditorApp {
             self.sweep_tx = None;
         }
         release_freed_memory();
-        self.start_next_sweep(ctx);
+        self.start_next_sweep();
         if self.sweep_rx.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(180));
+            self.frame_within(Duration::from_millis(180));
         }
     }
 
-    pub(super) fn visible_sweep_candidates(&self) -> Vec<(usize, usize)> {
+    pub fn visible_sweep_candidates(&self) -> Vec<(usize, usize)> {
         let mut refs: Vec<(usize, usize, f32)> = self
             .assets
             .iter()
@@ -870,7 +869,7 @@ impl EditorApp {
         refs.into_iter().map(|(a, c, _)| (a, c)).collect()
     }
 
-    pub(super) fn visible_scene_clips(&self) -> Vec<(usize, usize)> {
+    pub fn visible_scene_clips(&self) -> Vec<(usize, usize)> {
         self.assets
             .iter()
             .enumerate()
@@ -885,7 +884,7 @@ impl EditorApp {
             .collect()
     }
 
-    pub(super) fn dismiss_sweep_candidate(&mut self, candidate_id: &str) {
+    pub fn dismiss_sweep_candidate(&mut self, candidate_id: &str) {
         for asset in &mut self.assets {
             if let Some(candidate) = asset
                 .sweep
@@ -901,7 +900,7 @@ impl EditorApp {
         }
     }
 
-    pub(super) fn add_sweep_candidate(&mut self, candidate_id: &str) {
+    pub fn add_sweep_candidate(&mut self, candidate_id: &str) {
         let candidate = self
             .assets
             .iter()
@@ -920,7 +919,7 @@ impl EditorApp {
         }
     }
 
-    pub(super) fn add_all_sweep_candidates(&mut self) {
+    pub fn add_all_sweep_candidates(&mut self) {
         let (candidates, skipped): (Vec<SweepCandidate>, usize) =
             self.fitting_format(self.curator_candidate_refs(false).into_iter().map(
                 |(asset, candidate)| (asset, &self.assets[asset].sweep.candidates[candidate]),
@@ -941,7 +940,7 @@ impl EditorApp {
         self.status = added_message(candidates.len(), "sweep clip", skipped);
     }
 
-    pub(super) fn add_all_scene_clips(&mut self) {
+    pub fn add_all_scene_clips(&mut self) {
         let (clips, skipped): (Vec<SweepCandidate>, usize) =
             self.fitting_format(self.curator_candidate_refs(true).into_iter().map(
                 |(asset, candidate)| (asset, &self.assets[asset].sweep.scene_clips[candidate]),
@@ -1357,7 +1356,7 @@ fn overlapping_transcript(
         .collect()
 }
 
-pub(super) fn minute_second(seconds: f64) -> String {
+pub fn minute_second(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
 }

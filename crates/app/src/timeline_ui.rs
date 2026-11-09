@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use eddie_core::editor::viewport::TimelineViewport;
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, Vec2,
 };
@@ -119,9 +120,10 @@ fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
 }
 
 pub struct TimelineView {
-    pub px_per_sec: f32,
-    pub scroll_x: f32,
-    pub magnet: bool,
+    /// The editor's viewport as drawn: the app copies it in before `show`
+    /// and back out after, so drops from the bin hit-test against the
+    /// frame on screen.
+    pub port: TimelineViewport,
     drag: Option<(ClipId, DragMode)>,
     press_origin: Option<Pos2>,
     last_drag_pos: Option<Pos2>,
@@ -132,9 +134,7 @@ pub struct TimelineView {
 impl Default for TimelineView {
     fn default() -> Self {
         Self {
-            px_per_sec: 48.0,
-            scroll_x: 0.0,
-            magnet: true,
+            port: TimelineViewport::default(),
             drag: None,
             press_origin: None,
             last_drag_pos: None,
@@ -146,60 +146,11 @@ impl Default for TimelineView {
 
 impl TimelineView {
     fn x_at(&self, content_left: f32, time: f64) -> f32 {
-        content_left + time as f32 * self.px_per_sec - self.scroll_x
+        content_left + time as f32 * self.port.px_per_sec - self.port.scroll_x
     }
 
     fn time_at(&self, content_left: f32, x: f32) -> f64 {
-        ((x - content_left + self.scroll_x) / self.px_per_sec) as f64
-    }
-
-    /// Zoom by `factor`, keeping `anchor` at the same screen position.
-    pub fn zoom(&mut self, factor: f32, anchor: f64) {
-        let offset = anchor as f32 * self.px_per_sec - self.scroll_x;
-        self.px_per_sec = (self.px_per_sec * factor).clamp(4.0, 600.0);
-        self.scroll_x = (anchor as f32 * self.px_per_sec - offset).max(0.0);
-    }
-
-    /// Zoom so `duration` seconds fill the lanes.
-    pub fn zoom_to_fit(&mut self, duration: f64) {
-        let Some(rect) = self.last_rect else {
-            return;
-        };
-        if duration <= 0.0 {
-            return;
-        }
-        let width = (rect.width() - HEADER_W - 24.0).max(40.0);
-        self.px_per_sec = (width / duration as f32).clamp(4.0, 600.0);
-        self.scroll_x = 0.0;
-    }
-
-    /// Scroll just enough to keep `time` inside the visible lanes.
-    pub fn reveal(&mut self, time: f64) {
-        let Some(rect) = self.last_rect else {
-            return;
-        };
-        let width = rect.width() - HEADER_W;
-        let margin = (width * 0.1).min(60.0);
-        let x = time as f32 * self.px_per_sec - self.scroll_x;
-        if x < margin {
-            self.scroll_x = (time as f32 * self.px_per_sec - margin).max(0.0);
-        } else if x > width - margin {
-            self.scroll_x = time as f32 * self.px_per_sec - (width - margin);
-        }
-    }
-
-    /// Playback follow: once the playhead reaches the middle of the lanes
-    /// it stays there and the clips scroll under it. A view the user
-    /// scrolled away from the playhead (`was` off screen) is left alone.
-    pub fn follow(&mut self, was: f64, now: f64) {
-        let Some(rect) = self.last_rect else {
-            return;
-        };
-        let width = rect.width() - HEADER_W;
-        let x = |time: f64| time as f32 * self.px_per_sec - self.scroll_x;
-        if (0.0..=width).contains(&x(was)) && x(now) > width * 0.5 {
-            self.scroll_x = now as f32 * self.px_per_sec - width * 0.5;
-        }
+        ((x - content_left + self.port.scroll_x) / self.port.px_per_sec) as f64
     }
 
     /// True while the user is scrubbing the ruler or dragging a clip.
@@ -223,8 +174,10 @@ impl TimelineView {
             Pos2::new(rect.right(), rect.bottom()),
         );
 
-        let max_scroll = (timeline.end() as f32 * self.px_per_sec - content.width() * 0.5).max(0.0);
-        self.scroll_x = self.scroll_x.min(max_scroll);
+        self.port.width = Some(content.width());
+        let max_scroll =
+            (timeline.end() as f32 * self.port.px_per_sec - content.width() * 0.5).max(0.0);
+        self.port.scroll_x = self.port.scroll_x.min(max_scroll);
         self.handle_scroll(ui, &response, content_left);
         self.handle_pointer(
             &response,
@@ -235,6 +188,7 @@ impl TimelineView {
             content_left,
             rect,
         );
+        self.port.interacting = self.is_interacting();
         self.paint(ui, timeline, *playhead, *selected, visuals, rect, content);
         response.on_hover_text(
             "Click to move the playhead. Drag clips to move, drag edges to trim. Ctrl+scroll zooms. F1 lists shortcuts.",
@@ -280,11 +234,11 @@ impl TimelineView {
             // Zoom around the cursor: keep the time under it stationary.
             let anchor_time = self.time_at(content_left, pointer_x);
             let factor = (delta.y * 0.002).exp();
-            self.px_per_sec = (self.px_per_sec * factor).clamp(4.0, 600.0);
-            self.scroll_x =
-                (anchor_time as f32 * self.px_per_sec - (pointer_x - content_left)).max(0.0);
+            self.port.set_zoom(self.port.px_per_sec * factor);
+            self.port.scroll_x =
+                (anchor_time as f32 * self.port.px_per_sec - (pointer_x - content_left)).max(0.0);
         } else {
-            self.scroll_x = (self.scroll_x - delta.y - delta.x).max(0.0);
+            self.port.scroll_x = (self.port.scroll_x - delta.y - delta.x).max(0.0);
         }
     }
 
@@ -436,10 +390,10 @@ impl TimelineView {
             const MARGIN: f32 = 36.0;
             const SPEED: f32 = 14.0;
             if pos.x > rect.right() - MARGIN {
-                self.scroll_x += SPEED;
+                self.port.scroll_x += SPEED;
                 response.ctx.request_repaint();
             } else if pos.x < content_left + MARGIN && pos.x >= rect.left() {
-                self.scroll_x = (self.scroll_x - SPEED).max(0.0);
+                self.port.scroll_x = (self.port.scroll_x - SPEED).max(0.0);
                 response.ctx.request_repaint();
             }
         }
@@ -497,9 +451,9 @@ impl TimelineView {
             } else if let Some((id, mode)) = self.drag {
                 // Snap targets (magnet on): timeline start, playhead, other
                 // clip edges. Magnet off means free placement on frame grid.
-                let threshold = 8.0 / self.px_per_sec as f64;
+                let threshold = 8.0 / self.port.px_per_sec as f64;
                 let mut candidates: Vec<f64> = Vec::new();
-                if self.magnet {
+                if self.port.magnet {
                     candidates.extend([0.0, *playhead]);
                     let linked = timeline.clip(id).and_then(|c| c.linked_clip);
                     for clip in timeline
@@ -996,7 +950,7 @@ impl TimelineView {
         let step = steps
             .iter()
             .copied()
-            .find(|s| *s as f32 * self.px_per_sec >= 72.0)
+            .find(|s| *s as f32 * self.port.px_per_sec >= 72.0)
             .unwrap_or(60.0);
         let first = (self.time_at(content_left, content_left) / step).floor() * step;
         let minor = step / 4.0;
@@ -1062,7 +1016,8 @@ impl TimelineView {
         let color = theme::CLIP_AUDIO.gamma_multiply(2.6);
         let mut x = rect.left() + 2.0;
         while x < rect.right() - 2.0 {
-            let source_time = clip.source_in + (x - rect.left()) as f64 / self.px_per_sec as f64;
+            let source_time =
+                clip.source_in + (x - rect.left()) as f64 / self.port.px_per_sec as f64;
             let idx = (source_time * peaks_per_sec) as usize;
             if let Some(peak) = visual.peaks.get(idx) {
                 // Square-root scale so quiet dialogue stays visible
@@ -1097,7 +1052,7 @@ impl TimelineView {
         };
         let tile_w = (rect.height() * aspect).max(12.0);
         let tint = Color32::from_white_alpha((clip.opacity.clamp(0.0, 1.0) * 230.0) as u8);
-        for tile in filmstrip_tiles(clip.source_in, clip.duration, self.px_per_sec, tile_w) {
+        for tile in filmstrip_tiles(clip.source_in, clip.duration, self.port.px_per_sec, tile_w) {
             let dest = Rect::from_min_size(
                 Pos2::new(rect.left() + tile.x, rect.top()),
                 Vec2::new(tile.w, rect.height()),
@@ -1376,7 +1331,10 @@ mod tests {
                 "target",
             );
             let mut view = TimelineView {
-                magnet,
+                port: TimelineViewport {
+                    magnet,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let from = clip_center(&view, &timeline, id);
@@ -1396,7 +1354,10 @@ mod tests {
             let id =
                 timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, duration, 0.157, "scene");
             let mut view = TimelineView {
-                magnet: false,
+                port: TimelineViewport {
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let from = clip_center(&view, &timeline, id);
@@ -1456,7 +1417,10 @@ mod tests {
         timeline.append_track();
         let before = timeline.clone();
         let mut view = TimelineView {
-            magnet: false,
+            port: TimelineViewport {
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, id);
@@ -1491,35 +1455,16 @@ mod tests {
     }
 
     #[test]
-    fn playback_scrolls_smoothly_but_leaves_a_scrolled_away_view_alone() {
-        // 1000 px of lanes at 10 px/s show 0..100 s.
-        let mut view = TimelineView {
-            px_per_sec: 10.0,
-            last_rect: Some(Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(HEADER_W + 1000.0, 200.0),
-            )),
-            ..Default::default()
-        };
-        view.follow(40.0, 49.5);
-        assert_eq!(view.scroll_x, 0.0, "left of the middle: the playhead moves");
-        view.follow(49.5, 50.5);
-        assert_eq!(view.scroll_x, 5.0, "pinned at the middle (500 px)");
-        view.follow(50.5, 51.0);
-        assert_eq!(view.scroll_x, 10.0, "each tick scrolls by what it played");
-        view.scroll_x = 3000.0;
-        view.follow(52.0, 53.0);
-        assert_eq!(view.scroll_x, 3000.0, "the user scrolled away");
-    }
-
-    #[test]
     fn short_clip_edges_still_trim_when_zoomed_in() {
         for left in [true, false] {
             let mut timeline = Timeline::empty_project();
             let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 1.0, 0.2, 0.157, "scene");
             let mut view = TimelineView {
-                px_per_sec: 300.0,
-                magnet: false,
+                port: TimelineViewport {
+                    px_per_sec: 300.0,
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let edge = if left { 1.0 } else { 1.2 };
@@ -1544,7 +1489,10 @@ mod tests {
             let ctx = egui::Context::default();
             let (mut timeline, id) = clip_fixture();
             let mut view = TimelineView {
-                magnet: false,
+                port: TimelineViewport {
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let mut playhead = 0.0;
@@ -1618,8 +1566,11 @@ mod tests {
             );
             let before = timeline.clone();
             let mut view = TimelineView {
-                px_per_sec: 240.0,
-                magnet: false,
+                port: TimelineViewport {
+                    px_per_sec: 240.0,
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let id = if drag_left { left } else { right };
@@ -1652,8 +1603,11 @@ mod tests {
         let tail = timeline.add_media_clip("tail", ClipKind::Video, 0, 2.8, 1.0, 0.0, "tail");
         let tail_before = timeline.clip(tail).unwrap().clone();
         let mut view = TimelineView {
-            px_per_sec: 120.0,
-            magnet: false,
+            port: TimelineViewport {
+                px_per_sec: 120.0,
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, a);
@@ -1680,8 +1634,11 @@ mod tests {
             timeline.add_media_clip("blocker", ClipKind::Video, 2, 5.0, 2.0, 0.0, "blocker");
             let before = timeline.clone();
             let mut view = TimelineView {
-                px_per_sec: 120.0,
-                magnet: false,
+                port: TimelineViewport {
+                    px_per_sec: 120.0,
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let from = clip_center(&view, &timeline, id);
@@ -1702,7 +1659,10 @@ mod tests {
         timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
         let before = timeline.clone();
         let mut view = TimelineView {
-            magnet: false,
+            port: TimelineViewport {
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, id);
@@ -1721,7 +1681,10 @@ mod tests {
         timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
         let before = timeline.clone();
         let mut view = TimelineView {
-            magnet: false,
+            port: TimelineViewport {
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, a);
@@ -1741,8 +1704,11 @@ mod tests {
         let b_audio = timeline.detach_audio(b).unwrap();
         let before = timeline.clone();
         let mut view = TimelineView {
-            px_per_sec: 240.0,
-            magnet: false,
+            port: TimelineViewport {
+                px_per_sec: 240.0,
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, a);
@@ -1787,7 +1753,10 @@ mod tests {
         timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
         let before = timeline.clone();
         let mut view = TimelineView {
-            magnet: false,
+            port: TimelineViewport {
+                magnet: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let from = clip_center(&view, &timeline, id);
@@ -1844,7 +1813,10 @@ mod tests {
                     }
                     let before = timeline.clone();
                     let mut view = TimelineView {
-                        magnet,
+                        port: TimelineViewport {
+                            magnet,
+                            ..Default::default()
+                        },
                         ..Default::default()
                     };
                     let id = if drag_left { left } else { right };
@@ -1901,7 +1873,10 @@ mod tests {
                 timeline.add_media_clip("tail", ClipKind::Video, 0, 2.8, 0.5, 0.0, "tail");
                 let before = timeline.clone();
                 let mut view = TimelineView {
-                    magnet,
+                    port: TimelineViewport {
+                        magnet,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 let (dragged, target) = if drag_left {
@@ -2019,7 +1994,10 @@ mod tests {
             let ctx = egui::Context::default();
             let (mut timeline, id) = clip_fixture();
             let mut view = TimelineView {
-                magnet: false,
+                port: TimelineViewport {
+                    magnet: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let (press_x, delta) = if left { (246.0, 24.0) } else { (522.0, -24.0) };
@@ -2444,7 +2422,7 @@ mod tests {
         let (mut timeline, a_id, b_id) = touching_fixture();
         let visuals = full_visuals();
         let mut view = TimelineView::default();
-        view.magnet = false; // isolate hit-testing from ripple-on-release
+        view.port.magnet = false; // isolate hit-testing from ripple-on-release
         let mut playhead = 0.0;
         let mut selected = None;
         let y = 99.0;
@@ -2490,7 +2468,7 @@ mod tests {
         let (mut timeline, a_id, b_id) = touching_fixture();
         let visuals = full_visuals();
         let mut view = TimelineView::default();
-        view.magnet = false; // isolate hit-testing from ripple-on-release
+        view.port.magnet = false; // isolate hit-testing from ripple-on-release
         let mut playhead = 0.0;
         let mut selected = None;
         let y = 99.0;

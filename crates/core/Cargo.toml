@@ -1,0 +1,23 @@
+[package]
+name = "eddie-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Eddie's editor without a window: project, bin, playback, scripting, curation and the command line"
+
+[features]
+# Local transcription on the GPU: whisper.cpp built with CUDA (needs the
+# CUDA toolkit) or Vulkan (needs Vulkan headers and glslc). Without either,
+# local transcription runs on the CPU and prefers large-v3-turbo.
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+
+[dependencies]
+openreel-engine = { path = "../engine" }
+openreel-media = { path = "../media" }
+rquickjs = "0.14"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+whisper-rs = "0.16"
+ureq = { version = "3", features = ["multipart"] }

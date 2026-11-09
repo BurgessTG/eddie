@@ -245,15 +245,18 @@ fn render_editor_screenshot() {
     let ctx = egui::Context::default();
     let mut app = EditorApp::headless(&ctx);
     // A small representative edit so timeline/inspector have content.
-    let video = app
+    let video =
+        app.editor
+            .timeline
+            .add_clip("sample_video.mp4", ClipKind::Video, 1, 0.0, 20.0, 0.0);
+    app.editor
         .timeline
-        .add_clip("sample_video.mp4", ClipKind::Video, 1, 0.0, 20.0, 0.0);
-    app.timeline
         .add_clip("sample_music.mp3", ClipKind::Audio, 2, 0.0, 14.4, 0.0);
-    app.timeline
+    app.editor
+        .timeline
         .add_clip("Highlights", ClipKind::Title, 0, 1.0, 4.0, 0.0);
-    app.selected = Some(video);
-    app.status = "Ready.".to_owned();
+    app.editor.selected = Some(video);
+    app.editor.status = "Ready.".to_owned();
 
     let mut textures = HashMap::new();
     let mut clock = 0.0_f64;

@@ -178,7 +178,8 @@ macOS.
 | --- | --- |
 | `crates/engine` (`openreel-engine`) | UI-independent timeline model: lanes, linked clips, edits, titles, timecode. |
 | `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview, audio mixer, scene detection, waveforms, thumbnails, export. |
-| `crates/app` (`openreel-app`, binary `eddie`) | egui app and `eddie` command line: media bin, timeline, monitor, gallery, curator, transcription, QuickJS console. |
+| `crates/core` (`eddie-core`) | The editor without a window: media bin, project, playback, undo, curation, transcription, the QuickJS scripting API and the `eddie` command line. |
+| `crates/app` (`openreel-app`, binary `eddie`) | egui window over `eddie-core`: media bin, timeline, monitor, gallery, curator, settings. |
 
 ## Limitations
 

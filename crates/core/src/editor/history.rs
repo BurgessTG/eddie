@@ -16,7 +16,7 @@ struct State {
     selected: Option<ClipId>,
 }
 
-pub(super) struct History {
+pub struct History {
     committed: State,
     /// The last differing timeline seen, and when it last changed.
     latest: Option<(Timeline, f64)>,
@@ -25,7 +25,7 @@ pub(super) struct History {
 }
 
 impl History {
-    pub(super) fn new(timeline: &Timeline) -> Self {
+    pub fn new(timeline: &Timeline) -> Self {
         Self {
             committed: State {
                 timeline: timeline.clone(),
@@ -38,13 +38,13 @@ impl History {
     }
 
     /// Forget every step; the current timeline becomes the baseline.
-    pub(super) fn reset(&mut self, timeline: &Timeline) {
+    pub fn reset(&mut self, timeline: &Timeline) {
         *self = Self::new(timeline);
     }
 
     /// Call once per frame. `pointer_down` and `typing` hold a change open;
     /// typing settles after a pause. Returns whether a change is still open.
-    pub(super) fn track(
+    pub fn track(
         &mut self,
         timeline: &Timeline,
         selected: Option<ClipId>,
@@ -91,7 +91,7 @@ impl History {
     }
 
     /// Step back. An open change is committed first so it is what undoes.
-    pub(super) fn undo(&mut self, timeline: &mut Timeline, selected: &mut Option<ClipId>) -> bool {
+    pub fn undo(&mut self, timeline: &mut Timeline, selected: &mut Option<ClipId>) -> bool {
         if *timeline != self.committed.timeline {
             self.commit(timeline, *selected);
         }
@@ -104,7 +104,7 @@ impl History {
         true
     }
 
-    pub(super) fn redo(&mut self, timeline: &mut Timeline, selected: &mut Option<ClipId>) -> bool {
+    pub fn redo(&mut self, timeline: &mut Timeline, selected: &mut Option<ClipId>) -> bool {
         if *timeline != self.committed.timeline {
             // A new edit since the undo replaced the redo branch.
             self.commit(timeline, *selected);

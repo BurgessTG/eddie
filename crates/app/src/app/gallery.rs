@@ -1,181 +1,43 @@
 //! Browsing curated ranges never changes the source inventory or timeline.
 
-use std::cmp::Ordering;
-
+use eddie_core::editor::gallery::{
+    category_label, clock, GalleryDuration, GalleryFilters, GalleryQuality, GallerySort,
+    GalleryView,
+};
+use eddie_core::editor::media::BinAsset;
+use eddie_core::editor::sweep::{ReviewStatus, SweepCandidate, SweepStatus, CURATOR_CATEGORIES};
 use eframe::egui::{self, CornerRadius, RichText, Sense, Stroke, Vec2};
 use openreel_engine::Orientation;
 
-use super::media::{cover_uv, BinAsset};
-use super::sweep::{ReviewStatus, SweepCandidate, SweepStatus, CURATOR_CATEGORIES};
+use super::media::cover_uv;
 use super::EditorApp;
 use crate::theme;
 
 mod thumbnails;
-use thumbnails::GalleryThumbnails;
+pub(super) use thumbnails::GalleryThumbnails;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub(super) enum GalleryView {
-    #[default]
-    Clips,
-    Scenes,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub(super) enum GalleryQuality {
-    #[default]
-    All,
-    Prime,
-    Reviewed,
-    NeedsReview,
-    Local,
-}
-
-impl GalleryQuality {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "Any quality",
-            Self::Prime => "Prime",
-            Self::Reviewed => "Reviewed",
-            Self::NeedsReview => "Needs review",
-            Self::Local => "Local only",
+/// The Clips filters: type, quality and length menus, then Reset.
+fn filter_controls(filters: &mut GalleryFilters, ui: &mut egui::Ui) {
+    let category = category_label(filters.category.as_deref().unwrap_or("all")).to_owned();
+    filter_choice(ui, "gallery_category", 110.0, &category, |ui| {
+        ui.selectable_value(&mut filters.category, None, "All types")
+            .on_hover_text("Show every content category");
+        for category in CURATOR_CATEGORIES {
+            ui.selectable_value(
+                &mut filters.category,
+                Some(category.to_owned()),
+                category_label(category),
+            )
+            .on_hover_text("Match this category as well as the other active filters");
         }
-    }
-
-    fn matches(self, clip: &SweepCandidate) -> bool {
-        match self {
-            Self::All => true,
-            Self::Prime => clip.is_prime(),
-            Self::Reviewed => clip.review.status == ReviewStatus::Reviewed,
-            Self::NeedsReview => clip.review.status == ReviewStatus::NeedsReview,
-            Self::Local => clip.review.status == ReviewStatus::Local,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub(super) enum GalleryDuration {
-    #[default]
-    All,
-    UnderTwo,
-    TwoToEight,
-    EightToThirty,
-    ThirtyPlus,
-}
-
-impl GalleryDuration {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "Any duration",
-            Self::UnderTwo => "Under 2 s",
-            Self::TwoToEight => "2 to 8 s",
-            Self::EightToThirty => "8 to 30 s",
-            Self::ThirtyPlus => "30+ s",
-        }
-    }
-
-    fn matches(self, duration: f64) -> bool {
-        match self {
-            Self::All => true,
-            Self::UnderTwo => duration < 2.0,
-            Self::TwoToEight => (2.0..8.0).contains(&duration),
-            Self::EightToThirty => (8.0..30.0).contains(&duration),
-            Self::ThirtyPlus => duration >= 30.0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub(super) enum GallerySort {
-    #[default]
-    Score,
-    Source,
-    Shortest,
-    Longest,
-}
-
-impl GallerySort {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Score => "Best first",
-            Self::Source => "Source order",
-            Self::Shortest => "Shortest first",
-            Self::Longest => "Longest first",
-        }
-    }
-
-    fn compare(self, a: &SweepCandidate, b: &SweepCandidate) -> Ordering {
-        match self {
-            // Usable picture first: burned-in text and unreviewed ranges
-            // sink below it however high the model scored them.
-            Self::Score => {
-                let rank = |clip: &SweepCandidate| {
-                    if matches!(
-                        clip.review.status,
-                        ReviewStatus::NeedsReview | ReviewStatus::Rejected
-                    ) {
-                        2
-                    } else if clip.tags.iter().any(|tag| tag == "on-screen-text") {
-                        1
-                    } else {
-                        0
-                    }
-                };
-                rank(a)
-                    .cmp(&rank(b))
-                    .then_with(|| b.score.total_cmp(&a.score))
-            }
-            Self::Source => Ordering::Equal,
-            Self::Shortest => a.duration.total_cmp(&b.duration),
-            Self::Longest => b.duration.total_cmp(&a.duration),
-        }
-    }
-}
-
-#[derive(Default, PartialEq, Eq, Hash)]
-pub(super) struct GalleryFilters {
-    pub(super) search: String,
-    pub(super) category: Option<String>,
-    pub(super) quality: GalleryQuality,
-    pub(super) duration: GalleryDuration,
-    pub(super) sort: GallerySort,
-}
-
-impl GalleryFilters {
-    fn matches(&self, clip: &SweepCandidate, words: &[&str]) -> bool {
-        if self
-            .category
-            .as_ref()
-            .is_some_and(|category| *category != clip.category)
-            || !self.quality.matches(clip)
-            || !self.duration.matches(clip.duration)
-        {
-            return false;
-        }
-        words.iter().all(|word| {
-            [&clip.asset_name, &clip.title, &clip.category, &clip.reason]
-                .into_iter()
-                .chain(clip.tags.iter())
-                .chain(clip.transcript.iter().map(|turn| &turn.text))
-                .any(|text| text.to_lowercase().contains(word))
-        })
-    }
-
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        let category = category_label(self.category.as_deref().unwrap_or("all")).to_owned();
-        filter_choice(ui, "gallery_category", 110.0, &category, |ui| {
-            ui.selectable_value(&mut self.category, None, "All types")
-                .on_hover_text("Show every content category");
-            for category in CURATOR_CATEGORIES {
-                ui.selectable_value(
-                    &mut self.category,
-                    Some(category.to_owned()),
-                    category_label(category),
-                )
-                .on_hover_text("Match this category as well as the other active filters");
-            }
-        })
-        .on_hover_text("Filter by content type");
-        filter_choice(ui, "gallery_quality", 120.0, self.quality.label(), |ui| {
+    })
+    .on_hover_text("Filter by content type");
+    filter_choice(
+        ui,
+        "gallery_quality",
+        120.0,
+        filters.quality.label(),
+        |ui| {
             for quality in [
                 GalleryQuality::All,
                 GalleryQuality::Prime,
@@ -183,14 +45,20 @@ impl GalleryFilters {
                 GalleryQuality::NeedsReview,
                 GalleryQuality::Local,
             ] {
-                ui.selectable_value(&mut self.quality, quality, quality.label())
+                ui.selectable_value(&mut filters.quality, quality, quality.label())
                     .on_hover_text(
                         "Filter quality or review status without replacing the content category",
                     );
             }
-        })
-        .on_hover_text("Filter quality or review status independently of type");
-        filter_choice(ui, "gallery_duration", 115.0, self.duration.label(), |ui| {
+        },
+    )
+    .on_hover_text("Filter quality or review status independently of type");
+    filter_choice(
+        ui,
+        "gallery_duration",
+        115.0,
+        filters.duration.label(),
+        |ui| {
             for duration in [
                 GalleryDuration::All,
                 GalleryDuration::UnderTwo,
@@ -198,112 +66,51 @@ impl GalleryFilters {
                 GalleryDuration::EightToThirty,
                 GalleryDuration::ThirtyPlus,
             ] {
-                ui.selectable_value(&mut self.duration, duration, duration.label())
+                ui.selectable_value(&mut filters.duration, duration, duration.label())
                     .on_hover_text("Filter by usable range length; each upper bound is exclusive");
             }
-        })
-        .on_hover_text("Find shorter inserts or longer usable takes");
-        if theme::ghost_button(ui, "Reset")
-            .on_hover_text("Clear clip filters and restore Best first; keep the selected source")
-            .clicked()
-        {
-            *self = Self::default();
-        }
+        },
+    )
+    .on_hover_text("Find shorter inserts or longer usable takes");
+    if theme::ghost_button(ui, "Reset")
+        .on_hover_text("Clear clip filters and restore Best first; keep the selected source")
+        .clicked()
+    {
+        *filters = GalleryFilters::default();
     }
-}
-
-#[derive(Default)]
-pub(super) struct CuratorGallery {
-    pub(super) open: bool,
-    pub(super) view: GalleryView,
-    pub(super) filters: GalleryFilters,
-    thumbnails: Option<GalleryThumbnails>,
 }
 
 impl EditorApp {
-    pub(super) fn open_curator_gallery(&mut self) {
-        self.set_playing(false);
-        self.curator.open = true;
-    }
-
-    pub(super) fn curator_candidate_refs(&self, scenes: bool) -> Vec<(usize, usize)> {
-        let mut refs = if scenes {
-            self.visible_scene_clips()
-        } else {
-            self.visible_sweep_candidates()
-        };
-        let query = self.curator.filters.search.to_lowercase();
-        let words: Vec<_> = query.split_whitespace().collect();
-        refs.retain(|(asset, clip)| {
-            let asset = &self.assets[*asset];
-            if self
-                .selected_asset
-                .as_ref()
-                .is_some_and(|path| *path != asset.info.path)
-            {
-                return false;
-            }
-            scenes
-                || self
-                    .curator
-                    .filters
-                    .matches(&asset.sweep.candidates[*clip], &words)
-        });
-        refs.sort_by(|(a_asset, a), (b_asset, b)| {
-            let (a, b) = if scenes {
-                (
-                    &self.assets[*a_asset].sweep.scene_clips[*a],
-                    &self.assets[*b_asset].sweep.scene_clips[*b],
-                )
-            } else {
-                (
-                    &self.assets[*a_asset].sweep.candidates[*a],
-                    &self.assets[*b_asset].sweep.candidates[*b],
-                )
-            };
-            let order = if scenes {
-                Ordering::Equal
-            } else {
-                self.curator.filters.sort.compare(a, b)
-            };
-            order
-                .then_with(|| a_asset.cmp(b_asset))
-                .then_with(|| a.source_in.total_cmp(&b.source_in))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        refs
-    }
-
     pub(super) fn gallery_content(&mut self, ui: &mut egui::Ui) {
-        let scenes = self.curator.view == GalleryView::Scenes;
+        let scenes = self.editor.curator.view == GalleryView::Scenes;
         // Row one picks what to browse: view and source, then search and
         // order beside them when they fit, or on their own row when not.
         let inline = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                if let Some(view) = theme::segmented(ui, self.curator.view, &[
+                if let Some(view) = theme::segmented(ui, self.editor.curator.view, &[
                     (GalleryView::Clips, "Clips", "Search and sort usable ranges and ranges needing review"),
                     (GalleryView::Scenes, "All scenes", "Every source shot, including rejected material; ignores Clip filters and stays in source order"),
                 ]) {
-                    self.curator.view = view;
+                    self.editor.curator.view = view;
                 }
-                let source = self.selected_asset.as_deref().and_then(|path| self.asset(path))
+                let source = self.editor.selected_asset.as_deref().and_then(|path| self.editor.asset(path))
                     .map(|asset| asset.info.name.as_str()).unwrap_or("All sources");
                 egui::ComboBox::from_id_salt("gallery_source")
                     .width(160.0)
                     .truncate()
                     .selected_text(source)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.selected_asset, None, "All sources")
+                        ui.selectable_value(&mut self.editor.selected_asset, None, "All sources")
                             .on_hover_text("Browse ranges from every imported source");
-                        for asset in &self.assets {
-                            ui.selectable_value(&mut self.selected_asset, Some(asset.info.path.clone()), &asset.info.name)
+                        for asset in &self.editor.assets {
+                            ui.selectable_value(&mut self.editor.selected_asset, Some(asset.info.path.clone()), &asset.info.name)
                                 .on_hover_text(&asset.info.path);
                         }
                     }).response.on_hover_text("Choose one source or search across every source");
                 let inline = ui.available_width() >= SEARCH_MIN + SORT_RESERVE;
                 if inline {
-                    search_and_sort(ui, &mut self.curator.filters, scenes);
+                    search_and_sort(ui, &mut self.editor.curator.filters, scenes);
                 }
                 inline
             })
@@ -312,15 +119,16 @@ impl EditorApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                search_and_sort(ui, &mut self.curator.filters, scenes);
+                search_and_sort(ui, &mut self.editor.curator.filters, scenes);
             });
         }
         ui.add_space(8.0);
 
         let compact = ui.available_width() < 720.0;
-        let running = self.assets.iter().any(|asset| {
+        let running = self.editor.assets.iter().any(|asset| {
             asset.sweep.status == SweepStatus::Running
                 && self
+                    .editor
                     .selected_asset
                     .as_ref()
                     .is_none_or(|path| *path == asset.info.path)
@@ -328,7 +136,7 @@ impl EditorApp {
         let mut add_all = false;
         // Row two narrows and acts: filters on the left; the count, music
         // policy and the one primary action on the right.
-        let refs = self.curator_candidate_refs(scenes);
+        let refs = self.editor.curator_candidate_refs(scenes);
         let count = format!(
             "{} {}{}",
             refs.len(),
@@ -362,8 +170,8 @@ impl EditorApp {
                 response.on_hover_text("Curating; results appear when it finishes");
             }
         };
-        let filters = &mut self.curator.filters;
-        let mute = &mut self.mute_music_beds;
+        let filters = &mut self.editor.curator.filters;
+        let mute = &mut self.editor.mute_music_beds;
         let filter_ui = |ui: &mut egui::Ui, filters: &mut GalleryFilters| {
             ui.add_enabled_ui(!scenes, |ui| {
                 if compact {
@@ -380,13 +188,13 @@ impl EditorApp {
                     } else {
                         format!("Filters ({active})")
                     };
-                    ui.menu_button(label, |ui| filters.controls(ui))
+                    ui.menu_button(label, |ui| filter_controls(filters, ui))
                         .response
                         .on_hover_text(
                             "Combine content type, quality, review status and duration filters",
                         );
                 } else {
-                    filters.controls(ui);
+                    filter_controls(filters, ui);
                 }
             });
         };
@@ -409,9 +217,9 @@ impl EditorApp {
         ui.add_space(6.0);
         if add_all {
             if scenes {
-                self.add_all_scene_clips();
+                self.editor.add_all_scene_clips();
             } else {
-                self.add_all_sweep_candidates();
+                self.editor.add_all_sweep_candidates();
             }
         }
         if refs.is_empty() {
@@ -419,9 +227,10 @@ impl EditorApp {
             ui.label(
                 RichText::new(if running {
                     "Results appear when curation finishes."
-                } else if !self.assets.iter().any(|asset| {
+                } else if !self.editor.assets.iter().any(|asset| {
                     asset.sweep.status == SweepStatus::Ready
                         && self
+                            .editor
                             .selected_asset
                             .as_deref()
                             .is_none_or(|path| path == asset.info.path)
@@ -433,12 +242,12 @@ impl EditorApp {
                 .color(theme::MUTED_FG),
             );
             if !scenes
-                && self.curator.filters != GalleryFilters::default()
+                && self.editor.curator.filters != GalleryFilters::default()
                 && theme::ghost_button(ui, "Reset filters")
                     .on_hover_text("Show every suggestion for this source again")
                     .clicked()
             {
-                self.curator.filters = GalleryFilters::default();
+                self.editor.curator.filters = GalleryFilters::default();
             }
             return;
         }
@@ -455,17 +264,16 @@ impl EditorApp {
             .min(fit_height);
         let card_height = card_width * 9.0 / 16.0 + 104.0;
         let thumbnails = self
-            .curator
-            .thumbnails
+            .gallery_thumbnails
             .get_or_insert_with(|| GalleryThumbnails::new(ui.ctx()));
         let mut add = None;
         let mut dismiss = None;
         egui::ScrollArea::vertical()
             .id_salt((
                 "curator_gallery",
-                self.curator.view,
-                &self.curator.filters,
-                &self.selected_asset,
+                self.editor.curator.view,
+                &self.editor.curator.filters,
+                &self.editor.selected_asset,
             ))
             .auto_shrink([false, false])
             .show_rows(ui, card_height, refs.len().div_ceil(columns), |ui, rows| {
@@ -473,7 +281,7 @@ impl EditorApp {
                 for row in rows {
                     ui.horizontal_top(|ui| {
                         for &(asset, clip) in refs.iter().skip(row * columns).take(columns) {
-                            let asset = &self.assets[asset];
+                            let asset = &self.editor.assets[asset];
                             let clip = if scenes {
                                 &asset.sweep.scene_clips[clip]
                             } else {
@@ -481,7 +289,7 @@ impl EditorApp {
                             };
                             let clashes = asset.info.has_video
                                 && Orientation::of(asset.info.width, asset.info.height)
-                                    != self.timeline.orientation;
+                                    != self.editor.timeline.orientation;
                             ui.push_id(&clip.id, |ui| {
                                 let (add_clip, dismiss_clip) = gallery_card(
                                     ui,
@@ -504,10 +312,10 @@ impl EditorApp {
                 }
             });
         if let Some(id) = add {
-            self.add_sweep_candidate(&id);
+            self.editor.add_sweep_candidate(&id);
         }
         if let Some(id) = dismiss {
-            self.dismiss_sweep_candidate(&id);
+            self.editor.dismiss_sweep_candidate(&id);
         }
     }
 }
@@ -568,24 +376,6 @@ fn filter_choice(
             .selected_text(label)
             .show_ui(ui, choices)
             .response
-    }
-}
-
-/// `M:SS.s` source position for card captions.
-fn clock(seconds: f64) -> String {
-    let tenths = (seconds.max(0.0) * 10.0).round() as u64;
-    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
-}
-
-fn category_label(category: &str) -> &str {
-    match category {
-        "all" => "All types",
-        "reaction" => "Reaction",
-        "talking" => "Talking",
-        "action" => "Action",
-        "broll" => "B-roll",
-        "establishing" => "Establishing",
-        other => other,
     }
 }
 
@@ -769,52 +559,4 @@ fn gallery_card(
             });
     });
     (add, dismiss)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn clip(score: f32, status: ReviewStatus, tags: &[&str]) -> SweepCandidate {
-        SweepCandidate {
-            id: format!("{score}"),
-            asset_path: "a.mp4".to_owned(),
-            asset_name: "a.mp4".to_owned(),
-            title: "a.mp4".to_owned(),
-            source_in: 0.0,
-            duration: 1.0,
-            score,
-            reason: String::new(),
-            stability: 0.9,
-            audio_energy: 0.1,
-            audio_peak: 0.1,
-            category: "broll".to_owned(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
-            motion_score: 0.3,
-            audio_score: 0.1,
-            music_bed: false,
-            visual: None,
-            has_video: true,
-            transcript: Vec::new(),
-            review: super::super::sweep::ClipReview {
-                status,
-                ..Default::default()
-            },
-            dismissed: false,
-        }
-    }
-
-    #[test]
-    fn best_first_puts_usable_picture_above_text_and_unreviewed_ranges() {
-        // The highest scores belong to the ranges that must sink.
-        let mut clips = vec![
-            clip(100.0, ReviewStatus::NeedsReview, &[]),
-            clip(95.0, ReviewStatus::Reviewed, &["on-screen-text"]),
-            clip(60.0, ReviewStatus::Reviewed, &[]),
-            clip(70.0, ReviewStatus::Local, &[]),
-        ];
-        clips.sort_by(|a, b| GallerySort::Score.compare(a, b));
-        let order: Vec<_> = clips.iter().map(|c| c.score).collect();
-        assert_eq!(order, vec![70.0, 60.0, 95.0, 100.0]);
-    }
 }

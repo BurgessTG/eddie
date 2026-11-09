@@ -139,7 +139,7 @@ pub const CLIP_HANDLE_BASE: u64 = 1 << 40;
 
 impl ScriptCommand {
     /// The clip this command targets, if any.
-    pub(crate) fn target_mut(&mut self) -> Option<&mut u64> {
+    pub fn target_mut(&mut self) -> Option<&mut u64> {
         match self {
             Self::SelectClip(id) | Self::DeleteClip(id) => Some(id),
             Self::SplitClip { clip, .. }
@@ -165,7 +165,7 @@ impl ScriptCommand {
 
     /// Replace a handle returned earlier in this batch with the clip its
     /// addition created. `created` maps handles to clip IDs.
-    pub(crate) fn resolve_handle(
+    pub fn resolve_handle(
         &mut self,
         created: &std::collections::HashMap<u64, u64>,
     ) -> Result<(), String> {
@@ -178,7 +178,7 @@ impl ScriptCommand {
     }
 
     /// Validate numeric inputs without changing finite values or clamping policy.
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         let finite = match self {
             Self::Seek(value)
             | Self::SplitClip { at: value, .. }

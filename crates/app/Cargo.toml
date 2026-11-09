@@ -14,16 +14,13 @@ path = "src/main.rs"
 # Local transcription on the GPU: whisper.cpp built with CUDA (needs the
 # CUDA toolkit) or Vulkan (needs Vulkan headers and glslc). Without either,
 # local transcription runs on the CPU and prefers large-v3-turbo.
-cuda = ["whisper-rs/cuda"]
-vulkan = ["whisper-rs/vulkan"]
+cuda = ["eddie-core/cuda"]
+vulkan = ["eddie-core/vulkan"]
 
 [dependencies]
+eddie-core = { path = "../core" }
 eframe = { version = "0.32", features = ["wgpu"] }
 openreel-engine = { path = "../engine" }
 openreel-media = { path = "../media" }
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
-rquickjs = "0.14"
-serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-whisper-rs = "0.16"
-ureq = { version = "3", features = ["multipart"] }

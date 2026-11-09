@@ -6,7 +6,7 @@
 //! only take timing from matched heard words, and unmatched words are
 //! interpolated and marked `estimated`, so they never become cut points.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use openreel_media::MediaInfo;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -28,19 +28,12 @@ const SNAP_SECONDS: f64 = 0.25;
 const MIN_KEEP_SECONDS: f64 = 0.04;
 
 /// The multilingual base model (`ggml-base.bin`): `EDDIE_WHISPER_MODEL`, or
-/// `whisper/ggml-base.bin` beside the settings file. Absent means no local
-/// alignment; curation keeps turn-level timing.
-pub(super) fn model_path() -> Option<PathBuf> {
+/// `ggml-base.bin` in `installed`, the user's model folder. Absent means no
+/// local alignment; curation keeps turn-level timing.
+pub fn model_path(installed: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("EDDIE_WHISPER_MODEL")
         .map(PathBuf::from)
-        // Tests stay deterministic even where a model is installed.
-        .or_else(|| {
-            if cfg!(test) {
-                return None;
-            }
-            crate::app::settings::config_path()
-                .and_then(|config| Some(config.parent()?.join("whisper/ggml-base.bin")))
-        })
+        .or_else(|| Some(installed?.join("ggml-base.bin")))
         .filter(|path| path.is_file())
 }
 
@@ -57,8 +50,9 @@ fn needs_alignment(turn: &TranscriptSegment) -> bool {
 
 /// Add word timing to every turn that needs it. Returns (aligned, candidates).
 /// A turn whose local hearing does not match keeps turn-level timing.
-pub(super) fn align_transcript(
+pub fn align_transcript(
     info: &MediaInfo,
+    model: Option<&Path>,
     transcript: &mut [TranscriptSegment],
 ) -> Result<(usize, usize), String> {
     let candidates: Vec<usize> = (0..transcript.len())
@@ -67,7 +61,7 @@ pub(super) fn align_transcript(
     if candidates.is_empty() {
         return Ok((0, 0));
     }
-    let path = model_path().ok_or("no local model")?;
+    let path = model.ok_or("no local model")?;
     whisper_rs::install_logging_hooks();
     let context = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
         .map_err(|error| format!("local model could not load: {error}"))?;
@@ -124,7 +118,7 @@ pub(super) fn align_transcript(
 
 /// Move each heard sentence break to the quietest 20 ms frame near it, so a
 /// cut there falls in the pause rather than on a word edge.
-pub(super) fn snap_breaks(words: &mut [TranscriptWord], pcm: &[f32], offset: f64) {
+pub fn snap_breaks(words: &mut [TranscriptWord], pcm: &[f32], offset: f64) {
     const FRAME: usize = SAMPLE_RATE / 50;
     for k in 0..words.len().saturating_sub(1) {
         if !ends_sentence(&words[k].text) || words[k].estimated || words[k + 1].estimated {
