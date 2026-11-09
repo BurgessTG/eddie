@@ -38,7 +38,7 @@ pub(super) fn model_path() -> Option<PathBuf> {
             if cfg!(test) {
                 return None;
             }
-            crate::app::chat::config_path()
+            crate::app::settings::config_path()
                 .and_then(|config| Some(config.parent()?.join("whisper/ggml-base.bin")))
         })
         .filter(|path| path.is_file())

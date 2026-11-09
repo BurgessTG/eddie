@@ -203,10 +203,8 @@ impl EditorApp {
         let media: Vec<String> = serde_json::from_value(value["media"].take()).unwrap_or_default();
         let saved_dir = value["projectDir"].as_str().map(PathBuf::from);
 
-        self.cancel_chat();
         self.set_playing(false);
-        self.chat_undo = None;
-        self.chat_settings.format = timeline.orientation;
+        self.settings.format = timeline.orientation;
         self.timeline = timeline;
         self.selected = None;
         self.playhead = 0.0;
@@ -327,9 +325,7 @@ impl EditorApp {
     /// An empty timeline and bin, in the current format. Files still
     /// importing or being curated stay so their work is not lost.
     fn new_project(&mut self) {
-        self.cancel_chat();
         self.set_playing(false);
-        self.chat_undo = None;
         self.timeline = Timeline::empty_project().with_orientation(self.timeline.orientation);
         self.history.reset(&self.timeline);
         self.saved_timeline = self.timeline.clone();

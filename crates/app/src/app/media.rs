@@ -848,8 +848,7 @@ impl EditorApp {
                                 count(asset.sweep.candidates.len(), "clip")
                             ),
                             _ => format!(
-                                "{} · {} · {}",
-                                if asset.sweep.usage.batches > 0 { "Reviewed" } else { "Local" },
+                                "{} · {}",
                                 count(asset.sweep.candidates.len(), "clip"),
                                 count(asset.sweep.scene_clips.len(), "scene")
                             ),
@@ -897,13 +896,13 @@ impl EditorApp {
                                 SweepStatus::NotStarted => Some((
                                     "Curate",
                                     true,
-                                    "Extract every shot and review useful ranges; Meta review sends sampled frames and audio when configured",
+                                    "Find every shot, transcribe speech and rank usable ranges, on this computer unless Speech uses a cloud provider",
                                 )),
                                 SweepStatus::Running => None,
                                 SweepStatus::Ready => Some((
                                     "Re-curate",
                                     false,
-                                    "Analyze again, for example after adding an API key",
+                                    "Analyze again, for example after changing the speech provider",
                                 )),
                                 SweepStatus::Failed => {
                                     Some(("Retry", false, "Try analyzing this video again"))

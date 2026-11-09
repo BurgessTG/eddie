@@ -2,7 +2,7 @@
 pkgname=eddie
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="The editor that watches the footage for you: a native Rust video editor with Meta's models built in"
+pkgdesc="The editor that watches the footage for you: a native Rust video editor that AI agents can drive"
 arch=('x86_64')
 url="https://github.com/BurgessTG/eddie"
 license=('MIT' 'Apache-2.0')

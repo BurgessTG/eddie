@@ -232,10 +232,10 @@ pub(super) const BINDINGS: &[Binding] = &[
         &[key(SHIFT, Key::Z)],
     ),
     anywhere(bind(
-        UiAction::FocusChat,
+        UiAction::OpenSettings,
         "View",
-        "Chat",
-        &[key(CMD, Key::K)],
+        "Settings",
+        &[key(CMD, Key::Comma)],
     )),
     anywhere(bind(
         UiAction::ShowShortcuts,
@@ -470,6 +470,9 @@ mod tests {
         assert_eq!(press(&ctx, NONE, Key::Space, true), None);
         assert_eq!(press(&ctx, CMD, Key::Z, true), None);
         assert_eq!(press(&ctx, CMD, Key::S, true), Some(UiAction::SaveProject));
-        assert_eq!(press(&ctx, CMD, Key::K, true), Some(UiAction::FocusChat));
+        assert_eq!(
+            press(&ctx, CMD, Key::Comma, true),
+            Some(UiAction::OpenSettings)
+        );
     }
 }

@@ -18,7 +18,6 @@ use crate::preview;
 use crate::scripting::{ScriptCommand, ScriptEngine};
 use crate::theme;
 
-pub(crate) mod chat;
 mod gallery;
 mod headless;
 pub(crate) use headless::cli_main;
@@ -28,14 +27,13 @@ mod media;
 mod project;
 #[cfg(test)]
 mod screenshot;
-pub(crate) mod session;
+mod settings;
 mod shortcuts;
 mod sweep;
 use crate::timeline_ui::{ClipVisual, TimelineView, VisualMap};
-use chat::{ChatSettings, ChatWorkerResult, PendingChat, TimelineSnapshot};
 use gallery::CuratorGallery;
 use media::{AssetState, BinAsset, ImportMsg};
-use session::ChatSession;
+use settings::Settings;
 use sweep::SweepMsg;
 
 const PREVIEW_W: u32 = 960;
@@ -96,17 +94,11 @@ enum UiAction {
     NextEdit,
     ToggleMagnet,
     Deselect,
-    FocusChat,
+    OpenSettings,
     ShowShortcuts,
     ShuttleReverse,
     ShuttleStop,
     ShuttleForward,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RightTab {
-    Chat,
-    Details,
 }
 
 pub struct EditorApp {
@@ -204,21 +196,11 @@ pub struct EditorApp {
     console_history: Vec<String>,
     console_history_idx: Option<usize>,
 
-    chat_settings: ChatSettings,
-    connection_check: Option<chat::PendingConnectionCheck>,
-    /// Last connection check for the current settings, shown in the dialog.
-    connection_result: Option<Result<(), String>>,
-    chat_session: ChatSession,
-    persist_session: bool,
+    settings: Settings,
     /// Saved curations; `None` keeps tests away from the user's config.
     curation_dir: Option<PathBuf>,
     /// Imports decode filmstrip thumbnails; the command line has no bin.
     make_thumbnails: bool,
-    chat_input: String,
-    chat_rx: Option<Receiver<(u64, ChatWorkerResult)>>,
-    chat_pending: Option<PendingChat>,
-    chat_generation: u64,
-    chat_undo: Option<TimelineSnapshot>,
     history: history::History,
     /// Where Save writes; set by Save as or Open.
     project_path: Option<PathBuf>,
@@ -231,17 +213,10 @@ pub struct EditorApp {
     file_dialog: Option<project::PendingFileDialog>,
     /// Set once the user chose to close without (or after) saving.
     allow_close: bool,
-    show_chat: bool,
-    right_tab: RightTab,
-    prev_selected: Option<ClipId>,
     /// Focus the Details text box next frame (monitor caption double-click).
     focus_title_text: bool,
-    /// Focus the chat input next frame (Ctrl+K).
-    focus_chat: bool,
     show_shortcuts: bool,
-    show_chat_settings: bool,
-    show_chat_debug: bool,
-    last_generated_js: String,
+    show_settings: bool,
 
     frame_ms_ema: f32,
     rss_mb: u64,
@@ -257,10 +232,10 @@ impl EditorApp {
             Ok(engine) => (Some(engine), vec!["Eddie JS. help()".to_owned()]),
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
-        let chat_settings = ChatSettings::load();
-        openreel_media::set_hardware_decode(chat_settings.hardware_decode);
+        let settings = Settings::load();
+        openreel_media::set_hardware_decode(settings.hardware_decode);
         openreel_media::warm_hardware_decode();
-        let timeline = Timeline::empty_project().with_orientation(chat_settings.format);
+        let timeline = Timeline::empty_project().with_orientation(settings.format);
         let saved_timeline = timeline.clone();
         Self {
             history: history::History::new(&timeline),
@@ -326,33 +301,18 @@ impl EditorApp {
             console_output,
             console_history: Vec::new(),
             console_history_idx: None,
-            chat_settings,
-            connection_check: None,
-            connection_result: None,
-            chat_session: ChatSession::load(),
-            persist_session: true,
+            settings,
             curation_dir: sweep::default_curation_dir(),
             make_thumbnails: true,
-            chat_input: String::new(),
-            chat_rx: None,
-            chat_pending: None,
-            chat_generation: 0,
-            chat_undo: None,
             project_path: None,
             saved_timeline,
             missing_media: Vec::new(),
             pending_discard: None,
             file_dialog: None,
             allow_close: false,
-            show_chat: true,
-            right_tab: RightTab::Chat,
-            prev_selected: None,
             focus_title_text: false,
-            focus_chat: false,
             show_shortcuts: false,
-            show_chat_settings: false,
-            show_chat_debug: false,
-            last_generated_js: String::new(),
+            show_settings: false,
             frame_ms_ema: 0.0,
             rss_mb: read_rss_mb(),
             frame_count: 0,
@@ -432,18 +392,9 @@ impl EditorApp {
             console_output,
             console_history: Vec::new(),
             console_history_idx: None,
-            chat_settings: ChatSettings::default(),
-            connection_check: None,
-            connection_result: None,
-            chat_session: ChatSession::new("screenshot"),
-            persist_session: false,
+            settings: Settings::default(),
             curation_dir: None,
             make_thumbnails: true,
-            chat_input: String::new(),
-            chat_rx: None,
-            chat_pending: None,
-            chat_generation: 0,
-            chat_undo: None,
             history: history::History::new(&Timeline::empty_project()),
             project_path: None,
             saved_timeline: Timeline::empty_project(),
@@ -451,15 +402,9 @@ impl EditorApp {
             pending_discard: None,
             file_dialog: None,
             allow_close: false,
-            show_chat: true,
-            right_tab: RightTab::Chat,
-            prev_selected: None,
             focus_title_text: false,
-            focus_chat: false,
             show_shortcuts: false,
-            show_chat_settings: false,
-            show_chat_debug: false,
-            last_generated_js: String::new(),
+            show_settings: false,
             frame_ms_ema: 0.0,
             rss_mb: read_rss_mb(),
             frame_count: 0,
@@ -1419,7 +1364,7 @@ impl EditorApp {
             .collect()
     }
 
-    /// The measured mix for scripts and chat: loudness before export's gain,
+    /// The measured mix for scripts: loudness before export's gain,
     /// what export will do to it, quiet stretches, and the mix's loudness
     /// while each audible clip plays.
     fn audio_report(&self) -> serde_json::Value {
@@ -1658,7 +1603,6 @@ impl EditorApp {
             UiAction::Undo => self.step_history(false),
             UiAction::Redo => self.step_history(true),
             UiAction::ClearTimeline => {
-                self.cancel_chat();
                 self.set_playing(false);
                 self.timeline =
                     Timeline::empty_project().with_orientation(self.timeline.orientation);
@@ -1733,11 +1677,7 @@ impl EditorApp {
                     self.selected = None;
                 }
             }
-            UiAction::FocusChat => {
-                self.show_chat = true;
-                self.right_tab = RightTab::Chat;
-                self.focus_chat = true;
-            }
+            UiAction::OpenSettings => self.show_settings = !self.show_settings,
             UiAction::ShowShortcuts => self.show_shortcuts = !self.show_shortcuts,
         }
     }
@@ -1838,13 +1778,16 @@ impl EditorApp {
                     "waveformPeaksPerSec": peaks_per_sec,
                     "silenceRanges": silence_ranges,
                     "tempo": a.beats.as_ref().map(|grid| (grid.bpm * 10.0).round() / 10.0),
+                    "utterances": sweep::utterances(&a.sweep.transcript)
+                        .into_iter()
+                        .map(|u| serde_json::json!({"start": u.start, "end": u.end, "text": u.text}))
+                        .collect::<Vec<_>>(),
                     "beats": a.beats.as_ref().map(|grid| {
                         grid.beats
                             .iter()
                             .map(|t| (t * 1000.0).round() / 1000.0)
                             .collect::<Vec<_>>()
                     }),
-                    "curationUsage": a.sweep.usage.json(),
                 })
             })
             .collect();
@@ -1912,7 +1855,7 @@ impl EditorApp {
                     .enumerate()
                     .map(|(index, segment)| {
                         serde_json::json!({
-                            "id": session::transcript_segment_id(&asset.info.path, index),
+                            "id": sweep::transcript_segment_id(&asset.info.path, index),
                             "asset": asset.info.path,
                             "assetName": asset.info.name,
                             "start": segment.start,
@@ -1956,6 +1899,80 @@ impl EditorApp {
         .to_string()
     }
 
+    /// Apply a script's commands as one edit: every command applies, or the
+    /// editor is restored (timeline, selection, transport, magnet, zoom and
+    /// music-bed policy). Files go through import and export, never a
+    /// script. Returns the notes and each handle's new clip ID.
+    fn apply_edit(
+        &mut self,
+        ctx: &egui::Context,
+        commands: Vec<ScriptCommand>,
+    ) -> Result<(Vec<String>, HashMap<String, ClipId>), String> {
+        for command in &commands {
+            if matches!(command, ScriptCommand::Import(_) | ScriptCommand::Export(_)) {
+                return Err("use import and export for files, not a script".to_owned());
+            }
+            command.validate()?;
+        }
+        let (timeline, selected, playhead) = (self.timeline.clone(), self.selected, self.playhead);
+        let was_playing = self.playing;
+        let magnet = self.timeline_view.magnet;
+        let zoom = self.timeline_view.px_per_sec;
+        let mute_music_beds = self.mute_music_beds;
+        let started = Instant::now();
+        let mut created = HashMap::new();
+        let result = (|| {
+            let mut notes = Vec::new();
+            for command in commands {
+                notes.extend(self.apply_script_command(ctx, command, &mut created)?);
+                // Finite input can still overflow frame-grid arithmetic.
+                if !self.playhead.is_finite()
+                    || self.timeline.clips.iter().any(|clip| {
+                        !clip.start.is_finite()
+                            || !clip.duration.is_finite()
+                            || !clip.source_in.is_finite()
+                            || !clip.end().is_finite()
+                    })
+                {
+                    return Err("edit exceeds the supported timeline range".to_owned());
+                }
+                // Cooperative bound: individual native commands are not
+                // preemptible, but a long finite batch cannot run unchecked.
+                if started.elapsed() > Duration::from_millis(250) {
+                    return Err("edit took too long; try a smaller batch".to_owned());
+                }
+            }
+            Ok(notes)
+        })();
+        let changed = self.timeline != timeline;
+        match result {
+            Ok(notes) => {
+                if changed {
+                    self.stop_sources();
+                    self.forget_stills();
+                }
+                let handles = created
+                    .into_iter()
+                    .map(|(handle, clip)| (handle.to_string(), clip))
+                    .collect();
+                Ok((notes, handles))
+            }
+            Err(error) => {
+                self.timeline = timeline;
+                self.selected = selected;
+                self.playhead = playhead;
+                self.playing = was_playing;
+                self.timeline_view.magnet = magnet;
+                self.timeline_view.px_per_sec = zoom;
+                self.mute_music_beds = mute_music_beds;
+                self.stop_sources();
+                self.last_now = None;
+                self.forget_stills();
+                Err(error)
+            }
+        }
+    }
+
     fn apply_script_commands(
         &mut self,
         ctx: &egui::Context,
@@ -1964,11 +1981,6 @@ impl EditorApp {
         let mut notes = Vec::new();
         let mut created = HashMap::new();
         for command in commands {
-            // Explicit console clears cancel old model replies even when
-            // the replacement timeline happens to reuse identical IDs.
-            if matches!(command, ScriptCommand::ClearTimeline) {
-                self.cancel_chat();
-            }
             match self.apply_script_command(ctx, command, &mut created) {
                 Ok(Some(note)) => notes.push(note),
                 Ok(None) => {}
@@ -2541,12 +2553,6 @@ impl EditorApp {
                     ui.menu_button("View", |ui| {
                         ui.checkbox(&mut self.show_media, "Media bin")
                             .on_hover_text("Show the media bin and curator card");
-                        ui.checkbox(&mut self.show_chat, "Chat")
-                            .on_hover_text(shortcuts::tip(
-                                ctx,
-                                "Show the chat tab in the right dock",
-                                UiAction::FocusChat,
-                            ));
                         ui.checkbox(&mut self.show_inspector, "Details")
                             .on_hover_text("Show the selected clip's details in the right dock");
                         ui.checkbox(&mut self.show_console, "JS console")
@@ -2620,6 +2626,16 @@ impl EditorApp {
                         {
                             action = Some(UiAction::Export);
                         }
+                        let tip = shortcuts::tip(
+                            ctx,
+                            "Settings: playback, speech and format",
+                            UiAction::OpenSettings,
+                        );
+                        if tool_icon_button(ui, ToolIcon::Settings, self.show_settings, &tip)
+                            .clicked()
+                        {
+                            action = Some(UiAction::OpenSettings);
+                        }
                     });
                 });
             });
@@ -2642,7 +2658,6 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     let busy = self.import_rx.is_some()
                         || self.export_rx.is_some()
-                        || self.chat_pending.is_some()
                         || self.sweep_rx.is_some();
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                     if busy {
@@ -2861,24 +2876,11 @@ impl EditorApp {
             });
     }
 
-    /// Right dock: Chat and Details (inspector) share one panel
-    /// with tabs, so the timeline keeps its full height. Selecting
-    /// a clip switches to Details; Cmd+K switches back to Chat.
+    /// Right dock: the selected clip's Details, beside the full-height
+    /// timeline.
     fn right_dock(&mut self, ctx: &egui::Context) {
-        if !self.show_chat && !self.show_inspector {
+        if !self.show_inspector {
             return;
-        }
-        if self.selected != self.prev_selected {
-            self.prev_selected = self.selected;
-            if self.selected.is_some() && self.show_inspector {
-                self.right_tab = RightTab::Details;
-            }
-        }
-        // Fall back when the active tab is hidden from the View menu.
-        match self.right_tab {
-            RightTab::Chat if !self.show_chat => self.right_tab = RightTab::Details,
-            RightTab::Details if !self.show_inspector => self.right_tab = RightTab::Chat,
-            _ => {}
         }
         egui::SidePanel::right("right_dock")
             .resizable(true)
@@ -2886,68 +2888,12 @@ impl EditorApp {
             .width_range(280.0..=460.0)
             .frame(theme::panel_frame())
             .show(ctx, |ui| {
-                let mut tabs = Vec::new();
-                if self.show_chat {
-                    tabs.push((RightTab::Chat, "Chat", "Chat editing. Cmd+K jumps here."));
-                }
-                if self.show_inspector {
-                    tabs.push((
-                        RightTab::Details,
-                        "Details",
-                        "Fine-grained numbers for the selected clip",
-                    ));
-                }
-                ui.horizontal(|ui| {
-                    if let Some(tab) = theme::segmented(ui, self.right_tab, &tabs) {
-                        self.right_tab = tab;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        if tool_icon_button(
-                            ui,
-                            ToolIcon::Settings,
-                            self.show_chat_settings,
-                            "Meta Model API settings",
-                        )
-                        .clicked()
-                        {
-                            self.show_chat_settings = !self.show_chat_settings;
-                        }
-                        if self.right_tab == RightTab::Chat {
-                            if tool_icon_button(
-                                ui,
-                                ToolIcon::Code,
-                                self.show_chat_debug,
-                                "Show the last generated JavaScript",
-                            )
-                            .clicked()
-                            {
-                                self.show_chat_debug = !self.show_chat_debug;
-                            }
-                            if self.chat_undo.is_some()
-                                && tool_icon_button(
-                                    ui,
-                                    ToolIcon::Undo,
-                                    false,
-                                    "Undo the last AI edit",
-                                )
-                                .clicked()
-                            {
-                                self.undo_chat_edit();
-                            }
-                        }
-                    });
-                });
+                theme::panel_title(ui, "Details");
                 ui.add_space(12.0);
-                match self.right_tab {
-                    RightTab::Chat => self.chat_content(ui, ctx),
-                    RightTab::Details => {
-                        egui::ScrollArea::vertical()
-                            .id_salt("inspector_scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| self.inspector_content(ui));
-                    }
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.inspector_content(ui));
             });
     }
 
@@ -3380,7 +3326,6 @@ impl EditorApp {
                     if title.double_clicked() {
                         self.selected = Some(title_id);
                         self.show_inspector = true;
-                        self.right_tab = RightTab::Details;
                         self.focus_title_text = true;
                     }
                 }
@@ -3570,7 +3515,6 @@ impl eframe::App for EditorApp {
                 egui::UserAttentionType::Informational,
             ));
         }
-        self.poll_chat(ctx);
         self.poll_sweeps(ctx);
         self.poll_file_dialog(ctx);
         mark("polls");
@@ -3596,7 +3540,7 @@ impl eframe::App for EditorApp {
         self.status_bar(ctx);
         self.console_panel(ctx);
         self.timeline_panel(ctx);
-        self.chat_settings_window(ctx);
+        self.settings_window(ctx);
         if let Some(a) = self.media_bin(ctx) {
             action = Some(a);
         }
@@ -3695,8 +3639,6 @@ enum ToolIcon {
     ZoomIn,
     ZoomOut,
     Settings,
-    Code,
-    Undo,
 }
 
 /// App mark (timeline-clip E with a playhead), drawn as shapes.
@@ -4002,26 +3944,6 @@ fn tool_icon_button(ui: &mut Ui, icon: ToolIcon, active: bool, tooltip: &str) ->
             }
             painter.circle_filled(c, 1.6, fg);
         }
-        ToolIcon::Code => {
-            painter.line_segment([c + Vec2::new(-3.0, -5.0), c + Vec2::new(-7.0, 0.0)], line);
-            painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(-3.0, 5.0)], line);
-            painter.line_segment([c + Vec2::new(3.0, -5.0), c + Vec2::new(7.0, 0.0)], line);
-            painter.line_segment([c + Vec2::new(7.0, 0.0), c + Vec2::new(3.0, 5.0)], line);
-            painter.line_segment([c + Vec2::new(1.5, -6.0), c + Vec2::new(-1.5, 6.0)], line);
-        }
-        ToolIcon::Undo => {
-            // Counter-clockwise arrow.
-            let arc: Vec<egui::Pos2> = (0..=14)
-                .map(|i| {
-                    let angle = std::f32::consts::PI * (1.1 - 1.3 * i as f32 / 14.0);
-                    c + Vec2::new(1.0 + 5.5 * angle.cos(), 1.5 - 5.5 * angle.sin())
-                })
-                .collect();
-            let start = arc[0];
-            painter.add(Shape::line(arc, line));
-            painter.line_segment([start, start + Vec2::new(0.5, -4.0)], line);
-            painter.line_segment([start, start + Vec2::new(4.0, 0.8)], line);
-        }
         ToolIcon::Title => {
             painter.text(
                 c,
@@ -4206,6 +4128,231 @@ fn transport_button(ui: &mut Ui, icon: TransportIcon, tooltip: &str) -> egui::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One script as one edit, the path `eddie run` (and later the live
+    /// server) takes: the request-time state, then every command or none.
+    mod script_edit_tests {
+        use super::*;
+
+        fn asset(path: &str, duration: f64, video: bool) -> BinAsset {
+            BinAsset {
+                info: openreel_media::MediaInfo {
+                    path: path.to_owned(),
+                    name: path.to_owned(),
+                    duration,
+                    width: if video { 320 } else { 0 },
+                    height: if video { 180 } else { 0 },
+                    fps: if video { 30.0 } else { 0.0 },
+                    has_video: video,
+                    has_audio: true,
+                },
+                size_bytes: 0,
+                state: AssetState::Ready,
+                peaks: Vec::new(),
+                beats: None,
+                thumb_textures: Vec::new(),
+                sweep: sweep::SweepData::default(),
+            }
+        }
+
+        fn run(app: &mut EditorApp, ctx: &egui::Context, code: &str) -> Result<String, String> {
+            let mut engine = ScriptEngine::new()?;
+            let (output, commands) = engine.eval_checked(code, &app.script_state_json())?;
+            app.apply_edit(ctx, commands)?;
+            Ok(output)
+        }
+
+        #[test]
+        fn a_cutaway_moved_to_lane_zero_shows_over_the_base_clip() {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless(&ctx);
+            app.assets.push(asset("talk.mp4", 20.0, true));
+            app.assets.push(asset("broll.mp4", 20.0, true));
+            run(
+                &mut app,
+                &ctx,
+                "var talk = addAssetRange('talk.mp4', 0, 0, 12); setClipLane(talk, 1); \
+                 var cut = addAssetRange('broll.mp4', 4, 2, 3); setClipLane(cut, 0); \
+                 setEmbeddedAudio(cut, false);",
+            )
+            .unwrap();
+            let shown =
+                |app: &EditorApp, t: f64| app.timeline.active_video(t).map(|c| c.name.clone());
+            assert_eq!(shown(&app, 2.0).as_deref(), Some("talk.mp4"));
+            assert_eq!(shown(&app, 5.0).as_deref(), Some("broll.mp4"));
+            assert_eq!(shown(&app, 8.0).as_deref(), Some("talk.mp4"));
+            let cut = app
+                .timeline
+                .clips
+                .iter()
+                .find(|c| c.name == "broll.mp4")
+                .unwrap();
+            assert!(!cut.embedded_audio);
+
+            // Split the base and move its right piece by handle.
+            run(
+                &mut app,
+                &ctx,
+                "var t = clips().filter(c => c.name == 'talk.mp4')[0].id; \
+                 var right = splitClip(t, 9); moveClip(right, 29);",
+            )
+            .unwrap();
+            let spans = |app: &EditorApp, name: &str| {
+                let mut found: Vec<_> = app
+                    .timeline
+                    .clips
+                    .iter()
+                    .filter(|c| c.name == name)
+                    .map(|c| (c.start, c.source_in, c.duck))
+                    .collect();
+                found.sort_by(|a, b| a.0.total_cmp(&b.0));
+                found
+            };
+            assert_eq!(
+                spans(&app, "talk.mp4"),
+                [(0.0, 0.0, false), (29.0, 9.0, false)]
+            );
+
+            // Music ducks by default; insertTime opens room on every lane.
+            let mut bed = asset("bed.mp3", 60.0, false);
+            bed.beats = Some(openreel_media::BeatGrid {
+                bpm: 120.0,
+                beats: vec![0.0, 0.5],
+            });
+            app.assets.push(bed);
+            run(
+                &mut app,
+                &ctx,
+                "addAssetRange('bed.mp3', 0, 0, 20); insertTime(2, 5);",
+            )
+            .unwrap();
+            assert_eq!(spans(&app, "bed.mp3"), [(0.0, 0.0, true), (7.0, 2.0, true)]);
+            assert_eq!(
+                spans(&app, "talk.mp4"),
+                [(0.0, 0.0, false), (7.0, 2.0, false), (34.0, 9.0, false)]
+            );
+            assert_eq!(spans(&app, "broll.mp4"), [(9.0, 2.0, false)]);
+        }
+
+        #[test]
+        fn additions_return_handles_for_later_commands() {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless(&ctx);
+            app.assets.push(asset("ready.mp4", 10.0, true));
+            let keep = app
+                .timeline
+                .add_clip("Keep", ClipKind::Title, 0, 0.0, 1.0, 0.0);
+            // A deleted clip makes "highest ID + 1" a wrong guess.
+            let gone = app
+                .timeline
+                .add_clip("Gone", ClipKind::Title, 0, 1.0, 1.0, 0.0);
+            app.timeline.remove_clip(gone);
+            run(
+                &mut app,
+                &ctx,
+                "var shot = addAssetRange('ready.mp4', 2, 0, 4); setFade(shot, 0, 1.5); \
+                 var card = addTitle('Card', 0, 1); moveClip(card, 6);",
+            )
+            .unwrap();
+            let find = |name: &str| app.timeline.clips.iter().find(|c| c.name == name).unwrap();
+            assert_eq!(
+                (find("ready.mp4").start, find("ready.mp4").fade_out),
+                (2.0, 1.5)
+            );
+            assert_eq!(find("Card").start, 6.0);
+            assert_eq!(app.timeline.clip(keep).unwrap().start, 0.0);
+        }
+
+        #[test]
+        fn a_failed_script_restores_the_entire_edit() {
+            for (state, failing_command) in [
+                (AssetState::Ready, "addAsset('missing.mp4', 0)"),
+                (AssetState::Ready, "addAssetRange('ready.mp4', 0, 11, 1)"),
+                (AssetState::Processing, "addAsset('ready.mp4', 0)"),
+                (AssetState::Ready, "moveClip(999, 4)"),
+                (
+                    AssetState::Ready,
+                    "addTitle('Overflow', Number.MAX_VALUE, 2)",
+                ),
+                (AssetState::Ready, "exportTo('/tmp/out.mp4')"),
+            ] {
+                let ctx = egui::Context::default();
+                let mut app = EditorApp::headless(&ctx);
+                let mut ready = asset("ready.mp4", 10.0, true);
+                ready.state = state;
+                app.assets.push(ready);
+                let id = app
+                    .timeline
+                    .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+                app.selected = Some(id);
+                app.playhead = 1.0;
+                app.playing = true;
+                let before = app.timeline.clone();
+                let zoom = app.timeline_view.px_per_sec;
+                let result = run(
+                    &mut app,
+                    &ctx,
+                    &format!(
+                        "deleteClip({id}); addTitle('Transient', 0, 2); pause(); seek(0); \
+                         setMagnet(false); setMusicBedMuted(false); setZoom(123); {failing_command}"
+                    ),
+                );
+                assert!(result.is_err(), "{failing_command}");
+                assert_eq!(app.timeline, before, "{failing_command}");
+                assert_eq!(app.selected, Some(id));
+                assert_eq!(app.playhead, 1.0);
+                assert!(app.playing);
+                assert!(app.timeline_view.magnet && app.mute_music_beds);
+                assert_eq!(app.timeline_view.px_per_sec, zoom);
+            }
+        }
+
+        #[test]
+        fn scripts_read_utterances_and_snap_ranges_out_of_them() {
+            let ctx = egui::Context::default();
+            let mut app = EditorApp::headless(&ctx);
+            let mut talk = asset("talk.mp4", 20.0, true);
+            let turn = |start: f64, end: f64, text: &str| sweep::TranscriptSegment {
+                start,
+                end,
+                speaker: Some("A".to_owned()),
+                text: text.to_owned(),
+                words: Vec::new(),
+                session: None,
+            };
+            talk.sweep.transcript = vec![
+                turn(1.0, 3.0, "First thought."),
+                turn(3.05, 4.0, "Still me"),
+                turn(6.0, 9.0, "And a second one."),
+            ];
+            app.assets.push(talk);
+            let output = run(
+                &mut app,
+                &ctx,
+                "const span = (r) => [r.start, r.end]; \
+                 return JSON.stringify([utterances('talk.mp4').map(span), \
+                 span(snapToSpeech('talk.mp4', 2, 7)), span(snapToSpeech('talk.mp4', 4.5, 5.5)), \
+                 span(snapToSpeech('talk.mp4', 0.95, 9.05)), span(snapToSpeech('talk.mp4', 3.5, 3.6))])",
+            )
+            .unwrap();
+            type Span = (f64, f64);
+            let (groups, inside, pause, handles, crowded): (Vec<Span>, Span, Span, Span, Span) =
+                serde_json::from_str(&output).unwrap();
+            // A finished thought is its own utterance even when the same
+            // speaker goes on 50 ms later.
+            assert_eq!(groups, [(1.0, 3.0), (3.05, 4.0), (6.0, 9.0)]);
+            // Both edges inside speech: out to the handles, never past a
+            // neighbour's edge.
+            let near = |a: Span, b: Span| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+            assert!(near(inside, (0.88, 9.12)), "{inside:?}");
+            // Already in a pause: unchanged.
+            assert_eq!(pause, (4.5, 5.5));
+            // Inside a handle only: widened to the full handle.
+            assert!(near(handles, (0.88, 9.12)), "{handles:?}");
+            // The lead-in handle stops at the previous utterance's end.
+            assert!(near(crowded, (3.0, 4.12)), "{crowded:?}");
+        }
+    }
 
     /// Generated sample media (video, music), made once per test run.
     fn sample_media() -> &'static [PathBuf] {
@@ -5233,7 +5380,6 @@ mod tests {
                 _ => None,
             })
             .expect("caption on the monitor");
-        assert_eq!(app.right_tab, RightTab::Chat);
         let click = |pressed| pointer_button(caption.x, caption.y, pressed);
         render(
             &mut app,
@@ -5245,7 +5391,6 @@ mod tests {
         );
         render(&mut app, vec![click(true), click(false)]);
         assert_eq!(app.selected, Some(title));
-        assert_eq!(app.right_tab, RightTab::Details);
         render(&mut app, Vec::new());
         render(&mut app, vec![egui::Event::Text(" now".into())]);
         assert_eq!(
@@ -5786,7 +5931,7 @@ mod tests {
 
     /// Full JS surface end to end, offline: queued imports of real
     /// downloads, local curator sweep, console JS building fast
-    /// cuts (the same eval + ScriptCommand path chat output uses),
+    /// cuts (the same eval + ScriptCommand path scripts use),
     /// then export. Ignored by default; needs /tmp/clips and
     /// /tmp/rockets populated.
     #[test]
@@ -5881,7 +6026,7 @@ mod tests {
         }
         assert!(total_candidates > 0, "curator produced candidates");
 
-        // The console path chat uses: eval JS, apply ScriptCommands.
+        // The console path: eval JS, apply ScriptCommands.
         app.run_console(
             &ctx,
             "var primes = sweepCandidates().filter(c => c.tags.includes('prime'));\n\
@@ -7955,35 +8100,6 @@ mod tests {
             assert!(!asset.sweep.scene_clips.is_empty(), "{}", asset.info.name);
         }
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn right_dock_switches_to_details_on_selection() {
-        let ctx = egui::Context::default();
-        let mut app = EditorApp::headless(&ctx);
-        let id = app
-            .timeline
-            .add_clip("a.mp4", ClipKind::Video, 0, 0.0, 5.0, 0.0);
-        let run_dock = |app: &mut EditorApp| {
-            let _ = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        Vec2::new(1200.0, 800.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    app.right_dock(ctx);
-                    egui::CentralPanel::default().show(ctx, |_| {});
-                },
-            );
-        };
-        run_dock(&mut app);
-        assert_eq!(app.right_tab, RightTab::Chat);
-        app.selected = Some(id);
-        run_dock(&mut app);
-        assert_eq!(app.right_tab, RightTab::Details);
     }
 
     #[test]

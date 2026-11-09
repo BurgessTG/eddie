@@ -13,7 +13,11 @@ const VERSION: u64 = 1;
 
 /// Where curations live for this config: `<config dir>/curation`.
 pub(in crate::app) fn default_dir() -> Option<PathBuf> {
-    Some(crate::app::chat::config_path()?.parent()?.join("curation"))
+    Some(
+        crate::app::settings::config_path()?
+            .parent()?
+            .join("curation"),
+    )
 }
 
 fn identity(path: &str) -> Option<(u64, u128)> {

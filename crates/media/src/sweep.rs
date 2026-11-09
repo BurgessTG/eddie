@@ -12,65 +12,6 @@ use std::process::Command;
 use crate::decode::VideoDecoder;
 use crate::{run, MediaInfo, MediaResult, RawFrame};
 
-/// Where segment visual evidence came from. `LocalProxy` is real
-/// frame analysis, but it is not a person, face, expression, or SAM
-/// mask detector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum VisualEvidenceSource {
-    LocalProxy,
-    Sam,
-}
-
-/// Availability of an actual subject-segmentation provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SubjectSegmentationStatus {
-    Unavailable,
-    Ready,
-    Error,
-}
-
-/// One provider-produced subject mask summary. Pixel masks stay
-/// inside the provider; ranking only needs coverage and location.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SubjectMaskEvidence {
-    pub coverage: f32,
-    pub center_x: f32,
-    pub center_y: f32,
-    pub confidence: f32,
-}
-
-/// In-process boundary for a future local segmentation runtime.
-/// The app's network SAM 3.1 client lives in app sweep code, where
-/// HTTP settings already belong. A provider must return `None`
-/// rather than invent a mask when it cannot analyze a frame.
-pub trait SubjectSegmentationProvider: Send {
-    fn status(&self) -> SubjectSegmentationStatus;
-    fn analyze(&mut self, frame: &RawFrame, time: f64) -> MediaResult<Option<SubjectMaskEvidence>>;
-}
-
-/// In-process fallback. Network SAM evidence is added by the app
-/// when a Meta API key is configured; this local provider has no
-/// runtime or weights, so it reports the gap.
-pub struct UnavailableSubjectSegmentation;
-
-impl SubjectSegmentationProvider for UnavailableSubjectSegmentation {
-    fn status(&self) -> SubjectSegmentationStatus {
-        SubjectSegmentationStatus::Unavailable
-    }
-
-    fn analyze(
-        &mut self,
-        _frame: &RawFrame,
-        _time: f64,
-    ) -> MediaResult<Option<SubjectMaskEvidence>> {
-        Ok(None)
-    }
-}
-
-pub fn sam_unavailable_reason() -> &'static str {
-    "SAM has not run for this range; subject evidence remains local proxies."
-}
-
 /// Per-frame local visual measurements at sweep resolution.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameVisualEvidence {
@@ -91,12 +32,11 @@ pub struct FrameVisualEvidence {
     pub skin_tone_ratio: f32,
 }
 
-/// Segment-level visual evidence passed to the curator. Semantic
-/// fields stay `None` until a real model supplies them.
+/// Segment-level visual evidence: measured proxies from frame analysis,
+/// not a person, face, expression or mask detector. Curations saved with
+/// the removed SAM fields still load; serde ignores them.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SegmentVisualEvidence {
-    pub source: VisualEvidenceSource,
-    pub sam_status: SubjectSegmentationStatus,
     /// Mean foreground area from frame differencing.
     pub subject_coverage: f32,
     pub subject_center_x: Option<f32>,
@@ -109,26 +49,6 @@ pub struct SegmentVisualEvidence {
     pub luminance: f32,
     pub contrast: f32,
     pub skin_tone_ratio: f32,
-    pub sam_mask_coverage: Option<f32>,
-    pub sam_mask_center_x: Option<f32>,
-    pub sam_mask_center_y: Option<f32>,
-    /// Largest SAM person box on the representative still. Eddie
-    /// does not yet decode SAM's arithmetic-coded mask payload, so
-    /// box evidence stays distinct from mask coverage above.
-    pub sam_box_coverage: Option<f32>,
-    pub sam_box_center_x: Option<f32>,
-    pub sam_box_center_y: Option<f32>,
-    pub sam_confidence: Option<f32>,
-    pub sam_object_count: Option<usize>,
-    pub sam_face_box_coverage: Option<f32>,
-    pub sam_face_box_center_x: Option<f32>,
-    pub sam_face_box_center_y: Option<f32>,
-    pub sam_face_confidence: Option<f32>,
-    pub sam_face_count: Option<usize>,
-    pub sam_frame_time: Option<f64>,
-    pub sam_error: Option<String>,
-    pub face_present: Option<bool>,
-    pub expression: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -440,8 +360,6 @@ fn aggregate_visual_evidence(
     };
 
     Some(SegmentVisualEvidence {
-        source: VisualEvidenceSource::LocalProxy,
-        sam_status: SubjectSegmentationStatus::Unavailable,
         subject_coverage: mean(&|visual| visual.foreground_coverage),
         subject_center_x,
         subject_center_y,
@@ -455,23 +373,6 @@ fn aggregate_visual_evidence(
         luminance: mean(&|visual| visual.luminance),
         contrast: mean(&|visual| visual.contrast),
         skin_tone_ratio: mean(&|visual| visual.skin_tone_ratio),
-        sam_mask_coverage: None,
-        sam_mask_center_x: None,
-        sam_mask_center_y: None,
-        sam_box_coverage: None,
-        sam_box_center_x: None,
-        sam_box_center_y: None,
-        sam_confidence: None,
-        sam_object_count: None,
-        sam_face_box_coverage: None,
-        sam_face_box_center_x: None,
-        sam_face_box_center_y: None,
-        sam_face_confidence: None,
-        sam_face_count: None,
-        sam_frame_time: None,
-        sam_error: None,
-        face_present: None,
-        expression: None,
     })
 }
 
@@ -1642,27 +1543,8 @@ mod tests {
             .visual
             .as_ref()
             .expect("video segment carries visual evidence");
-        assert_eq!(evidence.source, VisualEvidenceSource::LocalProxy);
-        assert_eq!(evidence.sam_status, SubjectSegmentationStatus::Unavailable);
         assert!((evidence.subject_coverage - 0.25).abs() < 0.001);
         assert!((evidence.subject_center_x.expect("center x") - 0.5).abs() < 0.001);
-        assert!(evidence.face_present.is_none());
-        assert!(evidence.expression.is_none());
-    }
-
-    #[test]
-    fn unavailable_subject_provider_never_fakes_a_mask() {
-        let mut provider = UnavailableSubjectSegmentation;
-        assert_eq!(provider.status(), SubjectSegmentationStatus::Unavailable);
-        let frame = crate::RawFrame {
-            width: 2,
-            height: 2,
-            rgba: vec![0; 16],
-        };
-        assert!(provider
-            .analyze(&frame, 0.0)
-            .expect("provider reports unavailable cleanly")
-            .is_none());
     }
 
     #[test]

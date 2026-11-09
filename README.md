@@ -4,14 +4,16 @@
 
 [![CI](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml/badge.svg)](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml)
 
-A fast desktop video editor with an AI clip curator. Rust end to end:
+A fast desktop video editor that AI agents can drive. Rust end to end:
 `egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for playback,
 and the FFmpeg CLI tools for probing and export.
 
-Import footage, let the curator break it into every shot and the moments
-worth using, then cut those ranges together on a free-form timeline and
-export an H.264/AAC MP4. You can also edit by chat or from a sandboxed
-JavaScript console.
+Import footage, let the curator break it into every shot with its
+transcript, then cut those ranges together on a free-form timeline and
+export an H.264/AAC MP4. There is no AI inside: any agent (Claude Code,
+Codex, Amp, your own script) edits through the `eddie` command line and a
+sandboxed JavaScript API, and you keep editing by hand in the window. See
+[docs/agents.md](docs/agents.md).
 
 ## Features
 
@@ -32,8 +34,8 @@ JavaScript console.
   next cut's first picture is prerolled so short clips play through.
 - Titles and generated captions in four styles, identical in preview and
   export. Remove silence tightens pauses out of speech.
-- Undo/redo covers every timeline edit, whether made by hand, in Details,
-  in the console or by chat.
+- Undo/redo covers every timeline edit, whether made by hand, in Details
+  or in the console.
 - Projects (`.eddie`) store the timeline and media paths. Footage moved
   with its project is found again; anything else is relinked with File →
   Locate missing media.
@@ -42,29 +44,26 @@ JavaScript console.
 **Curator**
 
 Select a video and press **Curate**. Curation never runs on import, and
-results are saved per file.
+results are saved per file. It runs on this computer:
 
-- **Local analysis, always:** every frame is checked for scene cuts, with
-  flashes, objects passing the lens and lighting changes rejected. You get
-  a complete list of shots plus ranked suggestions.
-- **With a Meta Model API key:** the selected model reviews frames and the
-  transcript in 24-second windows, picks useful ranges inside each shot,
-  and can ask SAM 3.1 to track a subject. Edges are then checked against
-  the source pictures frame by frame, and speech keeps complete thoughts.
+- Every frame is checked for scene cuts, with flashes, objects passing the
+  lens and lighting changes rejected. You get a complete list of shots
+  plus ranked suggestions.
+- Speech is transcribed with the provider in Settings → Speech (local
+  whisper by default) and grouped into utterances, so cuts can keep
+  complete thoughts.
 - Every range gets a category (`reaction`, `talking`, `action`, `broll`,
-  `establishing`), tags, quality scores and a review status. Anything the
-  model could not validate stays available as **Needs review**.
-- **Gallery:** search names, tags, review notes and transcripts; filter by
-  type, quality and duration. **Add shown** appends exactly what is
-  displayed. **All scenes** shows every shot, rejected ones included.
+  `establishing`), tags and quality scores, all measured, not judged.
+- **Gallery:** search names, tags and transcripts; filter by type, quality
+  and duration. **Add shown** appends exactly what is displayed. **All
+  scenes** shows every shot.
 
-**Chat and scripting**
+**Scripting**
 
-- Chat (right dock) turns typed requests into edits. It shows what it's
-  doing while it works and can be cancelled. Each AI edit undoes in one
-  click, and a failed batch rolls back completely.
 - The JS console (View → JS console) runs QuickJS with memory and time
   limits and no filesystem or OS access. Run `help()` for the API.
+- `eddie run` runs the same API from the command line as one edit that
+  rolls back completely if any part fails.
 
 ## Requirements
 
@@ -74,9 +73,8 @@ results are saved per file.
   whisper.cpp).
 - Runtime: `ffmpeg` and `ffprobe` 9 on `PATH`; ALSA (or PipeWire/Pulse
   through ALSA) for sound.
-- Optional: a Meta Model API key for model review, transcription and SAM.
-  Without one, curation runs locally and chat needs a keyless localhost
-  endpoint.
+- Optional: a key for a cloud transcription provider (Meta Voice
+  Transcribe or any OpenAI-compatible API). Local transcription needs none.
 - For transcription: a whisper.cpp model in `whisper/` beside the settings
   file (or `EDDIE_WHISPER_DIR`), from
   [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
@@ -106,10 +104,8 @@ The last command generates test media into `samples/`. CI runs formatting
 and the engine tests only; the media and app suites need FFmpeg 9 and run
 locally.
 
-Open Settings with the gear in the right dock to set the API key, base URL
-(`https://api.meta.ai/v1` by default), model (`muse-wonder-1.0`, the
-default, or `muse-spark-1.3`) and format. **Check connection** validates
-the key and model without running inference.
+Open Settings with the gear beside Export (Ctrl+,) for hardware decode,
+the speech provider and the project format.
 
 ### Install on Arch
 
@@ -152,6 +148,8 @@ transcribed once unless you pass `--force`; Curate uses the same ones.
 console), as one edit: every command applies, or none does. It prints the
 script's `return` value, `console.log` lines, the clip IDs its handles
 became, and the inspection findings the edit introduced.
+[docs/agents.md](docs/agents.md) is the guide for agents: the API, the
+time grammar, and the rules that keep edits from going wrong.
 
 ## Shortcuts
 
@@ -172,7 +170,7 @@ macOS.
 | Ctrl+= / Ctrl+- / Shift+Z | Zoom in / out / fit timeline |
 | Ctrl+N / O / S | New / open / save project |
 | Ctrl+I / Ctrl+E | Import media / export MP4 |
-| Ctrl+K | Focus chat |
+| Ctrl+, | Settings |
 
 ## Layout
 
@@ -180,7 +178,7 @@ macOS.
 | --- | --- |
 | `crates/engine` (`openreel-engine`) | UI-independent timeline model: lanes, linked clips, edits, titles, timecode. |
 | `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview, audio mixer, scene detection, waveforms, thumbnails, export. |
-| `crates/app` (`openreel-app`, binary `eddie`) | egui app: media bin, timeline, monitor, gallery, curator, chat, QuickJS console. |
+| `crates/app` (`openreel-app`, binary `eddie`) | egui app and `eddie` command line: media bin, timeline, monitor, gallery, curator, transcription, QuickJS console. |
 
 ## Limitations
 
@@ -188,12 +186,11 @@ macOS.
   Proper nouns it can't know (product names) may be misspelled.
 - Meta's ASR returns speaker turns only. Without `ggml-base.bin`, its
   speech edges are turn-level.
-- SAM mask payloads are not decoded; subject evidence uses boxes only.
-- Burned-in text (title cards, news bars) is tagged by the model, not
-  detected locally, so local-only curation can't exclude it.
-- Model curation is slow: several passes per review window. Model scores
-  and sparse frame sampling are suggestions, not proof that every good
-  moment was found.
+- Burned-in text (title cards, news bars) is not detected, so curation
+  can't exclude it. Curations saved by the removed model reviewer keep
+  their `on-screen-text` tags.
+- Curator scores and categories are measurements (motion, sound, speech),
+  not editorial judgment. That judgment is the agent's or yours.
 - Undo history is not saved with a project.
 - Sound-card output latency is not compensated.
 

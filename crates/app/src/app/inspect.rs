@@ -1,6 +1,7 @@
-//! Timeline checks the chat agent reads (`inspect()`) and receives after
-//! each edit, with a contact sheet of the program, so it can see what its
-//! edit produced. Measured facts about the timeline, not taste.
+//! Timeline checks scripts and agents read (`inspect()`, `eddie inspect`):
+//! measured facts about the timeline, not taste. The contact sheet and
+//! source strip helpers below were the removed edit check's pictures; they
+//! are kept, tested, for the planned `eddie sheet` and `eddie strip`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,6 +12,7 @@ use serde::Serialize;
 
 use super::media::BinAsset;
 
+#[allow(dead_code)]
 /// At most this many contact sheet cells; more shots are sampled evenly.
 const SHEET_CELLS: usize = 16;
 
@@ -280,13 +282,17 @@ pub(super) fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> 
     findings
 }
 
+#[allow(dead_code)]
 /// Pictures sampled per source in a check's source strip.
 pub(super) const STRIP_CELLS: usize = 16;
+#[allow(dead_code)]
 /// At most this many sources get a strip, in program order.
 const STRIP_SOURCES: usize = 3;
+#[allow(dead_code)]
 /// Longer uncurated sources are not scanned for shots at check time.
 const STRIP_SCAN_LIMIT: f64 = 600.0;
 
+#[allow(dead_code)]
 /// Sources sampled whole, so a check can see where a described shot
 /// actually is instead of guessing a source time.
 pub(super) struct SourceStrip {
@@ -296,6 +302,7 @@ pub(super) struct SourceStrip {
     pub(super) legend: Vec<String>,
 }
 
+#[allow(dead_code)]
 pub(super) struct StripSource {
     tag: String,
     info: openreel_media::MediaInfo,
@@ -307,6 +314,7 @@ pub(super) struct StripSource {
     store: Option<std::path::PathBuf>,
 }
 
+#[allow(dead_code)]
 impl StripSource {
     /// The source's shots: curated scenes, else cuts detected in its
     /// picture (cached per file; this decodes the whole file at 64 px, so
@@ -406,11 +414,14 @@ impl StripSource {
     }
 }
 
+#[allow(dead_code)]
 /// Mean luminance (0..1) under which a strip picture counts as black.
 const BLACK_LUMINANCE: f32 = 0.06;
+#[allow(dead_code)]
 /// Black this long inside a detected shot becomes its own shot.
 const BLACK_RUN: f64 = 0.25;
 
+#[allow(dead_code)]
 /// Split detected shots where they enter or leave a black run. Scene
 /// detection deliberately keeps flashes and dark frames inside a shot, so
 /// a card that hard-cuts to black read as one shot and a fix spanning
@@ -462,10 +473,12 @@ fn split_at_black(
     split
 }
 
+#[allow(dead_code)]
 /// At most this many shots get a picture, so the longest shots keep spare
 /// pictures; a merged shot (a fade between two views) then shows both.
 const STRIP_SHOTS: usize = 12;
 
+#[allow(dead_code)]
 /// Sample times through a source and the shots they fall in, in source
 /// order. Up to `STRIP_SHOTS` of the longest shots get one picture each; the
 /// rest go to the pictured shots with the most time per picture, spread
@@ -510,6 +523,7 @@ fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<(f64, (f64, f
         .collect()
 }
 
+#[allow(dead_code)]
 /// A strip source for each source whose visible picture the edit placed
 /// or changed, at most `STRIP_SOURCES`, in program order.
 pub(super) fn source_strip(
@@ -597,6 +611,7 @@ pub(super) fn source_strip(
     strip
 }
 
+#[allow(dead_code)]
 /// One cell per visible shot (sampled evenly beyond `SHEET_CELLS`), each
 /// at the middle of its stretch, labelled with its time and clip.
 pub(super) fn sheet_cells(timeline: &Timeline) -> Vec<SheetCell> {

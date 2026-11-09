@@ -10,11 +10,7 @@ description = "OpenReel desktop video editor (egui + wgpu)"
 name = "eddie"
 path = "src/main.rs"
 
-# Dev-only test harness (src/dev_harness.rs). The feature only enables
-# extra #[cfg(test)] code that shells out to `muse exec`; it adds no
-# dependencies and no code to any non-test build, release included.
 [features]
-dev-harness = []
 # Local transcription on the GPU: whisper.cpp built with CUDA (needs the
 # CUDA toolkit) or Vulkan (needs Vulkan headers and glslc). Without either,
 # local transcription runs on the CPU and prefers large-v3-turbo.

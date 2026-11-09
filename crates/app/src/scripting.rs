@@ -345,9 +345,30 @@ function sceneClips() { return state().sceneClips || []; }
 function transcriptSegments() { return state().transcriptSegments || []; }
 function inspect() { return state().inspection || []; }
 function audioReport() { return state().audio || { status: "silent" }; }
+function __asset(nameOrPath) {
+  const a = assets().find((x) => x.path === String(nameOrPath) || x.name === String(nameOrPath));
+  if (!a) throw new Error("no asset " + nameOrPath);
+  return a;
+}
+function utterances(nameOrPath) { return __asset(nameOrPath).utterances || []; }
+function snapToSpeech(nameOrPath, start, end, handle) {
+  const a = __asset(nameOrPath);
+  const u = a.utterances || [];
+  const h = handle === undefined ? 0.12 : handle;
+  let s = start, e = end;
+  for (let i = 0; i < u.length; i++) {
+    const before = i > 0 ? u[i - 1].end : 0;
+    const after = i + 1 < u.length ? u[i + 1].start : a.duration;
+    if (u[i].start - h < s && s < u[i].end - 0.05) s = Math.max(u[i].start - h, before, 0);
+    if (u[i].start + 0.05 < e && e < u[i].end + h) e = Math.min(u[i].end + h, after, a.duration);
+  }
+  return { start: s, end: e };
+}
 function help() {
   return [
     "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect() audioReport()",
+    "utterances(asset)  // [{start,end,text}] speech that should not be cut inside",
+    "snapToSpeech(asset, start, end, handle?)  // {start,end} widened out of any utterance, 0.12s handles",
     "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' (request-time clips); time(spec) timeRange('a..b' | 'clip:7')",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
@@ -696,7 +717,7 @@ impl ScriptEngine {
         (output, commands)
     }
 
-    /// Evaluate for chat in a fresh runtime and context. Global assignments
+    /// Evaluate for `eddie run` in a fresh runtime and context. Global assignments
     /// and prototype changes cannot affect the REPL or later requests.
     /// Keep the function wrapper for top-level declarations and `return`.
     /// On a JavaScript error the queued commands are discarded, so

@@ -1,9 +1,6 @@
-//! Explicit curation: complete shot inventory, Muse Voice Transcribe,
-//! and timestamped visual review of all source ranges.
-//!
-//! SAM tracks requested visual concepts before the final editorial decision.
-//! Its source-timed boxes and detail crops inform the reviewer, not a separate
-//! quality bonus. Mask coverage and expressions remain unknown.
+//! Curation: the complete shot inventory of a file, its transcript, and
+//! ranked local suggestions, all measured on this computer (transcription
+//! may use a cloud provider). Agents and scripts make the editorial calls.
 
 use std::sync::mpsc::{channel, TryRecvError};
 use std::sync::Arc;
@@ -11,37 +8,30 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use openreel_media::{
-    MediaInfo, SegmentVisualEvidence, SubjectSegmentationStatus, SweepSegment, VisualEvidenceSource,
-};
+use openreel_media::{MediaInfo, SegmentVisualEvidence, SweepSegment};
 use serde::{Deserialize, Serialize};
 
-use super::chat::{api_endpoint, api_error_for_status, check_model_connection};
 use super::media::AssetState;
-use super::{ChatSettings, EditorApp};
+use super::EditorApp;
 
 mod align;
-mod curation;
-#[cfg(test)]
-mod curation_tests;
+mod speech;
 mod store;
-mod subjects;
 pub(super) mod transcribe;
-pub(super) use curation::{ClipReview, ReviewStatus, ReviewUsage};
+pub(super) use speech::utterances;
 pub(super) use store::{
     default_dir as default_curation_dir, load as load_curation, load_shots, load_transcript,
     save_shots,
 };
 
-const SAM_MODEL: &str = "sam-3.1";
-
 /// Clip type stays distinct from the app-assigned `prime` quality tag.
 pub(super) const CURATOR_CATEGORIES: [&str; 5] =
     ["reaction", "talking", "action", "broll", "establishing"];
 
-/// Controlled tag vocabulary. Local classification derives these
-/// from measured signals; model tags are validated against the
-/// same list so chat prompts can filter on stable words.
+/// Controlled tag vocabulary. Local classification derives a subset from
+/// measured signals; curations saved by the removed model reviewer can
+/// carry the rest, so scripts can filter on stable words.
+#[allow(dead_code)] // Read by the classifier's vocabulary test.
 pub(super) const CURATOR_TAGS: [&str; 27] = [
     "prime",
     "speech",
@@ -72,10 +62,6 @@ pub(super) const CURATOR_TAGS: [&str; 27] = [
     "on-screen-text",
 ];
 
-fn is_model_tag(tag: &str) -> bool {
-    CURATOR_TAGS.contains(&tag) && tag != "prime" && tag != "face-visible"
-}
-
 /// A mixed music bed (finished montages, scored footage) keeps
 /// nearly every audio bucket audible. This is only a hint: continuous
 /// speech can do the same, so it must not gate transcription.
@@ -87,10 +73,9 @@ fn is_music_bed(segment: &SweepSegment) -> bool {
 /// only at or above `PRIME_MIN_SCORE`.
 const PRIME_SHARE: f32 = 0.2;
 const PRIME_MIN_SCORE: f32 = 75.0;
-const SPEECH_HANDLE_SECONDS: f64 = 0.12;
 
-/// Files curated at once. Review mostly waits on the provider, but local
-/// shot analysis decodes every frame, so weak machines stay at one.
+/// Files curated at once. Shot analysis decodes every frame, so weak
+/// machines stay at one.
 fn parallel_sweeps() -> usize {
     thread::available_parallelism().map_or(1, |cores| (cores.get() / 4).clamp(1, 3))
 }
@@ -168,16 +153,6 @@ impl TranscriptSegment {
         seconds >= AMBIENT_MIN_SECONDS
             && (self.text.chars().filter(|c| c.is_alphanumeric()).count() as f64)
                 < AMBIENT_LETTERS_PER_SECOND * seconds
-    }
-
-    fn reaches_internal_asr_edge(&self, source_end: f64) -> bool {
-        self.session.as_ref().is_some_and(|session| {
-            (session.start > 0.0 && self.start <= session.start + SPEECH_HANDLE_SECONDS)
-                || session.end.is_some_and(|end| {
-                    end < source_end - SPEECH_HANDLE_SECONDS
-                        && self.end >= end - SPEECH_HANDLE_SECONDS
-                })
-        })
     }
 }
 
@@ -484,26 +459,7 @@ impl SweepCandidate {
     /// a centered, comparatively still foreground raises it. This
     /// does not claim lip movement or active-speaker detection.
     pub(super) fn talking_score(&self) -> f32 {
-        let base = talking_score(!self.transcript.is_empty(), self.visual.as_ref());
-        if self.transcript.is_empty() {
-            return base;
-        }
-        let Some(visual) = self.visual.as_ref() else {
-            return base;
-        };
-        if visual.face_present != Some(true) {
-            return base;
-        }
-        let center_factor = match (visual.sam_face_box_center_x, visual.sam_face_box_center_y) {
-            (Some(x), Some(y)) => {
-                let distance = ((x - 0.5).powi(2) + (y - 0.5).powi(2)).sqrt();
-                (1.0 - distance / std::f32::consts::FRAC_1_SQRT_2).clamp(0.0, 1.0)
-            }
-            _ => 0.5,
-        };
-        let confidence = visual.sam_face_confidence.unwrap_or(0.75);
-        base.max(0.7 + 0.3 * center_factor * confidence)
-            .clamp(0.0, 1.0)
+        talking_score(!self.transcript.is_empty(), self.visual.as_ref())
     }
 
     pub(super) fn visual_json(&self) -> serde_json::Value {
@@ -511,7 +467,7 @@ impl SweepCandidate {
     }
 
     pub(super) fn review_json(&self) -> serde_json::Value {
-        let mut review = self.review.json(self.source_in, self.end());
+        let mut review = self.review.json();
         review["speech"] = serde_json::json!(self
             .transcript
             .iter()
@@ -564,28 +520,14 @@ fn talking_score(has_speech: bool, visual: Option<&SegmentVisualEvidence>) -> f3
     .clamp(0.0, 1.0)
 }
 
-/// Stable evidence shape shared by model ranking, JS state, and
-/// chat. Unknown semantic values serialize as JSON `null`.
+/// Stable evidence shape for scripts. Every value is a measured proxy from
+/// local frame analysis, not a person, face or expression detector.
 pub(super) fn visual_evidence_json(
     visual: Option<&SegmentVisualEvidence>,
     talking_score: f32,
 ) -> serde_json::Value {
     match visual {
         Some(visual) => serde_json::json!({
-            "source": match visual.source {
-                VisualEvidenceSource::LocalProxy => "local-proxy",
-                VisualEvidenceSource::Sam => "sam",
-            },
-            "samStatus": match visual.sam_status {
-                SubjectSegmentationStatus::Unavailable => "unavailable",
-                SubjectSegmentationStatus::Ready => "ready",
-                SubjectSegmentationStatus::Error => "error",
-            },
-            "samUnavailableReason": if visual.sam_status == SubjectSegmentationStatus::Unavailable {
-                openreel_media::sam_unavailable_reason()
-            } else {
-                ""
-            },
             "subjectCoverage": visual.subject_coverage,
             "subjectCenter": {
                 "x": visual.subject_center_x,
@@ -597,35 +539,9 @@ pub(super) fn visual_evidence_json(
             "luminance": visual.luminance,
             "contrast": visual.contrast,
             "skinToneRatio": visual.skin_tone_ratio,
-            "samMaskCoverage": visual.sam_mask_coverage,
-            "samMaskCenter": {
-                "x": visual.sam_mask_center_x,
-                "y": visual.sam_mask_center_y,
-            },
-            "samBoxCoverage": visual.sam_box_coverage,
-            "samBoxCenter": {
-                "x": visual.sam_box_center_x,
-                "y": visual.sam_box_center_y,
-            },
-            "samConfidence": visual.sam_confidence,
-            "samObjectCount": visual.sam_object_count,
-            "samFaceBoxCoverage": visual.sam_face_box_coverage,
-            "samFaceBoxCenter": {
-                "x": visual.sam_face_box_center_x,
-                "y": visual.sam_face_box_center_y,
-            },
-            "samFaceConfidence": visual.sam_face_confidence,
-            "samFaceCount": visual.sam_face_count,
-            "samFrameTime": visual.sam_frame_time,
-            "samError": visual.sam_error,
-            "facePresent": visual.face_present,
-            "expression": visual.expression,
             "talkingScore": talking_score,
         }),
         None => serde_json::json!({
-            "source": "none",
-            "samStatus": "unavailable",
-            "samUnavailableReason": openreel_media::sam_unavailable_reason(),
             "subjectCoverage": null,
             "subjectCenter": {"x": null, "y": null},
             "subjectMotion": null,
@@ -634,23 +550,51 @@ pub(super) fn visual_evidence_json(
             "luminance": null,
             "contrast": null,
             "skinToneRatio": null,
-            "samMaskCoverage": null,
-            "samMaskCenter": {"x": null, "y": null},
-            "samBoxCoverage": null,
-            "samBoxCenter": {"x": null, "y": null},
-            "samConfidence": null,
-            "samObjectCount": null,
-            "samFaceBoxCoverage": null,
-            "samFaceBoxCenter": {"x": null, "y": null},
-            "samFaceConfidence": null,
-            "samFaceCount": null,
-            "samFrameTime": null,
-            "samError": null,
-            "facePresent": null,
-            "expression": null,
             "talkingScore": talking_score,
         }),
     }
+}
+
+/// Whether a range was judged by anyone. Every new range is `Local`; the
+/// others survive in curations saved by the removed model reviewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum ReviewStatus {
+    #[default]
+    Local,
+    Reviewed,
+    NeedsReview,
+    Rejected,
+}
+
+impl ReviewStatus {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Reviewed => "reviewed",
+            Self::NeedsReview => "needs-review",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Fields the removed reviewer also saved (frames, SAM evidence, coverage,
+/// usage) are ignored on load.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(super) struct ClipReview {
+    pub(super) status: ReviewStatus,
+    /// The model that reviewed a saved range, if one did.
+    pub(super) model: Option<String>,
+}
+
+impl ClipReview {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({"status": self.status.as_str(), "model": self.model})
+    }
+}
+
+/// Transcript segment IDs in script state: `tx:<asset path>#<index>`.
+pub(super) fn transcript_segment_id(asset_path: &str, index: usize) -> String {
+    format!("tx:{asset_path}#{index}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,7 +615,6 @@ pub(super) struct SweepData {
     /// ranked `candidates` picks, these spans are meant to cover
     /// the whole asset so an edited video can be deconstructed.
     pub(super) scene_clips: Vec<SweepCandidate>,
-    pub(super) usage: ReviewUsage,
 }
 
 impl Default for SweepData {
@@ -682,7 +625,6 @@ impl Default for SweepData {
             transcript: Vec::new(),
             candidates: Vec::new(),
             scene_clips: Vec::new(),
-            usage: ReviewUsage::default(),
         }
     }
 }
@@ -733,8 +675,7 @@ pub(super) enum SweepMsg {
 
 impl EditorApp {
     /// Explicit user-triggered curation for one ready asset.
-    /// Re-curation replaces the previous transcript and candidates,
-    /// which is how a later API-key session upgrades local results.
+    /// Re-curation replaces the previous transcript and candidates.
     pub(super) fn curate_asset(&mut self, ctx: &egui::Context, path: String) {
         let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) else {
             return;
@@ -770,8 +711,7 @@ impl EditorApp {
         }
     }
 
-    /// Start queued curations up to `parallel_sweeps()` at once. Model
-    /// review is mostly waiting on the provider, so files overlap.
+    /// Start queued curations up to `parallel_sweeps()` at once.
     fn start_next_sweep(&mut self, ctx: &egui::Context) {
         while self.sweep_running.len() < parallel_sweeps() && !self.sweep_queue.is_empty() {
             let path = self.sweep_queue.remove(0);
@@ -780,7 +720,7 @@ impl EditorApp {
             };
             let info = asset.info.clone();
             let peaks = asset.peaks.clone();
-            let settings = self.chat_settings.clone();
+            let settings = self.settings.transcription();
             let store_dir = self.curation_dir.clone();
             let tx = match &self.sweep_tx {
                 Some(tx) => tx.clone(),
@@ -903,9 +843,6 @@ impl EditorApp {
             self.sweep_tx = None;
         }
         release_freed_memory();
-        // The sweep changed: this is a pinned-summary refresh point
-        // (the only other one is chat submit, as a safety net).
-        self.refresh_pinned_summary();
         self.start_next_sweep(ctx);
         if self.sweep_rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(180));
@@ -1068,27 +1005,9 @@ fn added_message(count: usize, noun: &str, skipped: usize) -> String {
 fn run_sweep(
     info: &MediaInfo,
     peaks: &[f32],
-    settings: &ChatSettings,
+    settings: &transcribe::TranscribeSettings,
     store_dir: Option<&std::path::Path>,
     progress: &mut dyn FnMut(&str),
-) -> Result<SweepData, String> {
-    run_sweep_with_mode(
-        info,
-        peaks,
-        settings,
-        store_dir,
-        progress,
-        subjects::Mode::Automatic,
-    )
-}
-
-fn run_sweep_with_mode(
-    info: &MediaInfo,
-    peaks: &[f32],
-    settings: &ChatSettings,
-    store_dir: Option<&std::path::Path>,
-    progress: &mut dyn FnMut(&str),
-    mode: subjects::Mode,
 ) -> Result<SweepData, String> {
     progress("Analyzing scenes…");
     let motion = if info.has_video {
@@ -1113,77 +1032,30 @@ fn run_sweep_with_mode(
         ));
     }
     let mut stage_notes = Vec::new();
-    let model_ready = if settings.can_call_model() {
-        progress("Checking model access…");
-        match check_model_connection(settings) {
-            Ok(()) => true,
-            Err(error) => {
-                stage_notes.push(format!("Model review unavailable: {error}"));
-                false
-            }
-        }
-    } else {
-        stage_notes.push("Local analysis only; add a Meta API key for visual review.".to_owned());
-        false
-    };
-    // Transcription has its own provider (local by default), so it does not
-    // need model access. Waveform coverage cannot tell a soundtrack from
-    // continuous speech, so it never suppresses transcription.
-    let (transcript, transcript_available) = if info.has_audio {
+    // Waveform coverage cannot tell a soundtrack from continuous speech, so
+    // it never suppresses transcription.
+    let transcript = if info.has_audio {
         progress("Transcribing audio…");
-        match transcribe::transcribe_cached(
-            &settings.transcription(),
-            store_dir,
-            info,
-            false,
-            progress,
-        ) {
+        match transcribe::transcribe_cached(settings, store_dir, info, false, progress) {
             Ok(transcript) => {
                 stage_notes.push(transcript.note);
-                (transcript.segments, true)
+                transcript.segments
             }
             Err(error) => {
                 stage_notes.push(format!("Transcription failed: {error}"));
-                (Vec::new(), false)
+                Vec::new()
             }
         }
     } else {
         stage_notes.push("Transcription: no audio stream.".to_owned());
-        (Vec::new(), true)
+        Vec::new()
     };
-
-    // Model selections never remove shots from the source inventory.
     let mut scene_clips = local_candidates(info, &segments, &transcript);
     for (index, scene) in scene_clips.iter_mut().enumerate() {
         scene.id = format!("{}#scene-{index}", info.path);
     }
     let covered_seconds: f64 = segments.iter().map(|segment| segment.duration()).sum();
-    let mut usage = ReviewUsage::default();
-    let mut candidates = if model_ready {
-        let review = curation::review(
-            settings,
-            info,
-            &motion,
-            peaks,
-            &transcript,
-            transcript_available,
-            &mut scene_clips,
-            progress,
-            mode,
-        );
-        stage_notes.push(review.note);
-        usage = review.usage;
-        review.candidates
-    } else {
-        let mut local = local_candidates(info, &segments, &transcript);
-        if settings.can_call_model() {
-            for candidate in local.iter_mut().chain(scene_clips.iter_mut()) {
-                candidate.review.status = ReviewStatus::NeedsReview;
-                candidate.reason = "Needs review; model access check failed.".to_owned();
-            }
-        }
-        local
-    };
+    let mut candidates = local_candidates(info, &segments, &transcript);
     stage_notes.push(format!(
         "Clips: {}. Scenes: {}, {:.1}s covered.",
         candidates.len(),
@@ -1198,7 +1070,6 @@ fn run_sweep_with_mode(
         candidates,
         scene_clips,
         note: stage_notes.join(" "),
-        usage,
     })
 }
 
@@ -1382,7 +1253,7 @@ fn local_candidates(
                 score = (score + visual_bonus).min(100.0);
             }
             let reason = local_reason(info, segment, &overlaps);
-            candidate_from_segment(info, index, segment, &norms, score, reason, overlaps, None)
+            candidate_from_segment(info, index, segment, &norms, score, reason, overlaps)
         })
         .collect()
 }
@@ -1442,28 +1313,14 @@ fn candidate_from_segment(
     score: f32,
     reason: String,
     transcript: Vec<TranscriptSegment>,
-    model_call: Option<(String, Vec<String>)>,
 ) -> SweepCandidate {
     let motion_score = (segment.mean_motion / norms.max_motion).clamp(0.0, 1.0);
     let audio_score = (0.6 * (segment.audio_energy / norms.max_energy)
         + 0.4 * (segment.audio_peak / norms.max_peak))
         .clamp(0.0, 1.0);
-    let (local_category, local_tags) =
+    let (category, tags) =
         classify_local(segment, !transcript.is_empty(), motion_score, audio_score);
-    let (category, tags, music_bed) = match model_call {
-        Some((category, tags)) if CURATOR_CATEGORIES.contains(&category.as_str()) => {
-            let tags: Vec<String> = tags.into_iter().filter(|tag| is_model_tag(tag)).collect();
-            let music_bed = tags.iter().any(|tag| tag == "music-bed")
-                && !tags.iter().any(|tag| tag == "speech")
-                && category != "talking";
-            (category, tags, music_bed)
-        }
-        _ => (
-            local_category,
-            local_tags,
-            is_music_bed(segment) && transcript.is_empty(),
-        ),
-    };
+    let music_bed = is_music_bed(segment) && transcript.is_empty();
     SweepCandidate {
         id: format!("{}#{index}", info.path),
         asset_path: info.path.clone(),
@@ -1503,385 +1360,6 @@ fn overlapping_transcript(
 pub(super) fn minute_second(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct SamBox {
-    object_id: String,
-    x1: i64,
-    y1: i64,
-    x2: i64,
-    y2: i64,
-    width: u32,
-    height: u32,
-    confidence: Option<f32>,
-}
-
-impl SamBox {
-    fn coverage(&self) -> f32 {
-        if self.width == 0 || self.height == 0 {
-            return 0.0;
-        }
-        let width = (self.x2 + 1 - self.x1).max(0) as f32 / self.width as f32;
-        let height = (self.y2 + 1 - self.y1).max(0) as f32 / self.height as f32;
-        (width * height).clamp(0.0, 1.0)
-    }
-
-    fn center_x(&self) -> f32 {
-        if self.width == 0 {
-            0.0
-        } else {
-            ((self.x1 + self.x2 + 1) as f32 / 2.0 / self.width as f32).clamp(0.0, 1.0)
-        }
-    }
-
-    fn center_y(&self) -> f32 {
-        if self.height == 0 {
-            0.0
-        } else {
-            ((self.y1 + self.y2 + 1) as f32 / 2.0 / self.height as f32).clamp(0.0, 1.0)
-        }
-    }
-}
-
-fn sam_responses_url(settings: &ChatSettings) -> String {
-    api_endpoint(settings, "responses")
-}
-
-pub(super) fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0] as u32;
-        let second = *chunk.get(1).unwrap_or(&0) as u32;
-        let third = *chunk.get(2).unwrap_or(&0) as u32;
-        let combined = (first << 16) | (second << 8) | third;
-        for shift in [18, 12, 6, 0] {
-            output.push(ALPHABET[((combined >> shift) & 0x3f) as usize] as char);
-        }
-        if chunk.len() < 3 {
-            output.truncate(output.len() - (3 - chunk.len()));
-            output.push_str(&"=".repeat(3 - chunk.len()));
-        }
-    }
-    output
-}
-
-fn sam_request_body_with_prompt(jpeg: &[u8], prompt: &str) -> serde_json::Value {
-    serde_json::json!({
-        "model": SAM_MODEL,
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": prompt},
-                {
-                    "type": "input_image",
-                    "image_url": format!("data:image/jpeg;base64,{}", base64_encode(jpeg)),
-                },
-            ],
-        }],
-        "stream": true,
-        "metadata": {
-            "include_confidence": "true",
-            "mask_encoding": "one_bit",
-        },
-    })
-}
-
-fn collect_sam_output_text(value: &serde_json::Value, output: &mut String) {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_sam_output_text(item, output);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            if map.get("type").and_then(|value| value.as_str()) == Some("output_text") {
-                if let Some(text) = map.get("text").and_then(|value| value.as_str()) {
-                    output.push_str(text);
-                }
-            }
-            for key in ["output", "content", "response"] {
-                if let Some(child) = map.get(key) {
-                    collect_sam_output_text(child, output);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn sam_api_error(value: &serde_json::Value) -> Option<String> {
-    if value.get("error").is_some_and(|error| !error.is_null())
-        || matches!(
-            value["type"].as_str(),
-            Some("response.failed" | "response.incomplete" | "error")
-        )
-        || matches!(
-            value["status"].as_str(),
-            Some("failed" | "incomplete" | "cancelled")
-        )
-    {
-        return Some("SAM request did not complete successfully.".to_owned());
-    }
-    value.get("response").and_then(sam_api_error)
-}
-
-fn sam_output_text(body: &str) -> Result<String, String> {
-    let trimmed = body.trim();
-    if trimmed.starts_with('{') {
-        let value: serde_json::Value = serde_json::from_str(trimmed)
-            .map_err(|_| "Couldn't read the SAM response.".to_owned())?;
-        if let Some(error) = sam_api_error(&value) {
-            return Err(error);
-        }
-        if value["status"].as_str() != Some("completed") {
-            return Err("SAM request did not complete successfully.".to_owned());
-        }
-        if let Some(text) = value["output_text"].as_str() {
-            return Ok(text.to_owned());
-        }
-        let mut output = String::new();
-        collect_sam_output_text(&value, &mut output);
-        return Ok(output);
-    }
-
-    let mut output = String::new();
-    let mut completed = false;
-    let mut saw_delta = false;
-    let mut finalized = false;
-    let mut finalizers = std::collections::BTreeSet::new();
-    let mut lane = None;
-    for line in body.lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data == "[DONE]" {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(data)
-            .map_err(|_| "Couldn't read the SAM response.".to_owned())?;
-        if let Some(error) = sam_api_error(&value) {
-            return Err(error);
-        }
-        let kind = value["type"].as_str().unwrap_or("");
-        if kind.starts_with("response.refusal.") || value["part"]["type"] == "refusal" {
-            return Err("SAM refused the request.".to_owned());
-        }
-        let text_event = kind == "response.output_text.delta"
-            || kind == "response.output_text.done"
-            || (kind == "response.content_part.done" && value["part"]["type"] == "output_text");
-        if text_event {
-            let identity = (
-                value["item_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .ok_or("Missing SAM output identity")?
-                    .to_owned(),
-                value["output_index"]
-                    .as_u64()
-                    .ok_or("Missing SAM output index")?,
-                value["content_index"]
-                    .as_u64()
-                    .ok_or("Missing SAM content index")?,
-            );
-            if completed || lane.as_ref().is_some_and(|expected| expected != &identity) {
-                return Err("SAM returned conflicting output streams.".to_owned());
-            }
-            lane = Some(identity);
-            if kind == "response.output_text.delta" {
-                if finalized {
-                    return Err("SAM sent text after finalization.".to_owned());
-                }
-                output.push_str(value["delta"].as_str().ok_or("Invalid SAM text delta")?);
-                saw_delta = true;
-            } else {
-                let text = if kind == "response.output_text.done" {
-                    &value["text"]
-                } else {
-                    &value["part"]["text"]
-                };
-                let text = text.as_str().ok_or("Missing SAM final text")?;
-                if !finalizers.insert(kind.to_owned())
-                    || ((saw_delta || finalized) && output != text)
-                {
-                    return Err("SAM final text conflicts with its evidence stream.".to_owned());
-                }
-                if !saw_delta && !finalized {
-                    output.push_str(text);
-                }
-                finalized = true;
-            }
-        }
-        if kind == "response.completed" {
-            if completed || !finalized || value["response"]["status"].as_str() != Some("completed")
-            {
-                return Err("SAM evidence did not finish successfully.".to_owned());
-            }
-            completed = true;
-        }
-    }
-    if completed {
-        Ok(output)
-    } else {
-        Err("Couldn't read the SAM response.".to_owned())
-    }
-}
-
-fn parse_sam_boxes(text: &str) -> Result<Vec<SamBox>, String> {
-    let mut boxes = Vec::new();
-    let mut search = 0_usize;
-    while let Some(relative_start) = text[search..].find("<|box;") {
-        let start = search + relative_start;
-        let Some(relative_end) = text[start..].find("|>") else {
-            break;
-        };
-        let end = start + relative_end;
-        let mut id_start = start;
-        while id_start > 0 && text.as_bytes()[id_start - 1].is_ascii_digit() {
-            id_start -= 1;
-        }
-        let object_id = text[id_start..start].to_owned();
-        let body = &text[start + "<|box;".len()..end];
-        let fields: Vec<(&str, &str)> = body
-            .split(';')
-            .filter_map(|field| {
-                let (key, value) = field.split_once('=')?;
-                Some((key.trim(), value.trim()))
-            })
-            .collect();
-        let field = |key: &str| {
-            fields
-                .iter()
-                .find(|(candidate, _)| *candidate == key)
-                .map(|(_, value)| *value)
-        };
-        let parsed = (|| {
-            Some(SamBox {
-                object_id,
-                x1: field("x1")?.parse().ok()?,
-                y1: field("y1")?.parse().ok()?,
-                x2: field("x2")?.parse().ok()?,
-                y2: field("y2")?.parse().ok()?,
-                width: field("w")?.parse().ok()?,
-                height: field("h")?.parse().ok()?,
-                confidence: match field("c") {
-                    Some(value) => Some(
-                        value
-                            .parse::<f32>()
-                            .ok()
-                            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))?,
-                    ),
-                    None => None,
-                },
-            })
-        })();
-        if let Some(sam_box) = parsed {
-            if sam_box.width > 0
-                && sam_box.height > 0
-                && sam_box.x1 >= 0
-                && sam_box.y1 >= 0
-                && sam_box.x2 >= sam_box.x1
-                && sam_box.y2 >= sam_box.y1
-                && sam_box.x2 < sam_box.width as i64
-                && sam_box.y2 < sam_box.height as i64
-            {
-                boxes.push(sam_box);
-            }
-        }
-        search = end + 2;
-    }
-    if (!text.trim().is_empty() && boxes.is_empty()) || boxes.len() != text.matches("<|box").count()
-    {
-        Err("SAM returned malformed box evidence.".to_owned())
-    } else {
-        Ok(boxes)
-    }
-}
-
-fn apply_sam_evidence(candidate: &mut SweepCandidate, boxes: &[SamBox], frame_time: f64) {
-    if candidate.visual.is_none() {
-        return;
-    }
-    let primary = boxes
-        .iter()
-        .max_by(|a, b| a.coverage().total_cmp(&b.coverage()));
-    let centered = primary
-        .map(|sam_box| {
-            (0.3..=0.7).contains(&sam_box.center_x()) && (0.25..=0.75).contains(&sam_box.center_y())
-        })
-        .unwrap_or(false);
-    if let Some(visual) = candidate.visual.as_mut() {
-        visual.source = VisualEvidenceSource::Sam;
-        visual.sam_status = SubjectSegmentationStatus::Ready;
-        visual.sam_frame_time = Some(frame_time);
-        visual.sam_error = None;
-        visual.sam_object_count = Some(boxes.len());
-        match primary {
-            Some(sam_box) => {
-                visual.sam_box_coverage = Some(sam_box.coverage());
-                visual.sam_box_center_x = Some(sam_box.center_x());
-                visual.sam_box_center_y = Some(sam_box.center_y());
-                visual.sam_confidence = sam_box.confidence;
-            }
-            None => {
-                visual.sam_box_coverage = Some(0.0);
-                visual.sam_box_center_x = None;
-                visual.sam_box_center_y = None;
-                visual.sam_confidence = Some(0.0);
-            }
-        }
-    }
-    let Some(primary) = primary else {
-        return;
-    };
-    let push_tag = |candidate: &mut SweepCandidate, tag: &str| {
-        if !candidate.tags.iter().any(|existing| existing == tag) {
-            candidate.tags.push(tag.to_owned());
-        }
-    };
-    if centered {
-        push_tag(candidate, "subject-centered");
-    }
-    if primary.coverage() >= 0.18 {
-        push_tag(candidate, "subject-large");
-    }
-}
-
-fn apply_sam_face_evidence(candidate: &mut SweepCandidate, boxes: &[SamBox]) {
-    if candidate.visual.is_none() {
-        return;
-    }
-    let primary = boxes
-        .iter()
-        .max_by(|a, b| a.coverage().total_cmp(&b.coverage()));
-    if let Some(visual) = candidate.visual.as_mut() {
-        visual.sam_face_count = Some(boxes.len());
-        visual.face_present = Some(!boxes.is_empty());
-        match primary {
-            Some(face) => {
-                visual.sam_face_box_coverage = Some(face.coverage());
-                visual.sam_face_box_center_x = Some(face.center_x());
-                visual.sam_face_box_center_y = Some(face.center_y());
-                visual.sam_face_confidence = face.confidence;
-            }
-            None => {
-                visual.sam_face_box_coverage = Some(0.0);
-                visual.sam_face_box_center_x = None;
-                visual.sam_face_box_center_y = None;
-                visual.sam_face_confidence = Some(0.0);
-            }
-        }
-    }
-    if primary.is_some() {
-        if !candidate.tags.iter().any(|tag| tag == "face-visible") {
-            candidate.tags.push("face-visible".to_owned());
-        }
-    } else {
-        candidate.tags.retain(|tag| tag != "face-visible");
-    }
 }
 
 fn transcript_time(
@@ -2024,8 +1502,6 @@ mod tests {
 
     fn centered_visual() -> SegmentVisualEvidence {
         SegmentVisualEvidence {
-            source: VisualEvidenceSource::LocalProxy,
-            sam_status: SubjectSegmentationStatus::Unavailable,
             subject_coverage: 0.25,
             subject_center_x: Some(0.5),
             subject_center_y: Some(0.45),
@@ -2035,23 +1511,6 @@ mod tests {
             luminance: 0.6,
             contrast: 0.2,
             skin_tone_ratio: 0.1,
-            sam_mask_coverage: None,
-            sam_mask_center_x: None,
-            sam_mask_center_y: None,
-            sam_box_coverage: None,
-            sam_box_center_x: None,
-            sam_box_center_y: None,
-            sam_confidence: None,
-            sam_object_count: None,
-            sam_face_box_coverage: None,
-            sam_face_box_center_x: None,
-            sam_face_box_center_y: None,
-            sam_face_confidence: None,
-            sam_face_count: None,
-            sam_frame_time: None,
-            sam_error: None,
-            face_present: None,
-            expression: None,
         }
     }
 
@@ -2107,7 +1566,13 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let info = openreel_media::probe(path.to_str().unwrap()).expect("probe source");
-        let result = run_sweep(&info, &[], &ChatSettings::default(), None, &mut |_| {});
+        let result = run_sweep(
+            &info,
+            &[],
+            &transcribe::TranscribeSettings::default(),
+            None,
+            &mut |_| {},
+        );
         let _ = std::fs::remove_file(&path);
         let result = result.expect("local curation");
         for pair in result.scene_clips.windows(2) {
@@ -2167,7 +1632,7 @@ mod tests {
         let result = run_sweep(
             &info,
             &vec![0.5; 250],
-            &ChatSettings::default(),
+            &transcribe::TranscribeSettings::default(),
             None,
             &mut |_| {},
         )
@@ -2182,124 +1647,6 @@ mod tests {
         );
         assert_eq!(tail.audio_energy, 0.0);
         assert_eq!(tail.audio_coverage, 0.0);
-    }
-
-    #[test]
-    fn sam_request_and_streamed_boxes_parse_without_a_live_call() {
-        let settings = ChatSettings::default();
-        assert_eq!(
-            sam_responses_url(&settings),
-            "https://api.meta.ai/v1/responses"
-        );
-        assert_eq!(base64_encode(b"Eddie"), "RWRkaWU=");
-        let body = sam_request_body_with_prompt(b"\xff\xd8fake-jpeg\xff\xd9", "person");
-        assert_eq!(body["model"], SAM_MODEL);
-        assert_eq!(body["metadata"]["include_confidence"], "true");
-        assert_eq!(body["metadata"]["mask_encoding"], "one_bit");
-        let image_url = body["input"][0]["content"][1]["image_url"]
-            .as_str()
-            .expect("data URL");
-        assert!(image_url.starts_with("data:image/jpeg;base64,"));
-
-        let sse = format!(
-            "data: {}\n\ndata: {}\n\n",
-            serde_json::json!({"type":"response.output_text.done", "item_id":"fixture", "output_index":0, "content_index":0,
-                "text":"<0f>0<|box;x1=320;y1=90;x2=639;y2=449;w=1280;h=720;c=0.91|><|mask;x=0;y=0;c=0.91;data=10,10,!payload|>"}),
-            serde_json::json!({"type":"response.completed", "response":{"status":"completed"}})
-        );
-        let text = sam_output_text(&sse).expect("streamed SAM text");
-        let boxes = parse_sam_boxes(&text).expect("complete boxes");
-        assert_eq!(boxes.len(), 1);
-        assert_eq!(boxes[0].object_id, "0");
-        assert!((boxes[0].coverage() - 0.125).abs() < 0.001);
-        assert!((boxes[0].center_x() - 0.375).abs() < 0.001);
-        assert!((boxes[0].confidence.expect("confidence") - 0.91).abs() < 0.001);
-
-        let info = test_info();
-        let segment = SweepSegment {
-            start: 0.0,
-            end: 5.0,
-            mean_motion: 0.01,
-            peak_motion: 0.02,
-            stability: 0.9,
-            audio_energy: 0.3,
-            audio_peak: 0.4,
-            audio_coverage: 0.5,
-            scene_change: 0.0,
-            visual: Some(centered_visual()),
-        };
-        let norms = segment_norms(std::slice::from_ref(&segment));
-        let mut candidate = candidate_from_segment(
-            &info,
-            0,
-            &segment,
-            &norms,
-            80.0,
-            "Speech.".to_owned(),
-            Vec::new(),
-            None,
-        );
-        apply_sam_evidence(&mut candidate, &boxes, 2.5);
-        let visual = candidate.visual.as_ref().expect("visual evidence");
-        assert_eq!(visual.source, VisualEvidenceSource::Sam);
-        assert_eq!(visual.sam_status, SubjectSegmentationStatus::Ready);
-        assert_eq!(visual.sam_object_count, Some(1));
-        assert!(
-            visual.sam_mask_coverage.is_none(),
-            "box is not decoded mask coverage"
-        );
-        assert!(candidate.tags.iter().any(|tag| tag == "subject-centered"));
-        assert_eq!(candidate.score, 80.0, "geometry is not editorial quality");
-
-        candidate.transcript = vec![TranscriptSegment {
-            start: 0.0,
-            end: 4.0,
-            speaker: Some("A".to_owned()),
-            text: "Hello.".to_owned(),
-            words: Vec::new(),
-            session: None,
-        }];
-        apply_sam_face_evidence(
-            &mut candidate,
-            &[SamBox {
-                object_id: "0".to_owned(),
-                x1: 560,
-                y1: 180,
-                x2: 719,
-                y2: 419,
-                width: 1280,
-                height: 720,
-                confidence: Some(0.95),
-            }],
-        );
-        let visual = candidate.visual.as_ref().expect("visual evidence");
-        assert_eq!(visual.face_present, Some(true));
-        assert_eq!(visual.sam_face_count, Some(1));
-        assert!(candidate.tags.iter().any(|tag| tag == "face-visible"));
-        assert!(candidate.talking_score() > 0.9);
-        apply_sam_face_evidence(&mut candidate, &[]);
-        assert_eq!(candidate.visual.as_ref().unwrap().face_present, Some(false));
-        assert!(!candidate.tags.iter().any(|tag| tag == "face-visible"));
-    }
-
-    #[test]
-    fn sam_partial_and_failed_responses_are_not_negative_detections() {
-        for body in [
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"<0f>0<|box;x1=3\"}\n\n",
-            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"private upstream detail\"}}}\n\ndata: [DONE]\n\n",
-            "{\"status\":\"incomplete\",\"output_text\":\"<0f>\"}",
-        ] {
-            let result = sam_output_text(body);
-            assert!(result.is_err(), "must not treat incomplete evidence as zero people: {result:?}");
-            assert!(!result.unwrap_err().contains("private upstream detail"));
-        }
-        assert_eq!(
-            sam_output_text(concat!(
-                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"fixture\",\"output_index\":0,\"content_index\":0,\"text\":\"\"}\n\n",
-                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
-            )).unwrap(),
-            ""
-        );
     }
 
     #[test]
@@ -2557,15 +1904,11 @@ mod tests {
                 words: Vec::new(),
                 session: None,
             }],
-            None,
         );
         assert!(candidate.talking_score() > 0.8);
         let visual = candidate.visual_json();
-        assert_eq!(visual["source"], "local-proxy");
-        assert_eq!(visual["samStatus"], "unavailable");
-        assert!(visual["facePresent"].is_null());
-        assert!(visual["expression"].is_null());
-        assert!(visual["samMaskCoverage"].is_null());
+        assert_eq!(visual["subjectCoverage"], 0.25);
+        assert!(!candidate.tags.iter().any(|tag| tag == "face-visible"));
     }
 
     #[test]
@@ -2597,7 +1940,6 @@ mod tests {
                         *score,
                         "r".into(),
                         Vec::new(),
-                        None,
                     )
                 })
                 .collect();

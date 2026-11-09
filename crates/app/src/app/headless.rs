@@ -2,7 +2,6 @@
 //! scripts. Each command loads a project file, does one thing, saves when
 //! it changed the project, and prints one JSON object on stdout.
 
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -12,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::sweep::transcribe::{self, Provider};
 use super::{inspect, EditorApp};
-use crate::scripting::{ScriptCommand, ScriptEngine};
+use crate::scripting::ScriptEngine;
 
 const USAGE: &str = "\
 Usage: eddie <command> <project.eddie> ...
@@ -197,7 +196,7 @@ fn run(args: &[String]) -> Result<Value, String> {
     let saved = app.timeline.clone();
     let mut engine = ScriptEngine::new()?;
     let (output, commands) = engine.eval_checked(&code, &app.script_state_json())?;
-    let (notes, handles) = apply_edit(&ctx, &mut app, commands)?;
+    let (notes, handles) = app.apply_edit(&ctx, commands)?;
     let changed = app.timeline != saved;
     let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
         .into_iter()
@@ -218,57 +217,12 @@ fn run(args: &[String]) -> Result<Value, String> {
     }))
 }
 
-/// Apply a script's commands as one edit: on any error the project is
-/// restored and nothing is saved. Files go through `import` and `export`.
-fn apply_edit(
-    ctx: &egui::Context,
-    app: &mut EditorApp,
-    commands: Vec<ScriptCommand>,
-) -> Result<(Vec<String>, HashMap<String, u64>), String> {
-    for command in &commands {
-        if matches!(command, ScriptCommand::Import(_) | ScriptCommand::Export(_)) {
-            return Err("use `eddie import` or `eddie export` for files".to_owned());
-        }
-        command.validate()?;
-    }
-    let timeline = app.timeline.clone();
-    let mute_music_beds = app.mute_music_beds;
-    let mut created = HashMap::new();
-    let mut notes = Vec::new();
-    let mut result = Ok(());
-    for command in commands {
-        match app.apply_script_command(ctx, command, &mut created) {
-            Ok(note) => notes.extend(note),
-            Err(error) => {
-                result = Err(error);
-                break;
-            }
-        }
-        // Finite input can still overflow frame-grid arithmetic.
-        if app.timeline.clips.iter().any(|clip| {
-            !clip.start.is_finite() || !clip.duration.is_finite() || !clip.source_in.is_finite()
-        }) {
-            result = Err("edit exceeds the supported timeline range".to_owned());
-            break;
-        }
-    }
-    if let Err(error) = result {
-        app.timeline = timeline;
-        app.mute_music_beds = mute_music_beds;
-        return Err(error);
-    }
-    let handles = created
-        .into_iter()
-        .map(|(handle, clip)| (handle.to_string(), clip))
-        .collect();
-    Ok((notes, handles))
-}
-
 /// Transcribe with the saved settings, overridden by flags and by
 /// `EDDIE_TRANSCRIBE_API_KEY`. One file failing does not stop the rest.
 fn transcribe(args: &[String]) -> Result<Value, String> {
     let path = project_arg(args)?;
-    let mut settings = super::chat::ChatSettings::load().transcription();
+    let saved = super::Settings::load();
+    let mut settings = saved.transcription();
     if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
         settings.api_key = key.trim().to_owned();
     }
@@ -294,11 +248,9 @@ fn transcribe(args: &[String]) -> Result<Value, String> {
                         ..Default::default()
                     };
                     if provider == Provider::Meta {
-                        settings = super::chat::ChatSettings {
-                            transcription: settings,
-                            ..super::chat::ChatSettings::load()
-                        }
-                        .transcription();
+                        let mut meta = saved.clone();
+                        meta.transcription = settings;
+                        settings = meta.transcription();
                     }
                     if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
                         settings.api_key = key.trim().to_owned();

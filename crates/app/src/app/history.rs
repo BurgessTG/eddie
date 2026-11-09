@@ -1,6 +1,6 @@
 //! General undo/redo. Every timeline change becomes a step once the gesture
 //! that made it ends, whichever path made it: pointer edits, Details, the
-//! console, chat or local intents. A drag, a slider move or a burst of
+//! console, a script or local intents. A drag, a slider move or a burst of
 //! typing is one step, not one per frame.
 
 use openreel_engine::{ClipId, Timeline};

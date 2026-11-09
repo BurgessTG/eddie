@@ -15,13 +15,10 @@ use eframe::egui::TexturesDelta;
 use eframe::egui::{self, Color32, RawInput, Rect, TextureId, Vec2};
 use openreel_engine::ClipKind;
 
-use super::chat::{PendingChat, TimelineSnapshot};
-use super::session::{ChatRole, ChatSession};
 use super::EditorApp;
 
 const W: usize = 1440;
 const H: usize = 900;
-const SEED_PATH: &str = "/tmp/openreel-shot/config/openreel/chat_session.json";
 
 #[derive(Clone)]
 struct Texture {
@@ -225,8 +222,7 @@ fn run_frames_n(
             app.status_bar(ctx);
             app.console_panel(ctx);
             app.timeline_panel(ctx);
-            // Chat now lives in the right dock (Chat tab default).
-            app.chat_settings_window(ctx);
+            app.settings_window(ctx);
             if let Some(a) = app.media_bin(ctx) {
                 action = Some(a);
             }
@@ -240,44 +236,8 @@ fn run_frames_n(
     out.expect("frames ran")
 }
 
-fn seeded_session() -> ChatSession {
-    let seed = Path::new(SEED_PATH);
-    if seed.exists() {
-        let session = ChatSession::load_from(seed);
-        if !session.messages.is_empty() {
-            return session;
-        }
-    }
-    let mut session = ChatSession::new("openreel-project-1");
-    for (role, text) in [
-        (
-            ChatRole::User,
-            "Cut this down to a tight 20-second cut and put the title 'Highlights' at the start.",
-        ),
-        (
-            ChatRole::Assistant,
-            "Done — trimmed to a 20-second cut with a title.",
-        ),
-        (ChatRole::User, "Build it from the reaction shots."),
-        (
-            ChatRole::Assistant,
-            "Built the cut from the reaction shots.",
-        ),
-        (ChatRole::User, "Use the part where he talks about pricing."),
-        (ChatRole::Assistant, "Done — used the pricing section."),
-        (ChatRole::User, "Reactions first"),
-        (
-            ChatRole::Assistant,
-            "Done — arranged 6 sweep clips (no model call).",
-        ),
-    ] {
-        session.push(role, text.to_owned());
-    }
-    session
-}
-
 #[test]
-fn render_slice6_screenshots() {
+fn render_editor_screenshot() {
     if std::env::var("OPENREEL_SCREENSHOT").as_deref() != Ok("1") {
         eprintln!("SKIP screenshot render: set OPENREEL_SCREENSHOT=1");
         return;
@@ -293,26 +253,12 @@ fn render_slice6_screenshots() {
     app.timeline
         .add_clip("Highlights", ClipKind::Title, 0, 1.0, 4.0, 0.0);
     app.selected = Some(video);
-    app.chat_session = seeded_session();
-    app.chat_undo = Some(TimelineSnapshot::capture(&app.timeline, app.selected, 0.0));
-    app.status = "Session restored.".to_owned();
+    app.status = "Ready.".to_owned();
 
     let mut textures = HashMap::new();
     let mut clock = 0.0_f64;
     run_frames(&ctx, &mut app, &mut textures, &mut clock);
     let primitives = run_frames_n(&ctx, &mut app, &mut textures, &mut clock, Vec::new(), 2);
     let fb = rasterize(&primitives, &textures);
-    write_ppm(Path::new("/tmp/openreel_slice6_long_session.ppm"), &fb);
-
-    // Second scene: an in-flight model call (progress + Cancel).
-    app.chat_pending = Some(PendingChat::for_test(
-        "Build the montage",
-        "Ranking clips…",
-        &app.timeline,
-        app.script_state_json(),
-    ));
-    app.chat_generation = 1;
-    let primitives = run_frames_n(&ctx, &mut app, &mut textures, &mut clock, Vec::new(), 2);
-    let fb = rasterize(&primitives, &textures);
-    write_ppm(Path::new("/tmp/openreel_slice6_inflight.ppm"), &fb);
+    write_ppm(Path::new("/tmp/openreel_editor.ppm"), &fb);
 }

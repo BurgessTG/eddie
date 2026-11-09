@@ -124,6 +124,33 @@ impl TranscribeSettings {
     }
 }
 
+/// Keyless endpoints must be parsed localhost or loopback addresses, not
+/// hostname-prefix matches.
+pub(in crate::app) fn is_local_endpoint(base_url: &str) -> bool {
+    let Ok(uri) = base_url.trim().parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn api_error_for_status(status: u16) -> String {
+    match status {
+        401 | 403 => "Check the speech key in Settings.".to_owned(),
+        404 => "That speech model or URL was not found. Check Settings.".to_owned(),
+        429 => "The transcription service is busy. Try again shortly.".to_owned(),
+        500..=599 => "The transcription service had a problem. Try again shortly.".to_owned(),
+        _ => "The transcription request was rejected. Check Settings and try again.".to_owned(),
+    }
+}
+
 /// A finished transcript and how it was made.
 pub(in crate::app) struct Transcript {
     pub(in crate::app) segments: Vec<TranscriptSegment>,
@@ -212,7 +239,13 @@ pub(in crate::app) fn transcribe(
 pub(in crate::app) fn model_dir() -> Option<PathBuf> {
     std::env::var_os("EDDIE_WHISPER_DIR")
         .map(PathBuf::from)
-        .or_else(|| Some(crate::app::chat::config_path()?.parent()?.join("whisper")))
+        .or_else(|| {
+            Some(
+                crate::app::settings::config_path()?
+                    .parent()?
+                    .join("whisper"),
+            )
+        })
 }
 
 /// Most accurate first, for what this build can run in reasonable time:
@@ -580,7 +613,7 @@ fn post_form(
         .map_err(|_| "Couldn't reach transcription.".to_owned())?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(crate::app::chat::api_error_for_status(status));
+        return Err(api_error_for_status(status));
     }
     let text = response
         .body_mut()
@@ -641,7 +674,7 @@ fn openai(
         &settings.base_url
     };
     let url = endpoint(base, "audio/transcriptions");
-    let keyless = crate::app::chat::is_local_endpoint(base);
+    let keyless = is_local_endpoint(base);
     if settings.api_key.is_empty() && !keyless {
         return Err("Add an API key for transcription.".to_owned());
     }
