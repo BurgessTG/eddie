@@ -182,6 +182,203 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     assert!((length - 3.0).abs() < 0.1, "exported {length} s");
 }
 
+/// The colour of one pixel of a picture file.
+fn pixel(path: &Path, x: u32, y: u32) -> [u8; 3] {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-vf", &format!("format=rgb24,crop=1:1:{x}:{y}")])
+        .args(["-frames:v", "1"])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout.len(), 3, "{}", path.display());
+    [out.stdout[0], out.stdout[1], out.stdout[2]]
+}
+
+fn is_red(rgb: [u8; 3]) -> bool {
+    rgb[0] > 150 && rgb[2] < 100
+}
+
+fn is_blue(rgb: [u8; 3]) -> bool {
+    rgb[2] > 150 && rgb[0] < 100
+}
+
+/// An agent that cannot watch video sees the program, a whole source and
+/// exact frames: 3 s of red then 3 s of blue, with the blue part placed.
+#[test]
+fn pictures_show_the_program_a_source_and_exact_frames() {
+    let dir = Dir::new("pictures");
+    dir.ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=320x180:r=30:d=3",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=blue:s=320x180:r=30:d=3",
+        "-filter_complex",
+        "concat=n=2:v=1:a=0",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "shots.mp4",
+    ]);
+    let (code, _) = dir.eddie(&["new", "p.eddie", "shots.mp4"]);
+    assert_eq!(code, 0);
+    let (code, run) = dir.eddie(&[
+        "run",
+        "p.eddie",
+        "-e",
+        "addAssetRange('shots.mp4', 0, 3.5, 2); addTitle('Hello', 0, 1)",
+    ]);
+    assert_eq!(code, 0, "{run}");
+    let clip = run["handles"].as_object().unwrap().values().next().unwrap();
+
+    // The sheet: one cell per visible shot, here the titled second and the
+    // bare one, both showing the placed (blue) source time.
+    let (code, sheet) = dir.eddie(&["sheet", "p.eddie", "sheet.jpg"]);
+    assert_eq!(code, 0, "{sheet}");
+    assert_eq!(
+        (&sheet["shots"], &sheet["sampled"]),
+        (&2.into(), &false.into())
+    );
+    let cells = sheet["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 2, "{sheet}");
+    assert_eq!(
+        (
+            &cells[0]["time"],
+            &cells[0]["clip"],
+            &cells[0]["sourceTime"]
+        ),
+        (&0.5.into(), clip, &4.0.into())
+    );
+    assert!(cells[0]["title"].is_number() && cells[1]["title"].is_null());
+    let file = dir.0.join("sheet.jpg");
+    // 384 px cells behind 4 px gutters.
+    assert!(
+        is_blue(pixel(&file, 196, 44)),
+        "{:?}",
+        pixel(&file, 196, 44)
+    );
+    assert!(
+        is_blue(pixel(&file, 584, 44)),
+        "{:?}",
+        pixel(&file, 584, 44)
+    );
+    let (code, part) = dir.eddie(&["sheet", "p.eddie", "part.jpg", "1..2"]);
+    assert_eq!(code, 0, "{part}");
+    assert_eq!(part["cells"].as_array().unwrap().len(), 1);
+    assert_eq!(part["cells"][0]["time"], 1.5);
+
+    // The strip finds the source's two shots and marks what is placed.
+    let (code, strip) = dir.eddie(&["strip", "p.eddie", "shots.mp4", "strip.jpg"]);
+    assert_eq!(code, 0, "{strip}");
+    assert_eq!(strip["shots"], 2, "{strip}");
+    assert_eq!(strip["placed"], serde_json::json!([[3.5, 5.5]]));
+    let pictures = strip["pictures"].as_array().unwrap();
+    assert_eq!(pictures.len(), 16);
+    for picture in pictures {
+        let time = picture["time"].as_f64().unwrap();
+        assert_eq!(picture["placed"], (3.5..5.5).contains(&time), "{picture}");
+        let cut = picture["shot"][if time < 3.0 { 1 } else { 0 }]
+            .as_f64()
+            .unwrap();
+        assert!((cut - 3.0).abs() < 0.05, "{picture}");
+    }
+    // 192 px cells, eight per row: the first row is red, the second blue.
+    let file = dir.0.join("strip.jpg");
+    assert!(is_red(pixel(&file, 100, 50)), "{:?}", pixel(&file, 100, 50));
+    assert!(
+        is_blue(pixel(&file, 100, 190)),
+        "{:?}",
+        pixel(&file, 100, 190)
+    );
+
+    // Frames carry their real source times: 2.9 s is red, 3.0 s is blue.
+    let (code, frames) = dir.eddie(&[
+        "frames",
+        "p.eddie",
+        "shots.mp4",
+        "2.9..3.1",
+        "frames",
+        "--every",
+        "0.1",
+    ]);
+    assert_eq!(code, 0, "{frames}");
+    assert_eq!(
+        (&frames["start"], &frames["end"]),
+        (&2.9.into(), &3.1.into())
+    );
+    let listed = frames["frames"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{frames}");
+    let at = |index: usize| listed[index]["time"].as_f64().unwrap();
+    assert!(
+        (at(0) - 2.9).abs() < 0.001 && (at(1) - 3.0).abs() < 0.001,
+        "{frames}"
+    );
+    let file = |index: usize| PathBuf::from(listed[index]["file"].as_str().unwrap());
+    assert!(file(0).starts_with(dir.0.join("frames")));
+    assert!(is_red(pixel(&file(0), 100, 50)));
+    assert!(is_blue(pixel(&file(1), 100, 50)));
+
+    // A clip names the source range it shows; too many pictures is an error.
+    let (code, shown) = dir.eddie(&[
+        "frames",
+        "p.eddie",
+        "shots.mp4",
+        &format!("clip:{clip}"),
+        "shown",
+    ]);
+    assert_eq!(code, 0, "{shown}");
+    let listed = shown["frames"].as_array().unwrap();
+    assert_eq!(listed.len(), 16, "{shown}");
+    assert_eq!(listed[0]["time"], 3.5);
+    assert!(listed[15]["time"].as_f64().unwrap() < 5.5);
+    let (code, many) = dir.eddie(&[
+        "frames",
+        "p.eddie",
+        "shots.mp4",
+        "0..6",
+        "many",
+        "--every",
+        "0.1",
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        many["error"].as_str().unwrap().contains("at most 40"),
+        "{many}"
+    );
+    let (code, wide) = dir.eddie(&[
+        "frames",
+        "p.eddie",
+        "shots.mp4",
+        "1",
+        "wide",
+        "--width",
+        "4000",
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        wide["error"].as_str().unwrap().contains("64 to 1280"),
+        "{wide}"
+    );
+    let (code, late) = dir.eddie(&["frames", "p.eddie", "shots.mp4", "9", "late"]);
+    assert_eq!(code, 1);
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the source"),
+        "{late}"
+    );
+    assert!(!dir.0.join("late").exists());
+    let (code, sound) = dir.eddie(&["strip", "p.eddie", "nope.mp4", "x.jpg"]);
+    assert_eq!((code, &sound["ok"]), (1, &false.into()));
+}
+
 /// An OpenAI-style transcription server: answers each upload with two
 /// segments and word timings, and records every request it receives.
 fn fake_transcriber() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {

@@ -22,6 +22,7 @@ pub use headless::cli_main;
 pub mod history;
 pub mod inspect;
 pub mod media;
+pub mod pictures;
 pub mod project;
 pub mod settings;
 pub mod sweep;
@@ -2077,9 +2078,7 @@ impl Editor {
             }
             ScriptCommand::AddAsset { asset, at, handle } => {
                 let (path, name, duration) = self
-                    .assets
-                    .iter()
-                    .find(|a| a.info.path == asset || a.info.name == asset)
+                    .asset_named(&asset)
                     .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration))
                     .ok_or_else(|| format!("no asset '{asset}'"))?;
                 let id =
@@ -2094,9 +2093,7 @@ impl Editor {
                 handle,
             } => {
                 let (path, name) = self
-                    .assets
-                    .iter()
-                    .find(|a| a.info.path == asset || a.info.name == asset)
+                    .asset_named(&asset)
                     .map(|a| (a.info.path.clone(), a.info.name.clone()))
                     .ok_or_else(|| format!("no asset '{asset}'"))?;
                 let id = self

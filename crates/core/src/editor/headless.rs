@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::sweep::transcribe::{self, Provider};
-use super::{inspect, Editor};
+use super::{inspect, pictures, Editor};
 use crate::scripting::ScriptEngine;
 
 const USAGE: &str = "\
@@ -31,6 +31,18 @@ Usage: eddie <command> <project.eddie> ...
                                      transcribe media (all with sound when
                                      none is named); saved per file, so only
                                      --force transcribes again
+  sheet <project> <out.jpg> [range]  the program as pictures: one labelled
+                                     cell per visible shot, titles drawn; 16
+                                     cells at most, so a timeline range
+                                     (10..25, clip:7) shows a part in full
+  strip <project> <asset> <out.jpg>  16 pictures through one source, marked *
+                                     where the timeline already shows it
+  frames <project> <asset> <range|time> <out-dir> [--every seconds]
+         [--width px]                timestamped pictures of a source range,
+                                     one JPEG each, 40 at most (16 spread over
+                                     the range without --every). Times are
+                                     source times; clip:7 is the source range
+                                     clip 7 shows
   export <project> <out.mp4>         render the timeline
   help                               this text and the script API
 
@@ -44,6 +56,9 @@ const COMMANDS: &[&str] = &[
     "inspect",
     "run",
     "transcribe",
+    "sheet",
+    "strip",
+    "frames",
     "export",
     "help",
 ];
@@ -70,6 +85,9 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
         "inspect" => inspect_project(&args),
         "run" => run(&args),
         "transcribe" => transcribe(&args),
+        "sheet" => sheet(&args),
+        "strip" => strip(&args),
+        "frames" => frames(&args),
         "export" => export(&args),
         _ => unreachable!(),
     };
@@ -265,9 +283,7 @@ fn transcribe(args: &[String]) -> Result<Value, String> {
     let mut targets = Vec::new();
     for name in &wanted {
         let asset = app
-            .assets
-            .iter()
-            .find(|asset| asset.info.path == *name || asset.info.name == *name)
+            .asset_named(name)
             .ok_or_else(|| format!("no asset '{name}' in the project"))?;
         targets.push(asset.info.clone());
     }
@@ -309,6 +325,49 @@ fn transcribe(args: &[String]) -> Result<Value, String> {
         });
     }
     Ok(json!({ "ok": !failed, "assets": results }))
+}
+
+fn path_arg(args: &[String], index: usize, name: &str) -> Result<PathBuf, String> {
+    let path = args.get(index).ok_or_else(|| format!("missing {name}"))?;
+    Ok(std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
+}
+
+fn sheet(args: &[String]) -> Result<Value, String> {
+    let output = path_arg(args, 1, "<out.jpg>")?;
+    let app = open(&project_arg(args)?)?;
+    pictures::sheet(&app, output, args.get(2).map(String::as_str))?()
+}
+
+fn strip(args: &[String]) -> Result<Value, String> {
+    let asset = args.get(1).ok_or("missing <asset>")?;
+    let output = path_arg(args, 2, "<out.jpg>")?;
+    let app = open(&project_arg(args)?)?;
+    pictures::strip(&app, asset, output)?()
+}
+
+fn frames(args: &[String]) -> Result<Value, String> {
+    let mut every = None;
+    let mut width = None;
+    let mut plain = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let mut number = |flag: &str| {
+            rest.next()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| format!("{flag} needs a positive number"))
+        };
+        match arg.as_str() {
+            "--every" => every = Some(number("--every")?),
+            "--width" => width = Some(number("--width")? as u32),
+            _ => plain.push(arg.clone()),
+        }
+    }
+    let asset = plain.get(1).ok_or("missing <asset>")?;
+    let range = plain.get(2).ok_or("missing <range|time>")?;
+    let directory = path_arg(&plain, 3, "<out-dir>")?;
+    let app = open(&project_arg(&plain)?)?;
+    pictures::frames(&app, asset, range, directory, every, width)?()
 }
 
 fn export(args: &[String]) -> Result<Value, String> {

@@ -1242,16 +1242,7 @@ impl EditorApp {
                     self.editor.playhead,
                     picture.as_ref(),
                     audio_peaks,
-                    openreel_media::export_canvas(
-                        self.editor.timeline.orientation,
-                        self.editor
-                            .timeline
-                            .clips
-                            .iter()
-                            .filter(|c| c.kind == ClipKind::Video)
-                            .filter_map(|c| self.editor.asset(c.source.as_deref()?))
-                            .map(|a| (a.info.width, a.info.height)),
-                    ),
+                    self.editor.canvas(),
                     !self.editor.assets.is_empty(),
                 );
                 if let Some((title_id, title_rect)) = shown_title {

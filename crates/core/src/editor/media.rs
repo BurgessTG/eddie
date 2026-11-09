@@ -53,6 +53,27 @@ impl Editor {
         self.assets.iter().find(|a| a.info.path == path)
     }
 
+    /// The asset a script or command names, by path or by file name.
+    pub fn asset_named(&self, name: &str) -> Option<&BinAsset> {
+        self.assets
+            .iter()
+            .find(|a| a.info.path == name || a.info.name == name)
+    }
+
+    /// The picture size preview and export share: the largest source of the
+    /// project's orientation on the timeline.
+    pub fn canvas(&self) -> (u32, u32) {
+        openreel_media::export_canvas(
+            self.timeline.orientation,
+            self.timeline
+                .clips
+                .iter()
+                .filter(|clip| clip.kind == openreel_engine::ClipKind::Video)
+                .filter_map(|clip| self.asset(clip.source.as_deref()?))
+                .map(|asset| (asset.info.width, asset.info.height)),
+        )
+    }
+
     // -- import pipeline ------------------------------------------------------
 
     pub fn insert_placeholder(&mut self, path: &std::path::Path) {

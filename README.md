@@ -131,6 +131,9 @@ eddie state talk.eddie                          # the JSON scripts see
 eddie inspect talk.eddie                        # measured timeline problems
 eddie run talk.eddie -e "addAssetRange('a.mp4', 0, 12.5, 4)"
 eddie run talk.eddie edit.js --dry-run          # report without saving
+eddie sheet talk.eddie sheet.jpg                # the edit as labelled pictures
+eddie strip talk.eddie a.mp4 a.jpg              # 16 pictures through a source
+eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
 eddie export talk.eddie out.mp4
 eddie help                                      # commands and the script API
 ```
@@ -148,6 +151,13 @@ transcribed once unless you pass `--force`; Curate uses the same ones.
 console), as one edit: every command applies, or none does. It prints the
 script's `return` value, `console.log` lines, the clip IDs its handles
 became, and the inspection findings the edit introduced.
+
+`sheet`, `strip` and `frames` let an agent that cannot watch video look at
+its work. A sheet shows one labelled cell per visible shot (16 at most; a
+timeline range such as `10..25` shows one part in full). A strip shows a
+whole source and marks what the timeline already uses. Frames are JPEGs
+named by their source time, 40 per call at most.
+
 [docs/agents.md](docs/agents.md) is the guide for agents: the API, the
 time grammar, and the rules that keep edits from going wrong.
 

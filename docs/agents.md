@@ -12,16 +12,47 @@ fixed a real mistake.
 eddie new talk.eddie footage/*.mp4 music.wav   # create a project, importing media
 eddie transcribe talk.eddie                    # speech to text, saved per file
 eddie state talk.eddie                         # everything a script can read
+eddie strip talk.eddie a.mp4 a.jpg             # 16 pictures through one source
+eddie frames talk.eddie a.mp4 12..14 shots/    # timestamped pictures of a source range
 eddie run talk.eddie edit.js                   # one edit: all of it or none of it
 eddie inspect talk.eddie                       # measured problems in the timeline
+eddie sheet talk.eddie sheet.jpg               # the edit as pictures
 eddie export talk.eddie out.mp4
 ```
 
 Every command prints one JSON object. Errors print `{"ok":false,"error":...}`
 and exit 1. `eddie help` lists the commands and the script API.
 
-After `run`, read its `introducedFindings` (or run `inspect`) and fix what
-the edit broke. `--dry-run` reports an edit without saving it.
+After `run`, read its `introducedFindings` (or run `inspect`), look at a
+`sheet`, and fix what the edit broke. `--dry-run` reports an edit without
+saving it.
+
+## Pictures
+
+JSON does not show what a shot looks like. Three commands write JPEGs for
+you to open; each also prints the times it pictured.
+
+- `eddie sheet <project> <out.jpg> [range]` shows the program: one cell
+  per visible shot, labelled with its timeline time, clip ID and lane, and
+  with titles drawn on the picture.
+  - A sheet has 16 cells at most. When the timeline has more shots, the
+    cells are spread evenly and the JSON says `sampled: true`. Give a
+    timeline range (`10..25`, `clip:7`) to see every shot of one part.
+  - `cells` lists `time, clip, lane, sourceTime, title` for each picture.
+- `eddie strip <project> <asset> <out.jpg>` shows one source from start
+  to end in 16 pictures, labelled with source times. A `*` marks a time
+  the timeline already shows.
+  - `pictures` lists `time, placed, shot [start, end]`. `placed` lists the
+    source ranges on the timeline.
+  - `shotsWithoutPicture` counts shots the strip skipped. Use `frames` on
+    the gap before placing anything from one.
+- `eddie frames <project> <asset> <range|time> <out-dir>` writes one JPEG
+  per picture, named by its real source time (`a-00012.500s.jpg`).
+  - Times are source times. `clip:7` means the source range clip 7 shows.
+  - Without `--every <seconds>`, 16 pictures are spread over the range.
+    One call gives 40 at most. `--width <px>` sets the size (384 by
+    default, 64 to 1280).
+  - Use it to find the exact frame for a cut, or to read text on screen.
 
 ## Scripts
 
@@ -120,8 +151,8 @@ closeGaps()`.
 **Picking source ranges**
 
 - Only place a range you can vouch for: a scene, candidate or transcript
-  segment that describes it, or a picture you looked at. Never guess a
-  source time.
+  segment that describes it, or a `strip` or `frames` picture you looked
+  at. Never guess a source time.
 - Keep each range inside its source; `inspect()` reports one that runs
   outside.
 - To use "the part where she talks about pricing", find the transcript
@@ -174,8 +205,10 @@ closeGaps()`.
   - flash frames (visible for under two frames);
   - near-match cuts that skip or repeat 1–3 frames of the same shot;
   - clips hidden by a lower lane.
-- `state()` doesn't show what the edit looks like. A vision-capable agent
-  should look at the actual pictures before calling an edit done.
+- `state()` doesn't show what the edit looks like. Before calling an edit
+  done, open a `sheet` and compare each cell with what you meant to place
+  there. Past 16 shots, sheet the timeline in ranges.
+  - Without vision, say that the pictures were not checked.
 
 ## Recipes
 
