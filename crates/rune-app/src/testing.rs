@@ -1,13 +1,31 @@
 //! What the window's tests share: a headless window over a `Ui` and the
 //! pointer and key input a person would give it.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use crate::app::{self, Ui};
 
 pub const FRAME: f64 = 1.0 / 60.0;
+
+thread_local! {
+    static LAST_INPUT: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// A key or pointer event arrived, as the real window's host notes for
+/// each one before the frame that handles it. `Runtime` input methods do
+/// not, so a test that sends input itself calls this first.
+pub fn input_arrives() {
+    LAST_INPUT.with(|last| last.set(Some(Instant::now())));
+}
+
+/// `rune::last_input` for a headless window.
+pub fn last_input() -> Option<Instant> {
+    LAST_INPUT.with(Cell::get)
+}
 
 /// A 1400 by 900 window over `ui`, polled and keyed as the real one is.
 pub fn window(ui: Ui) -> Runtime<Ui> {
@@ -30,10 +48,13 @@ pub fn shown(rt: &Runtime<Ui>, key: &str) -> bool {
 
 pub fn click(rt: &mut Runtime<Ui>, key: &str) {
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is not shown"));
+    input_arrives();
     rt.pointer_move(x, y);
     rt.frame(FRAME);
+    input_arrives();
     rt.pointer_down(x, y);
     rt.frame(FRAME);
+    input_arrives();
     rt.pointer_up(x, y);
     frames(rt, 2);
 }
@@ -43,6 +64,7 @@ pub fn press(rt: &mut Runtime<Ui>, key: Key) {
 }
 
 pub fn chord(rt: &mut Runtime<Ui>, key: Key, mods: Mods) {
+    input_arrives();
     rt.key(KeyEvent { key, mods });
     frames(rt, 2);
 }

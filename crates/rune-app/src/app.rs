@@ -97,6 +97,10 @@ pub struct Ui {
     quit: bool,
     /// A pointer gesture that edits the timeline is held, so undo waits.
     pub pointer_held: bool,
+    /// When the window last took a key or pointer event, and the answer
+    /// the last poll saw.
+    last_input: fn() -> Option<Instant>,
+    input_seen: Option<Instant>,
 
     /// The window clock at the last poll, for the spinners.
     clock: f64,
@@ -117,7 +121,7 @@ impl Ui {
     /// the files named on the command line.
     pub fn open(handle: AppHandle<Ui>, imports: Vec<PathBuf>) -> Self {
         let wake = handle.clone();
-        let mut ui = Self::around(Some(handle), move |sink| {
+        let mut ui = Self::around(Some(handle), rune::last_input, move |sink| {
             Editor::open(Wake::new(move || wake.wake()), sink, imports)
         });
         if headless_run() {
@@ -130,11 +134,14 @@ impl Ui {
     /// settings, saved curations or an audio device.
     #[cfg(test)]
     pub fn headless() -> Self {
-        Self::around(None, |sink| Editor::headless_with(Wake::new(|| {}), sink))
+        Self::around(None, crate::testing::last_input, |sink| {
+            Editor::headless_with(Wake::new(|| {}), sink)
+        })
     }
 
     fn around(
         handle: Option<AppHandle<Ui>>,
+        last_input: fn() -> Option<Instant>,
         editor: impl FnOnce(Box<dyn PreviewSink>) -> Editor,
     ) -> Self {
         let monitor = Pixels::new();
@@ -180,6 +187,8 @@ impl Ui {
             allow_close: false,
             quit: false,
             pointer_held: false,
+            last_input,
+            input_seen: None,
             clock: 0.0,
             frame_ms: 0.0,
             view_ms: Cell::new(0.0),
@@ -379,6 +388,16 @@ fn headless_run() -> bool {
     std::env::args().any(|arg| FLAGS.contains(&arg.as_str()))
 }
 
+/// Whether Rune's `focus` only marks the window as wanting attention, which
+/// it does on Wayland. On X11 it restores a minimized window and takes the
+/// keyboard, and a finished export must not pull the user out of what they
+/// are typing elsewhere; there the status bar alone reports it. The test is
+/// winit's own choice of Wayland over X11.
+fn asks_for_attention_only() -> bool {
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    cfg!(target_os = "linux") && (set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET"))
+}
+
 pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     let started = Instant::now();
     ui.clock = clock;
@@ -390,7 +409,7 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     gallery::sync(ui);
     settings::sync(ui);
     console::sync(ui);
-    if ui.pump(clock) {
+    if ui.pump(clock) && asks_for_attention_only() {
         if let Some(handle) = &ui.handle {
             // A finished export asks to be noticed.
             handle.focus();
@@ -398,6 +417,14 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     }
     if ui.quit {
         tx.quit();
+    }
+    // Rune polls before it runs the frame's handlers, so what a key or the
+    // pointer is about to change gets its poll on the next frame: playback
+    // starts there, a dropped clip lands there, typed text is taken there.
+    let input = (ui.last_input)();
+    if input != ui.input_seen {
+        ui.input_seen = input;
+        tx.wake_after(std::time::Duration::ZERO);
     }
     if let Some(after) = ui.editor.repaint_after() {
         tx.wake_after(after);
@@ -573,6 +600,61 @@ mod tests {
                 ..Mods::default()
             },
         }
+    }
+
+    /// The window has asked for its next frame, not for a later timer such
+    /// as a tooltip's.
+    fn poll_is_due(rt: &rune::Runtime<super::Ui>) -> bool {
+        rt.wake_deadline()
+            .is_some_and(|due| due <= rt.clock + crate::testing::FRAME)
+    }
+
+    /// Rune polls before it runs a frame's handlers. Space sets the editor
+    /// playing after that frame's poll, so without another poll playback
+    /// never starts and nothing asks for a later frame.
+    #[test]
+    fn a_key_is_followed_by_a_poll() {
+        use crate::testing;
+        let mut rt = testing::window(super::Ui::headless());
+        assert_eq!(
+            rt.wake_deadline(),
+            None,
+            "a resting window asks for no frame"
+        );
+        testing::input_arrives();
+        rt.key(KeyEvent {
+            key: Key::Text(" ".to_owned()),
+            mods: Mods::default(),
+        });
+        rt.frame(testing::FRAME);
+        assert!(rt.state.editor.playing, "Space plays");
+        assert!(
+            poll_is_due(&rt),
+            "nothing would poll the editor after the key"
+        );
+    }
+
+    /// The same for the pointer: a press handled after the poll.
+    #[test]
+    fn a_press_is_followed_by_a_poll() {
+        use crate::testing;
+        let mut rt = testing::window(super::Ui::headless());
+        let (x, y) = rt.find("transport-PlayPause").expect("the play button");
+        testing::input_arrives();
+        rt.pointer_move(x, y);
+        rt.frame(testing::FRAME);
+        testing::input_arrives();
+        rt.pointer_down(x, y);
+        rt.frame(testing::FRAME);
+        rt.frame(testing::FRAME);
+        testing::input_arrives();
+        rt.pointer_up(x, y);
+        rt.frame(testing::FRAME);
+        assert!(rt.state.editor.playing, "the button plays");
+        assert!(
+            poll_is_due(&rt),
+            "nothing would poll the editor after the press"
+        );
     }
 
     /// A binding whose key the window cannot name would never fire.
