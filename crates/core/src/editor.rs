@@ -16,6 +16,7 @@ use openreel_media::{
 
 use crate::scripting::{ScriptCommand, ScriptEngine};
 
+pub mod commands;
 pub mod gallery;
 mod headless;
 pub use headless::cli_main;
@@ -24,6 +25,11 @@ pub mod inspect;
 pub mod media;
 pub mod pictures;
 pub mod project;
+#[cfg(unix)]
+pub mod server;
+#[cfg(not(unix))]
+#[path = "editor/server_stub.rs"]
+pub mod server;
 pub mod settings;
 pub mod sweep;
 pub mod viewport;
@@ -219,6 +225,8 @@ pub struct Editor {
     /// The last finished export and the status line announcing it; Open
     /// folder shows while that line is still the status.
     pub exported: Option<(PathBuf, String)>,
+    /// Why the last export stopped, until the next one starts.
+    pub export_failed: Option<String>,
 
     script_engine: Option<ScriptEngine>,
     pub console_output: Vec<String>,
@@ -240,9 +248,34 @@ pub struct Editor {
     /// Project media not found on open, in the order Locate asks for it.
     pub missing_media: Vec<String>,
 
+    /// Answers agents' requests for the open project (`server`).
+    server: Option<server::Server>,
+    /// A window listens for whichever project it has open.
+    listen: bool,
+    /// The project another editor was listening for, and when it was asked.
+    listen_refused: Option<(PathBuf, Instant)>,
+    /// Why this window is not listening, until the status bar has said it.
+    listen_notice: Option<String>,
+    /// The pointer was down when the last frame ended.
+    pointer_held: bool,
+    /// Where editors listen; tests use a folder of their own.
+    socket_dir: Option<PathBuf>,
+
     wake: Wake,
     /// The soonest a job in progress wants another frame without a wake.
     repaint_after: Option<Duration>,
+}
+
+/// The editor state a script's commands can change (`Editor::edit_snapshot`).
+#[derive(Clone)]
+pub struct EditSnapshot {
+    timeline: Timeline,
+    selected: Option<ClipId>,
+    playhead: f64,
+    playing: bool,
+    magnet: bool,
+    zoom: f32,
+    mute_music_beds: bool,
 }
 
 /// What one `Editor::begin_frame` saw finish.
@@ -265,6 +298,7 @@ impl Editor {
         editor.curation_dir = sweep::default_curation_dir();
         editor.model_dir = sweep::transcribe::installed_model_dir();
         editor.manual_audio = false;
+        editor.listen = true;
         editor
     }
 
@@ -343,6 +377,7 @@ impl Editor {
             export_rx: None,
             export_progress: None,
             exported: None,
+            export_failed: None,
             script_engine,
             console_output,
             console_history: Vec::new(),
@@ -353,6 +388,12 @@ impl Editor {
             make_thumbnails: true,
             project_path: None,
             missing_media: Vec::new(),
+            server: None,
+            listen: false,
+            listen_refused: None,
+            listen_notice: None,
+            pointer_held: false,
+            socket_dir: server::socket_dir(),
             wake,
             repaint_after: None,
         }
@@ -1437,6 +1478,7 @@ impl Editor {
                     done = true;
                 }
                 ExportMsg::Done(Err(e)) => {
+                    self.export_failed = Some(e.clone());
                     self.status = e;
                     done = true;
                 }
@@ -1472,6 +1514,8 @@ impl Editor {
         let (progress_tx, progress_rx) = channel::<f64>();
         self.export_rx = Some(rx);
         self.export_progress = Some(0.0);
+        self.exported = None;
+        self.export_failed = None;
         let wake = self.wake.clone();
         thread::spawn(move || {
             let tx_progress = tx.clone();
@@ -1490,7 +1534,17 @@ impl Editor {
         });
     }
 
-    pub fn step_history(&mut self, redo: bool) {
+    /// Make the timeline as it stands an undo step now, without waiting for
+    /// the frame to end. A script's edit is one step, apart from whatever
+    /// the user was in the middle of.
+    pub fn commit_history(&mut self) {
+        let now = self.last_now.unwrap_or(0.0);
+        self.history
+            .track(&self.timeline, self.selected, now, false, false);
+    }
+
+    /// Undo or redo one step. False when there was nothing to step.
+    pub fn step_history(&mut self, redo: bool) -> bool {
         let stepped = if redo {
             self.history.redo(&mut self.timeline, &mut self.selected)
         } else {
@@ -1503,7 +1557,7 @@ impl Editor {
                 "Nothing to undo."
             }
             .to_owned();
-            return;
+            return false;
         }
         self.set_playing(false);
         self.playhead = self.playhead.min(self.timeline.end());
@@ -1514,6 +1568,7 @@ impl Editor {
             "Undid the last edit."
         }
         .to_owned();
+        true
     }
 
     /// Do what `action` asks when it needs no window. False leaves it to
@@ -1529,8 +1584,12 @@ impl Editor {
             | Action::LocateMedia
             | Action::OpenSettings
             | Action::ShowShortcuts => return false,
-            Action::Undo => self.step_history(false),
-            Action::Redo => self.step_history(true),
+            Action::Undo => {
+                self.step_history(false);
+            }
+            Action::Redo => {
+                self.step_history(true);
+            }
             Action::ClearTimeline => {
                 self.clear_timeline();
                 self.status = "Timeline cleared. Media bin kept.".to_owned();
@@ -1839,11 +1898,7 @@ impl Editor {
             }
             command.validate()?;
         }
-        let (timeline, selected, playhead) = (self.timeline.clone(), self.selected, self.playhead);
-        let was_playing = self.playing;
-        let magnet = self.viewport.magnet;
-        let zoom = self.viewport.px_per_sec;
-        let mute_music_beds = self.mute_music_beds;
+        let before = self.edit_snapshot();
         let started = Instant::now();
         let mut created = HashMap::new();
         let result = (|| {
@@ -1869,7 +1924,7 @@ impl Editor {
             }
             Ok(notes)
         })();
-        let changed = self.timeline != timeline;
+        let changed = self.timeline != before.timeline;
         match result {
             Ok(notes) => {
                 if changed {
@@ -1883,19 +1938,43 @@ impl Editor {
                 Ok((notes, handles))
             }
             Err(error) => {
-                self.timeline = timeline;
-                self.selected = selected;
-                self.playhead = playhead;
-                self.playing = was_playing;
-                self.viewport.magnet = magnet;
-                self.viewport.px_per_sec = zoom;
-                self.mute_music_beds = mute_music_beds;
-                self.stop_sources();
-                self.last_now = None;
-                self.forget_stills();
+                self.restore_edit(before);
                 Err(error)
             }
         }
+    }
+
+    /// Everything a script's commands can change, to put back with
+    /// `restore_edit`.
+    pub fn edit_snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            timeline: self.timeline.clone(),
+            selected: self.selected,
+            playhead: self.playhead,
+            playing: self.playing,
+            magnet: self.viewport.magnet,
+            zoom: self.viewport.px_per_sec,
+            mute_music_beds: self.mute_music_beds,
+        }
+    }
+
+    /// The project file would differ from one saved at `before`.
+    pub fn differs_from(&self, before: &EditSnapshot) -> bool {
+        self.timeline != before.timeline || self.mute_music_beds != before.mute_music_beds
+    }
+
+    /// Undo an edit that must leave no trace: a failed one, or a dry run.
+    pub fn restore_edit(&mut self, before: EditSnapshot) {
+        self.timeline = before.timeline;
+        self.selected = before.selected;
+        self.playhead = before.playhead;
+        self.playing = before.playing;
+        self.viewport.magnet = before.magnet;
+        self.viewport.px_per_sec = before.zoom;
+        self.mute_music_beds = before.mute_music_beds;
+        self.stop_sources();
+        self.last_now = None;
+        self.forget_stills();
     }
 
     pub fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) -> Vec<String> {
@@ -2245,6 +2324,7 @@ impl Editor {
             let paths = std::mem::take(&mut self.initial_imports);
             self.open_launch_paths(paths);
         }
+        self.serve_requests();
         FrameEvents { exported }
     }
 
@@ -2270,6 +2350,7 @@ impl Editor {
     /// the mix. `pointer_down` and `typing` hold an edit open while a drag
     /// or a text field is still changing it.
     pub fn end_frame(&mut self, pointer_down: bool, typing: bool) {
+        self.pointer_held = pointer_down;
         self.poll_loudness(pointer_down);
         let now = self.last_now.unwrap_or(0.0);
         if self

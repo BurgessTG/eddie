@@ -66,6 +66,7 @@ impl Editor {
     /// media bin keeps what is already there.
     pub fn open_project(&mut self, path: &Path) -> Result<(), String> {
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        self.take_over(&path);
         let name = file_name(&path);
         let unreadable = || format!("{name} is not an Eddie project.");
         let raw = std::fs::read(&path).map_err(|error| format!("Couldn't open {name}: {error}"))?;

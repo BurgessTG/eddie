@@ -120,9 +120,10 @@ makepkg -si
 
 ## Command line
 
-Agents and scripts drive Eddie without a window. Each command opens a
-project file, does one thing, saves if it changed the project, and prints
-one JSON object; errors print `{"ok":false,"error":...}` and exit 1.
+Agents and scripts drive Eddie from the command line. Each command does
+one thing to a project and prints one JSON object; errors print
+`{"ok":false,"error":...}` and exit 1. Without a running editor, a command
+opens the project file, acts, and saves if it changed the project.
 
 ```sh
 eddie new talk.eddie footage/*.mp4 music.wav    # create, importing media
@@ -131,6 +132,7 @@ eddie state talk.eddie                          # the JSON scripts see
 eddie inspect talk.eddie                        # measured timeline problems
 eddie run talk.eddie -e "addAssetRange('a.mp4', 0, 12.5, 4)"
 eddie run talk.eddie edit.js --dry-run          # report without saving
+eddie curate talk.eddie                         # shots and ranked ranges
 eddie sheet talk.eddie sheet.jpg                # the edit as labelled pictures
 eddie strip talk.eddie a.mp4 a.jpg              # 16 pictures through a source
 eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
@@ -151,6 +153,17 @@ transcribed once unless you pass `--force`; Curate uses the same ones.
 console), as one edit: every command applies, or none does. It prints the
 script's `return` value, `console.log` lines, the clip IDs its handles
 became, and the inspection findings the edit introduced.
+
+**Live editing.** While a project is open in the Eddie window, the same
+commands go to that window instead of the file: an agent's edits appear on
+the timeline as you watch, each `run` is one step in your Undo history, and
+the window still saves only when you do (or on `eddie save`). `eddie serve
+talk.eddie` keeps a project open without a window, so media stays loaded
+between commands (about 50 ms each instead of about a second) and every
+change is saved; `eddie stop` ends it. `eddie undo` and `eddie redo` step
+the running editor's history, and `eddie events` prints one JSON line per
+change. The editor listens on a Unix socket only your user can open, under
+`$XDG_RUNTIME_DIR/eddie`; the protocol is in [docs/agents.md](docs/agents.md).
 
 `sheet`, `strip` and `frames` let an agent that cannot watch video look at
 its work. A sheet shows one labelled cell per visible shot (16 at most; a

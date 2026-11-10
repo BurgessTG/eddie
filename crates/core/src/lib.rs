@@ -4,4 +4,6 @@
 pub mod editor;
 pub mod scripting;
 
-pub use editor::{cli_main, Action, Editor, FrameEvents, NoPreview, PreviewSink, Wake};
+pub use editor::{
+    cli_main, Action, EditSnapshot, Editor, FrameEvents, NoPreview, PreviewSink, Wake,
+};

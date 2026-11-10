@@ -32,11 +32,14 @@ fn identity(path: &str) -> Option<(u64, u128)> {
 }
 
 /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
-fn file_for(dir: &Path, path: &str) -> PathBuf {
-    let hash = path.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+pub(crate) fn path_hash(path: &str) -> u64 {
+    path.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    });
-    dir.join(format!("{hash:016x}.json"))
+    })
+}
+
+fn file_for(dir: &Path, path: &str) -> PathBuf {
+    dir.join(format!("{:016x}.json", path_hash(path)))
 }
 
 /// Write a finished curation. Failures only cost a later re-curate.

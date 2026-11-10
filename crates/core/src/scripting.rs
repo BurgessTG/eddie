@@ -380,7 +380,7 @@ function help() {
     "  // adds and splits return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
-    "console.log(...) works. Variables persist between lines."
+    "console.log(...) and return report back. The in-app console keeps variables between lines; each eddie run starts fresh."
   ].join("\n");
 }
 var console = { log: (...a) => __log(a.map(String).join(" ")) };

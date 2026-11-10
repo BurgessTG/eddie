@@ -1,15 +1,21 @@
 //! The `eddie` command line: the editor without a window, for agents and
-//! scripts. Each command loads a project file, does one thing, saves when
-//! it changed the project, and prints one JSON object on stdout.
+//! scripts. A command names a project and asks for one thing (`commands`).
+//! When an editor already has that project open (a window, or `eddie
+//! serve`), the command is forwarded to it; otherwise it loads the project
+//! file, acts, and saves when it changed the project. Either way it prints
+//! one JSON object on stdout.
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use super::sweep::transcribe::{self, Provider};
-use super::{inspect, pictures, Editor};
+use super::commands::{self, Job, Note, Outcome, Reply};
+use super::sweep::transcribe;
+use super::{server, Editor, NoPreview, Settings, Wake};
 use crate::scripting::ScriptEngine;
 
 const USAGE: &str = "\
@@ -31,6 +37,11 @@ Usage: eddie <command> <project.eddie> ...
                                      transcribe media (all with sound when
                                      none is named); saved per file, so only
                                      --force transcribes again
+  curate <project> [asset...] [--force]
+                                     find shots and rank ranges in media (all
+                                     when none is named), for sceneClips() and
+                                     sweepCandidates(); saved per file, so
+                                     only --force curates again
   sheet <project> <out.jpg> [range]  the program as pictures: one labelled
                                      cell per visible shot, titles drawn; 16
                                      cells at most, so a timeline range
@@ -46,6 +57,20 @@ Usage: eddie <command> <project.eddie> ...
   export <project> <out.mp4>         render the timeline
   help                               this text and the script API
 
+Live editing. While a project is open in the Eddie window or in `serve`,
+every command above goes to that editor instead of the file: edits show in
+the window, each `run` is one Undo step, and replies carry \"live\":true.
+
+  serve <project>                    keep the project open without a window:
+                                     media and decoders stay loaded between
+                                     commands and every change is saved
+  stop <project>                     end `serve`
+  undo <project> | redo <project>    step the running editor's history
+  save <project>                     write the project file now (a window
+                                     saves only when asked; `serve` always)
+  events <project>                   one JSON line per change in the running
+                                     editor, until it closes
+
 Every command prints one JSON object. Errors print {\"ok\":false,...} and
 exit 1. Without a command, eddie opens the editor window.";
 
@@ -56,10 +81,17 @@ const COMMANDS: &[&str] = &[
     "inspect",
     "run",
     "transcribe",
+    "curate",
     "sheet",
     "strip",
     "frames",
     "export",
+    "serve",
+    "stop",
+    "undo",
+    "redo",
+    "save",
+    "events",
     "help",
 ];
 
@@ -80,22 +112,16 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
             return Some(0);
         }
         "new" => new(&args),
-        "import" => import(&args),
-        "state" => state(&args),
-        "inspect" => inspect_project(&args),
-        "run" => run(&args),
-        "transcribe" => transcribe(&args),
-        "sheet" => sheet(&args),
-        "strip" => strip(&args),
-        "frames" => frames(&args),
-        "export" => export(&args),
-        _ => unreachable!(),
+        "serve" => serve(&args),
+        "events" => events(&args),
+        _ => request(command, &args),
     };
     let (code, value) = match result {
         Ok(value) => (if value["ok"] == false { 1 } else { 0 }, value),
         Err(error) => (1, json!({ "ok": false, "error": error })),
     };
-    println!("{value}");
+    // A reader that went away (`eddie events | head`) is not an error.
+    let _ = writeln!(std::io::stdout(), "{value}");
     Some(code)
 }
 
@@ -105,61 +131,196 @@ fn script_help() -> String {
         .unwrap_or_else(|error| format!("scripting unavailable: {error}"))
 }
 
-/// A windowless editor. Saved curation returns on import, as in the window.
-fn editor() -> Editor {
-    let mut app = Editor::headless();
-    app.curation_dir = super::sweep::default_curation_dir();
-    app.model_dir = transcribe::installed_model_dir();
-    app.make_thumbnails = false;
-    app
+fn absolute(path: &str) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 
 fn project_arg(args: &[String]) -> Result<PathBuf, String> {
-    let path = args.first().ok_or("missing <project>")?;
-    Ok(std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
+    Ok(absolute(args.first().ok_or("missing <project>")?))
 }
 
-fn open(path: &Path) -> Result<Editor, String> {
-    let mut app = editor();
-    app.open_project(path)?;
-    wait_for_imports(&mut app);
-    Ok(app)
+/// A command's arguments as the request it makes. Paths become absolute
+/// here, where the command was run; an editor elsewhere serves them.
+fn params(command: &str, args: &[String]) -> Result<Value, String> {
+    let mut flags = Vec::new();
+    let mut plain = Vec::new();
+    let mut values = serde_json::Map::new();
+    let (switches, options): (&[&str], &[&str]) = match command {
+        "run" => (&["--dry-run"], &["-e"]),
+        "transcribe" => (
+            &["--force"],
+            &["--provider", "--model", "--language", "--vocabulary"],
+        ),
+        "curate" => (&["--force"], &[]),
+        "frames" => (&[], &["--every", "--width"]),
+        _ => (&[], &[]),
+    };
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if switches.contains(&arg.as_str()) {
+            flags.push(arg.as_str());
+        } else if options.contains(&arg.as_str()) {
+            let value = rest.next().ok_or_else(|| format!("{arg} needs a value"))?;
+            values.insert(arg.trim_start_matches('-').to_owned(), json!(value));
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option {arg}"));
+        } else {
+            plain.push(arg.as_str());
+        }
+    }
+    let flag = |name: &str| flags.contains(&name);
+    let at = |index: usize, name: &str| {
+        plain
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("missing {name}"))
+    };
+    let at_most = |count: usize| match plain.get(count) {
+        Some(extra) => Err(format!("unexpected argument '{extra}'")),
+        None => Ok(()),
+    };
+    let positive = |key: &str| match values.get(key) {
+        None => Ok(Value::Null),
+        Some(value) => value
+            .as_str()
+            .and_then(|text| text.parse::<f64>().ok())
+            .filter(|number| number.is_finite() && *number > 0.0)
+            .map(|number| json!(number))
+            .ok_or_else(|| format!("--{key} needs a positive number")),
+    };
+    Ok(match command {
+        "run" => {
+            let code = match (values.get("e"), plain.as_slice()) {
+                (Some(code), []) => code.clone(),
+                (None, [file]) => json!(std::fs::read_to_string(file)
+                    .map_err(|error| format!("couldn't read {file}: {error}"))?),
+                _ => return Err("run needs <file.js> or -e <code>".to_owned()),
+            };
+            json!({ "code": code, "dryRun": flag("--dry-run") })
+        }
+        "import" => {
+            if plain.is_empty() {
+                return Err("missing <media...>".to_owned());
+            }
+            json!({ "media": plain.iter().map(|path| absolute(path)).collect::<Vec<_>>() })
+        }
+        "transcribe" => {
+            let mut request = json!({ "assets": plain, "force": flag("--force") });
+            for key in ["provider", "model", "language", "vocabulary"] {
+                if let Some(value) = values.get(key) {
+                    request[key] = value.clone();
+                }
+            }
+            if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
+                request["apiKey"] = json!(key);
+            }
+            request
+        }
+        "curate" => json!({ "assets": plain, "force": flag("--force") }),
+        "sheet" => {
+            at_most(2)?;
+            json!({ "output": absolute(at(0, "<out.jpg>")?), "range": plain.get(1) })
+        }
+        "strip" => {
+            at_most(2)?;
+            json!({ "asset": at(0, "<asset>")?, "output": absolute(at(1, "<out.jpg>")?) })
+        }
+        "frames" => {
+            at_most(3)?;
+            json!({
+                "asset": at(0, "<asset>")?,
+                "range": at(1, "<range|time>")?,
+                "directory": absolute(at(2, "<out-dir>")?),
+                "every": positive("every")?,
+                "width": positive("width")?,
+            })
+        }
+        "export" => {
+            at_most(1)?;
+            json!({ "output": absolute(at(0, "<out.mp4>")?) })
+        }
+        _ => {
+            at_most(0)?;
+            json!({})
+        }
+    })
 }
 
-fn wait_for_imports(app: &mut Editor) {
-    while app.import_rx.is_some() || !app.import_queue.is_empty() {
-        app.poll_imports();
-        std::thread::sleep(Duration::from_millis(10));
+/// A windowless editor that sleeps until a worker has something for it.
+struct Session {
+    app: Editor,
+    woken: Receiver<()>,
+    started: Instant,
+}
+
+impl Session {
+    /// Saved curation returns on import and transcription uses the saved
+    /// speech provider, as in the window.
+    fn new() -> Self {
+        let (wake, woken) = sync_channel(1);
+        let wake = Wake::new(move || {
+            // One pending wake is enough: the next frame sees everything.
+            let _ = wake.try_send(());
+        });
+        let mut app = Editor::headless_with(wake, Box::new(NoPreview));
+        app.settings = Settings::load();
+        app.curation_dir = super::sweep::default_curation_dir();
+        app.model_dir = transcribe::installed_model_dir();
+        app.make_thumbnails = false;
+        Self {
+            app,
+            woken,
+            started: Instant::now(),
+        }
+    }
+
+    fn open(path: &Path) -> Result<Self, String> {
+        let mut session = Self::new();
+        session.app.open_project(path)?;
+        session.until(|app| (!importing(app)).then_some(()));
+        Ok(session)
+    }
+
+    /// Run frames until `poll` answers, as a window would draw them.
+    fn until<T>(&mut self, mut poll: impl FnMut(&mut Editor) -> Option<T>) -> T {
+        loop {
+            self.app.begin_frame(self.started.elapsed().as_secs_f64());
+            let answer = poll(&mut self.app);
+            self.app.end_frame(false, false);
+            if let Some(answer) = answer {
+                return answer;
+            }
+            match self.app.repaint_after() {
+                Some(after) => drop(self.woken.recv_timeout(after)),
+                None => drop(self.woken.recv()),
+            }
+        }
+    }
+
+    /// Wait for a job, printing its progress on stderr.
+    fn finish(&mut self, mut job: Job) -> Result<Outcome, String> {
+        self.until(|app| {
+            let mut notes = Vec::new();
+            let answer = job.poll(app, &mut notes);
+            for note in notes {
+                if let Note::Progress(line) = note {
+                    eprintln!("{line}");
+                }
+            }
+            answer
+        })
+    }
+
+    fn request(&mut self, method: &str, params: &Value) -> Result<Outcome, String> {
+        match commands::start(&mut self.app, method, params)? {
+            Reply::Done(outcome) => Ok(outcome),
+            Reply::Later(job) => self.finish(job),
+        }
     }
 }
 
-fn save(app: &mut Editor, path: &Path) -> Result<(), String> {
-    app.save_project_to(path)
-}
-
-/// Import `media` into the bin and report what came in and what did not.
-fn import_media(app: &mut Editor, media: &[String]) -> Value {
-    let paths: Vec<PathBuf> = media
-        .iter()
-        .map(|path| std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
-        .collect();
-    app.spawn_import(paths.clone());
-    wait_for_imports(app);
-    let (imported, failed): (Vec<_>, Vec<_>) = paths
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .partition(|path| app.asset(path).is_some());
-    json!({ "imported": imported, "failed": failed })
-}
-
-fn summary(app: &Editor, path: &Path) -> Value {
-    json!({
-        "project": path,
-        "clips": app.timeline.clips.len(),
-        "duration": app.timeline.end(),
-        "assets": app.assets.iter().map(|asset| &asset.info.name).collect::<Vec<_>>(),
-        "missingMedia": app.missing_media,
-    })
+fn importing(app: &Editor) -> bool {
+    app.import_rx.is_some() || !app.import_queue.is_empty()
 }
 
 fn new(args: &[String]) -> Result<Value, String> {
@@ -167,242 +328,90 @@ fn new(args: &[String]) -> Result<Value, String> {
     if path.exists() {
         return Err(format!("{} already exists", path.display()));
     }
-    let mut app = editor();
-    let media = import_media(&mut app, &args[1..]);
-    save(&mut app, &path)?;
-    let path = app.project_path.clone().unwrap_or(path);
-    Ok(json!({ "ok": true, "media": media, "summary": summary(&app, &path) }))
-}
-
-fn import(args: &[String]) -> Result<Value, String> {
-    let path = project_arg(args)?;
-    if args.len() < 2 {
-        return Err("missing <media...>".to_owned());
-    }
-    let mut app = open(&path)?;
-    let media = import_media(&mut app, &args[1..]);
-    save(&mut app, &path)?;
-    Ok(json!({ "ok": true, "media": media, "summary": summary(&app, &path) }))
-}
-
-fn state(args: &[String]) -> Result<Value, String> {
-    let app = open(&project_arg(args)?)?;
-    serde_json::from_str(&app.script_state_json()).map_err(|error| error.to_string())
-}
-
-fn inspect_project(args: &[String]) -> Result<Value, String> {
-    let app = open(&project_arg(args)?)?;
-    Ok(json!({
-        "ok": true,
-        "findings": inspect::inspect(&app.timeline, &app.assets),
-    }))
-}
-
-fn run(args: &[String]) -> Result<Value, String> {
-    let path = project_arg(args)?;
-    let dry_run = args.iter().any(|arg| arg == "--dry-run");
-    let rest: Vec<&String> = args[1..].iter().filter(|arg| *arg != "--dry-run").collect();
-    let code = match rest.as_slice() {
-        [flag, code] if flag.as_str() == "-e" => (*code).clone(),
-        [file] => std::fs::read_to_string(file)
-            .map_err(|error| format!("couldn't read {file}: {error}"))?,
-        _ => return Err("run needs <file.js> or -e <code>".to_owned()),
+    let mut session = Session::new();
+    let media = if args.len() > 1 {
+        let request = params("import", &args[1..])?;
+        session.request("import", &request)?.value["media"].take()
+    } else {
+        json!({ "imported": [], "failed": [] })
     };
-    let mut app = open(&path)?;
-    let before = inspect::inspect(&app.timeline, &app.assets);
-    let saved = app.timeline.clone();
-    let mut engine = ScriptEngine::new()?;
-    let (output, commands) = engine.eval_checked(&code, &app.script_state_json())?;
-    let (notes, handles) = app.apply_edit(commands)?;
-    let changed = app.timeline != saved;
-    let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
-        .into_iter()
-        .filter(|finding| !before.contains(finding))
-        .collect();
-    if changed && !dry_run {
-        save(&mut app, &path)?;
-    }
+    session.app.save_project_to(&path)?;
     Ok(json!({
         "ok": true,
-        "changed": changed,
-        "saved": changed && !dry_run,
-        "output": (output != "undefined").then_some(output),
-        "notes": notes,
-        "handles": handles,
-        "introducedFindings": introduced,
-        "summary": summary(&app, &path),
+        "media": media,
+        "saved": true,
+        "summary": commands::summary(&session.app),
     }))
 }
 
-/// Transcribe with the saved settings, overridden by flags and by
-/// `EDDIE_TRANSCRIBE_API_KEY`. One file failing does not stop the rest.
-fn transcribe(args: &[String]) -> Result<Value, String> {
-    let path = project_arg(args)?;
-    let saved = super::Settings::load();
-    let models = transcribe::installed_model_dir();
-    let mut settings = saved.transcription(models.as_deref());
-    if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
-        settings.api_key = key.trim().to_owned();
-    }
-    let mut force = false;
-    let mut wanted = Vec::new();
-    let mut rest = args[1..].iter();
-    while let Some(arg) = rest.next() {
-        let mut value = |flag: &str| {
-            rest.next()
-                .cloned()
-                .ok_or_else(|| format!("{flag} needs a value"))
-        };
-        match arg.as_str() {
-            "--force" => force = true,
-            "--provider" => {
-                let name = value("--provider")?;
-                let provider = Provider::from_name(&name)
-                    .ok_or_else(|| format!("unknown provider '{name}' (local, meta, openai)"))?;
-                if provider != settings.provider {
-                    // Another provider's key and endpoint do not carry over.
-                    let mut other = saved.clone();
-                    other.transcription = transcribe::TranscribeSettings {
-                        provider,
-                        ..Default::default()
-                    };
-                    settings = other.transcription(models.as_deref());
-                    if let Ok(key) = std::env::var("EDDIE_TRANSCRIBE_API_KEY") {
-                        settings.api_key = key.trim().to_owned();
-                    }
-                }
+/// Ask the editor that has the project open, or be that editor for one
+/// request.
+fn request(command: &str, args: &[String]) -> Result<Value, String> {
+    let project = project_arg(args)?;
+    let request = params(command, &args[1..])?;
+    let state = command == "state";
+    if let Some(mut live) = server::connect(&project) {
+        let mut value = live.request(command, &request, &mut |line| eprintln!("{line}"))?;
+        if let Some(object) = value.as_object_mut() {
+            // `state` is exactly what scripts see, here as there.
+            if state && object.get("ok") == Some(&json!(true)) {
+                object.remove("ok");
+            } else if !state {
+                object.insert("live".to_owned(), json!(true));
             }
-            "--model" => settings.model = value("--model")?,
-            "--language" => settings.language = value("--language")?,
-            "--vocabulary" => settings.vocabulary = value("--vocabulary")?,
-            flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
-            asset => wanted.push(asset.to_owned()),
         }
+        return Ok(value);
     }
-    let app = open(&path)?;
-    let mut targets = Vec::new();
-    for name in &wanted {
-        let asset = app
-            .asset_named(name)
-            .ok_or_else(|| format!("no asset '{name}' in the project"))?;
-        targets.push(asset.info.clone());
-    }
-    if wanted.is_empty() {
-        targets = app
-            .assets
-            .iter()
-            .filter(|asset| asset.info.has_audio)
-            .map(|asset| asset.info.clone())
-            .collect();
-    }
-    let store = app.curation_dir.clone();
-    let mut results = Vec::new();
-    let mut failed = false;
-    for info in targets {
-        let started = Instant::now();
-        let mut progress = |message: &str| eprintln!("{}: {message}", info.name);
-        let result =
-            transcribe::transcribe_cached(&settings, store.as_deref(), &info, force, &mut progress);
-        let seconds = started.elapsed().as_secs_f64();
-        results.push(match result {
-            Ok(transcript) => {
-                let words: usize = transcript.segments.iter().map(|s| s.words.len()).sum();
-                let entry = json!({
-                    "asset": info.name,
-                    "turns": transcript.segments.len(),
-                    "words": words,
-                    "source": transcript.source,
-                    "saved": transcript.cached,
-                    "seconds": seconds,
-                    "note": transcript.note,
-                });
-                entry
-            }
-            Err(error) => {
-                failed = true;
-                json!({ "asset": info.name, "error": error })
-            }
-        });
-    }
-    Ok(json!({ "ok": !failed, "assets": results }))
-}
-
-fn path_arg(args: &[String], index: usize, name: &str) -> Result<PathBuf, String> {
-    let path = args.get(index).ok_or_else(|| format!("missing {name}"))?;
-    Ok(std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
-}
-
-fn sheet(args: &[String]) -> Result<Value, String> {
-    let output = path_arg(args, 1, "<out.jpg>")?;
-    let app = open(&project_arg(args)?)?;
-    pictures::sheet(&app, output, args.get(2).map(String::as_str))?()
-}
-
-fn strip(args: &[String]) -> Result<Value, String> {
-    let asset = args.get(1).ok_or("missing <asset>")?;
-    let output = path_arg(args, 2, "<out.jpg>")?;
-    let app = open(&project_arg(args)?)?;
-    pictures::strip(&app, asset, output)?()
-}
-
-fn frames(args: &[String]) -> Result<Value, String> {
-    let mut every = None;
-    let mut width = None;
-    let mut plain = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        let mut number = |flag: &str| {
-            rest.next()
-                .and_then(|value| value.parse::<f64>().ok())
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .ok_or_else(|| format!("{flag} needs a positive number"))
-        };
-        match arg.as_str() {
-            "--every" => every = Some(number("--every")?),
-            "--width" => width = Some(number("--width")? as u32),
-            _ => plain.push(arg.clone()),
-        }
-    }
-    let asset = plain.get(1).ok_or("missing <asset>")?;
-    let range = plain.get(2).ok_or("missing <range|time>")?;
-    let directory = path_arg(&plain, 3, "<out-dir>")?;
-    let app = open(&project_arg(&plain)?)?;
-    pictures::frames(&app, asset, range, directory, every, width)?()
-}
-
-fn export(args: &[String]) -> Result<Value, String> {
-    let path = project_arg(args)?;
-    let output = args.get(1).ok_or("missing <out.mp4>")?;
-    let output = std::path::absolute(output).unwrap_or_else(|_| PathBuf::from(output));
-    let mut app = open(&path)?;
-    if !app.missing_media.is_empty() {
+    if matches!(command, "stop" | "undo" | "redo" | "save") {
         return Err(format!(
-            "{} media file(s) are missing: {}",
-            app.missing_media.len(),
-            app.missing_media.join(", ")
+            "{command} needs a running editor: open the project in Eddie, or run eddie serve"
         ));
     }
-    app.start_export(output);
-    if app.export_rx.is_none() {
-        return Err(app.status.clone());
+    let mut session = Session::open(&project)?;
+    let outcome = session.request(command, &request)?;
+    let mut value = outcome.value;
+    if outcome.changed {
+        session.app.save_project_to(&project)?;
+        value["saved"] = json!(true);
     }
-    let started = Instant::now();
-    let mut reported = 0.0;
-    while app.export_rx.is_some() {
-        if app.poll_export() {
-            let (file, _) = app.exported.clone().expect("finished export");
-            return Ok(json!({
-                "ok": true,
-                "output": file,
-                "seconds": started.elapsed().as_secs_f64(),
-            }));
-        }
-        let progress = app.export_progress.unwrap_or(0.0);
-        if progress >= reported + 0.1 {
-            reported = progress;
-            eprintln!("export {:.0}%", progress * 100.0);
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    if !state && value.get("ok").is_none() {
+        value["ok"] = json!(true);
     }
-    Err(app.status.clone())
+    Ok(value)
+}
+
+/// Keep the project open and answer requests until `eddie stop`. Prints one
+/// line when it is listening and one when it stops.
+fn serve(args: &[String]) -> Result<Value, String> {
+    let project = project_arg(args)?;
+    params("serve", &args[1..])?;
+    let mut session = Session::open(&project)?;
+    let socket = session.app.serve()?;
+    let ready = json!({
+        "ok": true,
+        "serving": project,
+        "socket": socket,
+        "pid": std::process::id(),
+    });
+    let mut stdout = std::io::stdout();
+    let _ = writeln!(stdout, "{ready}");
+    let _ = stdout.flush();
+    session.until(|app| app.serve_stopped().then_some(()));
+    // Dropping the editor sends the answer to `stop` before this exits.
+    drop(session);
+    Ok(json!({ "ok": true, "stopped": project }))
+}
+
+fn events(args: &[String]) -> Result<Value, String> {
+    let project = project_arg(args)?;
+    params("events", &args[1..])?;
+    let mut live = server::connect(&project)
+        .ok_or("events needs a running editor: open the project in Eddie, or run eddie serve")?;
+    let mut stdout = std::io::stdout();
+    live.events(&mut |line| {
+        writeln!(stdout, "{line}")
+            .and_then(|()| stdout.flush())
+            .is_ok()
+    })?;
+    Ok(json!({ "ok": true, "closed": project }))
 }

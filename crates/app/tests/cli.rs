@@ -1,8 +1,9 @@
 //! The `eddie` command line end to end: real binary, real media, a project
 //! file on disk. Needs `ffmpeg` and `ffprobe` on PATH, like the editor.
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 use serde_json::Value;
 
@@ -26,15 +27,22 @@ impl Dir {
         assert!(status.success());
     }
 
-    /// Run eddie from `cwd` (relative to the dir), returning exit code and JSON.
-    fn eddie_in(&self, cwd: &str, args: &[&str]) -> (i32, Value) {
-        let out = Command::new(env!("CARGO_BIN_EXE_eddie"))
+    /// eddie with this dir as its home, so it finds no settings, saved
+    /// curation or running editor of the user's.
+    fn command(&self, cwd: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_eddie"));
+        command
             .current_dir(self.0.join(cwd))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_RUNTIME_DIR", self.0.join("run"))
             .env("HOME", &self.0)
-            .args(args)
-            .output()
-            .unwrap();
+            .args(args);
+        command
+    }
+
+    /// Run eddie from `cwd` (relative to the dir), returning exit code and JSON.
+    fn eddie_in(&self, cwd: &str, args: &[&str]) -> (i32, Value) {
+        let out = self.command(cwd, args).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
             panic!(
@@ -51,6 +59,57 @@ impl Dir {
 
     fn project(&self) -> Value {
         serde_json::from_slice(&std::fs::read(self.0.join("p.eddie")).unwrap()).unwrap()
+    }
+
+    /// Start a command that keeps running and prints JSON lines.
+    fn spawn(&self, args: &[&str]) -> Running {
+        let mut child = self
+            .command(".", args)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let lines = BufReader::new(child.stdout.take().unwrap());
+        Running { child, lines }
+    }
+}
+
+/// `eddie serve` or `eddie events`, killed if a test fails before it ends.
+struct Running {
+    child: Child,
+    lines: BufReader<ChildStdout>,
+}
+
+impl Running {
+    /// The next line it prints; null once it has closed its output.
+    fn line(&mut self) -> Value {
+        let mut line = String::new();
+        self.lines.read_line(&mut line).unwrap();
+        if line.is_empty() {
+            return Value::Null;
+        }
+        serde_json::from_str(&line).unwrap_or_else(|error| panic!("{error}: {line}"))
+    }
+
+    /// Skip to the next line with this `event`.
+    fn event(&mut self, name: &str) -> Value {
+        loop {
+            let line = self.line();
+            assert!(!line.is_null(), "closed before a {name} event");
+            if line["event"] == name {
+                return line;
+            }
+        }
+    }
+
+    fn exit_code(&mut self) -> i32 {
+        self.child.wait().unwrap().code().unwrap()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -502,4 +561,280 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     // An unknown asset is an error, not an empty success.
     let (code, missing) = dir.eddie(&["transcribe", "p.eddie", "nope.wav"]);
     assert_eq!((code, &missing["ok"]), (1, &false.into()));
+}
+
+fn blue_clip(dir: &Dir, name: &str) {
+    dir.ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=blue:s=320x180:r=30:d=4",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        name,
+    ]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_served_project_takes_every_command_live() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = Dir::new("serve");
+    blue_clip(&dir, "shot.mp4");
+    let (code, _) = dir.eddie(&["new", "p.eddie", "shot.mp4"]);
+    assert_eq!(code, 0);
+    let clips = |dir: &Dir| dir.project()["timeline"]["clips"].as_array().unwrap().len();
+
+    // These need an editor that stays open.
+    for command in ["undo", "redo", "save", "stop", "events"] {
+        let (code, refused) = dir.eddie(&[command, "p.eddie"]);
+        assert_eq!(code, 1, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("needs a running editor"),
+            "{refused}"
+        );
+    }
+
+    let mut serve = dir.spawn(&["serve", "p.eddie"]);
+    let ready = serve.line();
+    assert_eq!(ready["ok"], true, "{ready}");
+    // Only this user reaches the socket.
+    let socket = PathBuf::from(ready["socket"].as_str().unwrap());
+    assert!(socket.starts_with(dir.0.join("run/eddie")), "{ready}");
+    let mode = |path: &Path| path.metadata().unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&socket), 0o600);
+    assert_eq!(mode(socket.parent().unwrap()), 0o700);
+
+    // One editor per project.
+    let (code, second) = dir.eddie(&["serve", "p.eddie"]);
+    assert_eq!(code, 1, "{second}");
+    assert_eq!(second["error"], "Another Eddie already has p.eddie open.");
+
+    let mut events = dir.spawn(&["events", "p.eddie"]);
+    let hello = events.line();
+    assert_eq!(
+        (&hello["event"], &hello["window"]),
+        (&"hello".into(), &false.into()),
+        "{hello}"
+    );
+
+    // An edit goes to the running editor, which saves it and tells
+    // whoever listens.
+    let (code, run) = dir.eddie(&["run", "p.eddie", "-e", "addAssetRange('shot.mp4', 0, 1, 2)"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(
+        (&run["live"], &run["changed"], &run["saved"]),
+        (&true.into(), &true.into(), &true.into()),
+        "{run}"
+    );
+    assert_eq!(clips(&dir), 1);
+    let changed = events.event("timeline");
+    assert_eq!(
+        (&changed["clips"], &changed["duration"]),
+        (&1.into(), &2.0.into()),
+        "{changed}"
+    );
+
+    // A script that fails halfway leaves nothing behind.
+    let (code, failed) = dir.eddie(&[
+        "run",
+        "p.eddie",
+        "-e",
+        "addAssetRange('shot.mp4', 2, 0, 1); setFade(999, 0.1, 0)",
+    ]);
+    assert_eq!((code, &failed["ok"]), (1, &false.into()), "{failed}");
+    assert_eq!(failed["live"], true);
+    let (_, state) = dir.eddie(&["state", "p.eddie"]);
+    assert_eq!(state["clips"].as_array().unwrap().len(), 1, "{state}");
+    // `state` is what scripts see, without a reply's wrapping.
+    assert!(state.get("ok").is_none() && state.get("live").is_none());
+
+    // A dry run reports the edit and keeps neither it nor an undo step.
+    let (code, dry) = dir.eddie(&[
+        "run",
+        "p.eddie",
+        "-e",
+        "addTitle('Later', 0, 1)",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "{dry}");
+    assert_eq!(
+        (&dry["changed"], &dry["saved"], &dry["summary"]["clips"]),
+        (&true.into(), &false.into(), &2.into()),
+        "{dry}"
+    );
+    assert_eq!(clips(&dir), 1);
+
+    // Each run is one undo step, and stepping history saves too.
+    let (code, undone) = dir.eddie(&["undo", "p.eddie"]);
+    assert_eq!(code, 0, "{undone}");
+    assert_eq!(
+        (
+            &undone["changed"],
+            &undone["saved"],
+            &undone["summary"]["clips"]
+        ),
+        (&true.into(), &true.into(), &0.into()),
+        "{undone}"
+    );
+    assert_eq!(clips(&dir), 0);
+    assert_eq!(events.event("timeline")["clips"], 0);
+    let (_, nothing) = dir.eddie(&["undo", "p.eddie"]);
+    assert_eq!(nothing["changed"], false, "{nothing}");
+    let (code, redone) = dir.eddie(&["redo", "p.eddie"]);
+    assert_eq!((code, &redone["summary"]["clips"]), (0, &1.into()));
+    assert_eq!(clips(&dir), 1);
+    assert_eq!(events.event("timeline")["clips"], 1);
+
+    // Media the editor is asked to import arrives in its bin and the file.
+    blue_clip(&dir, "more.mp4");
+    let (code, imported) = dir.eddie(&["import", "p.eddie", "more.mp4"]);
+    assert_eq!(code, 0, "{imported}");
+    assert_eq!(
+        (&imported["live"], &imported["saved"]),
+        (&true.into(), &true.into())
+    );
+    assert_eq!(dir.project()["media"].as_array().unwrap().len(), 2);
+    let arrived = loop {
+        let event = events.event("import");
+        if event["importing"] == false {
+            break event;
+        }
+    };
+    assert_eq!(arrived["assets"], 2, "{arrived}");
+
+    // Pictures come from the running editor's own timeline.
+    let (code, sheet) = dir.eddie(&["sheet", "p.eddie", "sheet.jpg"]);
+    assert_eq!(code, 0, "{sheet}");
+    assert_eq!(sheet["live"], true);
+    assert!(dir.0.join("sheet.jpg").metadata().unwrap().len() > 0);
+
+    let (code, saved) = dir.eddie(&["save", "p.eddie"]);
+    assert_eq!((code, &saved["saved"]), (0, &true.into()), "{saved}");
+    let (code, unknown) = dir.eddie(&["save", "p.eddie", "extra"]);
+    assert_eq!(code, 1, "{unknown}");
+
+    // Stopping ends the server, the listeners and the socket.
+    let (code, stopped) = dir.eddie(&["stop", "p.eddie"]);
+    assert_eq!((code, &stopped["stopped"]), (0, &true.into()), "{stopped}");
+    assert_eq!(serve.line()["stopped"], ready["serving"]);
+    assert_eq!(serve.exit_code(), 0);
+    loop {
+        let line = events.line();
+        assert!(!line.is_null(), "events ended without saying so");
+        if line.get("closed").is_some() {
+            break;
+        }
+    }
+    assert_eq!(events.exit_code(), 0);
+    assert!(!socket.exists());
+
+    // Without an editor the same command works on the file again.
+    let (code, run) = dir.eddie(&["run", "p.eddie", "-e", "return state().clips.length"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!((&run["output"], run.get("live")), (&"1".into(), None));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_killed_editor_leaves_a_socket_the_next_one_replaces() {
+    let dir = Dir::new("stale");
+    let (code, _) = dir.eddie(&["new", "p.eddie"]);
+    assert_eq!(code, 0);
+    let mut serve = dir.spawn(&["serve", "p.eddie"]);
+    let socket = PathBuf::from(serve.line()["socket"].as_str().unwrap());
+    serve.child.kill().unwrap();
+    serve.child.wait().unwrap();
+    assert!(socket.exists(), "a killed editor cannot tidy up");
+
+    // Nobody answers there, so commands work on the file.
+    let (code, run) = dir.eddie(&["run", "p.eddie", "-e", "addTitle('Hi', 0, 1)"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!((&run["saved"], run.get("live")), (&true.into(), None));
+
+    let mut again = dir.spawn(&["serve", "p.eddie"]);
+    assert_eq!(again.line()["ok"], true);
+    let (code, state) = dir.eddie(&["inspect", "p.eddie"]);
+    assert_eq!((code, &state["live"]), (0, &true.into()), "{state}");
+    let (code, _) = dir.eddie(&["stop", "p.eddie"]);
+    assert_eq!(code, 0);
+    assert_eq!(again.exit_code(), 0);
+}
+
+#[test]
+fn curation_runs_once_per_file_and_reaches_scripts() {
+    let dir = Dir::new("curate");
+    // Two shots, so the scene list has a cut to find.
+    dir.ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=320x180:r=30:d=3",
+        "-f",
+        "lavfi",
+        "-i",
+        "smptebars=s=320x180:r=30:d=3",
+        "-filter_complex",
+        "[0:v][1:v]concat=n=2:v=1:a=0",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "shots.mp4",
+    ]);
+    let (code, _) = dir.eddie(&["new", "p.eddie", "shots.mp4"]);
+    assert_eq!(code, 0);
+
+    let (code, first) = dir.eddie(&["curate", "p.eddie"]);
+    assert_eq!(code, 0, "{first}");
+    let entry = &first["assets"][0];
+    assert_eq!(
+        (
+            &entry["asset"],
+            &entry["curated"],
+            &entry["saved"],
+            &entry["scenes"]
+        ),
+        (&"shots.mp4".into(), &true.into(), &false.into(), &2.into()),
+        "{first}"
+    );
+    // Curation is about the media, not the project.
+    assert!(first.get("saved").is_none(), "{first}");
+
+    // Saved beside the settings: a second run answers from that.
+    let (code, again) = dir.eddie(&["curate", "p.eddie", "shots.mp4"]);
+    assert_eq!(
+        (
+            code,
+            &again["assets"][0]["saved"],
+            &again["assets"][0]["scenes"]
+        ),
+        (0, &true.into(), &2.into()),
+        "{again}"
+    );
+    let (code, forced) = dir.eddie(&["curate", "p.eddie", "--force"]);
+    assert_eq!(
+        (code, &forced["assets"][0]["saved"]),
+        (0, &false.into()),
+        "{forced}"
+    );
+
+    let (code, run) = dir.eddie(&[
+        "run",
+        "p.eddie",
+        "-e",
+        "const scenes = sceneClips(); \
+         return scenes.length + ' ' + scenes[1].sourceIn",
+    ]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["output"], "2 3");
+
+    let (code, missing) = dir.eddie(&["curate", "p.eddie", "nope.mp4"]);
+    assert_eq!((code, &missing["ok"]), (1, &false.into()), "{missing}");
 }

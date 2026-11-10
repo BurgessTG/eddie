@@ -11,6 +11,7 @@ fixed a real mistake.
 ```sh
 eddie new talk.eddie footage/*.mp4 music.wav   # create a project, importing media
 eddie transcribe talk.eddie                    # speech to text, saved per file
+eddie curate talk.eddie                        # shots and ranked ranges, saved per file
 eddie state talk.eddie                         # everything a script can read
 eddie strip talk.eddie a.mp4 a.jpg             # 16 pictures through one source
 eddie frames talk.eddie a.mp4 12..14 shots/    # timestamped pictures of a source range
@@ -26,6 +27,50 @@ and exit 1. `eddie help` lists the commands and the script API.
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
 `sheet`, and fix what the edit broke. `--dry-run` reports an edit without
 saving it.
+
+## A running editor
+
+While a project is open in the Eddie window or in `eddie serve`, every
+command goes to that editor instead of the project file. You call it the
+same way; replies add `"live":true`.
+
+- `eddie serve talk.eddie &` keeps a project open without a window. Start
+  it when you will send more than a few commands: media stays loaded, so a
+  command takes about 50 ms instead of about a second. It prints one line
+  when it is listening and saves every change. `eddie stop talk.eddie`
+  ends it.
+- In the window, the user watches your edits arrive, and each `run` is one
+  Undo step in their history.
+  - The window saves only when its user does, so replies say
+    `"saved":false`. Run `eddie save talk.eddie` when the user wants your
+    edits on disk.
+  - The user edits too. Read `state` again before each edit instead of
+    reusing clip IDs from an earlier call.
+  - An edit waits while the user is dragging something.
+- `eddie undo talk.eddie` and `eddie redo talk.eddie` step the running
+  editor's history, the user's edits included. Without a running editor
+  nothing remembers earlier commands: try an edit with `--dry-run`, or
+  reverse it with another script.
+- `eddie events talk.eddie` prints one JSON line per change until the
+  editor closes: `timeline` (`revision, clips, duration`, whoever made the
+  change), `import`, `curation`, `transcription` and `export`.
+- One editor holds a project at a time. A window that opens a served
+  project takes it over; a second `serve` is refused.
+
+A program can use the socket itself instead of running `eddie` per
+command. `serve` prints its `socket` path. Send one JSON object per line,
+`{"id":1,"method":"run","code":"split('clip:7@50%')"}`, and read lines
+until one has your `id` and `ok`; lines with `progress` or `event` come in
+between. The methods are the commands, with these parameters:
+
+- `run`: `code`, `dryRun`.
+- `import`: `media` (absolute paths).
+- `transcribe`: `assets`, `force`, `provider`, `model`, `language`,
+  `vocabulary`. `curate`: `assets`, `force`.
+- `sheet`: `output`, `range`. `strip`: `asset`, `output`. `frames`:
+  `asset`, `range`, `directory`, `every`, `width`. `export`: `output`.
+  Output paths are absolute.
+- `state`, `inspect`, `undo`, `redo`, `save` and `stop` take none.
 
 ## Pictures
 
@@ -88,7 +133,8 @@ transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
   confidence, estimated}], asrSession`. Speaker labels mean something only
   within one source.
 - **sceneClips** list every physical shot of each curated file, back to
-  back, in source order.
+  back, in source order. A file is curated by `eddie curate` or the
+  window's Curate button; until then it has no scenes or candidates.
 - **sweepCandidates** are the same ranges ranked by score, with no cap on
   how many.
 - **Each range has:** `id, asset, assetName, sourceIn, duration, score,

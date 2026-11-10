@@ -18,6 +18,7 @@ mod speech;
 mod store;
 pub mod transcribe;
 pub use speech::utterances;
+pub(crate) use store::path_hash;
 pub use store::{
     default_dir as default_curation_dir, load as load_curation, load_shots, load_transcript,
     save_shots,
@@ -676,14 +677,23 @@ impl Editor {
     /// Explicit user-triggered curation for one ready asset.
     /// Re-curation replaces the previous transcript and candidates.
     pub fn curate_asset(&mut self, path: String) {
+        if self.queue_curation(path) {
+            self.open_curator_gallery();
+        }
+    }
+
+    /// `curate_asset` without opening the Gallery, for a request from
+    /// outside the window. False when the asset is not ready or is already
+    /// being curated.
+    pub fn queue_curation(&mut self, path: String) -> bool {
         let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) else {
-            return;
+            return false;
         };
         if asset.state != AssetState::Ready
             || asset.sweep.status == SweepStatus::Running
             || self.sweep_queue.contains(&path)
         {
-            return;
+            return false;
         }
         if asset.sweep.status != SweepStatus::NotStarted {
             asset.sweep = SweepData::default();
@@ -691,8 +701,8 @@ impl Editor {
         asset.sweep.status = SweepStatus::Running;
         asset.sweep.note = "Curating…".to_owned();
         self.sweep_queue.push(path);
-        self.open_curator_gallery();
         self.start_next_sweep();
+        true
     }
 
     /// Queue every ready asset that has never been curated.

@@ -3169,3 +3169,195 @@ fn a_finished_export_reports_itself_and_where_it_went() {
     assert_eq!(app.status, "Exported montage.mp4");
     assert_eq!(app.exported, Some((path, app.status.clone())));
 }
+
+/// A second window is still told why agents do not reach it once its
+/// media has loaded: every finished import writes the status.
+#[cfg(unix)]
+#[test]
+fn a_second_window_says_so_after_its_media_loads() {
+    let dir = std::env::temp_dir().join(format!("eddie-second-window-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let project = dir.join("p.eddie");
+    let sockets = dir.join("run");
+    let settle = |app: &mut Editor| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            app.begin_frame(0.0);
+            app.end_frame(false, false);
+            if !app.importing() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "import timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let window = |project: Option<&std::path::Path>| {
+        let mut app = Editor::headless();
+        app.listen = true;
+        app.socket_dir = Some(sockets.clone());
+        if let Some(project) = project {
+            app.open_project(project).unwrap();
+        }
+        app
+    };
+
+    let mut first = window(None);
+    first.spawn_import(vec![sample_media()[1].clone()]);
+    settle(&mut first);
+    first.save_project_to(&project).unwrap();
+    settle(&mut first);
+    assert!(first.server.is_some(), "{}", first.status);
+
+    let mut second = window(Some(&project));
+    assert!(
+        second.importing(),
+        "the project's media loads in the background"
+    );
+    settle(&mut second);
+    assert!(second.server.is_none());
+    assert_eq!(second.status, "Another Eddie already has p.eddie open.");
+
+    // It is said once: later status lines stay.
+    second.status = "Split.".to_owned();
+    second.listen_refused = second
+        .listen_refused
+        .take()
+        .map(|(project, at)| (project, at - Duration::from_secs(2)));
+    settle(&mut second);
+    assert_eq!(second.status, "Split.");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One editor listens per project. A second `eddie serve` is refused; a
+/// window that opens the project takes it over from the server, and only
+/// its user can stop it.
+#[cfg(unix)]
+#[test]
+fn a_window_takes_a_served_project_over() {
+    use std::sync::mpsc::sync_channel;
+
+    let dir = std::env::temp_dir().join(format!("eddie-take-over-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let project = dir.join("p.eddie");
+    Editor::headless().save_project_to(&project).unwrap();
+    let sockets = dir.join("run");
+
+    let (listening, ready) = channel();
+    let served = {
+        let (project, sockets) = (project.clone(), sockets.clone());
+        thread::spawn(move || {
+            let (wake, woken) = sync_channel(1);
+            let wake = Wake::new(move || {
+                let _ = wake.try_send(());
+            });
+            let mut app = Editor::headless_with(wake, Box::new(NoPreview));
+            app.socket_dir = Some(sockets);
+            app.open_project(&project).unwrap();
+            app.serve().unwrap();
+            listening.send(()).unwrap();
+            let started = Instant::now();
+            while !app.serve_stopped() {
+                let _ = woken.recv_timeout(Duration::from_millis(200));
+                app.begin_frame(started.elapsed().as_secs_f64());
+                app.end_frame(false, false);
+                assert!(started.elapsed() < Duration::from_secs(30), "never stopped");
+            }
+        })
+    };
+    ready.recv().unwrap();
+
+    let mut second = Editor::headless();
+    second.socket_dir = Some(sockets.clone());
+    second.open_project(&project).unwrap();
+    let refused = second.serve().unwrap_err();
+    assert_eq!(refused, "Another Eddie already has p.eddie open.");
+
+    let mut window = Editor::headless();
+    window.listen = true;
+    window.socket_dir = Some(sockets.clone());
+    window.open_project(&project).unwrap();
+    served.join().unwrap();
+    window.begin_frame(0.0);
+    window.end_frame(false, false);
+    assert!(window.server.is_some(), "{}", window.status);
+
+    let ask = |method: &'static str, params: serde_json::Value| {
+        let (project, sockets) = (project.clone(), sockets.clone());
+        thread::spawn(move || {
+            let mut live = server::connect_in(&sockets, &project).expect("the window listens");
+            live.request(method, &params, &mut |_| {})
+        })
+    };
+    let frames = |window: &mut Editor, pointer_down: bool, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            window.begin_frame(0.0);
+            window.end_frame(pointer_down, false);
+            thread::sleep(Duration::from_millis(5));
+            assert!(Instant::now() < deadline, "the window never answered");
+        }
+    };
+
+    // An edit waits while the user is mid-drag; a question does not.
+    window.end_frame(true, false);
+    let question = ask("inspect", serde_json::json!({}));
+    frames(&mut window, true, &|| question.is_finished());
+    assert_eq!(question.join().unwrap().unwrap()["ok"], true);
+    let edit = ask("run", serde_json::json!({ "code": "addTitle('Hi', 0, 1)" }));
+    let waited = Instant::now();
+    frames(&mut window, true, &|| {
+        waited.elapsed() > Duration::from_millis(150)
+    });
+    assert!(!edit.is_finished() && window.timeline.clips.is_empty());
+    frames(&mut window, false, &|| edit.is_finished());
+    let edited = edit.join().unwrap().unwrap();
+    assert_eq!(
+        (&edited["ok"], &edited["changed"]),
+        (&true.into(), &true.into())
+    );
+    assert_eq!(window.timeline.clips.len(), 1);
+    assert_eq!(window.status, "Edited from the command line.");
+    // The window's file is its user's to save, and the edit theirs to undo.
+    assert_eq!(edited["saved"], false, "{edited}");
+    assert!(window.step_history(false));
+    assert!(window.timeline.clips.is_empty());
+
+    let asked = ask("stop", serde_json::json!({}));
+    frames(&mut window, false, &|| asked.is_finished());
+    let answer = asked.join().unwrap().unwrap();
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("close the window"),
+        "{answer}"
+    );
+    assert!(window.server.is_some());
+
+    // A second window opens the project but is told agents reach the
+    // other one. It takes the socket once that closes.
+    let mut late = Editor::headless();
+    late.listen = true;
+    late.socket_dir = Some(sockets.clone());
+    late.open_project(&project).unwrap();
+    late.begin_frame(0.0);
+    late.end_frame(false, false);
+    assert!(late.server.is_none());
+    assert_eq!(late.status, "Another Eddie already has p.eddie open.");
+    assert!(late.repaint_after().is_some(), "it asks again unprompted");
+
+    // The socket goes with the editor.
+    drop(window);
+    assert!(server::connect_in(&sockets, &project).is_none());
+    late.listen_refused = late
+        .listen_refused
+        .take()
+        .map(|(project, at)| (project, at - Duration::from_secs(2)));
+    late.begin_frame(0.0);
+    late.end_frame(false, false);
+    assert!(late.server.is_some(), "{}", late.status);
+    let _ = std::fs::remove_dir_all(&dir);
+}

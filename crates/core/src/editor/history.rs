@@ -22,6 +22,8 @@ pub struct History {
     latest: Option<(Timeline, f64)>,
     undo: Vec<State>,
     redo: Vec<State>,
+    /// Counts settled changes: every step, undo, redo and reset.
+    revision: u64,
 }
 
 impl History {
@@ -34,12 +36,21 @@ impl History {
             latest: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            revision: 0,
         }
     }
 
     /// Forget every step; the current timeline becomes the baseline.
     pub fn reset(&mut self, timeline: &Timeline) {
+        let revision = self.revision + 1;
         *self = Self::new(timeline);
+        self.revision = revision;
+    }
+
+    /// Changes whenever the settled timeline does, so a listener can tell
+    /// without comparing timelines.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Call once per frame. `pointer_down` and `typing` hold a change open;
@@ -88,6 +99,7 @@ impl History {
         }
         self.redo.clear();
         self.latest = None;
+        self.revision += 1;
     }
 
     /// Step back. An open change is committed first so it is what undoes.
@@ -126,6 +138,7 @@ impl History {
             .selected
             .filter(|id| timeline.clip(*id).is_some());
         self.latest = None;
+        self.revision += 1;
     }
 }
 
