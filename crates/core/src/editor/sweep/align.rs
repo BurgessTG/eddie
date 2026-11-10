@@ -23,9 +23,9 @@ const MIN_MATCHED_SHARE: f64 = 0.5;
 const SAMPLE_RATE: usize = 16_000;
 /// Heard word edges are good to about ±0.2 s. A sentence break moves to the
 /// quietest 20 ms of audio within this distance.
-const SNAP_SECONDS: f64 = 0.25;
+pub(super) const SNAP_SECONDS: f64 = 0.25;
 /// A snapped break leaves each neighboring word at least this much.
-const MIN_KEEP_SECONDS: f64 = 0.04;
+pub(super) const MIN_KEEP_SECONDS: f64 = 0.04;
 
 /// The multilingual base model (`ggml-base.bin`): `EDDIE_WHISPER_MODEL`, or
 /// `ggml-base.bin` in `installed`, the user's model folder. Absent means no

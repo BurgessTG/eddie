@@ -172,6 +172,25 @@ mod script_edit_tests {
         }
     }
 
+    /// An error an agent can act on names what would have worked.
+    #[test]
+    fn an_unknown_title_style_lists_the_styles() {
+        let mut app = Editor::headless();
+        let title = app
+            .timeline
+            .add_clip("Keep", ClipKind::Title, 0, 0.0, 5.0, 0.0);
+        for script in [
+            "addTitle('New', 6, 2, 'bogus')".to_owned(),
+            format!("setTitleStyle({title}, 'bogus')"),
+            format!("addCaptionsForClip({title}, 'bogus')"),
+        ] {
+            let error = run(&mut app, &script).unwrap_err();
+            for style in openreel_engine::TitleStyle::ALL {
+                assert!(error.contains(style.as_str()), "{script}: {error}");
+            }
+        }
+    }
+
     #[test]
     fn scripts_read_utterances_and_snap_ranges_out_of_them() {
         let mut app = Editor::headless();
@@ -338,6 +357,64 @@ mod playback_tests {
             (second - first - 6.02).abs() < 0.1,
             "{first} then {second} dB"
         );
+    }
+
+    /// Without a window there is no preview to keep at the export's
+    /// loudness, so the mix is measured when a request reads it.
+    #[test]
+    fn a_request_that_reads_the_mix_waits_for_its_measurement() {
+        use commands::Reply;
+        let fixture = Fixture::new();
+        let tone = fixture.dir.join("tone.wav");
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000:d=3")
+            .arg(&tone)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let tone = tone.to_string_lossy().into_owned();
+        let mut app = Editor::headless();
+        assert_eq!(app.audio_report()["status"], "silent");
+        add_asset(&mut app, &tone);
+        app.timeline
+            .add_media_clip("tone", ClipKind::Audio, 0, 0.0, 3.0, 0.0, &tone);
+        assert_eq!(app.audio_report()["status"], "measuring");
+
+        let answer = |app: &mut Editor, method: &str, code: &str| {
+            let params = serde_json::json!({ "code": code });
+            let mut job = match commands::start(app, method, &params).unwrap() {
+                Reply::Done(outcome) => return (outcome.value, false),
+                Reply::Later(job) => job,
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                // Nothing else takes the measurement in: a frame's own poll
+                // comes after its jobs.
+                if let Some(result) = job.poll(app, &mut Vec::new()) {
+                    return (result.unwrap().value, true);
+                }
+                assert!(Instant::now() < deadline, "the mix was never measured");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // A script that never looks at the mix does not pay for measuring it.
+        let (run, waited) = answer(&mut app, "run", "return clips().length");
+        assert_eq!((&run["output"], waited), (&"1".into(), false));
+        // One that does gets the measurement, and its edit applies once.
+        let script = "setVolume(clips()[0].id, 0.5); return audioReport().integratedLufs";
+        let (run, waited) = answer(&mut app, "run", script);
+        assert!(waited);
+        // FFmpeg's ebur128 reads this tone at -21.8 LUFS.
+        let lufs: f64 = run["output"].as_str().unwrap().parse().unwrap();
+        assert!((lufs + 21.8).abs() < 0.3, "{run}");
+        assert_eq!(app.timeline.clips[0].volume, 0.5);
+        // The edit changed the mix, so `state` measures again.
+        let (state, waited) = answer(&mut app, "state", "");
+        assert!(waited);
+        assert_eq!(state["audio"]["status"], "measured");
+        let lufs = state["audio"]["integratedLufs"].as_f64().unwrap();
+        assert!((lufs + 27.8).abs() < 0.3, "{state}");
     }
 
     fn add_asset(app: &mut Editor, path: &str) {
@@ -2117,6 +2194,57 @@ fn ducking_follows_transcript_speech_and_only_music_ducks_by_default() {
 }
 
 #[test]
+fn untranscribed_speech_is_read_from_the_waveform_at_its_own_level() {
+    // A quiet voiceover whose sound ends 2 s before its container does.
+    // Peaks were stretched over the container and judged against a fixed
+    // 0.03, so speech landed late and the soft syllable was silence.
+    let mut app = Editor::headless();
+    let mut peaks = vec![0.0005_f32; 50];
+    peaks.extend([0.06; 25]);
+    peaks.extend([0.008; 25]); // a soft trailing syllable
+    peaks.extend([0.0005; 50]);
+    peaks.extend([0.06; 50]);
+    app.assets.push(BinAsset {
+        info: MediaInfo {
+            path: "voice.wav".to_owned(),
+            name: "voice.wav".to_owned(),
+            duration: 6.0,
+            width: 0,
+            height: 0,
+            fps: 0.0,
+            has_video: false,
+            has_audio: true,
+        },
+        size_bytes: 0,
+        state: AssetState::Ready,
+        peaks,
+        beats: None,
+        thumbs: Vec::new(),
+        sweep: sweep::SweepData::default(),
+    });
+    app.timeline
+        .add_media_clip("voice", ClipKind::Audio, 0, 0.0, 6.0, 0.0, "voice.wav");
+    let music = app
+        .timeline
+        .add_media_clip("music", ClipKind::Audio, 1, 0.0, 6.0, 0.0, "song.wav");
+    app.timeline.clip_mut(music).expect("music clip").duck = true;
+    assert_eq!(app.speech_map()["voice.wav"], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let state: serde_json::Value = serde_json::from_str(&app.script_state_json()).unwrap();
+    let quiet: Vec<(f64, f64)> = state["assets"][0]["silenceRanges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|range| {
+            (
+                range["start"].as_f64().unwrap(),
+                range["end"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(quiet, vec![(0.0, 1.0), (2.0, 3.0)]);
+}
+
+#[test]
 fn adding_captions_maps_transcript_chunks_onto_a_timeline_clip() {
     let mut app = Editor::headless();
     let words = [
@@ -2244,6 +2372,44 @@ fn adding_captions_maps_transcript_chunks_onto_a_timeline_clip() {
             .expect("edge-only piece"),
         0
     );
+
+    // A script is told what the pass did, and why a clip got nothing.
+    let note = |app: &mut Editor, clip: ClipId| {
+        let command = ScriptCommand::AddCaptionsForClip {
+            clip,
+            style: "pop-caption".to_owned(),
+        };
+        app.apply_edit(vec![command]).unwrap().0.join("\n")
+    };
+    let place = |app: &mut Editor, at: f64, source_in: f64| {
+        app.timeline.add_media_clip(
+            "talk.mp4",
+            ClipKind::Video,
+            0,
+            at,
+            4.0,
+            source_in,
+            "/media/talk.mp4",
+        )
+    };
+    let fresh = place(&mut app, 30.0, 10.0);
+    assert_eq!(
+        note(&mut app, fresh),
+        format!("clip {fresh}: added {added} captions")
+    );
+    assert_eq!(
+        note(&mut app, clip),
+        format!("clip {clip}: no captions added; {added} lines already captioned")
+    );
+    assert_eq!(
+        note(&mut app, sliver),
+        format!("clip {sliver}: no captions added; 2 lines left out, under half inside the clip")
+    );
+    let wordless = place(&mut app, 40.0, 0.0);
+    assert_eq!(
+        note(&mut app, wordless),
+        format!("clip {wordless}: no captions added; no speech in its source range")
+    );
 }
 
 #[test]
@@ -2285,7 +2451,7 @@ fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
         .add_clip("Place card", ClipKind::Title, 1, 5.0, 1.0, 0.0);
 
     let pieces = app
-        .tighten_clip_silence(clip, 0.03, 0.35, 0.1)
+        .tighten_clip_silence(clip, None, 0.35, 0.1)
         .expect("waveform peaks tighten the clip");
     assert_eq!(pieces, 2);
     let mut kept: Vec<_> = app
@@ -2348,7 +2514,7 @@ fn tightening_silence_keeps_detached_audio_in_linked_phrases() {
     let audio = app.timeline.detach_audio(video).expect("detach audio");
 
     assert_eq!(
-        app.tighten_clip_silence(video, 0.03, 0.35, 0.1)
+        app.tighten_clip_silence(video, Some(0.03), 0.35, 0.1)
             .expect("tighten linked pair"),
         2
     );

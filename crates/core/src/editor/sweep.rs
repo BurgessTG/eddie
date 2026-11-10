@@ -1355,12 +1355,16 @@ fn candidate_from_segment(
     }
 }
 
+/// The turns spoken during a shot. Sparse turns are left out: they are
+/// ambience, or words a speech model imagined over music ("Thank you." across
+/// 30 s), and would make every shot under them a talking one.
 fn overlapping_transcript(
     segment: &SweepSegment,
     transcript: &[TranscriptSegment],
 ) -> Vec<TranscriptSegment> {
     transcript
         .iter()
+        .filter(|turn| !turn.is_ambient())
         .filter(|turn| turn.end > segment.start && turn.start < segment.end)
         .cloned()
         .collect()
@@ -1988,5 +1992,61 @@ mod tests {
         candidate.reason = "No reaction here.".to_owned();
         assert!(!candidate.is_reaction());
         assert_eq!(candidate.reaction_score(), 0.0);
+    }
+
+    /// Whisper hears "Thank you." across 30 s of music. That is not speech,
+    /// so it must not turn a music montage into talking candidates.
+    #[test]
+    fn words_imagined_over_music_do_not_make_a_shot_talking() {
+        let bed = SweepSegment {
+            start: 4.0,
+            end: 9.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.55,
+            audio_peak: 0.95,
+            audio_coverage: 0.97,
+            scene_change: 0.0,
+            visual: None,
+        };
+        let imagined = TranscriptSegment {
+            start: 0.0,
+            end: 29.98,
+            speaker: None,
+            text: "Thank you.".to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        let spoken = TranscriptSegment {
+            start: 5.0,
+            end: 8.0,
+            text: "This booth is the busiest one here.".to_owned(),
+            ..imagined.clone()
+        };
+        let candidate = local_candidates(
+            &test_info(),
+            std::slice::from_ref(&bed),
+            std::slice::from_ref(&imagined),
+        )
+        .pop()
+        .unwrap();
+        assert_ne!(candidate.category, "talking");
+        assert!(!candidate.tags.iter().any(|tag| tag == "speech"));
+        assert!(candidate.tags.iter().any(|tag| tag == "music-bed"));
+        assert!(candidate.music_bed, "the tag and the flag agree");
+        assert!(candidate.transcript.is_empty());
+        assert!(
+            !candidate.reason.to_lowercase().contains("speech"),
+            "{}",
+            candidate.reason
+        );
+
+        let candidate = local_candidates(&test_info(), &[bed], &[imagined, spoken.clone()])
+            .pop()
+            .unwrap();
+        assert_eq!(candidate.category, "talking");
+        assert_eq!(candidate.transcript, vec![spoken]);
+        assert!(!candidate.music_bed);
     }
 }

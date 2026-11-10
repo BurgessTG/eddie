@@ -18,10 +18,10 @@ use std::time::Duration;
 use openreel_media::MediaInfo;
 use whisper_rs::{
     DtwMode, DtwModelPreset, FullParams, SamplingStrategy, WhisperContext,
-    WhisperContextParameters, WhisperVadParams,
+    WhisperContextParameters, WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
 };
 
-use super::{align, store, TranscriptSegment, TranscriptSession, TranscriptWord};
+use super::{align, speech, store, TranscriptSegment, TranscriptSession, TranscriptWord};
 
 const SAMPLE_RATE: usize = 16_000;
 /// Local audio is decoded and heard this much at a time, so an hour-long
@@ -348,10 +348,13 @@ fn local(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let vad = model.with_file_name(VAD_MODEL);
-    let vad = vad.is_file().then(|| vad.to_string_lossy().into_owned());
+    let detector = model.with_file_name(VAD_MODEL);
     progress(&format!("Loading {model_name}…"));
     whisper_rs::install_logging_hooks();
+    // A detector that will not load is the same as none installed.
+    let mut detector = detector.is_file().then_some(detector).and_then(|path| {
+        WhisperVadContext::new(&path.to_string_lossy(), WhisperVadContextParams::default()).ok()
+    });
     let mut context_params = WhisperContextParameters::default();
     if let Some(model_preset) = dtw_preset(&model) {
         context_params.dtw_parameters.mode = DtwMode::ModelPreset { model_preset };
@@ -370,26 +373,35 @@ fn local(
     });
 
     let mut segments = Vec::new();
-    let mut start = 0.0;
-    while start < info.duration - 0.05 {
-        let length = (LOCAL_WINDOW_SECONDS + LOCAL_CUT_SEARCH_SECONDS).min(info.duration - start);
-        let mut pcm = openreel_media::pcm_mono_16k(&info.path, start, length)
-            .map_err(|error| format!("audio could not be decoded: {error}"))?;
-        let keep = if start + length < info.duration {
-            quiet_cut(&pcm, LOCAL_WINDOW_SECONDS, LOCAL_CUT_SEARCH_SECONDS)
-        } else {
-            pcm.len()
-        };
-        pcm.truncate(keep);
-        let heard = keep as f64 / SAMPLE_RATE as f64;
+    let decode = |start: f64, length: f64| {
+        openreel_media::pcm_mono_16k(&info.path, start, length)
+            .map_err(|error| format!("audio could not be decoded: {error}"))
+    };
+    local_windows(info.duration, decode, |start, pcm| {
+        let heard = pcm.len() as f64 / SAMPLE_RATE as f64;
         progress(&format!(
             "Transcribing {}–{} of {}…",
             clock(start),
             clock(start + heard),
             clock(info.duration)
         ));
+        let speech = match &mut detector {
+            Some(detector) => {
+                let spans = detector
+                    .segments_from_samples(WhisperVadParams::default(), pcm)
+                    .map_err(|error| format!("voice detection failed: {error}"))?;
+                Speech::from_spans(
+                    spans.map(|span| (span.start as f64 / 100.0, span.end as f64 / 100.0)),
+                    pcm.len(),
+                )
+            }
+            None => Speech::whole(pcm.len()),
+        };
+        if speech.kept.is_empty() {
+            return Ok(());
+        }
         // whisper.cpp rejects input shorter than one second.
-        let mut padded = pcm.clone();
+        let mut padded = speech.samples(pcm);
         padded.resize(padded.len().max(SAMPLE_RATE * 11 / 10), 0.0);
         let mut params = FullParams::new(SamplingStrategy::BeamSearch {
             beam_size: 5,
@@ -412,23 +424,13 @@ fn local(
         if !settings.vocabulary.is_empty() {
             params.set_initial_prompt(&settings.vocabulary);
         }
-        if let Some(vad) = &vad {
-            params.set_vad_model_path(Some(vad));
-            params.set_vad_params(WhisperVadParams::default());
-            params.enable_vad(true);
-        }
         state
             .full(params, &padded)
             .map_err(|error| format!("{model_name} failed: {error}"))?;
+        let mut tokens: Vec<Token> = Vec::new();
         for segment in state.as_iter() {
-            let Ok(text) = segment.to_str_lossy() else {
-                continue;
-            };
-            let text = text.trim().to_owned();
-            if text.is_empty() {
-                continue;
-            }
-            let mut pieces: Vec<(f64, f64, String, f32)> = Vec::new();
+            let opens = speech.original(segment.start_timestamp() as f64 / 100.0);
+            let mut opens_segment = true;
             for index in 0..segment.n_tokens() {
                 let Some(token) = segment.get_token(index) else {
                     continue;
@@ -440,41 +442,37 @@ fn local(
                     continue;
                 };
                 let data = token.token_data();
-                let t0 = data.t0 as f64 / 100.0;
-                let t1 = data.t1 as f64 / 100.0;
-                // DTW times a token's onset more tightly than t0.
-                let onset = if data.t_dtw >= 0 {
-                    data.t_dtw as f64 / 100.0
+                let before = tokens.last().map(|token| token.end);
+                // whisper.cpp stamps a token with the time its DTW path
+                // leaves it, so `t_dtw` is where the token ends and the
+                // token before it says where it starts. Without DTW the
+                // token carries whisper's own looser guess of both.
+                let (token_start, token_end) = if data.t_dtw >= 0 {
+                    (
+                        before.unwrap_or(opens),
+                        speech.original(data.t_dtw as f64 / 100.0),
+                    )
                 } else {
-                    t0
+                    (
+                        speech.original(data.t0 as f64 / 100.0),
+                        speech.original(data.t1 as f64 / 100.0),
+                    )
                 };
-                pieces.push((
-                    onset,
-                    t1.max(onset),
-                    piece.into_owned(),
-                    token.token_probability(),
-                ));
+                let token_start = token_start.max(before.unwrap_or(0.0));
+                tokens.push(Token {
+                    text: piece.into_owned(),
+                    start: token_start,
+                    end: token_end.max(token_start),
+                    probability: token.token_probability(),
+                    opens_segment: std::mem::take(&mut opens_segment),
+                });
             }
-            let mut words = words_from_tokens(&pieces, start);
-            let seg_start = start + segment.start_timestamp() as f64 / 100.0;
-            let seg_end = start + segment.end_timestamp() as f64 / 100.0;
-            for word in &mut words {
-                word.start = word.start.clamp(seg_start, seg_end);
-                word.end = word.end.clamp(word.start, seg_end);
-            }
-            align::snap_breaks(&mut words, &pcm, start);
-            segments.push(TranscriptSegment {
-                start: seg_start,
-                end: seg_end.max(seg_start),
-                speaker: None,
-                text,
-                words,
-                session: Some(Arc::clone(&session)),
-            });
         }
-        start += heard;
-    }
-    let detector = if vad.is_some() {
+        let words = words_from_tokens(&tokens, &Sound::new(pcm, &speech), start);
+        segments.extend(turns_from_words(words, &session));
+        Ok(())
+    })?;
+    let detector = if detector.is_some() {
         ""
     } else {
         ", no voice detector"
@@ -482,42 +480,324 @@ fn local(
     Ok((segments, format!("local:{model_name}{detector}")))
 }
 
-/// Join whisper tokens into words: a token starting with a space starts a
-/// new word. Each word starts at its first token's onset and ends where
-/// the next word starts or its last token ends, whichever is first.
-fn words_from_tokens(pieces: &[(f64, f64, String, f32)], offset: f64) -> Vec<TranscriptWord> {
-    let mut words: Vec<(f64, f64, String, Vec<f32>)> = Vec::new();
-    for (onset, end, piece, probability) in pieces {
-        match words.last_mut() {
-            Some(word) if !piece.starts_with(' ') => {
-                word.1 = word.1.max(*end);
-                word.2.push_str(piece);
-                word.3.push(*probability);
-            }
-            _ => words.push((*onset, *end, piece.clone(), vec![*probability])),
+/// The stretches of a window that hold speech. whisper hears only these,
+/// so music and room tone are never "heard" as words; times it reports
+/// are mapped back to the window with `original`.
+struct Speech {
+    /// First and end sample of each stretch, in order.
+    kept: Vec<(usize, usize)>,
+}
+
+/// Sound kept either side of detected speech, so word edges are heard whole.
+const SPEECH_PAD: f64 = 0.2;
+/// Speech this close together stays one stretch: whisper reads sentence
+/// ends from ordinary pauses, so only longer non-speech is removed.
+const SPEECH_JOIN: f64 = 1.0;
+/// Silence put where sound was removed, as whisper.cpp's own detector does.
+const SPEECH_GAP: usize = SAMPLE_RATE / 10;
+
+impl Speech {
+    fn whole(samples: usize) -> Self {
+        Self {
+            kept: vec![(0, samples)],
         }
     }
-    let starts: Vec<f64> = words.iter().map(|word| word.0).collect();
-    words
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, (start, end, text, probabilities))| {
-            let text = text.trim().to_owned();
-            if text.is_empty() || text.chars().all(|c| !c.is_alphanumeric()) {
-                return None;
+
+    /// `spans` are the detector's (start, end) seconds, in order.
+    fn from_spans(spans: impl Iterator<Item = (f64, f64)>, samples: usize) -> Self {
+        let sample = |seconds: f64| ((seconds.max(0.0) * SAMPLE_RATE as f64) as usize).min(samples);
+        let mut kept: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in spans {
+            let (from, to) = (sample(start - SPEECH_PAD), sample(end + SPEECH_PAD));
+            if to <= from {
+                continue;
             }
-            let end = starts.get(index + 1).map_or(end, |next| end.min(*next));
-            Some(TranscriptWord {
-                start: offset + start,
-                end: offset + end.max(start),
-                text,
+            match kept.last_mut() {
+                Some(last) if sample(start - SPEECH_JOIN) <= last.1 => last.1 = last.1.max(to),
+                _ => kept.push((from, to)),
+            }
+        }
+        Self { kept }
+    }
+
+    /// What whisper hears: the kept stretches with short silences between.
+    fn samples(&self, pcm: &[f32]) -> Vec<f32> {
+        let mut out = Vec::new();
+        for (index, (from, to)) in self.kept.iter().enumerate() {
+            if index > 0 {
+                out.resize(out.len() + SPEECH_GAP, 0.0);
+            }
+            out.extend_from_slice(&pcm[*from..*to]);
+        }
+        out
+    }
+
+    /// Window time of a time in `samples`. A time in an inserted silence is
+    /// the end of the speech before it.
+    fn original(&self, heard: f64) -> f64 {
+        let seconds = |samples: usize| samples as f64 / SAMPLE_RATE as f64;
+        let mut at = 0.0;
+        let mut last_end = 0.0;
+        for (index, (from, to)) in self.kept.iter().enumerate() {
+            if index > 0 {
+                at += seconds(SPEECH_GAP);
+            }
+            if heard < at {
+                return last_end;
+            }
+            let length = seconds(to - from);
+            if heard < at + length {
+                return seconds(*from) + (heard - at);
+            }
+            at += length;
+            last_end = seconds(*to);
+        }
+        last_end
+    }
+
+    fn holds(&self, sample: usize) -> bool {
+        self.kept
+            .iter()
+            .any(|(from, to)| (*from..*to).contains(&sample))
+    }
+}
+
+/// Which 20 ms frames of a window hold sound: inside the speech whisper
+/// heard, above that speech's own silence level, and in a run that gets
+/// well above it. A breath or a click in a pause is over the silence level
+/// for a frame or two and never loud; a word's soft start or tail is quiet
+/// too, but runs into the word.
+struct Sound {
+    frames: Vec<bool>,
+}
+
+const SOUND_FRAME: usize = SAMPLE_RATE / 50;
+/// A run of sound must reach this many times the silence level.
+const SOUND_REACH: f32 = 3.0;
+
+impl Sound {
+    fn new(pcm: &[f32], speech: &Speech) -> Self {
+        let peaks: Vec<f32> = pcm
+            .chunks(SOUND_FRAME)
+            .enumerate()
+            .map(|(frame, samples)| {
+                if speech.holds(frame * SOUND_FRAME + SOUND_FRAME / 2) {
+                    samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()))
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let spoken: Vec<f32> = peaks.iter().copied().filter(|peak| *peak > 0.0).collect();
+        let silent = openreel_media::silence_threshold(&spoken);
+        let mut frames = vec![false; peaks.len()];
+        let mut at = 0;
+        while at < peaks.len() {
+            let begins = at;
+            while at < peaks.len() && peaks[at] > silent {
+                at += 1;
+            }
+            if peaks[begins..at]
+                .iter()
+                .any(|peak| *peak >= silent * SOUND_REACH)
+            {
+                frames[begins..at].fill(true);
+            }
+            at = at.max(begins + 1);
+        }
+        Self { frames }
+    }
+
+    /// Runs of frames without sound that begin in `from..to` (seconds), as
+    /// (start, end). A run already under way at `from` begins there, and a
+    /// run is followed to its end even past `to`.
+    fn pauses(&self, from: f64, to: f64) -> Vec<(f64, f64)> {
+        let seconds = |frame: usize| (frame * SOUND_FRAME) as f64 / SAMPLE_RATE as f64;
+        let frame = |at: f64| (at.max(0.0) * SAMPLE_RATE as f64 / SOUND_FRAME as f64) as usize;
+        let mut runs = Vec::new();
+        let mut at = frame(from);
+        while at < self.frames.len() && seconds(at) < to {
+            if self.frames[at] {
+                at += 1;
+                continue;
+            }
+            let begins = at;
+            while at < self.frames.len() && !self.frames[at] {
+                at += 1;
+            }
+            runs.push((seconds(begins).max(from), seconds(at)));
+        }
+        runs
+    }
+}
+
+/// One whisper token on its window's clock.
+struct Token {
+    text: String,
+    /// Where the token before it ends, or its segment starts.
+    start: f64,
+    end: f64,
+    probability: f32,
+    /// A segment's first token starts a word even without a leading space.
+    opens_segment: bool,
+}
+
+/// A pause this short between two words is only trusted where whisper put
+/// punctuation; elsewhere it may be a consonant's closure inside a word.
+const PAUSE_SECONDS: f64 = 0.16;
+/// A pause shorter than this is not looked for at all.
+const MIN_PAUSE_SECONDS: f64 = 0.04;
+
+/// Join whisper tokens into words: a token starting with a space starts a
+/// new word. A word runs from its first token's start to the end of its
+/// last token that is not punctuation. Punctuation time, and the start of
+/// the next word, hold any pause between two words: where the sound stops
+/// there the word ends, and the next starts where sound returns. Words
+/// with no pause between them touch.
+fn words_from_tokens(tokens: &[Token], sound: &Sound, offset: f64) -> Vec<TranscriptWord> {
+    struct Raw {
+        start: f64,
+        /// End of the first token: the word's sound has begun by here.
+        begun: f64,
+        end: f64,
+        text: String,
+        probabilities: Vec<f32>,
+    }
+    let spoken = |text: &str| text.chars().any(char::is_alphanumeric);
+    let mut raw: Vec<Raw> = Vec::new();
+    for token in tokens {
+        match raw.last_mut() {
+            Some(word) if !token.text.starts_with(' ') && !token.opens_segment => {
+                if spoken(&token.text) {
+                    word.end = token.end;
+                }
+                word.text.push_str(&token.text);
+                word.probabilities.push(token.probability);
+            }
+            _ => raw.push(Raw {
+                start: token.start,
+                begun: token.end,
+                end: token.end,
+                text: token.text.clone(),
+                probabilities: vec![token.probability],
+            }),
+        }
+    }
+    let last_token_end = tokens.last().map_or(0.0, |token| token.end);
+    raw.retain(|word| spoken(&word.text));
+
+    // Where the word before a gap stops and the word after it starts.
+    // Either may be missing: the gap before the first word or after the last.
+    let gap = |before: Option<&Raw>, word: Option<&Raw>| -> (f64, f64) {
+        let from = match (before, word) {
+            (Some(before), _) => before.end,
+            (None, Some(word)) => word.start,
+            (None, None) => 0.0,
+        };
+        // Punctuation after `before` ends where `word` starts.
+        let lead = word.map_or(last_token_end, |word| word.start).max(from);
+        let until = word.map_or(lead + align::SNAP_SECONDS, |word| {
+            (word.begun - align::MIN_KEEP_SECONDS).max(lead)
+        });
+        // The longest quiet run is the pause. A shorter one beside it is a
+        // consonant's closure in one of the two words.
+        sound
+            .pauses(from, (lead + align::SNAP_SECONDS).min(until).max(lead))
+            .into_iter()
+            .map(|(start, end)| (start, end.min(until)))
+            .filter(|(start, end)| {
+                let least = if *start <= lead {
+                    MIN_PAUSE_SECONDS
+                } else {
+                    PAUSE_SECONDS
+                };
+                end - start >= least - 1e-9
+            })
+            .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+            // No pause: punctuation time stays with the earlier word.
+            .unwrap_or((lead, lead))
+    };
+
+    let mut words: Vec<TranscriptWord> = Vec::with_capacity(raw.len());
+    for index in 0..=raw.len() {
+        let word = raw.get(index);
+        let (stops, starts) = gap(index.checked_sub(1).map(|index| &raw[index]), word);
+        if let Some(earlier) = words.last_mut() {
+            earlier.end = (offset + stops).max(earlier.start);
+        }
+        if let Some(word) = word {
+            words.push(TranscriptWord {
+                start: offset + starts,
+                end: offset + word.end.max(starts),
+                text: word.text.trim().to_owned(),
                 confidence: Some(
-                    probabilities.iter().sum::<f32>() / probabilities.len().max(1) as f32,
+                    word.probabilities.iter().sum::<f32>() / word.probabilities.len().max(1) as f32,
                 ),
                 estimated: false,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    words
+}
+
+/// Group a window's words into turns: a turn is speech without a pause of
+/// `speech::CONTINUATION_SECONDS`, and starts and ends on its own words.
+/// whisper's segments are not used: they split sentences and run through
+/// pauses.
+fn turns_from_words(
+    words: Vec<TranscriptWord>,
+    session: &Arc<TranscriptSession>,
+) -> Vec<TranscriptSegment> {
+    let mut turns: Vec<TranscriptSegment> = Vec::new();
+    for word in words {
+        match turns.last_mut() {
+            Some(turn) if word.start - turn.end < speech::CONTINUATION_SECONDS => {
+                turn.end = word.end;
+                turn.text.push(' ');
+                turn.text.push_str(&word.text);
+                turn.words.push(word);
+            }
+            _ => turns.push(TranscriptSegment {
+                start: word.start,
+                end: word.end,
+                speaker: None,
+                text: word.text.clone(),
+                words: vec![word],
+                session: Some(Arc::clone(session)),
+            }),
+        }
+    }
+    turns
+}
+
+/// Walk a file's sound in windows of about ten minutes, each ending in a
+/// quiet half second. `decode(start, seconds)` returns 16 kHz samples and
+/// `hear(start, samples)` takes each window. The sound can end before the
+/// file does (a picture that runs a frame longer, or a silent tail): a
+/// read that comes back short is the last of it.
+fn local_windows(
+    duration: f64,
+    mut decode: impl FnMut(f64, f64) -> Result<Vec<f32>, String>,
+    mut hear: impl FnMut(f64, &[f32]) -> Result<(), String>,
+) -> Result<(), String> {
+    let least = SAMPLE_RATE / 20;
+    let mut start = 0.0;
+    while start < duration - 0.05 {
+        let length = (LOCAL_WINDOW_SECONDS + LOCAL_CUT_SEARCH_SECONDS).min(duration - start);
+        let mut pcm = decode(start, length)?;
+        if pcm.len() < least {
+            break;
+        }
+        let asked = (length * SAMPLE_RATE as f64) as usize;
+        let last = start + length >= duration || pcm.len() + least < asked;
+        if !last {
+            let keep = quiet_cut(&pcm, LOCAL_WINDOW_SECONDS, LOCAL_CUT_SEARCH_SECONDS);
+            pcm.truncate(keep);
+        }
+        hear(start, &pcm)?;
+        start += pcm.len() as f64 / SAMPLE_RATE as f64;
+    }
+    Ok(())
 }
 
 /// Sample index of the quietest half second within `search` seconds
@@ -827,22 +1107,182 @@ mod tests {
         assert_eq!(segments[0].timing_precision(), "word");
     }
 
+    fn token(start: f64, end: f64, text: &str) -> Token {
+        Token {
+            text: text.to_owned(),
+            start,
+            end,
+            probability: 0.9,
+            opens_segment: false,
+        }
+    }
+
+    /// Sound at 0.5 except in the `quiet` (start, end) seconds.
+    fn pcm_with_pauses(seconds: f64, quiet: &[(f64, f64)]) -> Vec<f32> {
+        let sample = |at: f64| (at * SAMPLE_RATE as f64).round() as usize;
+        let mut pcm = vec![0.5_f32; sample(seconds)];
+        for (start, end) in quiet {
+            pcm[sample(*start)..sample(*end)].fill(0.0);
+        }
+        pcm
+    }
+
+    fn spans(words: &[TranscriptWord]) -> Vec<(&str, f64, f64)> {
+        let round = |at: f64| (at * 100.0).round() / 100.0;
+        words
+            .iter()
+            .map(|w| (w.text.as_str(), round(w.start), round(w.end)))
+            .collect()
+    }
+
+    /// talk.mp4 opens "Hi, my name is": whisper's DTW ends "Hi" at 0.28,
+    /// the comma at 0.92 and "my" at 1.08, and the sound stops from 0.36
+    /// to 1.00. Words used to run from one DTW time to the next, so "Hi,"
+    /// ran through the pause and "my" had no length.
     #[test]
-    fn tokens_join_into_words_that_end_where_the_next_begins() {
-        let pieces = [
-            (0.10, 0.40, " Hel".to_owned(), 0.9),
-            (0.40, 0.60, "lo".to_owned(), 0.7),
-            (0.55, 0.90, ",".to_owned(), 0.9),
-            (0.50, 1.20, " world".to_owned(), 0.8),
-            (1.20, 1.30, ".".to_owned(), 0.9),
+    fn a_word_ends_where_its_sound_does_and_the_next_starts_after_the_pause() {
+        let tokens = [
+            token(0.0, 0.28, " Hi"),
+            token(0.28, 0.92, ","),
+            token(0.92, 1.08, " my"),
+            token(1.08, 1.20, " na"),
+            token(1.20, 1.38, "me"),
+            token(1.38, 1.60, "."),
         ];
-        let words = words_from_tokens(&pieces, 10.0);
-        let texts: Vec<_> = words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, ["Hello,", "world."]);
-        // "Hello," would run to 0.9 but the next word starts at 0.5.
-        assert_eq!((words[0].start, words[0].end), (10.1, 10.5));
-        assert_eq!((words[1].start, words[1].end), (10.5, 11.3));
-        assert!((words[0].confidence.unwrap() - 2.5 / 3.0).abs() < 1e-6);
+        let mut pcm = pcm_with_pauses(3.0, &[(0.36, 1.0), (1.5, 3.0)]);
+        // A breath in the pause: over the silence level (0.02 here), never
+        // loud. "my" used to start on it.
+        pcm[SAMPLE_RATE * 82 / 100..SAMPLE_RATE * 84 / 100].fill(0.03);
+        let sound = Sound::new(&pcm, &Speech::whole(pcm.len()));
+        let words = words_from_tokens(&tokens, &sound, 10.0);
+        assert_eq!(
+            spans(&words),
+            [
+                ("Hi,", 10.0, 10.36),
+                ("my", 11.0, 11.08),
+                // No pause between "my" and "name": they touch.
+                ("name.", 11.08, 11.5),
+            ]
+        );
+        assert!((words[2].confidence.unwrap() - 0.9).abs() < 1e-6);
+    }
+
+    /// A stop consonant closes the mouth for a few hundredths of a second.
+    /// Without punctuation that is not a pause, and beside a real pause the
+    /// longer one is the pause.
+    #[test]
+    fn a_consonant_closure_is_not_a_pause() {
+        let tokens = [
+            token(0.0, 0.40, " that"),
+            token(0.40, 0.90, " kept"),
+            token(0.90, 1.30, "."),
+            token(1.30, 1.80, " Then"),
+        ];
+        // 60 ms closures at 0.5 and 0.94, a pause from 1.06 to 1.4.
+        let pcm = pcm_with_pauses(3.0, &[(0.5, 0.56), (0.94, 1.0), (1.06, 1.4)]);
+        let sound = Sound::new(&pcm, &Speech::whole(pcm.len()));
+        let words = words_from_tokens(&tokens, &sound, 0.0);
+        assert_eq!(
+            spans(&words),
+            [("that", 0.0, 0.4), ("kept.", 0.4, 1.06), ("Then", 1.4, 1.8),]
+        );
+    }
+
+    /// Only detected speech reaches whisper. Times it reports map back to
+    /// the file, and a word after removed music starts where speech resumes.
+    #[test]
+    fn times_heard_without_the_music_map_back_to_the_file() {
+        let samples = SAMPLE_RATE * 30;
+        // Speech at 1-4 s and 4.5-6 s (one stretch) and at 20-22 s.
+        let speech =
+            Speech::from_spans([(1.0, 4.0), (4.5, 6.0), (20.0, 22.0)].into_iter(), samples);
+        let seconds = |(from, to): (usize, usize)| {
+            (
+                from as f64 / SAMPLE_RATE as f64,
+                to as f64 / SAMPLE_RATE as f64,
+            )
+        };
+        let kept: Vec<_> = speech.kept.iter().copied().map(seconds).collect();
+        assert_eq!(kept, [(0.8, 6.2), (19.8, 22.2)]);
+        let pcm = vec![0.5_f32; samples];
+        // 5.4 s, 0.1 s of silence, 2.4 s.
+        assert_eq!(speech.samples(&pcm).len(), SAMPLE_RATE * 79 / 10);
+        let near = |heard: f64, original: f64| {
+            let mapped = speech.original(heard);
+            assert!((mapped - original).abs() < 1e-6, "{heard} -> {mapped}");
+        };
+        near(0.0, 0.8);
+        near(3.0, 3.8);
+        // Inside the inserted silence: the end of the speech before it.
+        near(5.45, 6.2);
+        near(5.5, 19.8);
+        near(7.0, 21.3);
+        near(60.0, 22.2);
+
+        // "music." ends before the cut and "Next" is heard right after it.
+        let tokens = [
+            token(4.2, 4.9, " music"),
+            token(4.9, 5.4, "."),
+            token(5.4, 6.0, " Next"),
+        ]
+        .map(|token| Token {
+            start: speech.original(token.start),
+            end: speech.original(token.end),
+            ..token
+        });
+        let words = words_from_tokens(&tokens, &Sound::new(&pcm, &speech), 0.0);
+        assert_eq!(spans(&words), [("music.", 5.0, 6.2), ("Next", 19.8, 20.3)]);
+
+        assert!(Speech::from_spans(std::iter::empty(), samples)
+            .kept
+            .is_empty());
+    }
+
+    /// whisper's own segments tile the file and split mid-sentence. Turns
+    /// are runs of words with no long pause, on their words' edges.
+    #[test]
+    fn turns_hold_speech_without_a_long_pause() {
+        let word = |start: f64, end: f64, text: &str| TranscriptWord {
+            start,
+            end,
+            text: text.to_owned(),
+            confidence: Some(0.9),
+            estimated: false,
+        };
+        let session = Arc::new(TranscriptSession {
+            id: "local-test".to_owned(),
+            start: 0.0,
+            end: Some(30.0),
+        });
+        let turns = turns_from_words(
+            vec![
+                word(1.0, 1.4, "Hi,"),
+                word(2.0, 2.3, "there."),
+                word(2.6, 3.0, "Welcome"),
+                word(3.0, 3.5, "back."),
+                word(4.4, 4.8, "Next."),
+            ],
+            &session,
+        );
+        let seen: Vec<_> = turns
+            .iter()
+            .map(|turn| (turn.start, turn.end, turn.text.as_str(), turn.words.len()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (1.0, 3.5, "Hi, there. Welcome back.", 4),
+                (4.4, 4.8, "Next.", 1)
+            ]
+        );
+        assert!(turns.iter().all(|turn| turn.session.is_some()));
+        // The sentence end inside the first turn is a cut point with the
+        // pause left out on both sides.
+        let utterances: Vec<_> = speech::utterances(&turns)
+            .into_iter()
+            .map(|u| (u.start, u.end))
+            .collect();
+        assert_eq!(utterances, [(1.0, 2.3), (2.6, 3.5), (4.4, 4.8)]);
     }
 
     #[test]
@@ -854,6 +1294,55 @@ mod tests {
         }
         let cut = quiet_cut(&pcm, 35.0, 10.0) as f64 / SAMPLE_RATE as f64;
         assert!((31.0..31.6).contains(&cut), "cut at {cut}");
+    }
+
+    /// The windows `local_windows` hears of `sound` seconds in a file
+    /// `duration` seconds long, as (start, seconds).
+    fn heard_windows(duration: f64, sound: f64) -> Vec<(f64, f64)> {
+        let mut heard = Vec::new();
+        let mut reads = 0;
+        local_windows(
+            duration,
+            |start, length| {
+                reads += 1;
+                assert!(reads < 20, "the windows stopped advancing at {start}");
+                let seconds = length.min(sound - start).max(0.0);
+                Ok(vec![0.5; (seconds * SAMPLE_RATE as f64).round() as usize])
+            },
+            |start, pcm| {
+                heard.push((start, pcm.len() as f64 / SAMPLE_RATE as f64));
+                Ok(())
+            },
+        )
+        .unwrap();
+        heard
+    }
+
+    #[test]
+    fn windows_end_where_the_sound_does() {
+        // A picture that outlasts its sound by a frame and a half used to
+        // ask for the missing 54 ms forever.
+        assert_eq!(heard_windows(45.066667, 45.013333).len(), 1);
+        let (start, seconds) = heard_windows(45.066667, 45.013333)[0];
+        assert!(start == 0.0 && (seconds - 45.013333).abs() < 0.001);
+
+        // Sound that ends inside a later window is heard to its end, once.
+        let windows = heard_windows(1500.0, 650.0);
+        assert_eq!(windows.len(), 2, "{windows:?}");
+        let (second, seconds) = windows[1];
+        assert!(
+            (windows[0].1 - second).abs() < 1e-6,
+            "contiguous: {windows:?}"
+        );
+        assert!((570.0..=600.0).contains(&second), "cut inside the search");
+        assert!((second + seconds - 650.0).abs() < 0.001, "{windows:?}");
+
+        // Full-length sound still splits at the window size.
+        let windows = heard_windows(700.0, 700.0);
+        assert_eq!(windows.len(), 2, "{windows:?}");
+        assert!((windows[1].0 + windows[1].1 - 700.0).abs() < 0.001);
+
+        assert!(heard_windows(30.0, 0.0).is_empty(), "no sound at all");
     }
 
     #[test]

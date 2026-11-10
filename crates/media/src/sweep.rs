@@ -130,7 +130,7 @@ pub fn motion_samples(path: &str, info: &MediaInfo) -> MediaResult<Vec<MotionSam
     let mut samples = Vec::new();
     let mut spare: Vec<u8> = Vec::new();
     let mut previous: Option<Vec<u8>> = None;
-    let mut previous_histograms: Option<([f32; 64], [[f32; 64]; 16])> = None;
+    let mut previous_histograms: Option<Histograms> = None;
     let mut continuity = SceneContinuity::default();
     let mut occlusion = OcclusionExcursion::default();
 
@@ -537,7 +537,7 @@ struct OcclusionExcursion {
     /// Recent sample indices and their 64 px frames, at most the lookback.
     recent: VecDeque<(usize, Vec<u8>)>,
     anchor: Vec<u8>,
-    anchor_histograms: Option<Box<([f32; 64], [[f32; 64]; 16])>>,
+    anchor_histograms: Option<Box<Histograms>>,
     run: Option<OcclusionRun>,
     previous_featureless: bool,
 }
@@ -560,7 +560,7 @@ impl OcclusionExcursion {
         &mut self,
         samples: &mut [MotionSample],
         frame: &RawFrame,
-        histograms: &([f32; 64], [[f32; 64]; 16]),
+        histograms: &Histograms,
         continuity: &mut SceneContinuity,
     ) {
         let Some(index) = samples.len().checked_sub(1) else {
@@ -741,9 +741,12 @@ fn rgb_histogram(frame: &[u8]) -> [f32; 64] {
     rgb_histograms(frame, 0, 0).0
 }
 
+/// A frame's whole-picture RGB histogram and its 4x4 block histograms.
+type Histograms = ([f32; 64], [[f32; 64]; 16]);
+
 /// Global plus 4x4-block RGB histograms, sampled identically so
 /// their differences are directly comparable from frame to frame.
-fn rgb_histograms(frame: &[u8], width: u32, height: u32) -> ([f32; 64], [[f32; 64]; 16]) {
+fn rgb_histograms(frame: &[u8], width: u32, height: u32) -> Histograms {
     let mut histogram = [0.0_f32; 64];
     let mut blocks = [[0.0_f32; 64]; 16];
     let mut block_counts = [0.0_f32; 16];
@@ -845,21 +848,26 @@ fn frame_difference(previous: &[u8], current: &[u8]) -> f32 {
 
 /// Detect frame-accurate visual cuts from per-frame scene scores.
 ///
-/// A one-second trailing median/MAD of neighboring score maxima
-/// adapts to busy footage without treating repeated frames as
-/// high variance. Candidate picks group nearby transitions;
-/// the complete scene inventory keeps every detected boundary.
+/// A trailing median/MAD of neighboring score maxima adapts to busy
+/// footage without treating repeated frames as high variance. It looks
+/// back one second, but never past the last boundary: a shot is judged
+/// against itself, not against the shot before it. Candidate picks group
+/// nearby transitions; the complete scene inventory keeps every detected
+/// boundary.
 pub fn detect_scene_cuts(motion: &[MotionSample]) -> Vec<f64> {
     detect_scene_cuts_grouped(motion, 0.25)
 }
 
 fn detect_scene_cuts_grouped(motion: &[MotionSample], group_window: f64) -> Vec<f64> {
     let mut candidates: Vec<(f64, f32)> = Vec::new();
+    // The first frame of the shot being judged. Scores from before it,
+    // and the boundary's own score, say nothing about this shot's motion.
+    let mut shot_start = 0;
     for (index, sample) in motion.iter().enumerate().skip(1) {
         if sample.scene_score < MIN_SCENE_SCORE || sample.time <= 0.0 {
             continue;
         }
-        let history: Vec<f32> = motion[..index]
+        let history: Vec<f32> = motion[shot_start..index]
             .windows(2)
             .rev()
             .take_while(|pair| sample.time - pair[1].time <= 1.0)
@@ -868,6 +876,7 @@ fn detect_scene_cuts_grouped(motion: &[MotionSample], group_window: f64) -> Vec<
         let threshold = adaptive_scene_threshold(&history, MIN_SCENE_SCORE);
         if sample.scene_score >= threshold {
             candidates.push((sample.time, sample.scene_score));
+            shot_start = index + 1;
         }
     }
 
@@ -908,7 +917,10 @@ fn adaptive_scene_threshold(history: &[f32], floor: f32) -> f32 {
         .map(|value| (value - baseline).abs())
         .collect();
     let mad = median(&deviations);
-    floor.max(baseline + mad * 6.0)
+    // A short shot with uneven motion has a wide MAD from few frames. A
+    // score half again above everything in the shot is still a cut.
+    let peak = history.iter().copied().fold(0.0, f32::max);
+    floor.max((baseline + mad * 6.0).min(peak * 1.5))
 }
 
 fn median(values: &[f32]) -> f32 {
@@ -1242,6 +1254,59 @@ mod tests {
                 "{repeats} copies per source frame"
             );
         }
+    }
+
+    /// Scores measured on real footage, one per frame after `lead` calm
+    /// frames, as the scene starts they produce.
+    fn scene_starts(fps: f64, lead: usize, scores: &[f32]) -> Vec<f64> {
+        let motion: Vec<MotionSample> = std::iter::repeat_n(0.02, lead)
+            .chain(scores.iter().copied())
+            .chain(std::iter::repeat_n(0.015, 12))
+            .enumerate()
+            .map(|(frame, scene_score)| MotionSample {
+                time: frame as f64 / fps,
+                difference: scene_score,
+                scene_score,
+                visual: FrameVisualEvidence::default(),
+            })
+            .collect();
+        let duration = motion.len() as f64 / fps;
+        build_scene_segments(duration, &motion, &[], 50)
+            .iter()
+            .map(|scene| (scene.start * fps).round() / fps)
+            .collect()
+    }
+
+    /// A 0.67 s hyperlapse shot: every frame is nearly a new picture. The
+    /// calm shot before it must not set its baseline, or frames inside it
+    /// pass as cuts and its real end, judged against both shots at once,
+    /// does not.
+    #[test]
+    fn a_fast_motion_shot_ends_at_its_cut_not_inside_itself() {
+        let starts = scene_starts(
+            30.0,
+            40,
+            &[
+                0.513, 0.193, 0.199, 0.234, 0.231, 0.191, 0.225, 0.245, 0.235, 0.088, 0.168, 0.217,
+                0.255, 0.239, 0.278, 0.246, 0.259, 0.300, 0.186, 0.214, 0.542,
+            ],
+        );
+        assert_eq!(starts, [0.0, 40.0 / 30.0, 60.0 / 30.0]);
+    }
+
+    /// A 0.23 s shot whose few frames vary widely still ends where a score
+    /// stands half again above all of them.
+    #[test]
+    fn a_short_uneven_shot_keeps_its_cut() {
+        let starts = scene_starts(
+            60.0,
+            80,
+            &[
+                0.484, 0.007, 0.088, 0.002, 0.140, 0.004, 0.210, 0.004, 0.141, 0.004, 0.075, 0.001,
+                0.211, 0.009, 0.382,
+            ],
+        );
+        assert_eq!(starts, [0.0, 80.0 / 60.0, 94.0 / 60.0]);
     }
 
     #[test]

@@ -35,9 +35,10 @@ const FRAMES_MAX: usize = 40;
 const FRAMES_PASS_SECONDS: f64 = 30.0;
 const FRAMES_WIDTH: u32 = 384;
 
-/// A contact sheet of the program: one labelled cell per visible shot in
+/// A contact sheet of the program: labelled cells for the visible shots in
 /// `range` (a timeline range spec; the whole timeline without one), titles
-/// drawn as export draws them.
+/// drawn as export draws them. `shots` counts pictures, not title changes;
+/// `sampled` means some shot has no cell.
 pub fn sheet(app: &Editor, output: PathBuf, range: Option<&str>) -> Result<Render, String> {
     let span = match range {
         Some(spec) => app.timeline.time_index().range(spec)?,
@@ -295,9 +296,13 @@ impl SheetShot {
     }
 }
 
-/// One cell per visible shot inside `span` (sampled evenly beyond
-/// `SHEET_CELLS`), each at the middle of its stretch, and how many shots
-/// the span holds.
+/// The sheet's cells inside `span`, and how many shots (stretches of one
+/// visible picture) the span holds. A title changing over a shot is not a
+/// new shot, but it is something to see: while they fit, every stretch of
+/// one picture under one title gets a cell at its middle. Past
+/// `SHEET_CELLS` stretches, every shot keeps at least one cell and the
+/// spare ones go where a cell covers the most time. Past `SHEET_CELLS`
+/// shots, the span is sampled evenly.
 fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize) {
     let segments: Vec<Segment> = program_segments(timeline)
         .into_iter()
@@ -308,21 +313,37 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
             ..segment
         })
         .collect();
-    let total = segments.len();
-    let picked: Vec<Segment> = if total <= SHEET_CELLS {
+    let mut runs: Vec<(f64, f64)> = Vec::new();
+    let mut shown = None;
+    for segment in &segments {
+        match runs.last_mut() {
+            Some(run) if shown == Some(segment.video) => run.1 = segment.end,
+            _ => runs.push((segment.start, segment.end)),
+        }
+        shown = Some(segment.video);
+    }
+    let total = runs.len();
+    let at = |time: f64| {
         segments
+            .iter()
+            .find(|segment| segment.start <= time && time < segment.end)
+            .map(|segment| Segment {
+                start: time,
+                end: time,
+                ..*segment
+            })
+    };
+    let picked: Vec<Segment> = if segments.len() <= SHEET_CELLS {
+        segments.clone()
+    } else if total <= SHEET_CELLS {
+        spread(&runs, SHEET_CELLS)
+            .into_iter()
+            .filter_map(|(time, _)| at(time))
+            .collect()
     } else {
         (0..SHEET_CELLS)
             .filter_map(|index| {
-                let at = span.0 + (index as f64 + 0.5) * (span.1 - span.0) / SHEET_CELLS as f64;
-                segments
-                    .iter()
-                    .find(|segment| segment.start <= at && at < segment.end)
-                    .map(|segment| Segment {
-                        start: at,
-                        end: at,
-                        ..*segment
-                    })
+                at(span.0 + (index as f64 + 0.5) * (span.1 - span.0) / SHEET_CELLS as f64)
             })
             .collect()
     };
@@ -523,17 +544,24 @@ fn strip_times(duration: f64, shots: Option<&[(f64, f64)]>) -> Vec<(f64, (f64, f
     order.truncate(STRIP_SHOTS);
     order.sort_unstable();
     let picked: Vec<(f64, f64)> = order.into_iter().map(|i| shots[i]).collect();
-    let mut counts = vec![1_usize; picked.len()];
-    for _ in picked.len()..STRIP_CELLS {
-        let longest = (0..picked.len())
+    spread(&picked, STRIP_CELLS)
+}
+
+/// `cells` sample times over `ranges` (at most `cells` of them), each with
+/// its range, in order: one per range, the spare ones to whichever range
+/// has the most time per sample, spread evenly inside each.
+fn spread(ranges: &[(f64, f64)], cells: usize) -> Vec<(f64, (f64, f64))> {
+    let mut counts = vec![1_usize; ranges.len()];
+    for _ in ranges.len()..cells {
+        let longest = (0..ranges.len())
             .max_by(|a, b| {
-                let per = |i: usize| (picked[i].1 - picked[i].0) / counts[i] as f64;
+                let per = |i: usize| (ranges[i].1 - ranges[i].0) / counts[i] as f64;
                 per(*a).total_cmp(&per(*b))
             })
             .unwrap();
         counts[longest] += 1;
     }
-    picked
+    ranges
         .iter()
         .zip(counts)
         .flat_map(|(&(start, end), count)| {
@@ -708,7 +736,7 @@ mod tests {
                         format!("4.00s clip {b} L0")
                     ),
                 ],
-                4
+                3
             )
         );
         // A range keeps the shots it overlaps, cut to the range.
@@ -726,6 +754,36 @@ mod tests {
                 2
             )
         );
+    }
+
+    /// Captions change far more often than pictures. They are not shots,
+    /// and they must not crowd a short shot off the sheet.
+    #[test]
+    fn captions_neither_count_as_shots_nor_crowd_one_off_the_sheet() {
+        let mut timeline = Timeline::empty_project();
+        let a = timeline.add_media_clip("A", ClipKind::Video, 0, 0.0, 7.6, 0.0, "a.mp4");
+        // Even sampling of 15 s into 16 cells looks at 7.03 s and 7.97 s.
+        let b = timeline.add_media_clip("B", ClipKind::Video, 0, 7.6, 0.3, 0.0, "b.mp4");
+        let c = timeline.add_media_clip("C", ClipKind::Video, 0, 7.9, 7.1, 0.0, "c.mp4");
+        for line in 0..30 {
+            let at = line as f64 * 0.5;
+            timeline.add_clip(&format!("Line {line}"), ClipKind::Title, 1, at, 0.5, 0.0);
+        }
+        let (cells, shots) = sheet_shots(&timeline, (0.0, 15.0));
+        assert_eq!((cells.len(), shots), (SHEET_CELLS, 3));
+        let pictured: Vec<ClipId> = [a, b, c]
+            .into_iter()
+            .filter(|id| {
+                cells
+                    .iter()
+                    .any(|cell| cell.video.as_ref().is_some_and(|video| video.0 == *id))
+            })
+            .collect();
+        assert_eq!(pictured, [a, b, c]);
+        assert!(cells.windows(2).all(|pair| pair[0].time < pair[1].time));
+        // The spare cells show captions spread through the span, not the
+        // first thirteen.
+        assert!(cells.last().unwrap().time > 13.0);
     }
 
     /// More shots than cells: the sheet samples the span evenly and says how

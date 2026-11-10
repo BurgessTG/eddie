@@ -278,6 +278,52 @@ pub struct EditSnapshot {
     mute_music_beds: bool,
 }
 
+/// A title style by its script name; the error names the ones that exist.
+fn title_style(name: &str) -> Result<TitleStyle, String> {
+    TitleStyle::from_name(name).ok_or_else(|| {
+        let known: Vec<&str> = TitleStyle::ALL.iter().map(|style| style.as_str()).collect();
+        format!("unknown title style '{name}'; use {}", known.join(", "))
+    })
+}
+
+/// What captioning one clip did with each transcript line in its range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CaptionPass {
+    added: usize,
+    /// Already captioned by an earlier pass.
+    repeated: usize,
+    /// Under half inside the clip: the other side of the cut shows them.
+    outside: usize,
+}
+
+impl CaptionPass {
+    /// One line for the script's notes, so a clip that got no caption is
+    /// not mistaken for one that was captioned.
+    fn note(self, clip: ClipId) -> String {
+        let count = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        let mut parts = vec![match self.added {
+            0 => "no captions added".to_owned(),
+            added => format!("added {}", count(added, "caption")),
+        }];
+        if self.repeated > 0 {
+            parts.push(format!(
+                "{} already captioned",
+                count(self.repeated, "line")
+            ));
+        }
+        if self.outside > 0 {
+            parts.push(format!(
+                "{} left out, under half inside the clip",
+                count(self.outside, "line")
+            ));
+        }
+        if self == Self::default() {
+            parts.push("no speech in its source range".to_owned());
+        }
+        format!("clip {clip}: {}", parts.join("; "))
+    }
+}
+
 /// What one `Editor::begin_frame` saw finish.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameEvents {
@@ -458,7 +504,7 @@ impl Editor {
     pub fn tighten_clip_silence(
         &mut self,
         id: ClipId,
-        threshold: f32,
+        threshold: Option<f32>,
         min_silence: f64,
         padding: f64,
     ) -> Result<usize, String> {
@@ -492,7 +538,7 @@ impl Editor {
             openreel_media::WAVEFORM_PEAKS_PER_SEC as f64,
             source_start,
             source_end,
-            threshold,
+            threshold.unwrap_or_else(|| openreel_media::silence_threshold(&asset.peaks)),
             min_silence,
             padding,
         );
@@ -629,6 +675,14 @@ impl Editor {
         id: ClipId,
         style: openreel_engine::TitleStyle,
     ) -> Result<usize, String> {
+        Ok(self.caption_clip(id, style)?.added)
+    }
+
+    fn caption_clip(
+        &mut self,
+        id: ClipId,
+        style: openreel_engine::TitleStyle,
+    ) -> Result<CaptionPass, String> {
         let target = self
             .timeline
             .clip(id)
@@ -651,7 +705,7 @@ impl Editor {
         let source_start = target.source_in;
         let source_end = target.source_in + target.duration;
         let frame = 1.0 / self.timeline.fps;
-        let mut added = 0_usize;
+        let mut pass = CaptionPass::default();
         let mut last_added: Option<ClipId> = None;
 
         for segment in &transcript {
@@ -664,6 +718,7 @@ impl Editor {
                 // A line mostly spoken on the other side of a cut belongs
                 // there; showing it again here repeats it for a moment.
                 if clipped_end - clipped_start < 0.5 * (chunk.end - chunk.start) {
+                    pass.outside += 1;
                     continue;
                 }
                 let start = self
@@ -676,6 +731,7 @@ impl Editor {
                     end = (start + frame).min(target.end());
                 }
                 if end <= start {
+                    pass.outside += 1;
                     continue;
                 }
                 let duplicate = self.timeline.clips.iter().any(|clip| {
@@ -685,6 +741,7 @@ impl Editor {
                         && (clip.start - start).abs() <= frame / 2.0
                 });
                 if duplicate {
+                    pass.repeated += 1;
                     continue;
                 }
                 let duration = end - start;
@@ -710,19 +767,15 @@ impl Editor {
                         .collect();
                 }
                 last_added = Some(caption);
-                added += 1;
+                pass.added += 1;
             }
         }
-        if added == 0 && last_added.is_none() {
-            // A second identical pass is a successful no-op; an
-            // out-of-range transcript is also reported by the caller
-            // through the zero count.
-            return Ok(0);
-        }
+        // A second identical pass is a successful no-op, as is a clip whose
+        // source range holds no speech; the counts say which.
         if let Some(caption) = last_added {
             self.selected = Some(caption);
         }
-        Ok(added)
+        Ok(pass)
     }
 
     pub fn stop_sources(&mut self) {
@@ -1269,21 +1322,23 @@ impl Editor {
                 map.insert(source.clone(), turns);
                 continue;
             }
-            let duration = asset.info.duration;
-            if !asset.info.has_audio || asset.peaks.is_empty() || duration <= 0.0 {
+            if !asset.info.has_audio || asset.peaks.is_empty() {
                 continue;
             }
-            let rate = asset.peaks.len() as f64 / duration;
+            // Peaks keep their own rate; sound can end before the container.
+            let rate = openreel_media::WAVEFORM_PEAKS_PER_SEC as f64;
+            let sound_end = asset.peaks.len() as f64 / rate;
             let mut audible = Vec::new();
             let mut cursor = 0.0;
-            for quiet in openreel_media::silence_ranges(&asset.peaks, rate, 0.03, 0.35) {
+            let threshold = openreel_media::silence_threshold(&asset.peaks);
+            for quiet in openreel_media::silence_ranges(&asset.peaks, rate, threshold, 0.35) {
                 if quiet.start > cursor {
                     audible.push((cursor, quiet.start));
                 }
                 cursor = quiet.end;
             }
-            if cursor < duration {
-                audible.push((cursor, duration));
+            if cursor < sound_end {
+                audible.push((cursor, sound_end));
             }
             map.insert(source.clone(), audible);
         }
@@ -1345,10 +1400,12 @@ impl Editor {
     /// while each audible clip plays.
     pub fn audio_report(&self) -> serde_json::Value {
         let round = |value: f64| (value * 100.0).round() / 100.0;
-        let status = if self.loudness_rx.is_some() {
-            "measuring"
-        } else if self.loudness_mix.is_empty() {
+        let status = if self.audio_segments(None).is_empty() {
             "silent"
+        } else if !self.mix_measured() {
+            "measuring"
+        } else if self.loudness.is_none() {
+            "failed"
         } else {
             "measured"
         };
@@ -1398,6 +1455,18 @@ impl Editor {
     /// measured off the UI thread; the preview then plays with the gain
     /// export would apply and the same 0.8 limiter.
     pub fn poll_loudness(&mut self, pointer_down: bool) {
+        self.take_loudness();
+        if !self.match_export_loudness
+            || pointer_down
+            || self.loudness_checked.elapsed() < Duration::from_millis(500)
+        {
+            return;
+        }
+        self.measure_mix();
+    }
+
+    /// Take in a finished measurement.
+    fn take_loudness(&mut self) {
         if let Some(rx) = &self.loudness_rx {
             match rx.try_recv() {
                 Ok((mix, result)) => {
@@ -1413,19 +1482,34 @@ impl Editor {
                             10f64.powf(db / 20.0) as f32
                         });
                         self.loudness_gain = gain;
-                        self.audio_engine().set_loudness(gain);
+                        self.match_preview_loudness();
                     }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => self.loudness_rx = None,
             }
         }
-        if !self.match_export_loudness
-            || pointer_down
-            || self.loudness_checked.elapsed() < Duration::from_millis(500)
-        {
-            return;
+    }
+
+    /// Only an editor with a preview plays the measured gain; a measurement
+    /// made for a script changes nothing anyone hears.
+    fn match_preview_loudness(&mut self) {
+        if self.match_export_loudness {
+            let gain = self.loudness_gain;
+            self.audio_engine().set_loudness(gain);
         }
+    }
+
+    /// Whether the last measurement is of the mix the timeline has now.
+    pub fn mix_measured(&self) -> bool {
+        self.loudness_rx.is_none() && self.loudness_mix == self.audio_segments(None)
+    }
+
+    /// Measure the mix off this thread unless that measurement exists or is
+    /// under way. Its worker wakes the editor; call again, or
+    /// `poll_loudness`, to take the result in.
+    pub fn measure_mix(&mut self) {
+        self.take_loudness();
         self.loudness_checked = Instant::now();
         let mix = self.audio_segments(None);
         if mix == self.loudness_mix {
@@ -1439,7 +1523,7 @@ impl Editor {
             self.loudness_rx = None;
             self.loudness_gain = None;
             self.loudness = None;
-            self.audio_engine().set_loudness(None);
+            self.match_preview_loudness();
             return;
         }
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1447,9 +1531,11 @@ impl Editor {
         let (tx, rx) = channel();
         self.loudness_rx = Some(rx);
         let end = self.timeline.end();
+        let wake = self.wake.clone();
         thread::spawn(move || {
             let result = openreel_media::measure_mix(&mix, end, &cancel);
             let _ = tx.send((mix, result));
+            wake.wake();
         });
     }
 
@@ -1716,9 +1802,9 @@ impl Editor {
 
     // -- scripting ---------------------------------------------------------------
 
-    pub fn script_state_json(&self) -> String {
-        let clips: Vec<serde_json::Value> = self
-            .timeline
+    /// The timeline's clips as scripts read them (`state().clips`).
+    pub fn script_clips(&self) -> Vec<serde_json::Value> {
+        self.timeline
             .clips
             .iter()
             .map(|c| {
@@ -1747,7 +1833,11 @@ impl Editor {
                     "titleStyle": c.title_style.as_str(),
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    pub fn script_state_json(&self) -> String {
+        let clips = self.script_clips();
         let assets: Vec<serde_json::Value> = self
             .assets
             .iter()
@@ -1758,7 +1848,8 @@ impl Editor {
                     0.0
                 };
                 let silence_ranges: Vec<serde_json::Value> = if peaks_per_sec > 0.0 {
-                    openreel_media::silence_ranges(&a.peaks, peaks_per_sec, 0.03, 0.35)
+                    let threshold = openreel_media::silence_threshold(&a.peaks);
+                    openreel_media::silence_ranges(&a.peaks, peaks_per_sec, threshold, 0.35)
                         .iter()
                         .map(|range| {
                             serde_json::json!({
@@ -2148,8 +2239,7 @@ impl Editor {
                 style,
                 handle,
             } => {
-                let style = TitleStyle::from_name(&style)
-                    .ok_or_else(|| format!("unknown title style '{style}'"))?;
+                let style = title_style(&style)?;
                 let track = self.first_free_track(at, duration);
                 let id = self
                     .timeline
@@ -2161,8 +2251,7 @@ impl Editor {
                 created.extend(handle.map(|handle| (handle, id)));
             }
             ScriptCommand::SetTitleStyle { clip, style } => {
-                let style = TitleStyle::from_name(&style)
-                    .ok_or_else(|| format!("unknown title style '{style}'"))?;
+                let style = title_style(&style)?;
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     if target.kind != ClipKind::Title {
                         return Err(format!("clip {clip} is not a title"));
@@ -2171,9 +2260,8 @@ impl Editor {
                 }
             }
             ScriptCommand::AddCaptionsForClip { clip, style } => {
-                let style = TitleStyle::from_name(&style)
-                    .ok_or_else(|| format!("unknown title style '{style}'"))?;
-                self.add_captions_for_clip(clip, style)?;
+                let style = title_style(&style)?;
+                return Ok(Some(self.caption_clip(clip, style)?.note(clip)));
             }
             ScriptCommand::AddAsset { asset, at, handle } => {
                 let (path, name, duration) = self

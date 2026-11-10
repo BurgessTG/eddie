@@ -30,7 +30,9 @@ Usage: eddie <command> <project.eddie> ...
                                      run a script as one edit: every command
                                      applies, or none does. Each run starts
                                      fresh, and importMedia/exportTo are
-                                     refused: use import and export
+                                     refused: use import and export.
+                                     --dry-run keeps nothing and adds `clips`,
+                                     the timeline the edit would leave
   transcribe <project> [asset...] [--provider local|meta|openai]
              [--model M] [--language en] [--vocabulary \"Eddie, Wonder\"]
              [--force]
@@ -40,12 +42,14 @@ Usage: eddie <command> <project.eddie> ...
   curate <project> [asset...] [--force]
                                      find shots and rank ranges in media (all
                                      when none is named), for sceneClips() and
-                                     sweepCandidates(); saved per file, so
+                                     sweepCandidates(). Transcribes files with
+                                     no saved transcript. Saved per file, so
                                      only --force curates again
   sheet <project> <out.jpg> [range]  the program as pictures: one labelled
                                      cell per visible shot, titles drawn; 16
                                      cells at most, so a timeline range
-                                     (10..25, clip:7) shows a part in full
+                                     (10..25, clip:7) shows a part in full.
+                                     `shots` counts pictures, not captions
   strip <project> <asset> <out.jpg>  16 pictures through one source, marked *
                                      where the timeline already shows it
   frames <project> <asset> <range|time> <out-dir> [--every seconds]
@@ -72,7 +76,9 @@ the window, each `run` is one Undo step, and replies carry \"live\":true.
                                      editor, until it closes
 
 Every command prints one JSON object. Errors print {\"ok\":false,...} and
-exit 1. Without a command, eddie opens the editor window.";
+exit 1. `saved` says whether the project file was written; transcribe and
+curate mark a file answered from its saved result with \"reused\":true.
+Without a command, eddie opens the editor window.";
 
 const COMMANDS: &[&str] = &[
     "new",

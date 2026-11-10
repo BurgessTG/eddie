@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use rquickjs::{CString, Context, Function, Runtime};
+use rquickjs::{function::Opt, CString, Context, Function, Runtime};
 
 #[derive(Debug, PartialEq)]
 pub enum ScriptCommand {
@@ -90,7 +90,8 @@ pub enum ScriptCommand {
     },
     TightenSilence {
         clip: u64,
-        threshold: f32,
+        /// `None` is the source's own level (`silence_threshold`).
+        threshold: Option<f32>,
         min_silence: f64,
         padding: f64,
     },
@@ -199,7 +200,11 @@ impl ScriptCommand {
                 min_silence,
                 padding,
                 ..
-            } => threshold.is_finite() && min_silence.is_finite() && padding.is_finite(),
+            } => {
+                threshold.is_none_or(f32::is_finite)
+                    && min_silence.is_finite()
+                    && padding.is_finite()
+            }
             Self::AddTitle { at, duration, .. } => at.is_finite() && duration.is_finite(),
             Self::AddAssetRange {
                 at,
@@ -253,6 +258,8 @@ struct CommandQueue {
     /// Never reused within one engine, so a REPL variable holding an old
     /// handle cannot alias a later batch's addition.
     next_handle: u64,
+    /// The script looked at `state().audio`.
+    read_audio: bool,
 }
 
 impl CommandQueue {
@@ -334,10 +341,18 @@ pub struct ScriptEngine {
     context: Context,
     queue: Queue,
     next_handle: u64,
+    read_audio: bool,
 }
 
 const PRELUDE: &str = r#"
-function state() { return JSON.parse(__state_json); }
+function state() {
+  const s = JSON.parse(__state_json);
+  if ("audio" in s) {
+    const audio = s.audio;
+    Object.defineProperty(s, "audio", { enumerable: true, get() { __audio_read(); return audio; } });
+  }
+  return s;
+}
 function clips() { return state().clips; }
 function assets() { return state().assets; }
 function sweepCandidates() { return state().sweepCandidates || []; }
@@ -372,15 +387,20 @@ function help() {
     "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' (request-time clips); time(spec) timeRange('a..b' | 'clip:7')",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
-    "moveClip(id, start) setClipLane(id, lane) trimClip(id, left, right)  // -1 keeps an edge",
-    "renameClip(id, name) setOpacity(id, v) setVolume(id, v) setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
+    "moveClip(id, start) setClipLane(id, lane)",
+    "trimClip(id, left, right)  // the clip's new start and end as timeline times; null or -1 keeps an edge",
+    "renameClip(id, name) setOpacity(id, 0..1) setVolume(id, gain)  // linear gain 0..2; 0.5 is about 6 dB quieter",
+    "setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
-    "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool) tightenSilence(id, threshold?, minSilence?, padding?)",
-    "addTitle(text, at?, dur?, style?) setTitleStyle(id, style) addCaptionsForClip(id, style?) addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)",
+    "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool)",
+    "tightenSilence(id, threshold?, minSilence?, padding?)  // removes pauses of minSilence (0.35 s) or more, keeping padding (0.08 s); no threshold uses the recording's own quiet level",
+    "addTitle(text, at?, dur?, style?)  // defaults: playhead, 4 s, 'lower-third'",
+    "setTitleStyle(id, style) addCaptionsForClip(id, style?)  // styles: lower-third caption pop-caption minimal-caption highlight-caption; captions default to 'caption'",
+    "addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)  // lands on the first lane free for its span",
     "  // adds and splits return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
-    "console.log(...) and return report back. The in-app console keeps variables between lines; each eddie run starts fresh."
+    "return reports back as `output` (JSON text); console.log lines and command reports land in `notes`. The in-app console keeps variables between lines; each eddie run starts fresh."
   ].join("\n");
 }
 var console = { log: (...a) => __log(a.map(String).join(" ")) };
@@ -395,6 +415,8 @@ function __t(v) { return typeof v === "string" ? time(v) : v; }
 function seek(t) { __seek(__t(t)); }
 function moveClip(id, start) { __move_clip(id, __t(start)); }
 function insertTime(at, seconds) { __insert_time(__t(at), seconds); }
+function __edge(v) { return v === undefined || v === null ? -1 : __t(v); }
+function trimClip(id, left, right) { __trim_clip(id, __edge(left), __edge(right)); }
 function split(at) {
   const s = state();
   if (s.selected == null) throw new Error("no clip selected");
@@ -417,12 +439,13 @@ function addAssetRange(nameOrPath, at, sourceIn, dur) {
   return __add_asset_range(String(nameOrPath), __t(at), sourceIn, dur);
 }
 function tightenSilence(id, threshold, minSilence, padding) {
-  __tighten_silence(
+  const rest = [
     id,
-    threshold === undefined ? 0.03 : threshold,
     minSilence === undefined ? 0.35 : minSilence,
-    padding === undefined ? 0.08 : padding
-  );
+    padding === undefined ? 0.08 : padding,
+  ];
+  if (threshold === undefined || threshold === null) __tighten_silence(...rest);
+  else __tighten_silence(...rest, threshold);
 }
 "#;
 
@@ -456,6 +479,8 @@ impl ScriptEngine {
                     .push(msg.len(), || ScriptCommand::Log(
                         msg.as_str().to_owned()
                     )));
+                let q = Rc::clone(&queue);
+                reg!("__audio_read", move || q.borrow_mut().read_audio = true);
                 let q = Rc::clone(&queue);
                 reg!("play", move || q
                     .borrow_mut()
@@ -502,7 +527,7 @@ impl ScriptEngine {
                     .borrow_mut()
                     .push(0, || ScriptCommand::MoveClip { clip, start }));
                 let q = Rc::clone(&queue);
-                reg!("trimClip", move |clip: u64, left: f64, right: f64| q
+                reg!("__trim_clip", move |clip: u64, left: f64, right: f64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::TrimClip {
                         clip,
@@ -570,11 +595,11 @@ impl ScriptEngine {
                 let q = Rc::clone(&queue);
                 reg!(
                     "__tighten_silence",
-                    move |clip: u64, threshold: f32, min_silence: f64, padding: f64| q
+                    move |clip: u64, min_silence: f64, padding: f64, threshold: Opt<f32>| q
                         .borrow_mut()
                         .push(0, || ScriptCommand::TightenSilence {
                             clip,
-                            threshold,
+                            threshold: threshold.0,
                             min_silence,
                             padding,
                         })
@@ -708,7 +733,15 @@ impl ScriptEngine {
             context,
             queue,
             next_handle: CLIP_HANDLE_BASE,
+            read_audio: false,
         })
+    }
+
+    /// Whether the last evaluation looked at the measured mix
+    /// (`audioReport()`, `state().audio`). Measuring takes a moment, so a
+    /// caller that had no measurement yet can make one and evaluate again.
+    pub fn read_audio(&self) -> bool {
+        self.read_audio
     }
 
     /// Evaluate one REPL line. Returns display text and queued commands.
@@ -730,6 +763,7 @@ impl ScriptEngine {
         let mut engine = Self::new()?;
         let isolated = format!("(() => {{\n{code}\n}})()");
         let (output, commands, success) = engine.eval_inner(&isolated, state_json);
+        self.read_audio = engine.read_audio;
         if success {
             Ok((output, commands))
         } else {
@@ -778,6 +812,7 @@ impl ScriptEngine {
         let _ = self.queue.borrow_mut().check_active();
         let queue = std::mem::take(&mut *self.queue.borrow_mut());
         self.next_handle = queue.next_handle;
+        self.read_audio = queue.read_audio;
         if let Some(error) = queue.error {
             (format!("error: {error}"), Vec::new(), false)
         } else {
@@ -871,13 +906,13 @@ mod tests {
             vec![
                 ScriptCommand::TightenSilence {
                     clip: 9,
-                    threshold: 0.03,
+                    threshold: None,
                     min_silence: 0.35,
                     padding: 0.08,
                 },
                 ScriptCommand::TightenSilence {
                     clip: 10,
-                    threshold: 0.05,
+                    threshold: Some(0.05),
                     min_silence: 0.5,
                     padding: 0.12,
                 },
@@ -927,6 +962,7 @@ mod tests {
             .eval_checked(
                 "seek('clip:7@end'); moveClip(9, '0:01.5'); splitClip(7, 'clip:7@50%');
                  addTitle('Hi', '25%', 1); seek(2); split('90f'); insertTime('clip:9', 2);
+                 trimClip(7, 'clip:7@1s', null); trimClip(9, -1, 18);
                  const r = timeRange('clip:7..clip:9');
                  try { seek('clip:8'); } catch (e) { console.log(String(e)); }
                  return [time('end'), r.start, r.end].join(',');",
@@ -963,6 +999,17 @@ mod tests {
                 ScriptCommand::InsertTime {
                     at: 14.0,
                     seconds: 2.0
+                },
+                // A trim edge is a timeline time too; null or -1 keeps one.
+                ScriptCommand::TrimClip {
+                    clip: 7,
+                    left: Some(11.0),
+                    right: None,
+                },
+                ScriptCommand::TrimClip {
+                    clip: 9,
+                    left: None,
+                    right: Some(18.0),
                 },
                 ScriptCommand::Log("Error: no clip 8; clips: 7, 9".to_owned()),
             ]
@@ -1331,19 +1378,19 @@ mod tests {
                 ScriptCommand::SetZoom(value as f32),
                 ScriptCommand::TightenSilence {
                     clip: 1,
-                    threshold: value as f32,
+                    threshold: Some(value as f32),
                     min_silence: 0.35,
                     padding: 0.08,
                 },
                 ScriptCommand::TightenSilence {
                     clip: 1,
-                    threshold: 0.03,
+                    threshold: Some(0.03),
                     min_silence: value,
                     padding: 0.08,
                 },
                 ScriptCommand::TightenSilence {
                     clip: 1,
-                    threshold: 0.03,
+                    threshold: Some(0.03),
                     min_silence: 0.35,
                     padding: value,
                 },
@@ -1479,7 +1526,7 @@ mod tests {
                 ScriptCommand::SetZoom(-1.0),
                 ScriptCommand::TightenSilence {
                     clip: 1,
-                    threshold: -0.1,
+                    threshold: Some(-0.1),
                     min_silence: -0.2,
                     padding: -0.3
                 },

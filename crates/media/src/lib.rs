@@ -350,6 +350,30 @@ fn valid_peak_rate(peaks_per_sec: f64) -> bool {
     peaks_per_sec.is_finite() && peaks_per_sec > 0.0
 }
 
+/// Peak level at or under which speech recorded near full scale is silent.
+pub const SILENCE_PEAK: f32 = 0.03;
+
+/// The peak level at or under which this recording counts as silent. It
+/// follows the recording: 4% of its loud level (the 99th-percentile peak),
+/// which is `SILENCE_PEAK` near full scale and never more. A fixed level
+/// called a quiet take's soft syllables silence. It is never under 0.002
+/// either, so a file without sound stays silent.
+pub fn silence_threshold(peaks: &[f32]) -> f32 {
+    const SHARE_OF_LOUD: f32 = 0.04;
+    const FLOOR: f32 = 0.002;
+    let mut levels: Vec<f32> = peaks
+        .iter()
+        .copied()
+        .filter(|peak| peak.is_finite())
+        .collect();
+    if levels.is_empty() {
+        return SILENCE_PEAK;
+    }
+    let index = (levels.len() - 1) * 99 / 100;
+    let (_, loud, _) = levels.select_nth_unstable_by(index, f32::total_cmp);
+    (*loud * SHARE_OF_LOUD).clamp(FLOOR, SILENCE_PEAK)
+}
+
 /// Runs of waveform buckets at or below `threshold`, keeping only
 /// runs at least `min_duration` long. This is deliberately DSP,
 /// not speech recognition: a quiet room tone and true silence are
@@ -530,6 +554,28 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_quiet_recording_has_the_same_pauses_as_a_loud_one() {
+        // A take peaking near 0.08 had its soft trailing syllables under the
+        // fixed 0.03: 18 s of its 45 s read as silence, and about 5 s was.
+        let mut loud = Vec::new();
+        for _ in 0..4 {
+            loud.extend([0.6_f32; 40]);
+            loud.extend([0.08; 20]); // a soft trailing syllable
+            loud.extend([0.004; 30]); // the pause, with room tone
+        }
+        let quiet: Vec<f32> = loud.iter().map(|peak| peak * 0.1).collect();
+        let pauses = |peaks: &[f32]| silence_ranges(peaks, 50.0, silence_threshold(peaks), 0.35);
+        assert_eq!(pauses(&loud).len(), 4);
+        assert_eq!(pauses(&quiet), pauses(&loud));
+        assert!((pauses(&loud)[0].duration() - 0.6).abs() < 1e-9);
+        // Speech near full scale keeps the level it always had, and a file
+        // without sound is silent throughout.
+        assert_eq!(silence_threshold(&[0.9; 100]), SILENCE_PEAK);
+        assert_eq!(pauses(&[0.0004; 200]).len(), 1);
+        assert_eq!(silence_threshold(&[]), SILENCE_PEAK);
     }
 
     #[test]

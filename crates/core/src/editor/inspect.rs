@@ -256,12 +256,27 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     }
     for clip in &timeline.clips {
         if clip.kind == ClipKind::Video && !runs.iter().any(|run| run.2 == Some(clip.id)) {
+            // A voice kept under a cutaway is covered on purpose; say what
+            // still plays so the reader can tell that from a lost picture.
+            let heard = clip.embedded_audio
+                && clip.volume > 0.0
+                && clip
+                    .source
+                    .as_deref()
+                    .and_then(asset)
+                    .is_none_or(|asset| asset.info.has_audio);
             finding(
                 "hidden-clip",
                 "warning",
                 format!(
-                    "Clip {} on lane {} is always covered by a lower lane and never shows.",
-                    clip.id, clip.track
+                    "Clip {} on lane {} is always covered by a lower lane: {}.",
+                    clip.id,
+                    clip.track,
+                    if heard {
+                        "its picture never shows, only its sound plays"
+                    } else {
+                        "it never shows"
+                    }
                 ),
                 vec![clip.id],
                 clip.start,
@@ -322,8 +337,11 @@ mod tests {
         let c = timeline.add_media_clip("C", ClipKind::Video, 0, end_b + 1.0, 1.0, 9.5, "a.mp4");
         let card = timeline.add_clip("Day two", ClipKind::Title, 3, end_b + 2.0, 1.0, 0.0);
         let d = timeline.add_media_clip("D", ClipKind::Video, 0, end_b + 3.0, 1.0, 0.0, "tall.mp4");
-        // Under clip A on a higher lane: never visible.
+        // Under clip A on a higher lane: never visible, and silent.
         let hidden = timeline.add_media_clip("H", ClipKind::Video, 1, 0.5, 1.0, 0.0, "a.mp4");
+        timeline.clip_mut(hidden).unwrap().embedded_audio = false;
+        // Also covered, but heard: possibly a voice under a cutaway.
+        let voice = timeline.add_media_clip("V", ClipKind::Video, 4, 0.5, 1.0, 0.0, "a.mp4");
         let missing = timeline.add_media_clip("M", ClipKind::Audio, 2, 0.0, 1.0, 0.0, "gone.wav");
         // The last frame of the timeline may be short.
         let tail = timeline.add_media_clip(
@@ -374,6 +392,7 @@ mod tests {
             ("flash-frame", vec![flash]),
             ("picture-gap", vec![]),
             ("hidden-clip", vec![hidden]),
+            ("hidden-clip", vec![voice]),
         ];
         for item in &expected {
             assert!(found.contains(item), "missing {item:?} in {found:?}");
@@ -388,6 +407,24 @@ mod tests {
             .find(|finding| finding.kind == "picture-gap")
             .unwrap();
         assert!((gap.start - end_b).abs() < 1e-6 && (gap.end - (end_b + 1.0)).abs() < 1e-6);
+        let covered = |clip: ClipId| {
+            inspect(&timeline, &assets)
+                .into_iter()
+                .find(|finding| finding.clips == [clip])
+                .unwrap()
+                .message
+        };
+        assert_eq!(
+            covered(hidden),
+            format!("Clip {hidden} on lane 1 is always covered by a lower lane: it never shows.")
+        );
+        assert_eq!(
+            covered(voice),
+            format!(
+                "Clip {voice} on lane 4 is always covered by a lower lane: its picture never \
+                 shows, only its sound plays."
+            )
+        );
         let _ = (a, card, tail);
     }
 

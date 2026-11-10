@@ -64,6 +64,19 @@ pub enum Job {
         /// Paths answered from a saved curation instead.
         saved: Vec<String>,
     },
+    /// A request that reads the measured mix, waiting for the measurement.
+    Measure {
+        method: String,
+        params: Value,
+    },
+}
+
+impl Job {
+    /// Whether this job ends in a timeline edit, which a window holds back
+    /// while the user is mid-drag.
+    pub fn edits_timeline(&self) -> bool {
+        matches!(self, Job::Measure { method, .. } if edits_timeline(method))
+    }
 }
 
 pub enum TranscribeMsg {
@@ -93,13 +106,14 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
         Reply::Later(Job::Render(rx))
     };
     Ok(match method {
+        "state" if !app.mix_measured() => measure(app, method, params),
         "state" => Reply::Done(Outcome::read(
             serde_json::from_str(&app.script_state_json()).map_err(|error| error.to_string())?,
         )),
         "inspect" => Reply::Done(Outcome::read(json!({
             "findings": inspect::inspect(&app.timeline, &app.assets),
         }))),
-        "run" => Reply::Done(run(app, params)?),
+        "run" => run(app, params)?,
         "undo" | "redo" => {
             let changed = app.step_history(method == "redo");
             Reply::Done(Outcome {
@@ -219,9 +233,18 @@ pub fn summary(app: &Editor) -> Value {
     })
 }
 
+/// Answer `method` once the mix it reads has been measured.
+fn measure(app: &mut Editor, method: &str, params: &Value) -> Reply {
+    app.measure_mix();
+    Reply::Later(Job::Measure {
+        method: method.to_owned(),
+        params: params.clone(),
+    })
+}
+
 /// Run a script as one edit and one undo step. A dry run reports what the
 /// edit would do, then puts the editor back.
-fn run(app: &mut Editor, params: &Value) -> Result<Outcome, String> {
+fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     let code = text(params, "code")?;
     let dry_run = params["dryRun"].as_bool().unwrap_or(false);
     let findings = inspect::inspect(&app.timeline, &app.assets);
@@ -229,14 +252,20 @@ fn run(app: &mut Editor, params: &Value) -> Result<Outcome, String> {
     app.commit_history();
     let before = app.edit_snapshot();
     let mut engine = ScriptEngine::new()?;
-    let (output, commands) = engine.eval_checked(code, &app.script_state_json())?;
+    let evaluated = engine.eval_checked(code, &app.script_state_json());
+    if engine.read_audio() && !app.mix_measured() {
+        // It looked at a mix not measured yet. Nothing it queued has been
+        // applied, so measure and run it again.
+        return Ok(measure(app, "run", params));
+    }
+    let (output, commands) = evaluated?;
     let (notes, handles) = app.apply_edit(commands)?;
     let changed = app.differs_from(&before);
     let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
         .into_iter()
         .filter(|finding| !findings.contains(finding))
         .collect();
-    let value = json!({
+    let mut value = json!({
         "changed": changed,
         "saved": false,
         "output": (output != "undefined").then_some(output),
@@ -246,14 +275,17 @@ fn run(app: &mut Editor, params: &Value) -> Result<Outcome, String> {
         "summary": summary(app),
     });
     if dry_run {
+        // Nothing is kept, so this reply is the only place to read the
+        // timeline the edit would leave.
+        value["clips"] = app.script_clips().into();
         app.restore_edit(before);
     } else {
         app.commit_history();
     }
-    Ok(Outcome {
+    Ok(Reply::Done(Outcome {
         value,
         changed: changed && !dry_run,
-    })
+    }))
 }
 
 /// The saved speech settings, overridden per request.
@@ -401,6 +433,21 @@ impl Job {
         notes: &mut Vec<Note>,
     ) -> Option<Result<Outcome, String>> {
         match self {
+            Job::Measure { method, params } => {
+                // The timeline may have changed while this waited.
+                app.measure_mix();
+                if !app.mix_measured() {
+                    return None;
+                }
+                match start(app, method, params) {
+                    Ok(Reply::Done(outcome)) => Some(Ok(outcome)),
+                    Ok(Reply::Later(job)) => {
+                        *self = job;
+                        None
+                    }
+                    Err(error) => Some(Err(error)),
+                }
+            }
             Job::Import(media) => {
                 if app.import_rx.is_some() || !app.import_queue.is_empty() {
                     return None;
@@ -471,7 +518,7 @@ impl Job {
                                 "turns": transcript.segments.len(),
                                 "words": words,
                                 "source": transcript.source,
-                                "saved": transcript.cached,
+                                "reused": transcript.cached,
                                 "seconds": seconds,
                                 "note": transcript.note,
                             });
@@ -536,7 +583,7 @@ impl Job {
                             json!({
                                 "asset": asset.info.name,
                                 "curated": ready,
-                                "saved": saved.contains(path),
+                                "reused": saved.contains(path),
                                 "candidates": asset.sweep.candidates.len(),
                                 "scenes": asset.sweep.scene_clips.len(),
                                 "note": asset.sweep.note,

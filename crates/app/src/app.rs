@@ -1156,7 +1156,7 @@ impl EditorApp {
             }
         }
         if do_tighten {
-            match self.editor.tighten_clip_silence(id, 0.03, 0.35, 0.08) {
+            match self.editor.tighten_clip_silence(id, None, 0.35, 0.08) {
                 Ok(1) => self.editor.status = "No removable silence found.".to_owned(),
                 Ok(pieces) => {
                     self.editor.status = format!("Removed silence into {pieces} phrases.");

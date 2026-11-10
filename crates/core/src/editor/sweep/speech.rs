@@ -1,5 +1,5 @@
 //! Utterances: where a transcript's speech can be cut without ending a
-//! thought mid-sentence. Scripts read them as `speechGroups(asset)` and
+//! thought mid-sentence. Scripts read them as `utterances(asset)` and
 //! widen a source range out of them with `snapToSpeech`.
 //!
 //! These rules came from the removed model curation's talking-edge repair,
@@ -8,7 +8,7 @@
 use super::{ends_sentence, TranscriptSegment};
 
 /// Pause across which a sentence without a terminal mark still continues.
-const CONTINUATION_SECONDS: f64 = 0.8;
+pub(super) const CONTINUATION_SECONDS: f64 = 0.8;
 
 /// Words that leave a sentence hanging when a turn ends on them.
 const DANGLING_WORDS: &[&str] = &[

@@ -231,7 +231,16 @@ impl Server {
             let mut notes = Vec::new();
             let (client, id, job) = &mut self.jobs[index];
             let (client, id) = (*client, id.clone());
+            let edits = job.edits_timeline();
+            if hold_edits && edits {
+                app.frame_within(Duration::from_millis(100));
+                index += 1;
+                continue;
+            }
             let result = job.poll(app, &mut notes);
+            if let (true, Some(Ok(outcome))) = (edits, &result) {
+                self.edited(app, outcome);
+            }
             for note in notes {
                 match note {
                     Note::Progress(line) => {
@@ -314,11 +323,8 @@ impl Server {
             }
             _ => commands::start(app, &method, &params),
         };
-        // The window's user did not make this edit: say where it came from.
-        if let (true, "run", Ok(Reply::Done(outcome))) = (self.window, method.as_str(), &reply) {
-            if outcome.changed {
-                app.status = "Edited from the command line.".to_owned();
-            }
+        if let ("run", Ok(Reply::Done(outcome))) = (method.as_str(), &reply) {
+            self.edited(app, outcome);
         }
         match reply {
             Ok(Reply::Later(job)) => {
@@ -331,6 +337,13 @@ impl Server {
             }
             Ok(Reply::Done(outcome)) => self.finish(app, client, id, Ok(outcome)),
             Err(error) => self.finish(app, client, id, Err(error)),
+        }
+    }
+
+    /// The window's user did not make this edit: say where it came from.
+    fn edited(&self, app: &mut Editor, outcome: &Outcome) {
+        if self.window && outcome.changed {
+            app.status = "Edited from the command line.".to_owned();
         }
     }
 

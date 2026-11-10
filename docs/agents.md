@@ -24,9 +24,17 @@ eddie export talk.eddie out.mp4
 Every command prints one JSON object. Errors print `{"ok":false,"error":...}`
 and exit 1. `eddie help` lists the commands and the script API.
 
+- `curate` also transcribes each file that has no saved transcript, with
+  the Speech provider from Settings. Run `transcribe` first to choose the
+  provider, model or language.
+- `transcribe` and `curate` list each file under `assets`. `reused: true`
+  means a saved result answered; `--force` computes it again. `curate
+  --force` keeps a saved transcript; `transcribe --force` replaces it.
+- A reply's `saved` says whether the project file was written.
+
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
-`sheet`, and fix what the edit broke. `--dry-run` reports an edit without
-saving it.
+`sheet`, and fix what the edit broke. `run --dry-run` keeps nothing: its
+reply adds `clips`, the timeline the edit would leave.
 
 ## A running editor
 
@@ -80,9 +88,11 @@ you to open; each also prints the times it pictured.
 - `eddie sheet <project> <out.jpg> [range]` shows the program: one cell
   per visible shot, labelled with its timeline time, clip ID and lane, and
   with titles drawn on the picture.
-  - A sheet has 16 cells at most. When the timeline has more shots, the
-    cells are spread evenly and the JSON says `sampled: true`. Give a
-    timeline range (`10..25`, `clip:7`) to see every shot of one part.
+  - A sheet has 16 cells at most. `shots` counts the pictures in the
+    range; a new caption over the same picture is not a shot. Past 16
+    shots the cells are spread evenly and the JSON says `sampled: true`.
+    Give a timeline range (`10..25`, `clip:7`) to see every shot of one
+    part.
   - `cells` lists `time, clip, lane, sourceTime, title` for each picture.
 - `eddie strip <project> <asset> <out.jpg>` shows one source from start
   to end in 16 pictures, labelled with source times. A `*` marks a time
@@ -107,8 +117,13 @@ and 1 MiB of strings. Queries read the project as it was when the script
 started; edits are queued and applied together at the end. If any edit
 fails, the project is left exactly as it was.
 
-- `return` a value or `console.log(...)` to report back. Both show up in
-  the JSON `run` prints.
+- `run` prints `{changed, saved, output, notes, handles,
+  introducedFindings, summary}`.
+  - `output` is the script's `return` value as JSON text; parse it again.
+  - `notes` holds `console.log` lines and what commands report, such as
+    how many captions `addCaptionsForClip` added and why it left lines
+    out.
+  - `handles` maps each handle to the ID of the clip it created.
 - `importMedia` and `exportTo` are refused here. Use `eddie import` and
   `eddie export` instead.
 
@@ -126,6 +141,8 @@ transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
+  - `silenceRanges` are stretches of 0.35 s or more below the recording's
+    own quiet level.
   - `tempo` (BPM) and `beats` (source seconds) are set only for
     audio-only music with a steady beat; otherwise they are null.
 - **Transcript segments:** `id, asset, assetName, start, end, speaker,
@@ -143,28 +160,58 @@ transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
   visual, review {status, model}`.
   - New curations are local measurements, not judgments; `review.status`
     is `local`.
+  - The `music-bed` tag is the sound alone: steady, like music.
+    `musicBed: true` also needs the range to have no transcribed speech.
   - Curations saved by the old model reviewer can still say `reviewed`,
     `needs-review` or `rejected`.
 
 ### Time
 
-Every timeline time argument takes seconds or a spec string: `'3.2s'`,
-`'120f'`, `'1:05.5'`, `'50%'`, `'end'`, `'clip:7@end'`, `'clip:7@1.5s'`,
-`'clip:7@50%'`. Ranges are `'a..b'` or `'clip:7'`. `time(spec)` and
-`timeRange(spec)` resolve them. Clip specs name the IDs in `state()`, not
-handles.
+Every timeline time argument (`at`, `start`, `left`, `right`) takes
+seconds or a spec string: `'3.2s'`, `'120f'`, `'1:05.5'`, `'50%'`,
+`'end'`, `'clip:7@end'`, `'clip:7@1.5s'`, `'clip:7@50%'`. Ranges are
+`'a..b'` or `'clip:7'`. `time(spec)` and `timeRange(spec)` resolve them.
+Clip specs name the IDs in `state()`, not handles. Durations and source
+times (`dur`, `seconds`, `sourceIn`) are plain seconds.
 
 ### Editing
 
-`selectClip, split(at), splitClip(id, at), deleteClip(id?), moveClip(id,
-start), setClipLane(id, lane), trimClip(id, left, right)` (-1 keeps an
-edge), `renameClip, setOpacity, setVolume, setFade(id, in, out),
-setSmoothFades, setDuck, setCleanVoice, insertTime(at, seconds),
-detachAudio, unlinkClip, setEmbeddedAudio, tightenSilence(id, threshold?,
-minSilence?, padding?), addTitle(text, at?, dur?, style?), setTitleStyle,
-addCaptionsForClip(id, style?), addAsset(nameOrPath, at?),
-addAssetRange(nameOrPath, at, sourceIn, dur), setMagnet, setMusicBedMuted,
-closeGaps()`.
+- **Select and cut:** `selectClip(id)`, `split(at)` (the selected clip),
+  `splitClip(id, at)`, `deleteClip(id?)`, `clearTimeline()`.
+- **Place:** `addAsset(nameOrPath, at?)`, `addAssetRange(nameOrPath, at,
+  sourceIn, dur)`. A new clip lands on the first lane that is free for
+  its whole span. Read its lane as `track` in the next `state()`, or set
+  it with `setClipLane`.
+- **Move and trim:** `moveClip(id, start)`, `setClipLane(id, lane)`,
+  `insertTime(at, seconds)`, `closeGaps()`, `trimClip(id, left, right)`.
+  - `left` is the clip's new start and `right` its new end, both timeline
+    times. `null` or -1 keeps that edge.
+  - A new start moves the source in-point by the same amount. A new end
+    stops at the end of the source.
+- **Picture and sound:** `setOpacity(id, 0..1)`, `setVolume(id, gain)`,
+  `setFade(id, inSeconds, outSeconds)`, `setSmoothFades(id, bool)`,
+  `setDuck(id, bool)`, `setCleanVoice(id, bool)`, `setEmbeddedAudio(id,
+  bool)`, `detachAudio(id)`, `unlinkClip(id)`.
+  - `gain` is linear, from 0 to 2: 1 leaves the clip as recorded, 0.5 is
+    about 6 dB quieter, 0.25 about 12 dB.
+- **Pauses:** `tightenSilence(id, threshold?, minSilence?, padding?)`
+  removes each pause of `minSilence` seconds or more (0.35 by default)
+  and keeps `padding` seconds (0.08) at each cut. Leave `threshold` out
+  to use the recording's own quiet level.
+- **Titles:** `addTitle(text, at?, dur?, style?)`, `setTitleStyle(id,
+  style)`, `renameClip(id, text)` (a title's name is its text),
+  `addCaptionsForClip(id, style?)`.
+  - Styles: `lower-third`, `caption`, `pop-caption`, `minimal-caption`
+    and `highlight-caption`, which lights each word as it is spoken and
+    needs word timing.
+  - `addTitle` defaults to the playhead, 4 seconds and `lower-third`;
+    `addCaptionsForClip` to `caption`.
+  - One title shows at a time. Where two overlap, the one added first
+    shows.
+  - `addCaptionsForClip` returns no handle. Its line in `notes` says how
+    many captions it added; read their IDs from `state()` in the next
+    run.
+- **Settings:** `setMagnet(bool)`, `setMusicBedMuted(bool)`.
 
 ## Rules that prevent the usual mistakes
 
@@ -188,6 +235,9 @@ closeGaps()`.
   3. `setClipLane(cutaway, 0)`.
   4. `setEmbeddedAudio(cutaway, false)` if the cutaway's own sound is
      unwanted.
+
+  A base clip covered from end to end gets the `inspect()` finding
+  `hidden-clip` with "only its sound plays". Here that is the intent.
 - To make room for an inserted shot, use `insertTime(at, seconds)` rather
   than moving clips one by one. It splits everything crossing `at`
   (titles keep their text on both sides) and moves every lane later.
@@ -201,6 +251,9 @@ closeGaps()`.
   at. Never guess a source time.
 - Keep each range inside its source; `inspect()` reports one that runs
   outside.
+- Scene edges are measured, not exact. A fast move or a dissolve can put
+  a cut a few frames off, so look at a scene's first and last pictures
+  with `frames` before a cut that has to be clean.
 - To use "the part where she talks about pricing", find the transcript
   segment whose text matches. Place it with `addAssetRange(segment.asset,
   cursor, segment.start, segment.end - segment.start)`.
@@ -225,15 +278,19 @@ closeGaps()`.
 
 **Sound**
 
-- `musicBed: true` marks a range that probably has music baked in.
+- `musicBed: true` marks a range that probably has music baked in and no
+  speech.
   - Judge those ranges on their picture, not on their sound.
   - While `musicBedMuted` is true, such video is added muted so old
     soundtracks don't stack. Audio-only tracks always stay audible.
 - Music added on its own ducks under speech by default. A voiceover
   doesn't duck.
 - Export normalizes to -16 LUFS, so balance clips against each other.
-  - `audioReport()` gives each clip's loudness within the mix.
-  - A clip 10 LU quieter than its neighbours is buried.
+  - `audioReport()` gives the mix's loudness while each audible clip
+    plays, as `clips [{id, integratedLufs, truePeakDbtp}]`. Its `status`
+    is `measured`, `silent` when no clip is audible, or `failed`.
+  - A stretch 10 LU quieter than its neighbours is buried. Raise or
+    lower clips with `setVolume`.
 - `tightenSilence(id)` removes pauses from a speech clip. It refuses
   clips that are mostly music bed.
 - Waveform silence finds pauses, not fillers. Decide fillers from the

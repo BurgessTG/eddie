@@ -228,6 +228,8 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
         (code, &dry["changed"], &dry["saved"]),
         (0, &true.into(), &false.into())
     );
+    // It shows the timeline the edit would leave: here, an empty one.
+    assert_eq!(dry["clips"], serde_json::json!([]), "{dry}");
     let (code, _) = dir.eddie(&["run", "p.eddie", "-e", "exportTo('/tmp/x.mp4')"]);
     assert_eq!(code, 1);
     assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), saved);
@@ -317,13 +319,13 @@ fn pictures_show_the_program_a_source_and_exact_frames() {
     assert_eq!(code, 0, "{run}");
     let clip = run["handles"].as_object().unwrap().values().next().unwrap();
 
-    // The sheet: one cell per visible shot, here the titled second and the
-    // bare one, both showing the placed (blue) source time.
+    // The sheet: one shot in two cells, the titled second and the bare
+    // one, both showing the placed (blue) source time.
     let (code, sheet) = dir.eddie(&["sheet", "p.eddie", "sheet.jpg"]);
     assert_eq!(code, 0, "{sheet}");
     assert_eq!(
         (&sheet["shots"], &sheet["sampled"]),
-        (&2.into(), &false.into())
+        (&1.into(), &false.into())
     );
     let cells = sheet["cells"].as_array().unwrap();
     assert_eq!(cells.len(), 2, "{sheet}");
@@ -534,7 +536,7 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     assert_eq!(code, 0, "{first}");
     let entry = &first["assets"][0];
     assert_eq!(
-        (&entry["turns"], &entry["words"], &entry["saved"]),
+        (&entry["turns"], &entry["words"], &entry["reused"]),
         (&2.into(), &4.into(), &false.into()),
         "{first}"
     );
@@ -562,7 +564,7 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     // Saved per file: the second run uploads nothing.
     let (code, again) = dir.eddie(&["transcribe", "p.eddie"]);
     assert_eq!(
-        (code, &again["assets"][0]["saved"]),
+        (code, &again["assets"][0]["reused"]),
         (0, &true.into()),
         "{again}"
     );
@@ -690,6 +692,7 @@ fn a_served_project_takes_every_command_live() {
         (&true.into(), &false.into(), &2.into()),
         "{dry}"
     );
+    assert_eq!(dry["clips"][1]["name"], "Later", "{dry}");
     assert_eq!(clips(&dir), 1);
 
     // Each run is one undo step, and stepping history saves too.
@@ -819,7 +822,7 @@ fn curation_runs_once_per_file_and_reaches_scripts() {
         (
             &entry["asset"],
             &entry["curated"],
-            &entry["saved"],
+            &entry["reused"],
             &entry["scenes"]
         ),
         (&"shots.mp4".into(), &true.into(), &false.into(), &2.into()),
@@ -833,7 +836,7 @@ fn curation_runs_once_per_file_and_reaches_scripts() {
     assert_eq!(
         (
             code,
-            &again["assets"][0]["saved"],
+            &again["assets"][0]["reused"],
             &again["assets"][0]["scenes"]
         ),
         (0, &true.into(), &2.into()),
@@ -841,7 +844,7 @@ fn curation_runs_once_per_file_and_reaches_scripts() {
     );
     let (code, forced) = dir.eddie(&["curate", "p.eddie", "--force"]);
     assert_eq!(
-        (code, &forced["assets"][0]["saved"]),
+        (code, &forced["assets"][0]["reused"]),
         (0, &false.into()),
         "{forced}"
     );
