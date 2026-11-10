@@ -37,7 +37,7 @@ pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
         .fill(c.hover)
         // The window's corners, inside its border.
         .corners([theme::R_LG - 1.0, theme::R_LG - 1.0, 0.0, 0.0])
-        // Padding under centring: one pixel lower, where egui sets it.
+        // Padding under centring: one pixel lower, where the title reads centred.
         .child(
             el().pt(2.0).child(
                 text("Keyboard shortcuts")

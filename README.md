@@ -5,8 +5,9 @@
 [![CI](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml/badge.svg)](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml)
 
 A fast desktop video editor that AI agents can drive. Rust end to end:
-`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for probing
-and playback, and the `ffmpeg` command for export.
+[Rune](https://github.com/anomalyco/rune) on `wgpu` for the UI, in-process
+FFmpeg (`ffmpeg-next`) for probing and playback, and the `ffmpeg` command
+for export.
 
 Import footage, let the curator break it into every shot with its
 transcript, then cut those ranges together on a free-form timeline and
@@ -113,8 +114,9 @@ the speech provider and the project format.
 Install from the AUR with `yay -S eddie` (the latest release) or
 `yay -S eddie-git` (latest `master`). Release 0.1.0 predates the command
 line described below, so use `eddie-git` for it until the next release.
-`packaging/aur/PKGBUILD` is the release package and installs `eddie`, a
-desktop entry, the icon and these docs:
+`packaging/aur/PKGBUILD` is the release package (`packaging/aur-git/` is
+`eddie-git`) and installs `eddie`, a desktop entry that opens `.eddie`
+projects, the icon and these docs:
 
 ```sh
 mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
@@ -207,8 +209,7 @@ macOS.
 | `crates/engine` (`openreel-engine`) | UI-independent timeline model: lanes, linked clips, edits, titles, timecode. |
 | `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview, audio mixer, scene detection, waveforms, thumbnails, export. |
 | `crates/core` (`eddie-core`) | The editor without a window: media bin, project, playback, undo, curation, transcription, the QuickJS scripting API and the `eddie` command line. |
-| `crates/app` (`openreel-app`, binary `eddie`) | egui window over `eddie-core`: media bin, timeline, monitor, gallery, curator, settings. |
-| `crates/rune-app` (`eddie-rune`) | The same window being rebuilt on [Rune](https://github.com/anomalyco/rune). Unfinished; `eddie` is the egui window until it matches. |
+| `crates/app` (`openreel-app`, binary `eddie`) | The window over `eddie-core`, drawn with [Rune](https://github.com/anomalyco/rune): media bin, timeline, monitor, gallery, curator, settings. |
 
 ## Limitations
 

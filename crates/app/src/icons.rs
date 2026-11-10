@@ -1,5 +1,4 @@
-//! Glyphs drawn as shapes, with the egui window's numbers, so both windows
-//! show the same icons without an icon font.
+//! Glyphs drawn as shapes, so the window needs no icon font.
 
 use std::f32::consts::{PI, TAU};
 
@@ -50,6 +49,7 @@ pub(crate) fn ring(shape: Shape, c: P, r: f32, width: f32, color: Color) -> Shap
     shape.stroke_with(circle(c, r), true, width, LineCap::Round, color)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn outline(
     shape: Shape,
     x: f32,
@@ -60,7 +60,7 @@ pub(crate) fn outline(
     width: f32,
     color: Color,
 ) -> Shape {
-    // egui strokes these inside the rect.
+    // The stroke stays inside the rect.
     let inset = width / 2.0;
     shape.stroke_with(
         round_rect(

@@ -40,6 +40,8 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/eddie "$pkgdir/usr/bin/eddie"
   install -Dm644 packaging/eddie.desktop "$pkgdir/usr/share/applications/eddie.desktop"
+  # Lets a file manager open a .eddie project in Eddie.
+  install -Dm644 packaging/eddie.xml "$pkgdir/usr/share/mime/packages/eddie.xml"
   for size in 256 512; do
     install -Dm644 "packaging/eddie-$size.png" \
       "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/eddie.png"

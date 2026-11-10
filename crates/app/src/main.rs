@@ -1,38 +1,53 @@
+//! Eddie's window, drawn with Rune. The editor itself is `eddie-core`; this
+//! crate only shows it and turns pointer and key input into its calls.
+
 mod app;
-mod preview;
+mod console;
+mod details;
+mod dialogs;
+mod gallery;
+mod gallery_thumbs;
+mod icons;
+mod keys;
+mod media;
+mod menus;
+mod monitor;
+mod settings;
+mod shell;
+#[cfg(test)]
+mod testing;
 mod theme;
-mod timeline_ui;
+mod timeline;
 
-use app::EditorApp;
+use std::path::PathBuf;
 
-fn main() -> eframe::Result<()> {
+use rune::{App, AppSpec};
+
+use app::Ui;
+
+fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) = eddie_core::cli_main(&args) {
         std::process::exit(code);
     }
-    let initial_imports: Vec<std::path::PathBuf> = std::env::args_os()
-        .skip(1)
-        .filter(|arg| !arg.to_string_lossy().starts_with('-'))
-        .map(std::path::PathBuf::from)
+    // Rune reads its own flags (`--snap`, `--size`, ...) and hands back the
+    // rest: media and project files to open.
+    let imports: Vec<PathBuf> = rune::extra_args()
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
         .collect();
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Eddie")
-            // Matches eddie.desktop, so docks and launchers show the icon.
-            .with_app_id("eddie")
-            .with_icon(eframe::egui::IconData {
-                rgba: theme::icon_rgba(256),
-                width: 256,
-                height: 256,
-            })
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([1024.0, 640.0]),
-        renderer: eframe::Renderer::Wgpu,
-        ..Default::default()
+    // Matches eddie.desktop, so docks and launchers show the icon.
+    rune::set_app_id("eddie");
+    let spec = AppSpec {
+        min_size: Some((1024.0, 640.0)),
+        // Readouts and the console use the system's monospace font.
+        families: ("Inter", "ui-monospace, Inter"),
+        poll: Some(app::poll),
+        on_key: Some(app::on_key),
+        ..AppSpec::new("Eddie", (1440.0, 900.0), Ui::unopened, app::view)
     };
-    eframe::run_native(
-        "Eddie",
-        options,
-        Box::new(move |cc| Ok(Box::new(EditorApp::new(cc, initial_imports)))),
-    )
+    let app = App::new(spec).keep_running().on_close(app::on_close);
+    let handle = app.handle();
+    app.init(move || Ui::open(handle, imports)).run();
 }

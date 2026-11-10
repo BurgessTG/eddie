@@ -156,7 +156,7 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
         .w_full()
         .h(28.0)
         .center_y()
-        // Padding under centring: one pixel lower, where egui sets it.
+        // Padding under centring: one pixel lower, where the title reads centred.
         .child(
             el().pt(2.0).child(
                 text("Settings")
@@ -167,7 +167,7 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
         )
         .child(rune::spacer())
         .child(theme::close_button("settings-close", "Close settings (Esc)").on_press(close))
-        // egui's header is 4 narrower than its grid.
+        // The header is 4 narrower than the grid under it.
         .child(el().w(4.0));
 
     let hardware = theme::checkbox(

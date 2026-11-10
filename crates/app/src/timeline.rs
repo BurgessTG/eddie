@@ -24,8 +24,8 @@ use crate::theme::{self, c};
 
 /// Pointer travel that turns a press on the lanes into a drag.
 const DRAG_START: f32 = 6.0;
-/// How often the lanes scroll under a pointer held at their edge: the
-/// egui window's frame, so both scroll at the same speed.
+/// How often the lanes scroll under a pointer held at their edge: once a
+/// 60 Hz frame, which sets the scroll speed.
 const AUTOSCROLL_EVERY: Duration = Duration::from_millis(16);
 /// How far a clip's element reaches past the lanes' edges. Only the part
 /// in view is laid out, and its cut ends stay out of sight.

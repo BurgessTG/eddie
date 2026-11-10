@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/media", "crates/core", "crates/app", "crates/rune-app"]
-# `cargo run` starts the shipped window; the Rune window is `-p eddie-rune`.
-default-members = ["crates/engine", "crates/media", "crates/core", "crates/app"]
+members = ["crates/engine", "crates/media", "crates/core", "crates/app"]
 
 [workspace.package]
 edition = "2021"

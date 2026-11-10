@@ -7,6 +7,6 @@ Exec=eddie %F
 Icon=eddie
 Terminal=false
 Categories=AudioVideo;Video;AudioVideoEditing;
-MimeType=video/mp4;video/quicktime;video/x-matroska;video/webm;audio/mpeg;audio/x-wav;audio/flac;
+MimeType=application/x-eddie-project;video/mp4;video/quicktime;video/x-matroska;video/webm;audio/mpeg;audio/x-wav;audio/flac;
 StartupWMClass=eddie
 Keywords=video;editor;montage;timeline;

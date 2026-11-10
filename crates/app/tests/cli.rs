@@ -219,11 +219,13 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     );
     assert_eq!(clips[0]["fade_in"], 0.25);
     // The empty second before the clip is black with no title.
-    assert!(run["introducedFindings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "picture-gap"));
+    assert!(
+        run["introducedFindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "picture-gap")
+    );
 
     // A failing command undoes the commands before it, and nothing saves.
     let saved = std::fs::read(dir.0.join("p.eddie")).unwrap();
@@ -271,11 +273,13 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     // inspect measures the saved timeline: the same black second.
     let (code, inspected) = dir.eddie(&["inspect", "p.eddie"]);
     assert_eq!(code, 0, "{inspected}");
-    assert!(inspected["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "picture-gap"));
+    assert!(
+        inspected["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "picture-gap")
+    );
     assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), saved);
 
     // The export holds the black lead-in and the 2 s clip.

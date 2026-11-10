@@ -8,7 +8,7 @@ use rune_kit::{ScrollBar, ScrollBarStyle};
 use crate::app::Ui;
 use crate::theme::{self, Variant, c};
 
-/// egui's console with its output full: 148, its top border included.
+/// The console with its output full: 148, its top border included.
 pub const DEFAULT_H: f32 = 148.0;
 const MIN_H: f32 = 90.0;
 const MAX_H: f32 = 340.0;

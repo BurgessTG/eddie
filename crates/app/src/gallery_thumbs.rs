@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn gallery_thumbnails_show_the_requested_source_and_range() {
         let footage = Footage(std::env::temp_dir().join(format!(
-            "eddie-rune-gallery-{}-{}",
+            "eddie-gallery-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
