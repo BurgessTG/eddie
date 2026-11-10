@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use rune::{Color, Cursor, El, Shape, TextStyle, el, row, text};
+use rune::{Color, Cursor, El, HelpLook, Shadow, Shape, TextStyle, el, row, text};
 
 pub fn hex(code: &str) -> Color {
     rune::color::hex(code).expect("a literal colour")
@@ -77,6 +77,33 @@ static TOKENS: LazyLock<Tokens> = LazyLock::new(|| Tokens {
 
 pub fn c() -> &'static Tokens {
     &TOKENS
+}
+
+/// Behind whatever is selected: chosen text in a field, the current entry
+/// of a list.
+pub fn selection() -> Color {
+    rgba("#3B82F6", 70)
+}
+
+/// How every tooltip looks: a card with the popup shadow, just under its
+/// element.
+pub fn tooltip() -> HelpLook {
+    let c = c();
+    HelpLook::system(true)
+        .fill(c.card)
+        .ink(c.foreground)
+        .ring(1.0, c.border)
+        .radius(R_MD)
+        .padding(7.0, 7.0)
+        .font(BODY.lh(16.0))
+        .max_width(Some(500.0))
+        .gap(4.0)
+        .shadows([Shadow {
+            y: 4.0,
+            blur: 16.0,
+            color: Color::BLACK.alpha(120.0 / 255.0),
+            ..Shadow::default()
+        }])
 }
 
 pub const R_SM: f32 = 6.0;

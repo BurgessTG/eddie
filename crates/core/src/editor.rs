@@ -17,6 +17,7 @@ use openreel_media::{
 use crate::scripting::{ScriptCommand, ScriptEngine};
 
 pub mod commands;
+pub mod details;
 pub mod gallery;
 mod headless;
 pub use headless::cli_main;
@@ -2203,7 +2204,7 @@ impl Editor {
             }
             ScriptCommand::SetVolume { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
-                    c.volume = value.clamp(0.0, 2.0);
+                    c.volume = value.clamp(0.0, details::MAX_VOLUME);
                 }
             }
             ScriptCommand::SetFade {

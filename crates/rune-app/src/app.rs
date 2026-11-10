@@ -15,7 +15,7 @@ use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 use crate::dialogs::{Discard, PendingFileDialog};
 use crate::menus::Menu;
 use crate::theme::c;
-use crate::{dialogs, media, menus, monitor, shell, timeline};
+use crate::{details, dialogs, media, menus, monitor, shell, timeline};
 
 /// The program monitor's picture. The editor copies each frame in; Rune
 /// uploads it and wakes the window.
@@ -73,6 +73,8 @@ pub struct Ui {
     pub media_w: f32,
     pub bin_drag: Option<media::BinDrag>,
     pub bin_menu: Option<media::BinMenu>,
+    /// The Details panel's fields, open list and width.
+    pub details: details::State,
     /// Where the timeline's ruler and lanes were last laid out, in window
     /// points; `None` until they have been.
     pub timeline_rect: Option<[f32; 4]>,
@@ -153,6 +155,7 @@ impl Ui {
             media_w: media::DEFAULT_W,
             bin_drag: None,
             bin_menu: None,
+            details: details::State::default(),
             timeline_rect: None,
             lanes: timeline::LaneInput::default(),
             pending_discard: None,
@@ -194,6 +197,8 @@ impl Ui {
         self.take_thumbnails();
         self.poll_file_dialog();
         timeline::sync(self);
+        // A held slider is one edit, as a held clip is.
+        self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
@@ -202,7 +207,7 @@ impl Ui {
 
     /// A text field has the keyboard, so plain keys are text.
     pub fn typing(&self) -> bool {
-        (self.jump_open && self.jump.focused) || self.search.focused
+        (self.jump_open && self.jump.focused) || self.search.focused || self.details.typing()
     }
 
     /// Where a spinner's arc is in its turn, 0 to 1 once a second.
@@ -307,6 +312,7 @@ impl Ui {
                 self.jump.focused = false;
             }
             Action::Deselect if self.menu.is_some() => self.menu = None,
+            Action::Deselect if self.details.select.is_some() => self.details.select = None,
             Action::Deselect if self.bin_menu.is_some() => self.bin_menu = None,
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
             Action::Deselect if self.show_settings => self.show_settings = false,
@@ -344,6 +350,7 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         // Clicking elsewhere leaves the readout as it was.
         ui.jump_open = false;
     }
+    details::sync(ui);
     if ui.pump(clock) {
         if let Some(handle) = &ui.handle {
             // A finished export asks to be noticed.
@@ -442,6 +449,7 @@ pub fn on_close(ui: &mut Ui, tx: &mut Tx) {
 pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     let started = Instant::now();
     let c = c();
+    cx.help_look(crate::theme::tooltip());
     let mut overlays = Vec::new();
     let mut middle = row().w_full().grow(1.0).min_h(0.0);
     if ui.show_media {
@@ -449,14 +457,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     }
     middle = middle.child(monitor::central(ui, cx));
     if ui.show_inspector {
-        middle = middle.child(
-            col()
-                .key("details")
-                .w(340.0)
-                .h_full()
-                .fill(c.surface)
-                .border_sides([0.0, 0.0, 0.0, 1.0], c.border),
-        );
+        middle = middle.child(details::panel(ui));
     }
     let body = col()
         .w_full()
@@ -470,6 +471,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .child(shell::status_bar(ui));
     media::overlays(ui, &mut overlays);
     timeline::overlays(ui, &mut overlays);
+    details::overlays(ui, cx, &mut overlays);
     menus::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);

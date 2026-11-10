@@ -514,6 +514,7 @@ pub fn panel(ui: &Ui) -> El {
             )
         });
         let search = rune::text_input(&ui.search, theme::BODY)
+            .selection_color(theme::selection())
             .key("bin-search")
             .single_line()
             .w_full()

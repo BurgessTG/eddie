@@ -352,6 +352,7 @@ fn playhead_readout(ui: &Ui) -> El {
     let c = c();
     if ui.jump_open {
         return rune::text_input(&ui.jump, theme::mono(13.0))
+            .selection_color(theme::selection())
             .key("jump-box")
             .single_line()
             .w(96.0)

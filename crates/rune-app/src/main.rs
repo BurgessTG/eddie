@@ -2,6 +2,7 @@
 //! crate only shows it and turns pointer and key input into its calls.
 
 mod app;
+mod details;
 mod dialogs;
 mod icons;
 mod media;

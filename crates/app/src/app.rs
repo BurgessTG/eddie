@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use eddie_core::editor::details::MAX_VOLUME;
 use eddie_core::editor::MEDIA_EXTS;
 use eddie_core::{Action, Editor, PreviewSink, Wake};
 use eframe::egui::{
@@ -946,8 +947,10 @@ impl EditorApp {
                     .on_hover_text("Fades the picture against black");
                 }
                 if has_source {
-                    prop_row(ui, "Volume", |ui| percent_slider(ui, &mut clip.volume, 1.5))
-                        .on_hover_text("Clip gain; 100% is unity");
+                    prop_row(ui, "Volume", |ui| {
+                        percent_slider(ui, &mut clip.volume, MAX_VOLUME)
+                    })
+                    .on_hover_text("Clip gain; 100% is unity");
                 }
                 // Audio clips only, so a video clip's card keeps its height;
                 // scripts can fade any clip's sound with setFade.
@@ -1119,61 +1122,22 @@ impl EditorApp {
             }
         }
 
+        // The actions and their status lines are shared with the Rune
+        // window (`eddie_core::editor::details`).
         if do_detach {
-            if source_has_audio {
-                match self.editor.timeline.detach_audio(id) {
-                    Some(audio) => {
-                        self.editor.selected = Some(audio);
-                        self.editor.status = "Audio detached.".to_owned();
-                    }
-                    None => {
-                        self.editor.status = "This clip's audio is already detached.".to_owned();
-                    }
-                }
-            } else {
-                self.editor.status = "This clip has no detachable audio.".to_owned();
-            }
+            self.editor.detach_clip_audio(id);
         }
         if do_unlink {
-            if self.editor.timeline.unlink_clip(id) {
-                self.editor.status = "Picture and audio unlinked.".to_owned();
-            } else {
-                self.editor.status = "This clip is not linked.".to_owned();
-            }
+            self.editor.unlink_clip(id);
         }
         if do_captions {
-            match self.editor.add_captions_for_clip(id, caption_style) {
-                Ok(0) => {
-                    self.editor.status = "Captions already added or none overlap.".to_owned();
-                }
-                Ok(count) => {
-                    self.editor.status = format!(
-                        "Added {count} caption{}.",
-                        if count == 1 { "" } else { "s" }
-                    );
-                }
-                Err(error) => self.editor.status = error,
-            }
+            self.editor.add_clip_captions(id);
         }
         if do_tighten {
-            match self.editor.tighten_clip_silence(id, None, 0.35, 0.08) {
-                Ok(1) => self.editor.status = "No removable silence found.".to_owned(),
-                Ok(pieces) => {
-                    self.editor.status = format!("Removed silence into {pieces} phrases.");
-                }
-                Err(error) => self.editor.status = error,
-            }
+            self.editor.remove_clip_silence(id);
         }
         if do_split {
-            match self.editor.timeline.split_at(id, self.editor.playhead) {
-                Some(new_id) => {
-                    self.editor.selected = Some(new_id);
-                    self.editor.status = "Clip split at playhead.".to_owned();
-                }
-                None => {
-                    self.editor.status = "Playhead is not inside the selected clip.".to_owned();
-                }
-            }
+            self.editor.split_clip_at_playhead(id);
         }
         if do_delete {
             self.editor.delete_clip(id);
