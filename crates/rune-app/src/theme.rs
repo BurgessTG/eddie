@@ -302,10 +302,13 @@ pub fn segmented(
             })
             .cursor(Cursor::Pointer)
             .help(help.to_owned())
+            // An unselected segment's label lights up under the pointer.
+            .hover_group()
             .child(
                 text(label.to_owned())
                     .font(BODY)
                     .color(if active { c.foreground } else { c.muted_fg })
+                    .group_color(c.foreground)
                     .single_line(),
             );
         track = track.child(wire(index, item));

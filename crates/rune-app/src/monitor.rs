@@ -8,6 +8,7 @@ use openreel_engine::{Clip, ClipKind, format_timecode};
 use rune::{Color, Cursor, Cx, El, Phase, Shape, Span, SurfaceFit, col, el, rich, row, text};
 
 use crate::app::Ui;
+use crate::gallery;
 use crate::icons::{self, Transport};
 use crate::theme::{self, c};
 
@@ -55,7 +56,7 @@ pub fn central(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .child(row().child(tabs))
         .child(el().h(10.0));
     if gallery {
-        return panel.child(el().key("gallery").w_full().grow(1.0).min_h(0.0));
+        return panel.child(gallery::view(ui, cx));
     }
     let area = cx.layout_size("monitor-area");
     let mut stage = el().key("monitor-area").w_full().grow(1.0).min_h(0.0);

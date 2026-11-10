@@ -144,11 +144,19 @@ impl GalleryFilters {
             return false;
         }
         words.iter().all(|word| {
-            [&clip.asset_name, &clip.title, &clip.category, &clip.reason]
-                .into_iter()
-                .chain(clip.tags.iter())
-                .chain(clip.transcript.iter().map(|turn| &turn.text))
-                .any(|text| text.to_lowercase().contains(word))
+            // The category as stored ("broll") and as its card shows it
+            // ("B-roll").
+            [
+                clip.asset_name.as_str(),
+                &clip.title,
+                &clip.category,
+                category_label(&clip.category),
+                &clip.reason,
+            ]
+            .into_iter()
+            .chain(clip.tags.iter().map(String::as_str))
+            .chain(clip.transcript.iter().map(|turn| turn.text.as_str()))
+            .any(|text| text.to_lowercase().contains(word))
         })
     }
 }
@@ -281,6 +289,17 @@ mod tests {
             },
             dismissed: false,
         }
+    }
+
+    #[test]
+    fn search_finds_a_category_by_the_name_its_card_shows() {
+        let filters = GalleryFilters::default();
+        let range = clip(50.0, ReviewStatus::Local, &["prime"]);
+        for query in ["b-roll", "broll", "prime", "a.mp4"] {
+            assert!(filters.matches(&range, &[query]), "{query}");
+        }
+        assert!(!filters.matches(&range, &["talking"]));
+        assert!(!filters.matches(&range, &["b-roll", "talking"]));
     }
 
     #[test]

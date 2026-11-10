@@ -4,6 +4,8 @@
 mod app;
 mod details;
 mod dialogs;
+mod gallery;
+mod gallery_thumbs;
 mod icons;
 mod media;
 mod menus;

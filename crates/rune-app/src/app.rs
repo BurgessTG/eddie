@@ -15,7 +15,7 @@ use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 use crate::dialogs::{Discard, PendingFileDialog};
 use crate::menus::Menu;
 use crate::theme::c;
-use crate::{details, dialogs, media, menus, monitor, shell, timeline};
+use crate::{details, dialogs, gallery, media, menus, monitor, shell, timeline};
 
 /// The program monitor's picture. The editor copies each frame in; Rune
 /// uploads it and wakes the window.
@@ -75,6 +75,8 @@ pub struct Ui {
     pub bin_menu: Option<media::BinMenu>,
     /// The Details panel's fields, open list and width.
     pub details: details::State,
+    /// The Gallery's search box, open list and card pictures.
+    pub gallery: gallery::State,
     /// Where the timeline's ruler and lanes were last laid out, in window
     /// points; `None` until they have been.
     pub timeline_rect: Option<[f32; 4]>,
@@ -131,6 +133,12 @@ impl Ui {
     ) -> Self {
         let monitor = Pixels::new();
         let monitor_size = Rc::new(Cell::new(None));
+        let wake = handle.clone();
+        let gallery = gallery::State::new(move || {
+            if let Some(handle) = &wake {
+                handle.wake();
+            }
+        });
         let editor = editor(Box::new(MonitorSink {
             pixels: monitor.clone(),
             size: Rc::clone(&monitor_size),
@@ -156,6 +164,7 @@ impl Ui {
             bin_drag: None,
             bin_menu: None,
             details: details::State::default(),
+            gallery,
             timeline_rect: None,
             lanes: timeline::LaneInput::default(),
             pending_discard: None,
@@ -207,7 +216,10 @@ impl Ui {
 
     /// A text field has the keyboard, so plain keys are text.
     pub fn typing(&self) -> bool {
-        (self.jump_open && self.jump.focused) || self.search.focused || self.details.typing()
+        (self.jump_open && self.jump.focused)
+            || self.search.focused
+            || self.details.typing()
+            || self.gallery.typing()
     }
 
     /// Where a spinner's arc is in its turn, 0 to 1 once a second.
@@ -217,7 +229,10 @@ impl Ui {
 
     /// Something is spinning, so frames must keep coming.
     fn busy(&self) -> bool {
-        self.editor.importing() || self.editor.exporting() || self.editor.curating()
+        self.editor.importing()
+            || self.editor.exporting()
+            || self.editor.curating()
+            || (self.editor.curator.open && self.gallery.busy())
     }
 
     /// Swap the playhead readout for a box holding it, selected, so typing
@@ -313,6 +328,7 @@ impl Ui {
             }
             Action::Deselect if self.menu.is_some() => self.menu = None,
             Action::Deselect if self.details.select.is_some() => self.details.select = None,
+            Action::Deselect if self.gallery.popup.is_some() => self.gallery.popup = None,
             Action::Deselect if self.bin_menu.is_some() => self.bin_menu = None,
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
             Action::Deselect if self.show_settings => self.show_settings = false,
@@ -351,6 +367,7 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         ui.jump_open = false;
     }
     details::sync(ui);
+    gallery::sync(ui);
     if ui.pump(clock) {
         if let Some(handle) = &ui.handle {
             // A finished export asks to be noticed.
@@ -472,6 +489,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     media::overlays(ui, &mut overlays);
     timeline::overlays(ui, &mut overlays);
     details::overlays(ui, cx, &mut overlays);
+    gallery::overlays(ui, cx, &mut overlays);
     menus::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);

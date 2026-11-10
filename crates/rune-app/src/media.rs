@@ -104,7 +104,7 @@ fn preview(
     frame
 }
 
-fn spinner(size: f32, turn: f32) -> El {
+pub(crate) fn spinner(size: f32, turn: f32) -> El {
     el().size(size, size)
         .shape(icons::spinner(size, turn, c().foreground))
 }
