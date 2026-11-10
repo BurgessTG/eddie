@@ -1,6 +1,7 @@
-# Formatting and the timeline engine's tests. The media and app crates need
-# FFmpeg 9 development libraries, which GitHub's Ubuntu images do not ship;
-# run their suites locally.
+# `check` is quick: formatting and the timeline engine's tests.
+# `workspace` builds and tests every crate. The media, core and app crates
+# need FFmpeg 9 development libraries, which GitHub's Ubuntu images do not
+# ship, so that job runs in an Arch Linux container.
 name: CI
 
 on:
@@ -19,3 +20,42 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo test --locked -p openreel-engine
+
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    container:
+      image: archlinux:latest
+    env:
+      # No sound device in a container: the mixer paces a silent output.
+      SDL_AUDIODRIVER: dummy
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Install build and test dependencies
+        # git comes first so checkout clones instead of downloading an
+        # archive. The fonts are for titles (fc-match) and the window.
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rustup clang cmake pkgconf \
+            ffmpeg alsa-lib gtk3 fontconfig ttf-liberation inter-font
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (the mise.toml pin)
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      - name: Record library versions
+        id: versions
+        run: |
+          echo "ffmpeg=$(pacman -Q ffmpeg | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
+          ffmpeg -version | head -n1
+          pkg-config --modversion libavcodec alsa gtk+-3.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # ffmpeg-sys-next generates its bindings from the installed headers.
+          key: arch-${{ steps.versions.outputs.ffmpeg }}
+      - name: Build
+        run: cargo test --workspace --locked --no-run
+      - name: Test
+        # Two threads: several media tests check pacing against the wall
+        # clock, and a hosted runner has four slow cores.
+        run: cargo test --workspace --locked -- --test-threads=2

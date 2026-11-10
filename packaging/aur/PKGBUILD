@@ -10,6 +10,8 @@ depends=('ffmpeg' 'gtk3' 'glib2' 'alsa-lib' 'fontconfig' 'gcc-libs' 'glibc'
          'libxkbcommon' 'wayland' 'libx11' 'vulkan-icd-loader')
 makedepends=('cargo' 'clang' 'cmake' 'pkgconf')
 optdepends=('inter-font: the interface font Eddie is designed with'
+            'ttf-liberation: a font for titles when fontconfig finds no other'
+            'libva-nvidia-driver: hardware decode on NVIDIA (Settings, off by default)'
             'xdg-utils: Open folder after an export')
 conflicts=('eddie-git')
 options=('!lto' '!debug')
@@ -42,6 +44,9 @@ package() {
     install -Dm644 "packaging/eddie-$size.png" \
       "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/eddie.png"
   done
+  # `eddie help` and the README send agents to docs/agents.md.
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/agents.md "$pkgdir/usr/share/doc/$pkgname/agents.md"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
 }

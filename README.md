@@ -5,8 +5,8 @@
 [![CI](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml/badge.svg)](https://github.com/BurgessTG/eddie/actions/workflows/ci.yml)
 
 A fast desktop video editor that AI agents can drive. Rust end to end:
-`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for playback,
-and the FFmpeg CLI tools for probing and export.
+`egui` + `wgpu` for the UI, in-process FFmpeg (`ffmpeg-next`) for probing
+and playback, and the `ffmpeg` command for export.
 
 Import footage, let the curator break it into every shot with its
 transcript, then cut those ranges together on a free-form timeline and
@@ -32,7 +32,7 @@ sandboxed JavaScript API, and you keep editing by hand in the window. See
   can duck under speech.
 - Program monitor with frame stepping. Audio drives the playhead, and the
   next cut's first picture is prerolled so short clips play through.
-- Titles and generated captions in four styles, identical in preview and
+- Titles and generated captions in five styles, identical in preview and
   export. Remove silence tightens pauses out of speech.
 - Undo/redo covers every timeline edit, whether made by hand, in Details
   or in the console.
@@ -68,11 +68,12 @@ results are saved per file. It runs on this computer:
 ## Requirements
 
 - Rust, pinned in `mise.toml` (use [mise](https://mise.jdx.dev)).
-- Build: FFmpeg 9 development libraries, ALSA development headers,
-  `pkg-config`, `clang` (for bindgen), `cmake` and a C++ compiler (for
-  whisper.cpp).
+- Build: FFmpeg 9, ALSA and GTK 3 development files, `pkg-config`, `clang`
+  (for bindgen), `cmake` and a C++ compiler (for whisper.cpp). On Arch:
+  `sudo pacman -S --needed base-devel clang cmake pkgconf ffmpeg alsa-lib gtk3 fontconfig`.
 - Runtime: `ffmpeg` 9 on `PATH`; ALSA (or PipeWire/Pulse through ALSA) for
-  sound. The tests also need `ffprobe`.
+  sound; GTK 3 for file dialogs; fontconfig (`fc-match`) and a font for
+  titles; a Vulkan driver for the window. The tests also need `ffprobe`.
 - Optional: a key for a cloud transcription provider (Meta Voice
   Transcribe or any OpenAI-compatible API). Local transcription needs none.
 - For transcription: a whisper.cpp model in `whisper/` beside the settings
@@ -96,13 +97,13 @@ git clone https://github.com/BurgessTG/eddie.git
 cd eddie
 mise exec -- cargo run --release                  # judge performance in release
 mise exec -- cargo run --release -- a.mp4 b.mov   # import files on launch
-SDL_AUDIODRIVER=dummy mise exec -- cargo test     # full suite, headless
+SDL_AUDIODRIVER=dummy mise exec -- cargo test --workspace   # full suite, headless
 mise exec -- cargo run -p openreel-media --example generate_samples -- samples
 ```
 
-The last command generates test media into `samples/`. CI runs formatting
-and the engine tests only; the media and app suites need FFmpeg 9 and run
-locally.
+The last command generates test media into `samples/`. CI checks
+formatting, then builds and tests the whole workspace in an Arch Linux
+container, which has FFmpeg 9.
 
 Open Settings with the gear beside Export (Ctrl+,) for hardware decode,
 the speech provider and the project format.
@@ -110,8 +111,10 @@ the speech provider and the project format.
 ### Install on Arch
 
 Install from the AUR with `yay -S eddie` (the latest release) or
-`yay -S eddie-git` (latest `master`). `packaging/aur/PKGBUILD` is the
-release package and installs `eddie`, a desktop entry and the icon:
+`yay -S eddie-git` (latest `master`). Release 0.1.0 predates the command
+line described below, so use `eddie-git` for it until the next release.
+`packaging/aur/PKGBUILD` is the release package and installs `eddie`, a
+desktop entry, the icon and these docs:
 
 ```sh
 mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
@@ -138,6 +141,7 @@ eddie strip talk.eddie a.mp4 a.jpg              # 16 pictures through a source
 eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
 eddie export talk.eddie out.mp4
 eddie help                                      # commands and the script API
+eddie guide                                     # the guide for agents
 ```
 
 `eddie transcribe talk.eddie [asset...]` transcribes media with the
@@ -163,7 +167,8 @@ between commands (about 50 ms each instead of about a second) and every
 change is saved; `eddie stop` ends it. `eddie undo` and `eddie redo` step
 the running editor's history, and `eddie events` prints one JSON line per
 change. The editor listens on a Unix socket only your user can open, under
-`$XDG_RUNTIME_DIR/eddie`; the protocol is in [docs/agents.md](docs/agents.md).
+`$XDG_RUNTIME_DIR/eddie` (or `run/` beside the settings file); the
+protocol is in [docs/agents.md](docs/agents.md).
 
 `sheet`, `strip` and `frames` let an agent that cannot watch video look at
 its work. A sheet shows one labelled cell per visible shot (16 at most; a
@@ -203,6 +208,7 @@ macOS.
 | `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview, audio mixer, scene detection, waveforms, thumbnails, export. |
 | `crates/core` (`eddie-core`) | The editor without a window: media bin, project, playback, undo, curation, transcription, the QuickJS scripting API and the `eddie` command line. |
 | `crates/app` (`openreel-app`, binary `eddie`) | egui window over `eddie-core`: media bin, timeline, monitor, gallery, curator, settings. |
+| `crates/rune-app` (`eddie-rune`) | The same window being rebuilt on [Rune](https://github.com/anomalyco/rune). Unfinished; `eddie` is the egui window until it matches. |
 
 ## Limitations
 
