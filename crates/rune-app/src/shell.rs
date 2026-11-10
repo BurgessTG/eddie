@@ -270,3 +270,35 @@ pub fn status_bar(ui: &Ui) -> El {
     }
     bar
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::app::Ui;
+    use crate::testing::{frames, shown, tooltip, window};
+
+    #[test]
+    fn a_finished_export_offers_its_folder_until_the_status_moves_on() {
+        let mut ui = Ui::headless();
+        ui.editor.status = "Exported montage.mp4".to_owned();
+        ui.editor.exported = Some((
+            PathBuf::from("/videos/cut/montage.mp4"),
+            ui.editor.status.clone(),
+        ));
+        let mut rt = window(ui);
+        assert!(shown(&rt, "open-export-folder"));
+        assert!(
+            tooltip(&mut rt, "open-export-folder")
+                .is_some_and(|words| words.contains("/videos/cut/montage.mp4")),
+            "the button names the file it opens the folder of"
+        );
+
+        rt.state.editor.status = "Split clip.".to_owned();
+        frames(&mut rt, 2);
+        assert!(
+            !shown(&rt, "open-export-folder"),
+            "stale exports offer nothing"
+        );
+    }
+}

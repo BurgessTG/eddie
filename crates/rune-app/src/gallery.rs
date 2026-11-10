@@ -27,7 +27,13 @@ const FIELD_H: f32 = 28.0;
 const GAP: f32 = 8.0;
 /// The view switch and the source list, which search and sort sit beside.
 const SWITCH_W: f32 = 158.0;
+/// The source list is this wide, and grows to show a longer name whole
+/// until `SOURCE_MAX_W`.
 const SOURCE_W: f32 = 160.0;
+const SOURCE_MAX_W: f32 = 320.0;
+/// What a list adds around its choice: padding, the gaps either side of
+/// its spacer, and the arrow.
+const SELECT_CHROME_W: f32 = 48.0;
 const SORT_W: f32 = 120.0;
 /// Search needs this much beside the sort list, or the pair takes a row of
 /// its own.
@@ -176,6 +182,8 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
         .as_deref()
         .and_then(|path| editor.asset(path))
         .map_or("All sources", |asset| asset.info.name.as_str());
+    let source_w = (rune::text::measure(source, &[], theme::BODY, None).0 + SELECT_CHROME_W)
+        .clamp(SOURCE_W, SOURCE_MAX_W);
     let source = select(
         "gallery-source",
         source,
@@ -184,7 +192,7 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
         popup == Some(Popup::Source),
         true,
     )
-    .w(SOURCE_W);
+    .w(source_w);
     let search = rune::text_input(&ui.gallery.search, theme::BODY)
         .selection_color(theme::selection())
         .key("gallery-search")
@@ -216,7 +224,7 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
         !scenes,
     )
     .min_w(SORT_W);
-    let inline = width - SWITCH_W - SOURCE_W - 2.0 * GAP >= SEARCH_MIN + GAP + SORT_W;
+    let inline = width - SWITCH_W - source_w - 2.0 * GAP >= SEARCH_MIN + GAP + SORT_W;
     let mut top = row()
         .w_full()
         .h(32.0)

@@ -471,6 +471,21 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_is_shown() {
+        isolated_config("settings::tests::a_failed_save_is_shown", |path| {
+            // A directory where the file should be makes the rename fail.
+            std::fs::create_dir_all(&path).unwrap();
+            let mut rt = settings();
+            click(&mut rt, "settings-hardware");
+            let hardware = rt.state.editor.settings.hardware_decode;
+            // The switch is process-wide; leave it as other tests expect.
+            openreel_media::set_hardware_decode(false);
+            assert!(hardware, "the change still applies to this session");
+            assert_eq!(rt.state.editor.status, "Couldn't save settings.");
+        });
+    }
+
+    #[test]
     fn a_cloud_provider_asks_for_its_url_and_key() {
         isolated_config(
             "settings::tests::a_cloud_provider_asks_for_its_url_and_key",

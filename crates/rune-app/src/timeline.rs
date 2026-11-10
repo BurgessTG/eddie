@@ -1056,6 +1056,51 @@ mod tests {
         assert!((now - 6.0).abs() < 0.02, "time under the pointer {now}");
     }
 
+    /// Trimming a clip's left edge away from its neighbour leaves a gap.
+    /// The magnet only snaps edges while dragging: the frames after the
+    /// release must not ripple the gap closed.
+    #[test]
+    fn a_left_trim_with_the_magnet_on_survives_the_frames_after_it() {
+        let mut ui = Ui::headless();
+        assert!(ui.editor.viewport.magnet);
+        let a = ui.editor.timeline.add_media_clip(
+            "a.mp4",
+            ClipKind::Video,
+            0,
+            0.0,
+            10.0,
+            0.0,
+            "/media/a.mp4",
+        );
+        let b = ui.editor.timeline.add_media_clip(
+            "b.mp4",
+            ClipKind::Video,
+            0,
+            10.0,
+            10.0,
+            0.0,
+            "/media/b.mp4",
+        );
+        // The whole window, editor pump included.
+        let mut rt = crate::testing::window(ui);
+        let edge = at(&rt, 10.0, 0);
+        // Just inside B's left edge, three seconds to the right.
+        press_drag_release(&mut rt, (edge.0 + 3.0, edge.1), (edge.0 + 147.0, edge.1));
+        for _ in 0..10 {
+            rt.frame(FRAME);
+        }
+        let timeline = &rt.state.editor.timeline;
+        let (a, b) = (timeline.clip(a).unwrap(), timeline.clip(b).unwrap());
+        assert_eq!((a.start, a.end()), (0.0, 10.0));
+        assert!((b.start - 13.0).abs() < 0.05, "start {}", b.start);
+        assert!((b.end() - 20.0).abs() < 1e-6, "end {}", b.end());
+        assert!(
+            (b.source_in - 3.0).abs() < 0.05,
+            "source in {}",
+            b.source_in
+        );
+    }
+
     #[test]
     fn the_zoom_slider_is_logarithmic_and_drags() {
         // Half way along is the geometric middle of the range.

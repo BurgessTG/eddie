@@ -254,3 +254,87 @@ pub fn unsaved(ui: &Ui, overlays: &mut Vec<El>) {
             .child(card),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use eddie_core::Action;
+    use rune::{Key, Mods};
+
+    use super::Discard;
+    use crate::app::Ui;
+    use crate::testing::{chord, click, frames, press, shown, tooltip, window};
+
+    #[test]
+    fn open_and_new_ask_before_dropping_unsaved_edits() {
+        let mut rt = window(Ui::headless());
+        rt.state
+            .editor
+            .run_console("addTitle('Booth', 3, 2);".to_owned());
+        frames(&mut rt, 2);
+        assert!(
+            rt.state.editor.has_unsaved_changes(),
+            "{}",
+            rt.state.editor.status
+        );
+        for (action, discard) in [
+            (Action::OpenProject, Discard::Open),
+            (Action::NewProject, Discard::New),
+        ] {
+            rt.state.act(action);
+            frames(&mut rt, 2);
+            assert_eq!(rt.state.pending_discard, Some(discard));
+            assert!(shown(&rt, "unsaved-changes"));
+            assert_eq!(
+                rt.state.editor.timeline.clips.len(),
+                1,
+                "nothing is dropped before an answer"
+            );
+            press(&mut rt, Key::Escape);
+            assert_eq!(rt.state.pending_discard, None, "Esc keeps editing");
+            assert!(!shown(&rt, "unsaved-changes"));
+        }
+
+        let ctrl = Mods {
+            cmd: true,
+            ..Mods::default()
+        };
+        chord(&mut rt, Key::Command('n'), ctrl);
+        assert_eq!(rt.state.pending_discard, Some(Discard::New));
+        // The prompt owns the keyboard: no shortcut reaches the editor.
+        let magnet = rt.state.editor.viewport.magnet;
+        press(&mut rt, Key::Text("m".into()));
+        assert_eq!(rt.state.editor.viewport.magnet, magnet);
+        for key in ["unsaved-save", "unsaved-drop", "unsaved-cancel"] {
+            assert!(
+                tooltip(&mut rt, key).is_some_and(|words| !words.is_empty()),
+                "{key} has no tooltip"
+            );
+        }
+        click(&mut rt, "unsaved-cancel");
+        assert_eq!(rt.state.pending_discard, None);
+        assert_eq!(rt.state.editor.timeline.clips.len(), 1);
+
+        chord(&mut rt, Key::Command('n'), ctrl);
+        click(&mut rt, "unsaved-drop");
+        assert_eq!(rt.state.pending_discard, None);
+        assert!(rt.state.editor.timeline.clips.is_empty());
+    }
+
+    #[test]
+    fn a_saved_project_is_replaced_without_asking() {
+        let mut rt = window(Ui::headless());
+        rt.state
+            .editor
+            .run_console("addTitle('Booth', 3, 2);".to_owned());
+        let dir = std::env::temp_dir().join(format!("eddie-window-discard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        rt.state.editor.save_project_to(&dir.join("saved")).unwrap();
+        frames(&mut rt, 2);
+        rt.state.act(Action::NewProject);
+        frames(&mut rt, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rt.state.pending_discard, None);
+        assert!(rt.state.editor.timeline.clips.is_empty());
+    }
+}

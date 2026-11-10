@@ -539,3 +539,55 @@ fn read_rss_mb() -> u64 {
         .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
         .map_or(0, |pages| pages * 4096 / (1024 * 1024))
 }
+
+#[cfg(test)]
+mod tests {
+    use eddie_core::shortcuts::{BINDINGS, Chord, KeyName};
+    use rune::{Key, KeyEvent, Mods};
+
+    /// The event the window gets for a chord: Ctrl with a character
+    /// arrives as a command, a plain character as the text it types.
+    fn event(chord: Chord) -> KeyEvent {
+        let key = match chord.key {
+            KeyName::Char(key) if chord.command => Key::Command(key),
+            KeyName::Char(key) if chord.shift => Key::Text(key.to_uppercase().collect()),
+            KeyName::Char(key) => Key::Text(key.to_string()),
+            KeyName::Space => Key::Text(" ".to_owned()),
+            KeyName::Left => Key::Left,
+            KeyName::Right => Key::Right,
+            KeyName::Up => Key::Up,
+            KeyName::Down => Key::Down,
+            KeyName::Home => Key::Home,
+            KeyName::End => Key::End,
+            KeyName::Delete => Key::Delete,
+            KeyName::Backspace => Key::Backspace,
+            KeyName::Escape => Key::Escape,
+            KeyName::Function(number) => Key::Function(number),
+        };
+        KeyEvent {
+            key,
+            mods: Mods {
+                cmd: chord.command,
+                ctrl: chord.command,
+                shift: chord.shift,
+                ..Mods::default()
+            },
+        }
+    }
+
+    /// A binding whose key the window cannot name would never fire.
+    #[test]
+    fn every_bound_chord_is_one_the_window_can_read() {
+        for binding in BINDINGS {
+            for chord in binding.keys {
+                assert_eq!(
+                    super::chord(&event(*chord)),
+                    Some(*chord),
+                    "{:?} never reaches {:?}",
+                    chord,
+                    binding.action
+                );
+            }
+        }
+    }
+}
