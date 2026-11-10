@@ -1,10 +1,14 @@
 //! Custom-painted timeline: ruler, lanes, clips, playhead.
 //!
-//! Geometry and hit-testing live here. Pointer placement uses the engine's
-//! project frame grid; reorders and rollbacks retain exact existing intervals.
+//! Geometry, hit-testing and what each gesture means live in
+//! `eddie_core::editor::lanes`; this file reads egui's pointer and paints.
 
 use std::collections::HashMap;
 
+use eddie_core::editor::lanes::{
+    self, filmstrip_tiles, ruler_label, ruler_step, ClipHit, Gesture, Scene, ViewRect, EDGE_PX,
+    HEADER_W, RULER_H, TRACK_GAP, TRACK_H,
+};
 use eddie_core::editor::viewport::TimelineViewport;
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, Vec2,
@@ -12,13 +16,6 @@ use eframe::egui::{
 use openreel_engine::{format_timecode, Clip, ClipId, ClipKind, Timeline};
 
 use crate::theme;
-
-const HEADER_W: f32 = 144.0;
-const RULER_H: f32 = 26.0;
-const TRACK_H: f32 = 46.0;
-const TRACK_GAP: f32 = 4.0;
-const EDGE_PX: f32 = 9.0;
-const MOVE_BODY_PX: f32 = 12.0;
 
 /// Per-source visual data supplied by the app for one frame of painting.
 pub struct ClipVisual<'a> {
@@ -29,94 +26,20 @@ pub struct ClipVisual<'a> {
 
 pub type VisualMap<'a> = HashMap<&'a str, ClipVisual<'a>>;
 
-#[derive(Clone, Copy)]
-enum ClipHit {
-    Body,
-    Left,
-    Right,
-}
-
-#[derive(Clone, Copy)]
-enum DragMode {
-    Move {
-        grab_offset: f64,
-        home_start: f64,
-        home_track: usize,
-        home_linked: Option<(ClipId, f64)>,
-    },
-    TrimLeft {
-        orig_start: f64,
-        press_time: f64,
-    },
-    TrimRight {
-        orig_end: f64,
-        press_time: f64,
-    },
-}
-
-/// One filmstrip fragment: destination offset/width inside the clip
-/// rect, the horizontal UV span of its thumbnail, and the source
-/// time at its center.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FilmstripTile {
-    x: f32,
-    w: f32,
-    uv: (f32, f32),
-    center_source: f64,
-}
-
-/// Lay out filmstrip fragments on a grid anchored to source time
-/// zero, not to the clip's left edge. Tile width in seconds comes
-/// from the zoom (`tile_w / px_per_sec`), so zooming changes frame
-/// density, while trimming slides the clip border across fragments
-/// that stay put: an edge tile is UV-cropped, never re-phased.
-fn filmstrip_tiles(
-    source_in: f64,
-    duration: f64,
-    px_per_sec: f32,
-    tile_w: f32,
-) -> Vec<FilmstripTile> {
-    if px_per_sec <= 0.0 || tile_w <= 0.0 || duration <= 0.0 {
-        return Vec::new();
+fn view_rect(rect: Rect) -> ViewRect {
+    ViewRect {
+        left: rect.left(),
+        top: rect.top(),
+        right: rect.right(),
+        bottom: rect.bottom(),
     }
-    let tile_sec = (tile_w / px_per_sec) as f64;
-    let clip_w = (duration * px_per_sec as f64) as f32;
-    let first_k = (source_in / tile_sec).floor() as i64;
-    let mut tiles = Vec::new();
-    let mut k = first_k;
-    loop {
-        let tile_source_start = k as f64 * tile_sec;
-        let x = ((tile_source_start - source_in) * px_per_sec as f64) as f32;
-        if x >= clip_w {
-            break;
-        }
-        let visible_left = x.max(0.0);
-        let visible_right = (x + tile_w).min(clip_w);
-        if visible_right > visible_left {
-            tiles.push(FilmstripTile {
-                x: visible_left,
-                w: visible_right - visible_left,
-                uv: ((visible_left - x) / tile_w, (visible_right - x) / tile_w),
-                center_source: tile_source_start + tile_sec / 2.0,
-            });
-        }
-        k += 1;
-    }
-    tiles
 }
 
-/// An absent target must not compete with a real target as a zero-distance snap.
-fn snap_target(time: f64, candidates: &[f64], threshold: f64) -> Option<f64> {
-    candidates
-        .iter()
-        .copied()
-        .filter(|c| (c - time).abs() <= threshold)
-        .min_by(|a, b| (a - time).abs().total_cmp(&(b - time).abs()))
-}
-
-/// Snap `time` to the nearest candidate within `threshold` seconds.
-fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
-    snap_target(time, candidates, threshold).unwrap_or(time)
+fn egui_rect(rect: ViewRect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(rect.left, rect.top),
+        Pos2::new(rect.right, rect.bottom),
+    )
 }
 
 #[derive(Default)]
@@ -125,25 +48,24 @@ pub struct TimelineView {
     /// and back out after, so drops from the bin hit-test against the
     /// frame on screen.
     pub port: TimelineViewport,
-    drag: Option<(ClipId, DragMode)>,
+    gesture: Gesture,
     press_origin: Option<Pos2>,
     last_drag_pos: Option<Pos2>,
-    seeking: bool,
     last_rect: Option<Rect>,
 }
 
 impl TimelineView {
     fn x_at(&self, content_left: f32, time: f64) -> f32 {
-        content_left + time as f32 * self.port.px_per_sec - self.port.scroll_x
+        lanes::x_at(&self.port, content_left, time)
     }
 
     fn time_at(&self, content_left: f32, x: f32) -> f64 {
-        ((x - content_left + self.port.scroll_x) / self.port.px_per_sec) as f64
+        lanes::time_at(&self.port, content_left, x)
     }
 
     /// True while the user is scrubbing the ruler or dragging a clip.
     pub fn is_interacting(&self) -> bool {
-        self.seeking || self.drag.is_some()
+        self.gesture.is_interacting()
     }
 
     pub fn show(
@@ -163,19 +85,9 @@ impl TimelineView {
         );
 
         self.port.width = Some(content.width());
-        let max_scroll =
-            (timeline.end() as f32 * self.port.px_per_sec - content.width() * 0.5).max(0.0);
-        self.port.scroll_x = self.port.scroll_x.min(max_scroll);
+        lanes::clamp_scroll(&mut self.port, timeline.end(), content.width());
         self.handle_scroll(ui, &response, content_left);
-        self.handle_pointer(
-            &response,
-            timeline,
-            playhead,
-            selected,
-            visuals,
-            content_left,
-            rect,
-        );
+        self.handle_pointer(&response, timeline, playhead, selected, visuals, rect);
         self.port.interacting = self.is_interacting();
         self.paint(ui, timeline, *playhead, *selected, visuals, rect, content);
         response.on_hover_text(
@@ -186,25 +98,17 @@ impl TimelineView {
     /// Map a screen position to `(track, time)` for drag-and-drop from the
     /// media bin. Uses the most recent frame's geometry.
     pub fn drop_target(&self, pos: Pos2) -> Option<(usize, f64)> {
-        let rect = self.last_rect?;
-        if !rect.contains(pos) || pos.x < rect.left() + HEADER_W {
-            return None;
-        }
-        let track = self.track_at(rect, pos.y)?;
-        let time = self.time_at(rect.left() + HEADER_W, pos.x).max(0.0);
-        Some((track, time))
+        lanes::drop_target(&self.port, view_rect(self.last_rect?), [pos.x, pos.y])
     }
 
     /// Content rect of a lane from the most recent frame's geometry,
     /// for highlighting a pending drop lane. Works one past the last
     /// lane too (the append zone).
     pub fn lane_rect(&self, track: usize) -> Option<Rect> {
-        let rect = self.last_rect?;
-        let y = rect.top() + RULER_H + track as f32 * (TRACK_H + TRACK_GAP);
-        Some(Rect::from_min_size(
-            Pos2::new(rect.left() + HEADER_W, y),
-            Vec2::new((rect.right() - rect.left() - HEADER_W).max(0.0), TRACK_H),
-        ))
+        Some(egui_rect(lanes::lane_rect(
+            view_rect(self.last_rect?),
+            track,
+        )))
     }
 
     fn handle_scroll(&mut self, ui: &mut Ui, response: &egui::Response, content_left: f32) {
@@ -220,92 +124,28 @@ impl TimelineView {
         });
         if ctrl && delta.y != 0.0 {
             // Zoom around the cursor: keep the time under it stationary.
-            let anchor_time = self.time_at(content_left, pointer_x);
-            let factor = (delta.y * 0.002).exp();
-            self.port.set_zoom(self.port.px_per_sec * factor);
-            self.port.scroll_x =
-                (anchor_time as f32 * self.port.px_per_sec - (pointer_x - content_left)).max(0.0);
+            lanes::zoom_about(
+                &mut self.port,
+                content_left,
+                pointer_x,
+                (delta.y * 0.002).exp(),
+            );
         } else {
-            self.port.scroll_x = (self.port.scroll_x - delta.y - delta.x).max(0.0);
+            lanes::scroll_by(&mut self.port, delta.x, delta.y);
         }
-    }
-
-    fn track_at(&self, rect: Rect, y: f32) -> Option<usize> {
-        let lanes_top = rect.top() + RULER_H;
-        if y < lanes_top {
-            return None;
-        }
-        Some(((y - lanes_top) / (TRACK_H + TRACK_GAP)) as usize)
     }
 
     fn clip_rect(&self, rect: Rect, clip: &Clip) -> Rect {
-        let content_left = rect.left() + HEADER_W;
-        let y = rect.top() + RULER_H + clip.track as f32 * (TRACK_H + TRACK_GAP) + 3.0;
-        Rect::from_min_max(
-            Pos2::new(self.x_at(content_left, clip.start), y),
-            Pos2::new(self.x_at(content_left, clip.end()), y + TRACK_H - 6.0),
-        )
+        egui_rect(lanes::clip_rect(&self.port, view_rect(rect), clip))
     }
 
-    /// Paint, hover and press classification share the same geometry. Handles
-    /// shrink before taking away the move body; tiny clips are entirely body
-    /// until zoomed in. An adjacent clip's outside handle cannot steal it.
     fn hit_clip<'a>(
         &self,
         timeline: &'a Timeline,
         rect: Rect,
         pos: Pos2,
     ) -> Option<(&'a Clip, ClipHit)> {
-        let track = self.track_at(rect, pos.y)?;
-        let mut outside_edge: Option<(f32, &Clip, ClipHit)> = None;
-        for clip in timeline.clips.iter().filter(|c| c.track == track) {
-            let bounds = self.clip_rect(rect, clip);
-            if !bounds.y_range().contains(pos.y) {
-                continue;
-            }
-            let handle = EDGE_PX.min(((bounds.width() - MOVE_BODY_PX) * 0.5).max(0.0));
-            let left_dist = (pos.x - bounds.left()).abs();
-            let right_dist = (pos.x - bounds.right()).abs();
-            if pos.x >= bounds.left() && pos.x < bounds.right() {
-                let hit = if handle > 0.0 && left_dist <= handle {
-                    ClipHit::Left
-                } else if handle > 0.0 && right_dist <= handle {
-                    ClipHit::Right
-                } else {
-                    ClipHit::Body
-                };
-                return Some((clip, hit));
-            }
-            for (distance, hit) in [(left_dist, ClipHit::Left), (right_dist, ClipHit::Right)] {
-                if handle > 0.0
-                    && distance <= handle
-                    && outside_edge.is_none_or(|(best, _, _)| distance < best)
-                {
-                    outside_edge = Some((distance, clip, hit));
-                }
-            }
-        }
-        outside_edge.map(|(_, clip, hit)| (clip, hit))
-    }
-
-    /// End of the nearest same-track clip ending at or before `orig_start`.
-    fn prev_end(timeline: &Timeline, clip: &Clip, orig_start: f64) -> f64 {
-        timeline
-            .clips
-            .iter()
-            .filter(|c| c.id != clip.id && c.track == clip.track && c.end() <= orig_start + 1e-6)
-            .map(Clip::end)
-            .fold(0.0, f64::max)
-    }
-
-    /// Start of the nearest same-track clip starting at or after `from`.
-    fn next_start(timeline: &Timeline, clip: &Clip, from: f64) -> Option<f64> {
-        timeline
-            .clips
-            .iter()
-            .filter(|c| c.id != clip.id && c.track == clip.track && c.start >= from - 1e-6)
-            .map(|c| c.start)
-            .min_by(|a, b| a.total_cmp(b))
+        lanes::hit_clip(&self.port, timeline, view_rect(rect), [pos.x, pos.y])
     }
 
     fn handle_pointer(
@@ -315,7 +155,6 @@ impl TimelineView {
         playhead: &mut f64,
         selected: &mut Option<ClipId>,
         visuals: &VisualMap<'_>,
-        content_left: f32,
         rect: Rect,
     ) {
         let (pressed, released, decidedly_dragging, origin, pointer_pos) =
@@ -344,344 +183,84 @@ impl TimelineView {
         let release_drag = released
             && decidedly_dragging
             && saved_press.is_some()
-            && self.drag.is_none()
-            && !self.seeking;
+            && !self.gesture.is_interacting();
         let drag_started = response.drag_started() || release_drag;
         let drag_stopped = response.drag_stopped() || release_drag;
+        let view = view_rect(rect);
+        let point = |pos: Pos2| [pos.x, pos.y];
         let Some(pos) = response
             .interact_pointer_pos()
             .or_else(|| release_drag.then_some(pointer_pos).flatten())
         else {
             if drag_stopped {
-                let last = self.last_drag_pos;
-                self.finish_drag(timeline, rect, last);
+                let last = self.last_drag_pos.map(point);
+                self.finish_drag(timeline, playhead, selected, view, last);
             }
             return;
         };
-        if self.seeking || self.drag.is_some() {
+        if self.gesture.is_interacting() {
             self.last_drag_pos = Some(pos);
         }
         // Classify from where the press began, not where the pointer is
-        // when egui crosses its drag threshold (~6px later). Using the
-        // current position misclassifies most edge grabs as moves.
+        // when egui crosses its drag threshold (~6px later).
         let press_pos = saved_press.or(origin).unwrap_or(pos);
-        // Ignore presses deep in the track-header gutter, but allow the
-        // strip of gutter next to t=0 where a full-length clip's left edge
-        // lives. While an interaction is live, always keep tracking.
-        if press_pos.x < content_left - EDGE_PX && !self.seeking && self.drag.is_none() {
+        // While an interaction is live, always keep tracking.
+        if !Gesture::accepts(view, point(press_pos)) && !self.gesture.is_interacting() {
             return;
         }
 
-        // Auto-scroll while dragging near the viewport edges so the far
-        // edge of a long clip can be reached without letting go.
-        if (self.seeking || self.drag.is_some()) && !drag_stopped {
-            const MARGIN: f32 = 36.0;
-            const SPEED: f32 = 14.0;
-            if pos.x > rect.right() - MARGIN {
-                self.port.scroll_x += SPEED;
-                response.ctx.request_repaint();
-            } else if pos.x < content_left + MARGIN && pos.x >= rect.left() {
-                self.port.scroll_x = (self.port.scroll_x - SPEED).max(0.0);
-                response.ctx.request_repaint();
-            }
+        if !drag_stopped && self.gesture.autoscroll(&mut self.port, view, point(pos)) {
+            response.ctx.request_repaint();
         }
 
-        let time = self.time_at(content_left, pos.x).max(0.0);
-        let press_time = self.time_at(content_left, press_pos.x).max(0.0);
-
+        let mut scene = Scene {
+            timeline,
+            playhead,
+            selected,
+            port: &mut self.port,
+            rect: view,
+        };
         // Clicks arrive on release without a later drag_stopped event.
         // Only real drags may retain interaction state.
-        if drag_started || response.clicked() {
-            if press_pos.y < rect.top() + RULER_H {
-                self.seeking = drag_started;
-                *playhead = timeline.snap(time);
-            } else {
-                // A click parks the playhead. A drag keeps the existing
-                // playhead target instead of snapping short clips to their
-                // own grab point, especially on a purely vertical move.
-                if response.clicked() {
-                    *playhead = timeline.snap(press_time);
-                }
-                if let Some((clip, hit)) = self.hit_clip(timeline, rect, press_pos) {
-                    let mode = match hit {
-                        ClipHit::Body => DragMode::Move {
-                            grab_offset: press_time - clip.start,
-                            home_start: clip.start,
-                            home_track: clip.track,
-                            home_linked: clip
-                                .linked_clip
-                                .and_then(|id| timeline.clip(id))
-                                .map(|linked| (linked.id, linked.start)),
-                        },
-                        ClipHit::Left => DragMode::TrimLeft {
-                            orig_start: clip.start,
-                            press_time,
-                        },
-                        ClipHit::Right => DragMode::TrimRight {
-                            orig_end: clip.end(),
-                            press_time,
-                        },
-                    };
-                    *selected = Some(clip.id);
-                    self.drag = drag_started.then_some((clip.id, mode));
-                } else if response.clicked() {
-                    *selected = None;
-                }
-            }
+        if drag_started {
+            self.gesture.begin(&mut scene, point(press_pos), point(pos));
+        }
+        if response.clicked() {
+            self.gesture.click(&mut scene, point(press_pos), point(pos));
         }
 
         // egui does not report `dragged` on the release frame, which can
         // carry a new pointer position (including a different target lane).
         if response.dragged() || drag_stopped {
             self.last_drag_pos = Some(pos);
-            if self.seeking {
-                *playhead = timeline.snap(time);
-            } else if let Some((id, mode)) = self.drag {
-                // Snap targets (magnet on): timeline start, playhead, other
-                // clip edges. Magnet off means free placement on frame grid.
-                let threshold = 8.0 / self.port.px_per_sec as f64;
-                let mut candidates: Vec<f64> = Vec::new();
-                if self.port.magnet {
-                    candidates.extend([0.0, *playhead]);
-                    let linked = timeline.clip(id).and_then(|c| c.linked_clip);
-                    for clip in timeline
-                        .clips
-                        .iter()
-                        .filter(|c| c.id != id && Some(c.id) != linked)
-                    {
-                        candidates.push(clip.start);
-                        candidates.push(clip.end());
-                    }
-                }
-                let clip_snapshot = timeline.clip(id).cloned();
-                match (mode, clip_snapshot) {
-                    (DragMode::Move { grab_offset, .. }, Some(clip)) => {
-                        // Vertical lane change within existing lanes;
-                        // growth past the top or bottom lane resolves
-                        // on drop (finish_drag). Horizontal overlap is
-                        // allowed mid-drag so the clip can be carried
-                        // over a neighbor; finish_drag swaps or
-                        // returns it home, never leaving an overlap.
-                        if let Some(target) = self
-                            .track_at(rect, pos.y)
-                            .filter(|t| *t < timeline.track_labels.len())
-                        {
-                            if target != clip.track {
-                                timeline.set_clip_track(id, target);
-                            }
-                        }
-                        let raw = time - grab_offset;
-                        let by_start = snap_target(raw, &candidates, threshold);
-                        let by_end = snap_target(raw + clip.duration, &candidates, threshold)
-                            .map(|end| end - clip.duration);
-                        let snapped = [by_start, by_end]
-                            .into_iter()
-                            .flatten()
-                            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
-                            .unwrap_or(raw);
-                        timeline.move_clip(id, snapped);
-                    }
-                    (
-                        DragMode::TrimLeft {
-                            orig_start,
-                            press_time,
-                        },
-                        Some(clip),
-                    ) => {
-                        // Move the edge by the drag delta. Setting the edge
-                        // to the pointer time would instantly cut away the
-                        // grab offset inside the edge handle.
-                        let desired = orig_start + (time - press_time);
-                        // The pointer takes the nearest frame; only a bound
-                        // (the previous clip) makes the model round one way.
-                        let snapped = timeline.snap(snap_to(desired, &candidates, threshold));
-                        let prev_end = Self::prev_end(timeline, &clip, orig_start);
-                        timeline.trim_left(id, snapped.max(prev_end));
-                    }
-                    (
-                        DragMode::TrimRight {
-                            orig_end,
-                            press_time,
-                        },
-                        Some(clip),
-                    ) => {
-                        let desired = orig_end + (time - press_time);
-                        let mut new_end = timeline.snap(snap_to(desired, &candidates, threshold));
-                        if let Some(visual) = clip
-                            .source
-                            .as_ref()
-                            .and_then(|src| visuals.get(src.as_str()))
-                        {
-                            let max_end = clip.start + (visual.duration - clip.source_in).max(0.0);
-                            new_end = new_end.min(max_end);
-                        }
-                        if let Some(next) = Self::next_start(timeline, &clip, clip.start) {
-                            new_end = new_end.min(next);
-                        }
-                        timeline.trim_right(id, new_end);
-                    }
-                    _ => {}
-                }
-            }
+            self.gesture.drag(&mut scene, point(pos), &|source| {
+                visuals.get(source).map(|visual| visual.duration)
+            });
         }
 
         if drag_stopped {
-            self.finish_drag(timeline, rect, Some(pos));
+            self.finish_drag(timeline, playhead, selected, view, Some(point(pos)));
         }
     }
 
-    /// End a drag. The magnet only snaps while dragging; gaps are
-    /// never closed here. A Move dropped above the first lane or
-    /// below the last grows a new lane there for the clip. A Move
-    /// dropped onto one neighbor on its home lane swaps positions
-    /// with it. A wider preview may overlap more clips when the pointer
-    /// clearly targets an adjacent neighbor; only that pair reorders.
-    /// Ambiguous or colliding drops return home without moving other clips.
-    fn finish_drag(&mut self, timeline: &mut Timeline, rect: Rect, drop_pos: Option<Pos2>) {
-        if let Some((
-            id,
-            DragMode::Move {
-                home_start,
-                home_track,
-                home_linked,
-                ..
-            },
-        )) = self.drag
-        {
-            let lanes_top = rect.top() + RULER_H;
-            let lanes_bottom =
-                lanes_top + timeline.track_labels.len() as f32 * (TRACK_H + TRACK_GAP) - TRACK_GAP;
-            // Well past the edge counts as aiming for a new lane, so
-            // slight pointer drift on a sideways drag of an edge-lane
-            // clip does not grow one by accident. The ruler strip is
-            // the only room above the first lane, hence the smaller
-            // top threshold.
-            let above = drop_pos.is_some_and(|pos| pos.y < lanes_top - RULER_H * 0.5);
-            let below = drop_pos.is_some_and(|pos| pos.y > lanes_bottom + TRACK_H * 0.5);
-            if drop_pos.is_none() || ((above || below) && !Self::linked_lane_clear(timeline, id)) {
-                Self::restore_move(timeline, id, home_start, home_track, home_linked);
-            } else if above {
-                timeline.insert_track_at(0);
-                timeline.set_clip_track(id, 0);
-            } else if below {
-                let track = timeline.append_track();
-                timeline.set_clip_track(id, track);
-            } else if let Some(pos) = drop_pos {
-                Self::resolve_move_drop(
-                    timeline,
-                    id,
-                    home_start,
-                    home_track,
-                    home_linked,
-                    self.time_at(rect.left() + HEADER_W, pos.x),
-                );
-            }
-        }
-        self.drag = None;
+    fn finish_drag(
+        &mut self,
+        timeline: &mut Timeline,
+        playhead: &mut f64,
+        selected: &mut Option<ClipId>,
+        rect: ViewRect,
+        drop_pos: Option<lanes::Point>,
+    ) {
+        let mut scene = Scene {
+            timeline,
+            playhead,
+            selected,
+            port: &mut self.port,
+            rect,
+        };
+        self.gesture.finish(&mut scene, drop_pos);
         self.press_origin = None;
         self.last_drag_pos = None;
-        self.seeking = false;
-    }
-
-    fn lane_overlaps(timeline: &Timeline, clip: &Clip) -> Vec<ClipId> {
-        timeline
-            .clips
-            .iter()
-            .filter(|c| {
-                c.id != clip.id
-                    && c.track == clip.track
-                    && c.start < clip.end() - 1e-9
-                    && clip.start < c.end() - 1e-9
-            })
-            .map(|c| c.id)
-            .collect()
-    }
-
-    fn linked_lane_clear(timeline: &Timeline, id: ClipId) -> bool {
-        timeline
-            .clip(id)
-            .and_then(|clip| clip.linked_clip)
-            .and_then(|linked| timeline.clip(linked))
-            .is_none_or(|linked| {
-                // The dragged clip can be temporarily on its partner's lane
-                // before a drop creates a new lane for it.
-                Self::lane_overlaps(timeline, linked)
-                    .into_iter()
-                    .all(|other| other == id)
-            })
-    }
-
-    fn restore_move(
-        timeline: &mut Timeline,
-        id: ClipId,
-        home_start: f64,
-        home_track: usize,
-        home_linked: Option<(ClipId, f64)>,
-    ) {
-        // Rollback is not a new frame-grid edit. Imported starts can be
-        // fractional, so calling move_clip(home_start) would change them.
-        if let Some(clip) = timeline.clip_mut(id) {
-            clip.start = home_start;
-            clip.track = home_track;
-        }
-        if let Some((linked, start)) = home_linked {
-            if let Some(clip) = timeline.clip_mut(linked) {
-                clip.start = start;
-            }
-        }
-    }
-
-    fn resolve_move_drop(
-        timeline: &mut Timeline,
-        id: ClipId,
-        home_start: f64,
-        home_track: usize,
-        home_linked: Option<(ClipId, f64)>,
-        drop_time: f64,
-    ) {
-        let Some(clip) = timeline.clip(id).cloned() else {
-            return;
-        };
-        let overlaps = Self::lane_overlaps(timeline, &clip);
-        if overlaps.is_empty() && Self::linked_lane_clear(timeline, id) {
-            return;
-        }
-        // Attempt a swap from the original positions, not the overlapping
-        // drag preview. The engine validates all linked placements before
-        // mutating anything; rejection leaves the restored home untouched.
-        Self::restore_move(timeline, id, home_start, home_track, home_linked);
-        if clip.track != home_track {
-            return;
-        }
-        let partner = if overlaps.len() == 1 {
-            Some(overlaps[0])
-        } else {
-            // Centering a long clip on a short neighbor can make the drag
-            // preview extend over a third clip. The pointer disambiguates
-            // only an immediate neighbor, never a multi-clip ripple.
-            overlaps.into_iter().find(|other| {
-                let partner = timeline.clip(*other).unwrap();
-                if !partner.contains(drop_time) {
-                    return false;
-                }
-                let left_end = if home_start < partner.start {
-                    home_start + clip.duration
-                } else {
-                    partner.end()
-                };
-                let right_start = home_start.max(partner.start);
-                !timeline.clips.iter().any(|between| {
-                    between.id != id
-                        && between.id != partner.id
-                        && between.track == home_track
-                        && between.start < right_start - 1e-9
-                        && between.end() > left_end + 1e-9
-                })
-            })
-        };
-        if let Some(partner) = partner {
-            timeline.swap_clips(id, partner);
-        }
     }
 
     fn paint(
@@ -886,7 +465,7 @@ impl TimelineView {
         }
 
         // Live readout while moving/trimming a clip.
-        if let Some((id, _)) = self.drag {
+        if let Some(id) = self.gesture.dragged_clip() {
             if let (Some(clip), Some(pos)) =
                 (timeline.clip(id), ui.input(|i| i.pointer.interact_pos()))
             {
@@ -935,12 +514,7 @@ impl TimelineView {
     }
 
     fn paint_ruler(&self, painter: &egui::Painter, rect: Rect, content_left: f32) {
-        let steps = [0.25_f64, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
-        let step = steps
-            .iter()
-            .copied()
-            .find(|s| *s as f32 * self.port.px_per_sec >= 72.0)
-            .unwrap_or(60.0);
+        let step = ruler_step(self.port.px_per_sec);
         let first = (self.time_at(content_left, content_left) / step).floor() * step;
         let minor = step / 4.0;
         let bottom = rect.top() + RULER_H;
@@ -1136,69 +710,9 @@ fn paint_link_glyph(painter: &egui::Painter, c: Pos2, fg: Color32) {
     }
 }
 
-/// Ruler label: `M:SS`, with hundredths only when the step needs them.
-fn ruler_label(t: f64, step: f64) -> String {
-    let minutes = (t / 60.0).floor() as u64;
-    let seconds = t - minutes as f64 * 60.0;
-    if step < 1.0 {
-        let text = format!("{minutes}:{seconds:05.2}");
-        text.trim_end_matches('0').trim_end_matches('.').to_owned()
-    } else {
-        format!("{minutes}:{:02}", seconds.round() as u64)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn snaps_to_nearest_candidate_within_threshold() {
-        let candidates = [0.0, 2.0, 5.0];
-        assert_eq!(snap_to(1.9, &candidates, 0.25), 2.0);
-        assert_eq!(snap_to(5.2, &candidates, 0.25), 5.0);
-    }
-
-    #[test]
-    fn filmstrip_tiles_anchor_to_source_time_not_clip_edge() {
-        // 48px/s, 72px tiles -> one fragment per 1.5s of source.
-        let tiles = filmstrip_tiles(3.5, 6.0, 48.0, 72.0);
-        // First fragment covers source 3.0..4.5: only its right part
-        // is inside the clip, UV-cropped instead of re-phased.
-        let first = tiles[0];
-        assert_eq!(first.x, 0.0);
-        assert!((first.w - 48.0).abs() < 0.01, "w {}", first.w);
-        assert!((first.uv.0 - 1.0 / 3.0).abs() < 0.01, "uv0 {}", first.uv.0);
-        assert!((first.uv.1 - 1.0).abs() < 0.01);
-        assert!((first.center_source - 3.75).abs() < 1e-9);
-        // Fragments are equally spaced and cover the clip width.
-        for pair in tiles.windows(2) {
-            assert!((pair[1].x - (pair[0].x + pair[0].w)).abs() < 0.01);
-        }
-        let last = tiles[tiles.len() - 1];
-        assert!((last.x + last.w - 288.0).abs() < 0.01);
-
-        // Trimming the head by 0.5s must not re-phase later
-        // fragments: the fragment covering source 6.75 keeps its
-        // center and UV span, only its clip-local x shifts.
-        let trimmed = filmstrip_tiles(4.0, 5.5, 48.0, 72.0);
-        let before = tiles
-            .iter()
-            .find(|t| (t.center_source - 6.75).abs() < 1e-9)
-            .expect("fragment at 6.75 before trim");
-        let after = trimmed
-            .iter()
-            .find(|t| (t.center_source - 6.75).abs() < 1e-9)
-            .expect("fragment at 6.75 after trim");
-        assert_eq!(before.uv, after.uv);
-        assert!((before.x - after.x - 24.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn does_not_snap_beyond_threshold() {
-        let candidates = [0.0, 2.0, 5.0];
-        assert_eq!(snap_to(3.0, &candidates, 0.25), 3.0);
-    }
 
     fn run_frames(
         ctx: &egui::Context,

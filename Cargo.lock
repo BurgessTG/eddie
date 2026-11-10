@@ -1174,6 +1174,7 @@ dependencies = [
  "eddie-core",
  "openreel-engine",
  "openreel-media",
+ "rfd",
  "rune",
  "rune-kit",
  "serde_json",

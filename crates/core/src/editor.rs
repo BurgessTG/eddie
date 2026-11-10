@@ -22,6 +22,7 @@ mod headless;
 pub use headless::cli_main;
 pub mod history;
 pub mod inspect;
+pub mod lanes;
 pub mod media;
 pub mod pictures;
 pub mod project;

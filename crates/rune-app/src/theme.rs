@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use rune::{Color, Cursor, El, Shape, TextStyle, el, row, text};
 
-fn hex(code: &str) -> Color {
+pub fn hex(code: &str) -> Color {
     rune::color::hex(code).expect("a literal colour")
 }
 
@@ -30,6 +30,8 @@ pub struct Tokens {
     pub primary_fg: Color,
     pub muted_fg: Color,
     pub subtle_fg: Color,
+    /// Outlines of things in flight: a dragged tile, the lane it lands on.
+    pub ring: Color,
     /// Selection only.
     pub brand: Color,
     pub destructive: Color,
@@ -58,6 +60,7 @@ static TOKENS: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     primary_fg: hex("#18181B"),
     muted_fg: hex("#A1A1AA"),
     subtle_fg: hex("#71717A"),
+    ring: hex("#A1A1AA"),
     brand: hex("#3B82F6"),
     destructive: hex("#EF4444"),
     destructive_fg: hex("#FCA5A5"),
@@ -177,14 +180,44 @@ pub fn button(key: &str, label: &str, variant: Variant, help: &str, enabled: boo
     }
 }
 
-/// A square button around a hand-drawn icon (`icons`), ghost at rest, or
-/// filled when `active` (a toggle that is on).
+/// A 30×30 button around a hand-drawn icon (`icons::tool`, drawn in the
+/// foreground colour): ghost at rest with a muted glyph, filled when
+/// `active` (a toggle that is on). The glyph brightens under the pointer.
 pub fn icon_button(key: &str, icon: Shape, help: &str, active: bool, enabled: bool) -> El {
+    glyph_button(
+        key,
+        el().size(30.0, 30.0).shape(icon),
+        help,
+        active,
+        enabled,
+    )
+}
+
+/// An icon button whose glyph is a letter.
+pub fn letter_button(key: &str, letter: &str, help: &str, active: bool, enabled: bool) -> El {
+    let glyph = row().size(30.0, 30.0).center().child(
+        text(letter.to_owned())
+            .font(sized(16.0))
+            .color(c().foreground)
+            .single_line(),
+    );
+    glyph_button(key, glyph, help, active, enabled)
+}
+
+fn glyph_button(key: &str, glyph: El, help: &str, active: bool, enabled: bool) -> El {
     let c = c();
+    // The glyph is drawn bright; resting buttons show it at MUTED_FG's
+    // level, which on these greys is 62% of FOREGROUND.
+    let glyph = if !enabled {
+        glyph.opacity(0.3)
+    } else if active {
+        glyph
+    } else {
+        glyph.group_opacity(0.62, 1.0)
+    };
     let frame = row()
         .key(key.to_owned())
-        .size(30.0, 28.0)
-        .center()
+        .size(30.0, 30.0)
         .radius(R_MD)
         .fill(if active {
             c.secondary
@@ -192,15 +225,12 @@ pub fn icon_button(key: &str, icon: Shape, help: &str, active: bool, enabled: bo
             Color::TRANSPARENT
         })
         .help(help.to_owned())
-        .child(
-            el().size(16.0, 16.0)
-                .shape(icon)
-                .opacity(if enabled { 1.0 } else { 0.45 }),
-        );
+        .child(glyph);
     if enabled {
         frame
-            .hover(if active { c.hover } else { c.secondary })
-            .press(c.hover)
+            .hover_group()
+            .hover(c.secondary)
+            .press(hex("#404049"))
             .cursor(Cursor::Pointer)
     } else {
         frame.disabled(true)
