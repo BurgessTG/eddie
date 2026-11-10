@@ -2393,6 +2393,24 @@ impl Editor {
         }
     }
 
+    /// Up (`older`) or Down in the console's input: the line it should now
+    /// hold. Up stops at the oldest line; Down past the newest gives the
+    /// empty line back. `None` when Up has nothing to recall.
+    pub fn recall_console(&mut self, older: bool) -> Option<String> {
+        let index = if older {
+            Some(match self.console_history_idx {
+                Some(index) => index.saturating_sub(1),
+                None => self.console_history.len().checked_sub(1)?,
+            })
+        } else {
+            self.console_history_idx
+                .map(|index| index + 1)
+                .filter(|index| *index < self.console_history.len())
+        };
+        self.console_history_idx = index;
+        Some(index.map_or_else(String::new, |index| self.console_history[index].clone()))
+    }
+
     pub fn advance_playback(&mut self, now: f64) {
         let dt = self.last_now.map_or(0.0, |last| now - last);
         self.last_now = Some(now);

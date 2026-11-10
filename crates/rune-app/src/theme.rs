@@ -106,6 +106,11 @@ pub fn tooltip() -> HelpLook {
         }])
 }
 
+/// A field or select on a card: white at 4% over it.
+pub fn field_fill() -> Color {
+    hex("#212124")
+}
+
 pub const R_SM: f32 = 6.0;
 pub const R_MD: f32 = 8.0;
 pub const R_LG: f32 = 10.0;
@@ -124,8 +129,13 @@ pub fn semibold(size: f32) -> TextStyle {
     TextStyle::new(size, 600.0)
 }
 
+/// Mono text on a whole-pixel grid: the 0.6 em advance is tracked to the
+/// nearest pixel, so timecodes and counters keep their width as digits change.
 pub fn mono(size: f32) -> TextStyle {
-    TextStyle::new(size, 400.0).mono()
+    let advance = size * 0.6;
+    TextStyle::new(size, 400.0)
+        .mono()
+        .tracking(advance.round() - advance)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -316,6 +326,157 @@ pub fn segmented(
     track
 }
 
+/// How tall fields, closed lists, list rows and checkboxes are.
+pub const FIELD_H: f32 = 28.0;
+
+/// A round switch with its label. The caller adds `on_press`.
+pub fn checkbox(key: &str, label: &str, help: &str, on: bool) -> El {
+    let c = c();
+    let mark = Shape::new().view_box(14.0, 14.0);
+    let mark = if on {
+        mark.stroke(
+            vec![[3.4, 8.2], [6.0, 10.7], [10.6, 5.3]],
+            1.3,
+            c.foreground,
+        )
+    } else {
+        mark
+    };
+    row()
+        .key(key.to_owned())
+        .h(FIELD_H)
+        .gap(4.0)
+        .center_y()
+        .role("checkbox")
+        .checked(on)
+        .focusable(true)
+        .label(label.to_owned())
+        .cursor(Cursor::Pointer)
+        .help(help.to_owned())
+        .child(
+            el().size(14.0, 14.0)
+                .child(
+                    el().absolute(0.0, 0.0)
+                        .size(14.0, 14.0)
+                        .radius(7.0)
+                        .fill(c.secondary),
+                )
+                .child(el().absolute(0.0, 0.0).size(14.0, 14.0).shape(mark)),
+        )
+        .child(
+            text(label.to_owned())
+                .font(BODY)
+                .color(c.foreground)
+                .single_line(),
+        )
+}
+
+/// A closed list: its choice and a down arrow, over `fill` at rest. The
+/// caller sets its width and, when `enabled`, adds `on_press`.
+pub fn select(key: &str, choice: &str, help: &str, fill: Color, open: bool, enabled: bool) -> El {
+    let c = c();
+    let field = row()
+        .key(key.to_owned())
+        .h(FIELD_H)
+        .pl(12.0)
+        .pr(14.0)
+        .gap(6.0)
+        .center_y()
+        .radius(R_MD)
+        .fill(if open { c.hover } else { fill })
+        .role("combobox")
+        .expanded(open)
+        .label(choice.to_owned())
+        .help(help.to_owned())
+        .child(
+            text(choice.to_owned())
+                .font(BODY)
+                .color(c.foreground)
+                .single_line()
+                .truncate(),
+        )
+        .child(rune::spacer())
+        .child(
+            el().size(10.0, 8.0).shape(
+                Shape::new()
+                    .view_box(10.0, 8.0)
+                    .fill(vec![[0.25, 1.3], [9.75, 1.3], [5.0, 7.3]], c.foreground),
+            ),
+        );
+    if enabled {
+        field
+            .hover(if open { c.hover } else { c.secondary })
+            .press(c.hover)
+            .focusable(true)
+            .cursor(Cursor::Pointer)
+    } else {
+        field.disabled(true).opacity(0.5)
+    }
+}
+
+/// One choice in an open list. The current one is marked as selection is
+/// everywhere else: a brand tint behind brand text. The caller adds
+/// `on_press`.
+pub fn option(key: String, label: &str, help: &str, current: bool) -> El {
+    let c = c();
+    let option = row()
+        .key(key)
+        .w_full()
+        .h(FIELD_H)
+        .px(12.0)
+        .center_y()
+        .radius(R_MD)
+        .cursor(Cursor::Pointer)
+        .role("option")
+        .label(label.to_owned())
+        .help(help.to_owned())
+        .child(
+            text(label.to_owned())
+                .font(BODY)
+                .color(if current { c.brand } else { c.foreground })
+                .single_line(),
+        );
+    if current {
+        option.fill(selection())
+    } else {
+        option.hover(c.hover).press(c.pressed)
+    }
+}
+
+/// The frame of an open list or popup: a card with the popup shadow.
+pub fn popup(key: &str) -> El {
+    let c = c();
+    rune::col()
+        .key(key.to_owned())
+        // egui's margin of 6 inside a border of 1.
+        .padding(7.0)
+        .fill(c.card)
+        .border(1.0, c.border)
+        .radius(R_MD)
+        .shadow(4.0, 16.0, Color::BLACK.alpha(120.0 / 255.0))
+}
+
+/// A 28×28 close button: an X that brightens over a hover fill.
+pub fn close_button(key: &str, help: &str) -> El {
+    let c = c();
+    let cross = Shape::new()
+        .view_box(28.0, 28.0)
+        .stroke(vec![[9.0, 9.0], [19.0, 19.0]], 1.6, c.foreground)
+        .stroke(vec![[19.0, 9.0], [9.0, 19.0]], 1.6, c.foreground);
+    row()
+        .key(key.to_owned())
+        .size(28.0, 28.0)
+        .radius(R_MD)
+        .label("Close")
+        .help(help.to_owned())
+        .cursor(Cursor::Pointer)
+        .hover_group()
+        .hover(c.secondary)
+        .press(hex("#404049"))
+        // MUTED_FG's level at rest, as the icon buttons.
+        .child(el().size(28.0, 28.0).shape(cross).group_opacity(0.62, 1.0))
+}
+
 /// Section label: semibold, foreground.
 pub fn panel_title(label: &str) -> El {
     text(label.to_owned())
@@ -339,7 +500,8 @@ pub fn card() -> El {
         .fill(c().card)
         .border(1.0, c().border)
         .radius(R_LG)
-        .padding(12.0)
+        // 12 inside the border, which draws over the padding.
+        .padding(13.0)
 }
 
 // -- logo ----------------------------------------------------------------------
@@ -393,65 +555,4 @@ pub fn mark(size: f32) -> El {
         c.logo_playhead,
     );
     el().size(size, size).shape(shape)
-}
-
-/// The window icon: the mark on a dark rounded tile, `size`² RGBA,
-/// 4×4 supersampled. Same pixels as the egui front end's.
-pub fn icon_rgba(size: u32) -> Vec<u8> {
-    const TIP: [[f32; 2]; 3] = [[0.2364, 0.0], [0.3757, 0.0], [0.3060, 0.0776]];
-    const TILE: [u8; 3] = [0x10, 0x10, 0x13];
-    const CLIP: [u8; 3] = [0xFF, 0xEE, 0xEF];
-    const PLAYHEAD: [u8; 3] = [0x8B, 0x5C, 0xF6];
-    let inside_capsule = |px: f32, py: f32, [x, y, w, h]: [f32; 4]| {
-        let r = h / 2.0;
-        let cx = px.clamp(x + r, x + w - r);
-        (px - cx).powi(2) + (py - (y + r)).powi(2) <= r * r
-    };
-    let inside_rect =
-        |px: f32, py: f32, [x, y, w, h]: [f32; 4]| px >= x && px <= x + w && py >= y && py <= y + h;
-    let inside_tip = |px: f32, py: f32| {
-        let [a, b, c] = TIP;
-        let side =
-            |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0]);
-        let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
-        !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
-    };
-    let (pad, radius) = (0.17, 0.22);
-    let mut out = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let (mut sum, mut covered) = ([0.0_f32; 3], 0.0_f32);
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    let u = (x as f32 + (sx as f32 + 0.5) / 4.0) / size as f32;
-                    let v = (y as f32 + (sy as f32 + 0.5) / 4.0) / size as f32;
-                    let (cu, cv) = (u.clamp(radius, 1.0 - radius), v.clamp(radius, 1.0 - radius));
-                    if (u - cu).powi(2) + (v - cv).powi(2) > radius * radius {
-                        continue;
-                    }
-                    let (mx, my) = ((u - pad) / (1.0 - 2.0 * pad), (v - pad) / (1.0 - 2.0 * pad));
-                    let color = if inside_rect(mx, my, MARK_LINE) || inside_tip(mx, my) {
-                        PLAYHEAD
-                    } else if MARK_CLIPS.iter().any(|clip| inside_capsule(mx, my, *clip)) {
-                        CLIP
-                    } else {
-                        TILE
-                    };
-                    for (total, channel) in sum.iter_mut().zip(color) {
-                        *total += f32::from(channel);
-                    }
-                    covered += 1.0;
-                }
-            }
-            for channel in sum {
-                out.push(if covered > 0.0 {
-                    (channel / covered).round() as u8
-                } else {
-                    0
-                });
-            }
-            out.push((covered / 16.0 * 255.0).round() as u8);
-        }
-    }
-    out
 }

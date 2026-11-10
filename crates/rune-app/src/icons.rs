@@ -84,16 +84,14 @@ fn seg(shape: Shape, a: P, b: P, width: f32, color: Color) -> Shape {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     Magnet,
-    Title,
     Split,
     Delete,
     ZoomIn,
     ZoomOut,
     Settings,
-    Close,
 }
 
-/// A tool glyph in a 30×30 box. `Title` is a letter and draws nothing here.
+/// A tool glyph in a 30×30 box.
 pub fn tool(icon: Tool, fg: Color) -> Shape {
     let (cx, cy) = (15.0_f32, 15.0_f32);
     let at = |dx: f32, dy: f32| [cx + dx, cy + dy];
@@ -130,7 +128,6 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
             }
             disc(shape, at(0.0, 0.0), 1.6, fg)
         }
-        Tool::Title => shape,
         Tool::Split => {
             let mut shape = outline(shape, cx - 9.0, cy - 5.0, 7.0, 10.0, 2.0, 1.6, fg);
             shape = outline(shape, cx + 2.0, cy - 5.0, 7.0, 10.0, 2.0, 1.6, fg);
@@ -150,10 +147,6 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
                 shape = seg(shape, at(dx, -1.5), at(dx, 5.0), 1.2, fg);
             }
             shape
-        }
-        Tool::Close => {
-            let shape = shape.line(at(-4.5, -4.5), at(4.5, 4.5), 1.6, LineCap::Round, fg);
-            shape.line(at(4.5, -4.5), at(-4.5, 4.5), 1.6, LineCap::Round, fg)
         }
     }
     .view_box(30.0, 30.0)
@@ -213,17 +206,6 @@ pub fn transport(icon: Transport, fg: Color) -> Shape {
         Transport::ToEnd => shape.fill(tri(1.0), fg).fill(bar(5.5, 2.5, 0.0), fg),
     }
     .view_box(38.0, 32.0)
-}
-
-/// The play triangle on a tile without a picture.
-pub fn play_triangle(w: f32, h: f32, color: Color) -> Shape {
-    let (cx, cy) = (w / 2.0, h / 2.0);
-    Shape::new()
-        .fill(
-            vec![[cx - 7.0, cy - 9.0], [cx + 9.0, cy], [cx - 7.0, cy + 9.0]],
-            color,
-        )
-        .view_box(w, h)
 }
 
 /// A spinner arc: three quarters of a ring, turned by `turn` (0..1).

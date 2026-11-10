@@ -330,7 +330,8 @@ impl Editor {
         info.has_video && Orientation::of(info.width, info.height) != self.timeline.orientation
     }
 
-    pub fn set_format(&mut self, format: Orientation) {
+    /// Returns how many placed clips the new format leaves out of place.
+    pub fn set_format(&mut self, format: Orientation) -> usize {
         self.timeline.orientation = format;
         let clashing = self
             .timeline
@@ -345,6 +346,7 @@ impl Editor {
             1 => "1 clip doesn't match the new format.".to_owned(),
             n => format!("{n} clips don't match the new format."),
         };
+        clashing
     }
 
     pub fn add_asset_to_timeline(&mut self, path: &str, track: Option<usize>, at: f64) {

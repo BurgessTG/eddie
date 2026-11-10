@@ -12,8 +12,11 @@ use crate::gallery;
 use crate::icons::{self, Transport};
 use crate::theme::{self, c};
 
-/// The transport under the monitor: 4 gap, 14 scrubber, 44 bar, 10 spare.
-const TRANSPORT_H: f32 = 68.0;
+/// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
+const TRANSPORT_H: f32 = 62.0;
+/// Space above the monitor and between it and the transport.
+const TABS_GAP: f32 = 16.0;
+const TRANSPORT_GAP: f32 = 10.0;
 const BAR_W: f32 = 520.0;
 /// Narrower than this, the length readout would run into the controls.
 const LENGTH_MIN_W: f32 = 470.0;
@@ -54,7 +57,7 @@ pub fn central(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .py(12.0)
         .fill(c.background)
         .child(row().child(tabs))
-        .child(el().h(10.0));
+        .child(el().h(TABS_GAP));
     if gallery {
         return panel.child(gallery::view(ui, cx));
     }
@@ -64,7 +67,7 @@ pub fn central(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         stage = stage.child(frame(ui, w, h));
     }
     let bar_w = area.map_or(BAR_W, |[w, _]| w.min(BAR_W));
-    panel.child(stage).child(el().h(4.0)).child(
+    panel.child(stage).child(el().h(TRANSPORT_GAP)).child(
         col()
             .w_full()
             .h(TRANSPORT_H)
@@ -347,6 +350,8 @@ fn timecode(timecode: &str, bright: Color) -> El {
     .font(theme::mono(13.0))
     .color(bright)
     .single_line()
+    // Digits sit on the transport glyphs' centre line.
+    .offset(0.0, 1.0)
 }
 
 fn playhead_readout(ui: &Ui) -> El {
@@ -409,11 +414,14 @@ fn transport_button(icon: Transport, label: &str, action: Action) -> El {
                 ),
         )
     } else {
-        button.hover_group().radius(theme::R_MD).child(
-            el().size(38.0, 32.0)
-                .shape(icons::transport(icon, c.foreground))
-                .group_opacity(0.62, 1.0),
-        )
+        button
+            .radius(theme::R_MD)
+            .hover(c.secondary)
+            .press(theme::hex("#404049"))
+            .child(
+                el().size(38.0, 32.0)
+                    .shape(icons::transport(icon, c.foreground)),
+            )
     }
 }
 

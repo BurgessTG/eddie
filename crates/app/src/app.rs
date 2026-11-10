@@ -287,27 +287,11 @@ impl EditorApp {
                             "Run JavaScript against the editor. Enter runs. Up and Down recall history.",
                         );
                     if response.has_focus() || response.lost_focus() {
-                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
-                            && !self.editor.console_history.is_empty()
+                        for (key, older) in [(egui::Key::ArrowUp, true), (egui::Key::ArrowDown, false)]
                         {
-                            let idx = match self.editor.console_history_idx {
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                                None => self.editor.console_history.len() - 1,
-                            };
-                            self.editor.console_history_idx = Some(idx);
-                            self.console_input = self.editor.console_history[idx].clone();
-                        }
-                        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                            match self.editor.console_history_idx {
-                                Some(i) if i + 1 < self.editor.console_history.len() => {
-                                    self.editor.console_history_idx = Some(i + 1);
-                                    self.console_input =
-                                        self.editor.console_history[i + 1].clone();
-                                }
-                                _ => {
-                                    self.editor.console_history_idx = None;
-                                    self.console_input.clear();
+                            if ui.input(|i| i.key_pressed(key)) {
+                                if let Some(line) = self.editor.recall_console(older) {
+                                    self.console_input = line;
                                 }
                             }
                         }

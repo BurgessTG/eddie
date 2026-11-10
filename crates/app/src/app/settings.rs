@@ -170,19 +170,10 @@ impl EditorApp {
                 });
             });
         self.show_settings = open && !close_clicked;
-        if let Some(format) = format_choice.filter(|f| *f != self.editor.settings.format) {
+        if let Some(format) = format_choice {
             self.editor.settings.format = format;
-            self.editor.set_format(format);
         }
-        if self.editor.settings.hardware_decode != before.hardware_decode {
-            openreel_media::set_hardware_decode(self.editor.settings.hardware_decode);
-        }
-        if self.editor.settings != before {
-            self.editor.status = match self.editor.settings.save() {
-                Ok(()) => "Settings saved.".to_owned(),
-                Err(error) => error,
-            };
-        }
+        self.editor.settings_changed(&before);
     }
 }
 

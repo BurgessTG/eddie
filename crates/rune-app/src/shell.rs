@@ -14,15 +14,13 @@ use crate::theme::{self, Variant, c};
 
 pub fn menu_bar(ui: &Ui) -> El {
     let c = c();
-    let mut bar = row()
-        .key("menu-bar")
-        .w_full()
-        .px(14.0)
-        .py(8.0)
+    // The mark, the name and the menus share a 28-point line at the top of
+    // the bar; the 30-point settings button beside Export sets its height.
+    let mut left = row()
+        .h(28.0)
         .gap(8.0)
         .center_y()
-        .fill(c.surface)
-        .border_sides([0.0, 0.0, 1.0, 0.0], c.border)
+        .self_start()
         .child(theme::mark(22.0))
         .child(
             text("Eddie")
@@ -33,7 +31,7 @@ pub fn menu_bar(ui: &Ui) -> El {
         .child(el().w(2.0));
     for menu in Menu::ALL {
         let open = ui.menu == Some(menu);
-        bar = bar.child(
+        left = left.child(
             row()
                 .key(menu.anchor())
                 .px(12.0)
@@ -64,7 +62,17 @@ pub fn menu_bar(ui: &Ui) -> El {
                 }),
         );
     }
-    bar.child(spacer())
+    row()
+        .key("menu-bar")
+        .w_full()
+        .px(14.0)
+        .py(8.0)
+        .gap(8.0)
+        .center_y()
+        .fill(c.surface)
+        .border_sides([0.0, 0.0, 1.0, 0.0], c.border)
+        .child(left)
+        .child(spacer())
         .child(
             theme::icon_button(
                 "open-settings",
@@ -86,6 +94,8 @@ pub fn menu_bar(ui: &Ui) -> El {
                 &shortcuts::tip("Export the timeline as an MP4", Action::Export),
                 true,
             )
+            .h(27.0)
+            .mb(1.0)
             .on_press(|ui: &mut Ui| ui.act(Action::Export)),
         )
 }

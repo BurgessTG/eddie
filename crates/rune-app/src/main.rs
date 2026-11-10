@@ -2,15 +2,20 @@
 //! crate only shows it and turns pointer and key input into its calls.
 
 mod app;
+mod console;
 mod details;
 mod dialogs;
 mod gallery;
 mod gallery_thumbs;
 mod icons;
+mod keys;
 mod media;
 mod menus;
 mod monitor;
+mod settings;
 mod shell;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod timeline;
 

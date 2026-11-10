@@ -3151,6 +3151,38 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
 }
 
 #[test]
+fn console_history_recalls_lines_and_ends_on_an_empty_one() {
+    let mut editor = Editor::headless();
+    assert_eq!(editor.recall_console(true), None, "nothing was run yet");
+    for line in ["1", "2", "2"] {
+        editor.run_console(line.to_owned());
+    }
+    assert_eq!(editor.recall_console(true).as_deref(), Some("2"));
+    assert_eq!(
+        editor.recall_console(true).as_deref(),
+        Some("1"),
+        "a line run twice in a row is kept once"
+    );
+    assert_eq!(
+        editor.recall_console(true).as_deref(),
+        Some("1"),
+        "Up stops at the oldest"
+    );
+    assert_eq!(editor.recall_console(false).as_deref(), Some("2"));
+    assert_eq!(
+        editor.recall_console(false).as_deref(),
+        Some(""),
+        "Down past the newest"
+    );
+    editor.run_console("3".to_owned());
+    assert_eq!(
+        editor.recall_console(true).as_deref(),
+        Some("3"),
+        "running a line starts recall from the newest again"
+    );
+}
+
+#[test]
 fn undo_and_redo_step_through_console_edits() {
     let mut app = Editor::headless();
     let track = |app: &mut Editor| {

@@ -148,6 +148,30 @@ impl Settings {
     }
 }
 
+impl super::Editor {
+    /// The Settings window edited `self.settings`, which was `before`. The
+    /// running editor takes the format and decode choice, the file is
+    /// saved, and the status says what happened.
+    pub fn settings_changed(&mut self, before: &Settings) {
+        if self.settings == *before {
+            return;
+        }
+        let mut clashing = 0;
+        if self.settings.format != before.format {
+            clashing = self.set_format(self.settings.format);
+        }
+        if self.settings.hardware_decode != before.hardware_decode {
+            openreel_media::set_hardware_decode(self.settings.hardware_decode);
+        }
+        match self.settings.save() {
+            Err(error) => self.status = error,
+            // Clips the new format leaves out of place are what to read.
+            Ok(()) if clashing > 0 => {}
+            Ok(()) => self.status = "Settings saved.".to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +311,58 @@ mod tests {
                     std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
                     1
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn a_format_change_is_saved_and_reports_clips_it_leaves_out_of_place() {
+        with_isolated_config(
+            "editor::settings::tests::a_format_change_is_saved_and_reports_clips_it_leaves_out_of_place",
+            |_| {
+                use crate::editor::media::{AssetState, BinAsset};
+                let mut editor = crate::Editor::headless();
+                editor.assets.push(BinAsset {
+                    info: openreel_media::MediaInfo {
+                        path: "/media/wide.mp4".to_owned(),
+                        name: "wide.mp4".to_owned(),
+                        duration: 10.0,
+                        width: 1920,
+                        height: 1080,
+                        fps: 30.0,
+                        has_video: true,
+                        has_audio: true,
+                    },
+                    size_bytes: 0,
+                    state: AssetState::Ready,
+                    peaks: Vec::new(),
+                    beats: None,
+                    thumbs: Vec::new(),
+                    sweep: Default::default(),
+                });
+
+                // Nothing placed: the change is saved and says only that.
+                let before = editor.settings.clone();
+                editor.settings.transcription.language = "en".to_owned();
+                editor.settings_changed(&before);
+                assert_eq!(editor.status, "Settings saved.");
+                assert_eq!(Settings::load().transcription.language, "en");
+
+                editor
+                    .try_add_asset_range_to_timeline("/media/wide.mp4", "", None, 0.0, 0.0, 1.0)
+                    .expect("landscape video fits the default project");
+                let before = editor.settings.clone();
+                editor.settings.format = Orientation::Portrait;
+                editor.settings_changed(&before);
+                assert_eq!(editor.timeline.orientation, Orientation::Portrait);
+                assert_eq!(Settings::load().format, Orientation::Portrait);
+                assert_eq!(editor.status, "1 clip doesn't match the new format.");
+
+                // An unchanged settings value writes and says nothing.
+                editor.status = "untouched".to_owned();
+                let before = editor.settings.clone();
+                editor.settings_changed(&before);
+                assert_eq!(editor.status, "untouched");
             },
         );
     }

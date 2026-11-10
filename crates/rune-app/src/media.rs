@@ -349,7 +349,7 @@ fn curator_card(ui: &Ui, width: f32) -> El {
         theme::R_SM,
     );
     card = card.child(
-        row().gap(10.0).center_y().child(thumb).child(
+        row().h(33.0).gap(10.0).child(thumb).child(
             col()
                 .grow(1.0)
                 .min_w(0.0)

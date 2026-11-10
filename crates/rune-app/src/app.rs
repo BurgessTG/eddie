@@ -15,7 +15,9 @@ use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 use crate::dialogs::{Discard, PendingFileDialog};
 use crate::menus::Menu;
 use crate::theme::c;
-use crate::{details, dialogs, gallery, media, menus, monitor, shell, timeline};
+use crate::{
+    console, details, dialogs, gallery, keys, media, menus, monitor, settings, shell, timeline,
+};
 
 /// The program monitor's picture. The editor copies each frame in; Rune
 /// uploads it and wakes the window.
@@ -60,6 +62,10 @@ pub struct Ui {
     pub show_console: bool,
     pub show_settings: bool,
     pub show_shortcuts: bool,
+    /// The Settings dialog's typed fields and open list.
+    pub settings: settings::State,
+    /// The console's input line and height.
+    pub console: console::State,
     /// The playhead readout's jump box and whether it is showing.
     pub jump: TextEdit,
     pub jump_open: bool,
@@ -155,6 +161,8 @@ impl Ui {
             show_console: false,
             show_settings: false,
             show_shortcuts: false,
+            settings: settings::State::default(),
+            console: console::State::default(),
             jump: TextEdit::new(""),
             jump_open: false,
             focus_title: false,
@@ -220,6 +228,8 @@ impl Ui {
             || self.search.focused
             || self.details.typing()
             || self.gallery.typing()
+            || self.settings.typing()
+            || (self.show_console && self.console.typing())
     }
 
     /// Where a spinner's arc is in its turn, 0 to 1 once a second.
@@ -319,8 +329,15 @@ impl Ui {
             Action::SaveProject => self.save_project(false, None),
             Action::SaveProjectAs => self.save_project(true, None),
             Action::LocateMedia => self.pick_missing_media(),
-            Action::OpenSettings => self.show_settings = !self.show_settings,
-            Action::ShowShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::OpenSettings if self.show_settings => settings::close(self),
+            Action::OpenSettings => {
+                self.show_shortcuts = false;
+                self.show_settings = true;
+            }
+            Action::ShowShortcuts => {
+                settings::close(self);
+                self.show_shortcuts = !self.show_shortcuts;
+            }
             // Esc closes what is open before it deselects.
             Action::Deselect if self.jump_open => {
                 self.jump_open = false;
@@ -330,8 +347,11 @@ impl Ui {
             Action::Deselect if self.details.select.is_some() => self.details.select = None,
             Action::Deselect if self.gallery.popup.is_some() => self.gallery.popup = None,
             Action::Deselect if self.bin_menu.is_some() => self.bin_menu = None,
+            Action::Deselect if self.settings.providers_open => {
+                self.settings.providers_open = false;
+            }
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
-            Action::Deselect if self.show_settings => self.show_settings = false,
+            Action::Deselect if self.show_settings => settings::close(self),
             _ => {
                 self.editor.perform(action);
             }
@@ -368,6 +388,8 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     }
     details::sync(ui);
     gallery::sync(ui);
+    settings::sync(ui);
+    console::sync(ui);
     if ui.pump(clock) {
         if let Some(handle) = &ui.handle {
             // A finished export asks to be noticed.
@@ -446,7 +468,15 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(action) = shortcuts::action_for(chord, ui.typing(), tx.key_repeat()) else {
         return false;
     };
-    ui.act(action);
+    // Under a dialog the editor is inert to keys as it is to the pointer.
+    let dialog = ui.show_settings || ui.show_shortcuts;
+    let closes = matches!(
+        action,
+        Action::Deselect | Action::OpenSettings | Action::ShowShortcuts
+    );
+    if !dialog || closes {
+        ui.act(action);
+    }
     true
 }
 
@@ -484,13 +514,20 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .on_drop_files(|ui: &mut Ui, files, _| ui.editor.spawn_import(files.to_vec()))
         .child(shell::menu_bar(ui))
         .child(middle)
-        .child(timeline::panel(ui, cx))
-        .child(shell::status_bar(ui));
+        .child(timeline::panel(ui, cx));
+    let body = if ui.show_console {
+        body.child(console::panel(ui))
+    } else {
+        body
+    }
+    .child(shell::status_bar(ui));
     media::overlays(ui, &mut overlays);
     timeline::overlays(ui, &mut overlays);
     details::overlays(ui, cx, &mut overlays);
     gallery::overlays(ui, cx, &mut overlays);
     menus::overlay(ui, &mut overlays);
+    settings::overlays(ui, &mut overlays);
+    keys::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);
     rune_kit::root(body, overlays)

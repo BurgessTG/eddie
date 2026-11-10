@@ -5,14 +5,11 @@
 use eddie_core::editor::details::MAX_VOLUME;
 use eddie_core::{Action, Editor, shortcuts};
 use openreel_engine::{Clip, ClipId, ClipKind, TitleStyle};
-use rune::{
-    Align, Color, Cursor, Cx, El, Key, Phase, ScrollSpec, Shape, Side, TextEdit, col, el, row,
-    spacer, text,
-};
+use rune::{Align, Cursor, Cx, El, Key, Phase, ScrollSpec, Side, TextEdit, col, el, row, text};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
 use crate::app::Ui;
-use crate::theme::{self, Variant, c};
+use crate::theme::{self, FIELD_H, Variant, c};
 
 pub const DEFAULT_W: f32 = 340.0;
 const MIN_W: f32 = 280.0;
@@ -27,11 +24,7 @@ const CARD_PAD_BOTTOM: f32 = 12.0;
 const CARD_TITLE_H: f32 = 17.0;
 const GAP: f32 = 8.0;
 const LABEL_W: f32 = 78.0;
-/// A row of an open style list.
-const OPTION_H: f32 = 28.0;
 const ROW_H: f32 = 30.0;
-const FIELD_H: f32 = 28.0;
-const CHECK_H: f32 = 28.0;
 const HANDLE: f32 = 24.0;
 /// The rail starts this far inside the slider's left end,
 const RAIL_INSET: f32 = 4.0;
@@ -359,7 +352,7 @@ pub fn panel(ui: &Ui) -> El {
                         .single_line(),
                 ),
             )
-            .child(el().h(4.0))
+            .child(el().h(5.0))
             .child(
                 row()
                     .w_full()
@@ -793,7 +786,7 @@ fn value_field(ui: &Ui, field: Field, help: String) -> El {
         .px(8.0)
         .py(6.0)
         .radius(theme::R_MD)
-        .fill(field_fill())
+        .fill(theme::field_fill())
         .color(c.foreground)
         .focus_within_ring(1.0, -1.0, c.brand)
         .help(help)
@@ -813,11 +806,6 @@ fn value_field(ui: &Ui, field: Field, help: String) -> El {
                 false
             }
         })
-}
-
-/// White at 4% over a card.
-fn field_fill() -> Color {
-    theme::hex("#212124")
 }
 
 /// A 0-to-`max` slider with the same value as a typed percentage beside it.
@@ -903,15 +891,6 @@ fn handle_range(width: f32) -> (f32, f32) {
     (RAIL_INSET + HANDLE_REACH, width - RAIL_END - HANDLE_REACH)
 }
 
-fn tick(on: bool, color: Color) -> Shape {
-    let mark = Shape::new().view_box(14.0, 14.0);
-    if on {
-        mark.stroke(vec![[3.4, 8.2], [6.0, 10.7], [10.6, 5.3]], 1.3, color)
-    } else {
-        mark
-    }
-}
-
 /// A switch on the clip itself.
 fn checkbox(
     id: ClipId,
@@ -921,89 +900,26 @@ fn checkbox(
     on: bool,
     toggle: fn(&mut Clip),
 ) -> El {
-    let c = c();
-    let control = row()
-        .key(key)
-        .h(CHECK_H)
-        .gap(4.0)
-        .center_y()
-        .role("checkbox")
-        .checked(on)
-        .focusable(true)
-        .label(label)
-        .cursor(Cursor::Pointer)
-        .help(help)
-        .child(
-            el().size(14.0, 14.0)
-                .child(
-                    el().absolute(0.0, 0.0)
-                        .size(14.0, 14.0)
-                        .radius(7.0)
-                        .fill(c.secondary),
-                )
-                .child(
-                    el().absolute(0.0, 0.0)
-                        .size(14.0, 14.0)
-                        .shape(tick(on, c.foreground)),
-                ),
-        )
-        .child(
-            text(label.to_owned())
-                .font(theme::BODY)
-                .color(c.foreground)
-                .single_line(),
-        )
-        .on_press(move |ui: &mut Ui| {
-            if let Some(clip) = ui.editor.timeline.clip_mut(id) {
-                toggle(clip);
-            }
-        });
+    let control = theme::checkbox(key, label, help, on).on_press(move |ui: &mut Ui| {
+        if let Some(clip) = ui.editor.timeline.clip_mut(id) {
+            toggle(clip);
+        }
+    });
     // The row keeps the press to the box and its label.
     row().w_full().child(control)
 }
 
 /// The closed style list: its choice and a down arrow.
 fn select(key: &'static str, choice: &str, help: &str, which: Select, open: bool) -> El {
-    let c = c();
-    row()
-        .key(key)
-        .h(FIELD_H)
-        .pl(12.0)
-        .pr(14.0)
-        .gap(6.0)
-        .center_y()
-        .radius(theme::R_MD)
-        .fill(if open { c.hover } else { field_fill() })
-        .hover(if open { c.hover } else { c.secondary })
-        .press(c.hover)
-        .role("combobox")
-        .expanded(open)
-        .focusable(true)
-        .label(choice.to_owned())
-        .cursor(Cursor::Pointer)
-        .help(help.to_owned())
-        .child(
-            text(choice.to_owned())
-                .font(theme::BODY)
-                .color(c.foreground)
-                .single_line()
-                .truncate(),
-        )
-        .child(spacer())
-        .child(
-            el().size(10.0, 8.0).shape(
-                Shape::new()
-                    .view_box(10.0, 8.0)
-                    .fill(vec![[0.25, 1.3], [9.75, 1.3], [5.0, 7.3]], c.foreground),
-            ),
-        )
-        .on_press(move |ui: &mut Ui| {
+    theme::select(key, choice, help, theme::field_fill(), open, true).on_press(
+        move |ui: &mut Ui| {
             ui.details.select = if ui.details.select == Some(which) {
                 None
             } else {
                 Some(which)
             };
-        })
+        },
+    )
 }
 
 /// Buttons sharing `width` equally.
@@ -1023,33 +939,15 @@ fn option_key(style: TitleStyle) -> String {
     )
 }
 
-/// One style in the open list. The current one is marked as selection is
-/// everywhere else: a brand tint behind brand text.
+/// One style in the open list.
 fn option(which: Select, id: ClipId, style: TitleStyle, current: bool) -> El {
-    let c = c();
-    let mut option = row()
-        .key(option_key(style))
-        .w_full()
-        .h(OPTION_H)
-        .px(12.0)
-        .center_y()
-        .radius(theme::R_MD)
-        .cursor(Cursor::Pointer)
-        .role("option")
-        .label(style.label())
-        .help(format!("Use the {} style", style.label()))
-        .child(
-            text(style.label().to_owned())
-                .font(theme::BODY)
-                .color(if current { c.brand } else { c.foreground })
-                .single_line(),
-        );
-    option = if current {
-        option.fill(theme::selection())
-    } else {
-        option.hover(c.hover).press(c.pressed)
-    };
-    option.on_press(move |ui: &mut Ui| {
+    theme::option(
+        option_key(style),
+        style.label(),
+        &format!("Use the {} style", style.label()),
+        current,
+    )
+    .on_press(move |ui: &mut Ui| {
         match which {
             Select::Title => {
                 if let Some(clip) = ui.editor.timeline.clip_mut(id) {
@@ -1083,16 +981,9 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
     // As wide as its field, wider only when a style's name needs it.
     let width = cx.layout_size(anchor).map_or(0.0, |size| size[0]);
     overlays.push(
-        col()
-            .key("details-select")
+        theme::popup("details-select")
             .min_w(width)
-            // egui's margin of 6 inside a border of 1.
-            .padding(7.0)
             .gap(6.0)
-            .fill(c().card)
-            .border(1.0, c().border)
-            .radius(theme::R_MD)
-            .shadow(4.0, 16.0, Color::BLACK.alpha(120.0 / 255.0))
             .children(
                 TitleStyle::ALL
                     .into_iter()

@@ -13,8 +13,8 @@ use eddie_core::editor::gallery::{
 use eddie_core::editor::media::BinAsset;
 use eddie_core::editor::sweep::{CURATOR_CATEGORIES, ReviewStatus, SweepCandidate, SweepStatus};
 use rune::{
-    Align, Color, Cursor, Cx, El, GrowthSpec, LineCap, ScrollSpec, Shape, Side, SurfaceFit,
-    TextEdit, col, el, row, spacer, text,
+    Align, Color, Cx, El, GrowthSpec, LineCap, ScrollSpec, Shape, Side, SurfaceFit, TextEdit, col,
+    el, row, spacer, text,
 };
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
@@ -229,7 +229,8 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(el().h(7.0));
+        // Under the 16 the panel leaves below its tabs.
+        .child(el().h(1.0));
     if inline {
         content = content.child(top.child(search).child(sort));
     } else {
@@ -292,7 +293,7 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
             ui.editor.add_all_sweep_candidates();
         }
     });
-    let mute = checkbox(
+    let mute = theme::checkbox(
         "gallery-mute",
         "Mute music beds",
         "Add ranges with baked-in music muted; turn off to keep their original score",
@@ -389,7 +390,7 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
     let [grid_w, grid_h] = cx
         .layout_size("gallery-grid")
         .unwrap_or([width, (height - 94.0).max(1.0)]);
-    let (columns, card_w) = grid(grid_w, grid_h);
+    let (columns, card_w, wider) = grid(grid_w, grid_h);
     let pitch = (card_w * 9.0 / 16.0).round() + CARD_TEXT_H + GAP_BELOW;
     let refs = Rc::new(refs);
     let keys = Rc::clone(&refs);
@@ -407,8 +408,11 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
             },
             move |ui: &Ui, index| {
                 let cards = (index * columns..refs.len().min((index + 1) * columns))
-                    .filter_map(|at| range(ui, &refs, at, scenes))
-                    .map(|(asset, clip)| card(ui, asset, clip, scenes, card_w, pitch - GAP_BELOW));
+                    .filter_map(|at| Some((at % columns, range(ui, &refs, at, scenes)?)))
+                    .map(|(column, (asset, clip))| {
+                        let w = card_w + if column < wider { 1.0 } else { 0.0 };
+                        card(ui, asset, clip, scenes, w, pitch - GAP_BELOW)
+                    });
                 row().h(pitch).gap(CARD_GAP).children(cards)
             },
         );
@@ -438,18 +442,24 @@ pub fn view(ui: &Ui, cx: &Cx<Ui>) -> El {
     )
 }
 
-/// Columns and a card's width for a grid box. A whole card, buttons
-/// included, must fit the box's height, so a wide but short Gallery shrinks
-/// its cards instead of cutting them.
-fn grid(avail_w: f32, avail_h: f32) -> (usize, f32) {
+/// Columns, a card's whole-pixel width, and how many leading columns are
+/// one pixel wider so the row ends where the box does. A whole card,
+/// buttons included, must fit the box's height, so a wide but short Gallery
+/// shrinks its cards instead of cutting them.
+fn grid(avail_w: f32, avail_h: f32) -> (usize, f32, usize) {
     let width = (avail_w - BAR_RESERVE).max(1.0);
     let columns = (((width + CARD_GAP) / (MIN_CARD_W + CARD_GAP)).floor() as usize).max(1);
     let fit_height = ((avail_h - 108.0) * 16.0 / 9.0).max(120.0);
-    let card_w = ((width - CARD_GAP * (columns - 1) as f32) / columns as f32)
-        .min(MAX_CARD_W)
-        .min(fit_height)
-        .floor();
-    (columns, card_w)
+    let free = width - CARD_GAP * (columns - 1) as f32;
+    let share = free / columns as f32;
+    let card_w = share.min(MAX_CARD_W).min(fit_height).floor();
+    // Only cards that fill the row have pixels left over to share.
+    let wider = if card_w == share.floor() {
+        (free - card_w * columns as f32).floor() as usize
+    } else {
+        0
+    };
+    (columns, card_w, wider)
 }
 
 /// The `at`th shown range and its source, while both still exist.
@@ -542,92 +552,16 @@ fn select(
     open: bool,
     enabled: bool,
 ) -> El {
-    let c = c();
-    let field = row()
-        .key(key)
-        .h(FIELD_H)
-        .pl(12.0)
-        .pr(14.0)
-        .gap(6.0)
-        .center_y()
-        .radius(theme::R_MD)
-        // The field fill as it lands on the stage.
-        .fill(if open { c.hover } else { theme::hex("#131315") })
-        .role("combobox")
-        .expanded(open)
-        .label(choice.to_owned())
-        .help(help.to_owned())
-        .child(
-            text(choice.to_owned())
-                .font(theme::BODY)
-                .color(c.foreground)
-                .single_line()
-                .truncate(),
-        )
-        .child(spacer())
-        .child(
-            el().size(10.0, 8.0).shape(
-                Shape::new()
-                    .view_box(10.0, 8.0)
-                    .fill(vec![[0.25, 1.3], [9.75, 1.3], [5.0, 7.3]], c.foreground),
-            ),
-        );
+    // The field fill as it lands on the stage.
+    let field = theme::select(key, choice, help, theme::hex("#131315"), open, enabled);
     if enabled {
-        field
-            .hover(if open { c.hover } else { c.secondary })
-            .press(c.hover)
-            .focusable(true)
-            .cursor(Cursor::Pointer)
-            .on_press(move |ui: &mut Ui| toggle(ui, which))
+        field.on_press(move |ui: &mut Ui| toggle(ui, which))
     } else {
-        field.disabled(true).opacity(0.5)
+        field
     }
 }
 
-/// A round switch with its label; the caller adds `on_press`.
-fn checkbox(key: &'static str, label: &'static str, help: &'static str, on: bool) -> El {
-    let c = c();
-    let mark = Shape::new().view_box(14.0, 14.0);
-    let mark = if on {
-        mark.stroke(
-            vec![[3.4, 8.2], [6.0, 10.7], [10.6, 5.3]],
-            1.3,
-            c.foreground,
-        )
-    } else {
-        mark
-    };
-    row()
-        .key(key)
-        .h(FIELD_H)
-        .gap(4.0)
-        .center_y()
-        .role("checkbox")
-        .checked(on)
-        .focusable(true)
-        .label(label)
-        .cursor(Cursor::Pointer)
-        .help(help)
-        .child(
-            el().size(14.0, 14.0)
-                .child(
-                    el().absolute(0.0, 0.0)
-                        .size(14.0, 14.0)
-                        .radius(7.0)
-                        .fill(c.secondary),
-                )
-                .child(el().absolute(0.0, 0.0).size(14.0, 14.0).shape(mark)),
-        )
-        .child(
-            text(label.to_owned())
-                .font(theme::BODY)
-                .color(c.foreground)
-                .single_line(),
-        )
-}
-
-/// One choice in an open list. The current one is marked as selection is
-/// everywhere else: a brand tint behind brand text.
+/// One choice in an open list; picking it leaves `after` open.
 fn option(
     key: String,
     label: &str,
@@ -636,30 +570,7 @@ fn option(
     after: Option<Popup>,
     pick: impl Fn(&mut Ui) + 'static,
 ) -> El {
-    let c = c();
-    let option = row()
-        .key(key)
-        .w_full()
-        .h(FIELD_H)
-        .px(12.0)
-        .center_y()
-        .radius(theme::R_MD)
-        .cursor(Cursor::Pointer)
-        .role("option")
-        .label(label.to_owned())
-        .help(help.to_owned())
-        .child(
-            text(label.to_owned())
-                .font(theme::BODY)
-                .color(if current { c.brand } else { c.foreground })
-                .single_line(),
-        );
-    let option = if current {
-        option.fill(theme::selection())
-    } else {
-        option.hover(c.hover).press(c.pressed)
-    };
-    option.on_press(move |ui: &mut Ui| {
+    theme::option(key, label, help, current).on_press(move |ui: &mut Ui| {
         pick(ui);
         ui.gallery.popup = after;
     })
@@ -840,15 +751,8 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
         list.children(options)
     };
     overlays.push(
-        col()
-            .key("gallery-popup")
+        theme::popup("gallery-popup")
             .min_w(width)
-            // egui's margin of 6 inside a border of 1.
-            .padding(7.0)
-            .fill(c.card)
-            .border(1.0, c.border)
-            .radius(theme::R_MD)
-            .shadow(4.0, 16.0, Color::BLACK.alpha(120.0 / 255.0))
             .child(list)
             .anchored(anchor, Side::Bottom, Align::Start, 0.0)
             .modal(true, close),
@@ -1000,11 +904,13 @@ fn card(ui: &Ui, asset: &BinAsset, clip: &SweepCandidate, scenes: bool, w: f32, 
         );
     // Where the range comes from, so mixed-source grids read without
     // hovering. A long file name gives way; the times, which tell one
-    // file's cards apart, stay whole.
+    // file's cards apart, stay whole. A line a fraction of a pixel too long
+    // takes one pixel of the padding instead of losing three letters.
     let origin = row()
         .w_full()
         .h(15.0)
-        .px(10.0)
+        .pl(10.0)
+        .pr(9.0)
         .center_y()
         .child(
             theme::caption(clip.asset_name.clone())
@@ -1185,6 +1091,14 @@ mod tests {
 
     fn shown(rt: &Runtime<Ui>, id: &str) -> bool {
         rt.find(&format!("gallery-card:{id}")).is_some()
+    }
+
+    #[test]
+    fn a_row_of_cards_ends_where_the_grid_does() {
+        // 1,256 px beside the scroll bar: six cards and five gaps, 4 px over.
+        assert_eq!(grid(1256.0 + BAR_RESERVE, 2000.0), (6, 197.0, 4));
+        // A card at its widest shares nothing.
+        assert_eq!(grid(300.0 + BAR_RESERVE, 2000.0), (1, MAX_CARD_W, 0));
     }
 
     #[test]
