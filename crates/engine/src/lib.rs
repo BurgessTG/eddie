@@ -150,9 +150,10 @@ impl Clip {
 pub fn fit_fades(duration: f64, fade_in: f64, fade_out: f64) -> (f64, f64) {
     let duration = duration.max(0.0);
     // Scaling the requested lengths keeps their ratio; each then fits.
+    // Capped so two huge requests cannot sum to infinity and scale to NaN.
     let clean = |f: f64| {
         if f.is_finite() {
-            f.max(0.0)
+            f.clamp(0.0, 1e9)
         } else {
             0.0
         }
@@ -201,6 +202,15 @@ pub const DUCK_RELEASE: f64 = 0.8;
 /// Pauses shorter than a full recovery and dip stay down, so music does
 /// not pump between phrases and neighbouring ramps never overlap.
 const DUCK_MERGE: f64 = DUCK_ATTACK + DUCK_HOLD + DUCK_RELEASE;
+
+/// Longest supported timeline, about 11.5 days. Loudness measurement and
+/// export planning walk the whole timeline, so a clip sent absurdly far out
+/// has to be an error instead of hours of rendered silence.
+pub const MAX_TIMELINE_SECONDS: f64 = 1_000_000.0;
+
+/// Slack for comparing an edge with the frame grid: far below a frame and
+/// above the noise of adding and subtracting timeline seconds.
+const EDGE_EPSILON: f64 = 1e-9;
 
 /// How far down a ducking envelope is `offset` seconds into a clip, from 0
 /// (unity) to 1 ([`DUCK_LEVEL`]), with raised-cosine ramps. `ranges` are
@@ -297,6 +307,44 @@ impl Timeline {
         }
     }
 
+    /// Whether every number is one the editor can work with: a real frame
+    /// rate, and finite clip times inside [`MAX_TIMELINE_SECONDS`]. A project
+    /// file or a script can otherwise carry values that divide by zero or
+    /// keep offline work running for hours.
+    pub fn in_supported_range(&self) -> bool {
+        (1.0..=1000.0).contains(&self.fps)
+            && self.clips.iter().all(|clip| {
+                clip.start.is_finite()
+                    && clip.source_in.is_finite()
+                    && (0.0..=MAX_TIMELINE_SECONDS).contains(&clip.duration)
+                    && clip.start.abs() <= MAX_TIMELINE_SECONDS
+                    && clip.end() <= MAX_TIMELINE_SECONDS
+            })
+    }
+
+    /// Pairs of clips that share a lane for a frame or more, lower ID
+    /// first. Adds, drags and swaps never leave one; a script's `moveClip`,
+    /// `setClipLane` or `trimClip` can. Overlaps under a frame come from
+    /// grid edges meeting off-grid media edges and do not count.
+    pub fn lane_overlaps(&self) -> Vec<(ClipId, ClipId)> {
+        let frame = 1.0 / self.fps;
+        let mut by_lane: Vec<&Clip> = self.clips.iter().collect();
+        by_lane.sort_by(|a, b| a.track.cmp(&b.track).then(a.start.total_cmp(&b.start)));
+        let mut pairs = Vec::new();
+        for (index, clip) in by_lane.iter().enumerate() {
+            for other in &by_lane[index + 1..] {
+                if other.track != clip.track || other.start > clip.end() - frame + EDGE_EPSILON {
+                    break;
+                }
+                if other.end() - other.start.max(clip.start) >= frame - EDGE_EPSILON {
+                    pairs.push((clip.id.min(other.id), clip.id.max(other.id)));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        pairs
+    }
+
     /// After loading a saved project: new clips never reuse a saved ID.
     pub fn ensure_fresh_ids(&mut self) {
         let next = self.clips.iter().map(|clip| clip.id + 1).max().unwrap_or(1);
@@ -306,6 +354,26 @@ impl Timeline {
     /// Snap a time to the nearest frame boundary.
     pub fn snap(&self, time: f64) -> f64 {
         (time * self.fps).round() / self.fps
+    }
+
+    /// The nearest frame boundary that is not before `time`.
+    fn snap_at_or_after(&self, time: f64) -> f64 {
+        let snapped = self.snap(time);
+        if snapped < time - EDGE_EPSILON {
+            ((time * self.fps).round() + 1.0) / self.fps
+        } else {
+            snapped
+        }
+    }
+
+    /// The nearest frame boundary that is not after `time`.
+    fn snap_at_or_before(&self, time: f64) -> f64 {
+        let snapped = self.snap(time);
+        if snapped > time + EDGE_EPSILON {
+            ((time * self.fps).round() - 1.0) / self.fps
+        } else {
+            snapped
+        }
     }
 
     pub fn add_track(&mut self, label: &str) -> usize {
@@ -521,11 +589,22 @@ impl Timeline {
             clip.source_in,
             Some(source),
         );
+        // Everything that shaped the embedded sound goes with it.
         if let Some(sound) = self.clip_mut(audio) {
             sound.volume = clip.volume;
+            sound.fade_in = clip.fade_in;
+            sound.fade_out = clip.fade_out;
+            sound.smooth_fades = clip.smooth_fades;
+            sound.clean_voice = clip.clean_voice;
+            sound.duck = clip.duck;
         }
         if let Some(picture) = self.clip_mut(id) {
             picture.embedded_audio = false;
+            picture.fade_in = 0.0;
+            picture.fade_out = 0.0;
+            picture.smooth_fades = false;
+            picture.clean_voice = false;
+            picture.duck = false;
         }
         self.link_pair(id, audio);
         Some(audio)
@@ -578,6 +657,9 @@ impl Timeline {
         let Some(original) = self.clip(id).cloned() else {
             return;
         };
+        if !new_start.is_finite() {
+            return;
+        }
         let snapped = self.snap(new_start.max(0.0));
         let delta = snapped - original.start;
         if let Some(clip) = self.clip_mut(id) {
@@ -675,18 +757,41 @@ impl Timeline {
         let Some(clip) = self.clip(id).cloned() else {
             return;
         };
-        let min_start = (clip.start - clip.source_in).max(0.0);
+        if !new_start.is_finite() {
+            return;
+        }
+        // Generated clips have no media to run out of: a title's edge can
+        // move earlier, and its source clock goes negative so word timings
+        // stay where they were.
+        let generated = clip.kind == ClipKind::Title;
+        let min_start = if generated {
+            0.0
+        } else {
+            (clip.start - clip.source_in).max(0.0)
+        };
         let max_start = clip.end() - frame;
-        let desired = self.snap(new_start.clamp(min_start, max_start.max(min_start)));
+        // The request is a bound the caller may have clamped to a neighbour
+        // or the media: the frame grid never moves the edge before it.
+        let snapped = self.snap_at_or_after(new_start);
+        // Clamp after snapping, so an off-grid media start stays exact.
+        let desired = snapped.clamp(min_start, max_start.max(min_start));
+        if new_start <= clip.start + EDGE_EPSILON && desired > clip.start {
+            // Extending must not shorten a clip whose edge is off the grid.
+            return;
+        }
         let delta = desired - clip.start;
         if let Some(clip) = self.clip_mut(id) {
             clip.start = desired;
-            clip.source_in = (clip.source_in + delta).max(0.0);
+            clip.source_in += delta;
+            if !generated {
+                clip.source_in = clip.source_in.max(0.0);
+            }
             clip.duration = (clip.duration - delta).max(frame);
         }
     }
 
-    /// Trim the left edge to `new_start`, keeping the end fixed.
+    /// Trim the left edge to `new_start`, keeping the end fixed. The edge
+    /// lands on the frame grid at or after `new_start`, never before it.
     /// `source_in` moves with the edge and clamps at 0 (start of media).
     /// A linked detach partner receives the same edge movement.
     pub fn trim_left(&mut self, id: ClipId, new_start: f64) {
@@ -708,15 +813,25 @@ impl Timeline {
     }
 
     fn trim_right_one(&mut self, id: ClipId, new_end: f64) {
+        if !new_end.is_finite() {
+            return;
+        }
         let frame = 1.0 / self.fps;
-        let snapped = self.snap(new_end);
+        // The caller clamped `new_end` to the media or the next clip, so the
+        // frame grid never moves the edge past it.
+        let snapped = self.snap_at_or_before(new_end);
         if let Some(clip) = self.clip_mut(id) {
+            if new_end >= clip.end() - EDGE_EPSILON && snapped < clip.end() {
+                // Extending must not shorten a clip whose edge is off the grid.
+                return;
+            }
             clip.duration = (snapped - clip.start).max(frame);
         }
     }
 
-    /// Trim the right edge to `new_end`. The caller clamps against the
-    /// source media duration; the model only enforces one frame minimum.
+    /// Trim the right edge to `new_end`: the frame at or before it, never
+    /// after. The caller clamps against the source media duration and the
+    /// next clip; the model only enforces one frame minimum.
     /// A linked detach partner receives the same edge movement.
     pub fn trim_right(&mut self, id: ClipId, new_end: f64) {
         let Some(original) = self.clip(id).cloned() else {
@@ -759,6 +874,9 @@ impl Timeline {
             clip.source.as_deref(),
         );
         if let Some(right_clip) = self.clip_mut(right) {
+            // A title extended earlier has a negative source clock; adding
+            // a clip clamps it, which would shift the word timing.
+            right_clip.source_in = clip.source_in + left_duration;
             right_clip.opacity = clip.opacity;
             right_clip.volume = clip.volume;
             right_clip.embedded_audio = clip.embedded_audio;
@@ -867,7 +985,8 @@ impl Timeline {
     /// first such clip. Every clip after a gap, on every lane, moves left by
     /// the same amount, so titles, captions and linked or layered media stay
     /// in sync with the pictures they sit over. A title inside a removed gap
-    /// moves to the gap's start.
+    /// moves to the gap's start; a title that would then share its lane's
+    /// time with another clip moves to a free lane instead.
     pub fn close_gaps(&mut self) {
         let mut covered: Vec<(f64, f64)> = self
             .clips
@@ -894,6 +1013,41 @@ impl Timeline {
                 .map(|&(a, b)| (clip.start.min(b) - a).max(0.0))
                 .sum();
             clip.start -= shift;
+        }
+        // Media keeps its spacing, so only a title can now sit on a clip of
+        // its lane: one from a removed gap, or one overhanging it. The later
+        // title keeps its time and moves to a lane free there.
+        let mut titles: Vec<(f64, ClipId)> = self
+            .clips
+            .iter()
+            .filter(|c| c.kind == ClipKind::Title)
+            .map(|c| (c.start, c.id))
+            .collect();
+        titles.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (start, id) in titles {
+            let Some(title) = self.clip(id).cloned() else {
+                continue;
+            };
+            let covers = |c: &Clip, track: usize| {
+                c.id != id
+                    && c.track == track
+                    && c.start < title.end() - EDGE_EPSILON
+                    && title.start < c.end() - EDGE_EPSILON
+            };
+            let stays = |c: &Clip| c.kind != ClipKind::Title || (c.start, c.id) < (start, id);
+            if !self
+                .clips
+                .iter()
+                .any(|c| covers(c, title.track) && stays(c))
+            {
+                continue;
+            }
+            let free = (0..self.track_labels.len())
+                .find(|&track| !self.clips.iter().any(|c| covers(c, track)));
+            let track = free.unwrap_or_else(|| self.append_track());
+            if let Some(clip) = self.clip_mut(id) {
+                clip.track = track;
+            }
         }
     }
 
@@ -952,7 +1106,8 @@ impl Timeline {
 /// Format seconds as `HH:MM:SS:FF` at the given frame rate.
 pub fn format_timecode(seconds: f64, fps: f64) -> String {
     let total_frames = (seconds.max(0.0) * fps).round() as u64;
-    let f = fps.round() as u64;
+    // A rate that rounds to zero would divide by zero.
+    let f = (fps.round() as u64).max(1);
     let frames = total_frames % f;
     let total_seconds = total_frames / f;
     format!(
@@ -1325,6 +1480,130 @@ mod tests {
     }
 
     #[test]
+    fn close_gaps_never_stacks_titles_on_one_lane() {
+        let mut tl = Timeline::new(30.0);
+        let main = tl.add_track("V1");
+        let captions = tl.add_track("Captions");
+        tl.add_clip("a.mp4", ClipKind::Video, main, 0.0, 5.0, 0.0);
+        let b = tl.add_clip("b.mp4", ClipKind::Video, main, 7.0, 3.0, 0.0);
+        // A caption overhanging a's end, one alone in the 5-7 gap and one
+        // over b: closing the gap brings all three to within 5-6.
+        let overhang = tl.add_clip("overhang", ClipKind::Title, captions, 4.5, 1.0, 0.0);
+        let in_gap = tl.add_clip("in gap", ClipKind::Title, captions, 6.0, 0.5, 0.0);
+        let over_b = tl.add_clip("over b", ClipKind::Title, captions, 7.0, 1.0, 0.0);
+        // A title on the picture lane inside the gap meets b itself.
+        let on_main = tl.add_clip("on main", ClipKind::Title, main, 5.5, 1.0, 0.0);
+        tl.close_gaps();
+        let clip = |id| tl.clip(id).unwrap();
+        assert_eq!(clip(b).start, 5.0);
+        // Times are the ones the pictures moved by.
+        assert_eq!(clip(overhang).start, 4.5);
+        assert_eq!(clip(in_gap).start, 5.0);
+        assert_eq!(clip(over_b).start, 5.0);
+        assert_eq!(clip(on_main).start, 5.0);
+        assert_eq!((clip(b).track, clip(overhang).track), (main, captions));
+        for a in &tl.clips {
+            for other in &tl.clips {
+                let overlap = a.start < other.end() && other.start < a.end();
+                assert!(
+                    a.id == other.id || a.track != other.track || !overlap,
+                    "{} and {} share lane {}",
+                    a.name,
+                    other.name,
+                    a.track
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lane_overlaps_lists_clips_sharing_a_lane_for_a_frame_or_more() {
+        let mut tl = Timeline::new(30.0);
+        let lane = tl.add_track("V1");
+        let other = tl.add_track("V2");
+        let a = tl.add_clip("a", ClipKind::Video, lane, 0.0, 5.0, 0.0);
+        // Half a frame over a's end: a grid edge against an off-grid one.
+        tl.add_clip("abuts", ClipKind::Video, lane, 5.0 - 0.5 / 30.0, 2.0, 0.0);
+        tl.add_clip("other lane", ClipKind::Video, other, 1.0, 2.0, 0.0);
+        assert_eq!(tl.lane_overlaps(), vec![]);
+        let inside = tl.add_clip("inside", ClipKind::Title, lane, 1.0, 0.5, 0.0);
+        let late = tl.add_clip("late", ClipKind::Audio, lane, 4.0, 0.9, 0.0);
+        assert_eq!(tl.lane_overlaps(), vec![(a, inside), (a, late)]);
+        assert!(tl.in_supported_range());
+        tl.move_clip(a, 1e12);
+        assert!(!tl.in_supported_range());
+        assert!(!Timeline::new(0.0).in_supported_range());
+        assert!(!Timeline::new(f64::NAN).in_supported_range());
+    }
+
+    #[test]
+    fn trims_never_pass_the_requested_edge() {
+        let mut tl = Timeline::new(30.0);
+        let track = tl.add_track("V1");
+        // Media adds keep exact, off-grid edges.
+        let id = tl.add_media_clip("a", ClipKind::Video, track, 11.01, 5.0, 3.0, "a.mp4");
+        // The caller clamped to media that ends at 16.05: the edge takes the
+        // frame before it (16.0333), not the nearer frame after it.
+        tl.trim_right(id, 16.05);
+        let end = 16.0 + 1.0 / 30.0;
+        assert!((tl.clip(id).unwrap().end() - end).abs() < 1e-9);
+        // Extending toward a neighbour that starts where this clip already
+        // ends off the grid changes nothing instead of shortening it.
+        let before = tl.clip(id).unwrap().clone();
+        tl.trim_right(id, before.end());
+        assert_eq!(tl.clip(id).unwrap(), &before);
+
+        // Left edge: a previous clip ends at 10.005; the edge stops at the
+        // first frame after it.
+        tl.trim_left(id, 10.005);
+        let clip = tl.clip(id).unwrap().clone();
+        assert!(clip.start >= 10.005 && (clip.start - 10.0 - 1.0 / 30.0).abs() < 1e-9);
+        assert!((clip.source_in - (3.0 - (11.01 - clip.start))).abs() < 1e-9);
+        assert!((clip.end() - end).abs() < 1e-9);
+        // Dragging left against a neighbour ending 5 ms before an off-grid
+        // start must not move the edge right.
+        let id = tl.add_media_clip("b", ClipKind::Video, track, 21.01, 2.0, 3.0, "b.mp4");
+        tl.trim_left(id, 21.005);
+        assert_eq!(tl.clip(id).unwrap().start, 21.01);
+        // An off-grid clip at the start of its media stays exactly there.
+        let id = tl.add_media_clip("c", ClipKind::Video, track, 30.013, 2.0, 0.0, "c.mp4");
+        tl.trim_left(id, 25.0);
+        let clip = tl.clip(id).unwrap();
+        assert_eq!(
+            (clip.start, clip.source_in, clip.duration),
+            (30.013, 0.0, 2.0)
+        );
+        // Not-a-number requests are ignored.
+        tl.trim_left(id, f64::NAN);
+        tl.trim_right(id, f64::NAN);
+        tl.move_clip(id, f64::NAN);
+        assert_eq!(tl.clip(id).unwrap().start, 30.013);
+    }
+
+    #[test]
+    fn a_title_extends_earlier_and_keeps_its_word_timing() {
+        let mut tl = Timeline::new(30.0);
+        let track = tl.add_track("Captions");
+        let id = tl.add_clip("two words", ClipKind::Title, track, 5.0, 2.0, 0.0);
+        tl.clip_mut(id).unwrap().words = vec![0.25, 1.0];
+        tl.trim_left(id, 4.0);
+        let clip = tl.clip(id).unwrap();
+        assert_eq!((clip.start, clip.end()), (4.0, 7.0));
+        assert_eq!(clip.word_times(), Some(vec![5.25, 6.0]));
+        // Splitting inside the part added before the first word keeps
+        // both pieces on the same clock.
+        let right = tl.split_at(id, 4.5).unwrap();
+        assert_eq!(tl.clip(right).unwrap().word_times(), Some(vec![5.25, 6.0]));
+    }
+
+    #[test]
+    fn a_zero_frame_rate_formats_without_dividing_by_zero() {
+        assert_eq!(format_timecode(3.0, 0.0), "00:00:00:00");
+        let (fade_in, fade_out) = fit_fades(4.0, 1e308, 1e308);
+        assert_eq!((fade_in, fade_out), (2.0, 2.0));
+    }
+
+    #[test]
     fn split_keeps_each_fade_on_its_own_edge() {
         let mut tl = Timeline::empty_project();
         let id = tl.add_media_clip("m", ClipKind::Audio, 0, 0.0, 4.0, 0.0, "m.mp3");
@@ -1415,12 +1694,22 @@ mod tests {
             3.0,
             "/media/interview.mp4",
         );
-        tl.clip_mut(video).unwrap().volume = 0.6;
+        {
+            let clip = tl.clip_mut(video).unwrap();
+            clip.volume = 0.6;
+            (clip.fade_in, clip.fade_out) = (0.5, 1.5);
+            (clip.smooth_fades, clip.clean_voice, clip.duck) = (true, true, true);
+        }
 
         let audio = tl.detach_audio(video).expect("detach embedded audio");
         let picture = tl.clip(video).unwrap().clone();
         let sound = tl.clip(audio).unwrap().clone();
         assert!(!picture.embedded_audio);
+        // The sound keeps its fades and processing; the silent picture has none.
+        assert_eq!((sound.fade_in, sound.fade_out), (0.5, 1.5));
+        assert!(sound.smooth_fades && sound.clean_voice && sound.duck);
+        assert_eq!((picture.fade_in, picture.fade_out), (0.0, 0.0));
+        assert!(!picture.smooth_fades && !picture.clean_voice && !picture.duck);
         assert_eq!(picture.linked_clip, Some(audio));
         assert_eq!(sound.kind, ClipKind::Audio);
         assert_eq!(sound.linked_clip, Some(video));
