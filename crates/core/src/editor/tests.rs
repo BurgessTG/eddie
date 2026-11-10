@@ -2594,6 +2594,33 @@ fn gallery_add_shown_combines_filters_and_preserves_display_order() {
         });
     }
     let before: serde_json::Value = serde_json::from_str(&app.script_state_json()).unwrap();
+    // Review choices are offered only while the bin holds a curation the
+    // removed reviewer saved.
+    assert_eq!(
+        app.gallery_quality_choices(),
+        [
+            GalleryQuality::All,
+            GalleryQuality::Prime,
+            GalleryQuality::Reviewed,
+            GalleryQuality::NeedsReview,
+            GalleryQuality::Local,
+        ]
+    );
+    fn candidates(app: &mut Editor) -> impl Iterator<Item = &mut sweep::SweepCandidate> {
+        app.assets
+            .iter_mut()
+            .flat_map(|asset| &mut asset.sweep.candidates)
+    }
+    let saved: Vec<_> = candidates(&mut app)
+        .map(|clip| std::mem::take(&mut clip.review.status))
+        .collect();
+    assert_eq!(
+        app.gallery_quality_choices(),
+        [GalleryQuality::All, GalleryQuality::Prime]
+    );
+    for (clip, status) in candidates(&mut app).zip(saved) {
+        clip.review.status = status;
+    }
     app.selected_asset = Some("/media/interview.mov".to_owned());
     let add_shown = |app: &mut Editor| -> Vec<(f64, f64)> {
         app.timeline = Timeline::empty_project();

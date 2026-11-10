@@ -17,7 +17,7 @@ mod thumbnails;
 pub(super) use thumbnails::GalleryThumbnails;
 
 /// The Clips filters: type, quality and length menus, then Reset.
-fn filter_controls(filters: &mut GalleryFilters, ui: &mut egui::Ui) {
+fn filter_controls(filters: &mut GalleryFilters, qualities: &[GalleryQuality], ui: &mut egui::Ui) {
     let category = category_label(filters.category.as_deref().unwrap_or("all")).to_owned();
     filter_choice(ui, "gallery_category", 110.0, &category, |ui| {
         ui.selectable_value(&mut filters.category, None, "All types")
@@ -38,21 +38,19 @@ fn filter_controls(filters: &mut GalleryFilters, ui: &mut egui::Ui) {
         120.0,
         filters.quality.label(),
         |ui| {
-            for quality in [
-                GalleryQuality::All,
-                GalleryQuality::Prime,
-                GalleryQuality::Reviewed,
-                GalleryQuality::NeedsReview,
-                GalleryQuality::Local,
-            ] {
+            for &quality in qualities {
                 ui.selectable_value(&mut filters.quality, quality, quality.label())
-                    .on_hover_text(
-                        "Filter quality or review status without replacing the content category",
-                    );
+                    .on_hover_text(match quality {
+                        GalleryQuality::All => "Show ranges of every quality",
+                        GalleryQuality::Prime => "The best fifth of each file, scored 75 or more",
+                        GalleryQuality::Reviewed => "Ranges an earlier model review accepted",
+                        GalleryQuality::NeedsReview => "Ranges an earlier model review doubted",
+                        GalleryQuality::Local => "Ranges no model reviewed",
+                    });
             }
         },
     )
-    .on_hover_text("Filter quality or review status independently of type");
+    .on_hover_text("Filter by quality, independently of type");
     filter_choice(
         ui,
         "gallery_duration",
@@ -89,7 +87,7 @@ impl EditorApp {
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if let Some(view) = theme::segmented(ui, self.editor.curator.view, &[
-                    (GalleryView::Clips, "Clips", "Search and sort usable ranges and ranges needing review"),
+                    (GalleryView::Clips, "Clips", "Search, filter and sort the suggested ranges"),
                     (GalleryView::Scenes, "All scenes", "Every source shot, including rejected material; ignores Clip filters and stays in source order"),
                 ]) {
                     self.editor.curator.view = view;
@@ -170,6 +168,7 @@ impl EditorApp {
                 response.on_hover_text("Curating; results appear when it finishes");
             }
         };
+        let qualities = self.editor.gallery_quality_choices();
         let filters = &mut self.editor.curator.filters;
         let mute = &mut self.editor.mute_music_beds;
         let filter_ui = |ui: &mut egui::Ui, filters: &mut GalleryFilters| {
@@ -188,13 +187,11 @@ impl EditorApp {
                     } else {
                         format!("Filters ({active})")
                     };
-                    ui.menu_button(label, |ui| filter_controls(filters, ui))
+                    ui.menu_button(label, |ui| filter_controls(filters, qualities, ui))
                         .response
-                        .on_hover_text(
-                            "Combine content type, quality, review status and duration filters",
-                        );
+                        .on_hover_text("Combine content type, quality and duration filters");
                 } else {
-                    filter_controls(filters, ui);
+                    filter_controls(filters, qualities, ui);
                 }
             });
         };
@@ -335,7 +332,7 @@ fn search_and_sort(ui: &mut egui::Ui, filters: &mut GalleryFilters, scenes: bool
             .margin(egui::Margin::symmetric(8, 6))
             .desired_width(width),
     )
-    .on_hover_text("Match words in source names, categories, tags, review notes and transcripts");
+    .on_hover_text("Match words in source names, titles, categories, tags, notes and transcripts");
     ui.add_enabled_ui(!scenes, |ui| {
         egui::ComboBox::from_id_salt("gallery_sort")
             .width(SORT_WIDTH)

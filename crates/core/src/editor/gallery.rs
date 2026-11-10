@@ -12,7 +12,7 @@ pub enum GalleryView {
     Scenes,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GalleryQuality {
     #[default]
     All,
@@ -161,6 +161,23 @@ pub struct CuratorGallery {
 }
 
 impl Editor {
+    /// The quality choices worth offering. Only curations saved by the
+    /// removed model reviewer carry a review status, so those choices
+    /// appear only while the bin holds such a range.
+    pub fn gallery_quality_choices(&self) -> &'static [GalleryQuality] {
+        use GalleryQuality::{All, Local, NeedsReview, Prime, Reviewed};
+        let reviewed = self
+            .assets
+            .iter()
+            .flat_map(|asset| &asset.sweep.candidates)
+            .any(|clip| clip.review.status != ReviewStatus::Local);
+        if reviewed {
+            &[All, Prime, Reviewed, NeedsReview, Local]
+        } else {
+            &[All, Prime]
+        }
+    }
+
     pub fn open_curator_gallery(&mut self) {
         self.set_playing(false);
         self.curator.open = true;
