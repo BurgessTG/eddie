@@ -5,7 +5,9 @@ members = ["crates/engine", "crates/media", "crates/core", "crates/app"]
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+# The project lock uses std's file locks (1.89); image and whisper-rs-sys
+# already need 1.88.
+rust-version = "1.89"
 
 # Small-disk dev profile: no debuginfo, no incremental artifacts.
 [profile.dev]

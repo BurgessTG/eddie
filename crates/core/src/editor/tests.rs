@@ -231,6 +231,65 @@ mod script_edit_tests {
         }
     }
 
+    /// A script that computed a time before zero, or an end before a
+    /// start, has a mistake: it hears about it instead of getting an edit
+    /// it did not ask for.
+    #[test]
+    fn arguments_out_of_range_are_refused_not_moved_into_range() {
+        let mut app = Editor::headless();
+        app.assets.push(asset("ready.mp4", 10.0, true));
+        let id = app
+            .timeline
+            .add_clip("Keep", ClipKind::Title, 0, 2.0, 5.0, 0.0);
+        let before = app.timeline.clone();
+        for (script, error) in [
+            (
+                format!("moveClip({id}, -5)"),
+                "moveClip needs a start of 0 or later, not -5",
+            ),
+            (
+                "addTitle('Z', -1, 1)".to_owned(),
+                "addTitle needs a time of 0 or later, not -1",
+            ),
+            (
+                "addTitle('Z', 8, 0)".to_owned(),
+                "addTitle needs a positive length, not 0",
+            ),
+            (
+                "addAsset('ready.mp4', -2)".to_owned(),
+                "addAsset needs a time of 0 or later, not -2",
+            ),
+            (
+                "addAssetRange('ready.mp4', 8, -1, 1)".to_owned(),
+                "addAssetRange needs a source start of 0 or later, not -1",
+            ),
+            (
+                "addAssetRange('ready.mp4', 8, 0, -3)".to_owned(),
+                "addAssetRange needs a positive length, not -3",
+            ),
+            (
+                "insertTime(-5, 1)".to_owned(),
+                "insertTime needs a time of 0 or later, not -5",
+            ),
+            (
+                format!("trimClip({id}, 6, 4)"),
+                "at 4 s, not after its start at 6 s",
+            ),
+        ] {
+            let refused = run(&mut app, &script).unwrap_err();
+            assert!(refused.contains(error), "{script}: {refused}");
+            assert_eq!(app.timeline, before, "{script}");
+        }
+        // The edges themselves are still fine.
+        run(
+            &mut app,
+            &format!("trimClip({id}, 3, 4); moveClip({id}, 0)"),
+        )
+        .unwrap();
+        let clip = app.timeline.clip(id).unwrap();
+        assert_eq!((clip.start, clip.duration), (0.0, 1.0));
+    }
+
     #[test]
     fn scripts_read_utterances_and_snap_ranges_out_of_them() {
         let mut app = Editor::headless();
@@ -644,6 +703,40 @@ mod playback_tests {
         let next = await_picture(&mut app, &monitor);
         assert!(next.b() > 240 && next.r() < 10, "next frame: {next:?}");
         app.set_playing(false);
+    }
+
+    #[test]
+    fn a_still_that_cannot_decode_is_not_asked_for_every_frame() {
+        let mut app = Editor::headless();
+        let gone = "/nonexistent/eddie-gone.mp4";
+        app.assets.push(BinAsset {
+            info: MediaInfo {
+                path: gone.to_owned(),
+                name: "gone.mp4".to_owned(),
+                duration: 10.0,
+                width: 320,
+                height: 180,
+                fps: 30.0,
+                has_video: true,
+                has_audio: false,
+            },
+            size_bytes: 0,
+            state: AssetState::Ready,
+            peaks: Vec::new(),
+            beats: None,
+            thumbs: Vec::new(),
+            sweep: sweep::SweepData::default(),
+        });
+        app.timeline
+            .add_media_clip("gone", ClipKind::Video, 0, 0.0, 5.0, 0.0, gone);
+        let until = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < until {
+            app.poll_frames();
+            app.sync_playback();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.still_inflight.is_none(), "the request was answered");
+        assert_eq!(app.still_gen, 1, "one request, then a wait");
     }
 
     #[test]
@@ -2303,6 +2396,12 @@ fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
     let follower = app
         .timeline
         .add_clip("Place card", ClipKind::Title, 1, 5.0, 1.0, 0.0);
+    {
+        let clip = app.timeline.clip_mut(clip).unwrap();
+        (clip.fade_in, clip.fade_out) = (0.2, 0.3);
+        (clip.duck, clip.clean_voice, clip.smooth_fades) = (true, true, true);
+        clip.volume = 0.5;
+    }
 
     let pieces = app
         .tighten_clip_silence(clip, None, 0.35, 0.1)
@@ -2325,6 +2424,28 @@ fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
     assert!((kept[1].start - kept[0].end()).abs() < 0.04);
     assert!((kept[1].source_in - 1.4).abs() < 0.04);
     assert!((kept[1].duration - 0.6).abs() < 0.04);
+    for piece in &kept {
+        assert_eq!(
+            (
+                piece.volume,
+                piece.duck,
+                piece.clean_voice,
+                piece.smooth_fades
+            ),
+            (0.5, true, true, true),
+            "every phrase sounds as the clip did"
+        );
+    }
+    assert_eq!(
+        [
+            kept[0].fade_in,
+            kept[0].fade_out,
+            kept[1].fade_in,
+            kept[1].fade_out
+        ],
+        [0.2, 0.0, 0.0, 0.3],
+        "the fades stay at the outer ends"
+    );
     assert!(
         (app.timeline.clip(follower).unwrap().start - 4.3).abs() < 0.04,
         "following material ripples left by the removed dead air"
@@ -3037,6 +3158,13 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
     assert_eq!(app.timeline.clips.len(), 2, "{}", app.status);
     app.save_project_to(&dir.join("expo")).unwrap();
     assert!(dir.join("expo.eddie").exists(), "the extension is added");
+    Editor::headless()
+        .save_project_to(&dir.join("cut v1.2"))
+        .unwrap();
+    assert!(
+        dir.join("cut v1.2.eddie").exists(),
+        "a dot in the name is not an extension to replace"
+    );
 
     let mut reopened = Editor::headless();
     reopened.open_project(&dir.join("expo.eddie")).unwrap();
@@ -3087,6 +3215,11 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
     assert!(reopened.assets.is_empty(), "the bin starts empty");
     assert!(reopened.project_path.is_none(), "Save asks for a new file");
     assert!(!reopened.has_unsaved_changes());
+    reopened.mute_music_beds = !reopened.mute_music_beds;
+    assert!(
+        reopened.has_unsaved_changes(),
+        "the music-bed choice is saved with the project"
+    );
 
     // A project named on the command line opens as the project, not as media.
     let mut launched = Editor::headless();
@@ -3132,6 +3265,8 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
         missing.status
     );
     assert_eq!(missing.timeline, app.timeline, "clips stay for relinking");
+    missing.run_console("addTitle('Before locating', 8, 1);".to_owned());
+    missing.commit_history();
     missing.locate_missing_media(&elsewhere.join("shot.mp4"));
     assert_eq!(missing.status, "Relinked 1 media file.");
     settle(&mut missing);
@@ -3142,6 +3277,27 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
         Some(located.as_str())
     );
     assert!(missing.assets[0].state == AssetState::Ready);
+    assert!(missing.has_unsaved_changes(), "the new place needs saving");
+    assert!(missing.step_history(false), "the earlier edit still undoes");
+    assert_eq!(missing.timeline.clips.len(), 2);
+    assert_eq!(
+        missing.timeline.clips[0].source.as_deref(),
+        Some(located.as_str()),
+        "undo does not bring the lost path back"
+    );
+    assert!(!missing.step_history(false), "locating is not a step");
+
+    // Importing a file again that no longer reads keeps what was known.
+    std::fs::write(elsewhere.join("shot.mp4"), "not a video").unwrap();
+    missing.spawn_import(vec![elsewhere.join("shot.mp4")]);
+    settle(&mut missing);
+    assert!(
+        missing.assets[0].state == AssetState::Ready,
+        "{}",
+        missing.status
+    );
+    assert!(missing.assets[0].info.duration > 0.0);
+    assert!(missing.import_errors.contains_key(&located));
 
     let before = missing.timeline.clone();
     std::fs::write(moved.join("bad.eddie"), "{}").unwrap();
@@ -3366,6 +3522,29 @@ fn a_second_window_says_so_after_its_media_loads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Frames until a window listens for its open project, asking again at
+/// once instead of after the two seconds a window waits. In a test run the
+/// first ask can be refused although the last editor is gone: a child
+/// process another test starts holds a copy of that editor's file lock
+/// from its fork until its exec.
+#[cfg(unix)]
+fn frames_until_listening(window: &mut Editor) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        window.listen_refused = window
+            .listen_refused
+            .take()
+            .map(|(project, at)| (project, at - Duration::from_secs(2)));
+        window.begin_frame(0.0);
+        window.end_frame(false, false);
+        if window.server.is_some() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{}", window.status);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// One editor listens per project. A second `eddie serve` is refused; a
 /// window that opens the project takes it over from the server, and only
 /// its user can stop it.
@@ -3416,9 +3595,7 @@ fn a_window_takes_a_served_project_over() {
     window.socket_dir = Some(sockets.clone());
     window.open_project(&project).unwrap();
     served.join().unwrap();
-    window.begin_frame(0.0);
-    window.end_frame(false, false);
-    assert!(window.server.is_some(), "{}", window.status);
+    frames_until_listening(&mut window);
 
     let ask = |method: &'static str, params: serde_json::Value| {
         let (project, sockets) = (project.clone(), sockets.clone());
@@ -3474,6 +3651,14 @@ fn a_window_takes_a_served_project_over() {
     );
     assert!(window.server.is_some());
 
+    // Reopening its own project never lets go of the file. A child
+    // process started at that moment would keep a copy of the hold
+    // until it execs, and the window could not take the file back.
+    let copy = window.project_lock.as_ref().unwrap().try_clone().unwrap();
+    window.open_project(&project).unwrap();
+    assert!(window.project_lock.is_some(), "the window let go");
+    drop(copy);
+
     // A second window opens the project but is told agents reach the
     // other one. It takes the socket once that closes.
     let mut late = Editor::headless();
@@ -3489,12 +3674,6 @@ fn a_window_takes_a_served_project_over() {
     // The socket goes with the editor.
     drop(window);
     assert!(server::connect_in(&sockets, &project).is_none());
-    late.listen_refused = late
-        .listen_refused
-        .take()
-        .map(|(project, at)| (project, at - Duration::from_secs(2)));
-    late.begin_frame(0.0);
-    late.end_frame(false, false);
-    assert!(late.server.is_some(), "{}", late.status);
+    frames_until_listening(&mut late);
     let _ = std::fs::remove_dir_all(&dir);
 }

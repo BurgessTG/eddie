@@ -314,17 +314,17 @@ pub fn waveform_peaks(path: &str, duration: f64, peaks_per_sec: u32) -> MediaRes
                 bytes = &bytes[1..];
             }
         }
-        let mut pairs = bytes.chunks_exact(2);
-        for pair in &mut pairs {
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        for pair in pairs {
             accumulate(
-                i16::from_le_bytes([pair[0], pair[1]]),
+                i16::from_le_bytes(*pair),
                 per_peak,
                 &mut peaks,
                 &mut current,
                 &mut count,
             );
         }
-        carry = pairs.remainder().first().copied();
+        carry = rest.first().copied();
     }
     if count > 0 {
         peaks.push(current);

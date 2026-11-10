@@ -47,6 +47,20 @@ impl History {
         self.revision = revision;
     }
 
+    /// Apply `change` to every timeline kept, so it is neither a step nor
+    /// undone by one. For facts about the files, not the edit: a relinked
+    /// media path.
+    pub fn rewrite(&mut self, change: impl Fn(&mut Timeline)) {
+        change(&mut self.committed.timeline);
+        if let Some((latest, _)) = &mut self.latest {
+            change(latest);
+        }
+        for state in self.undo.iter_mut().chain(&mut self.redo) {
+            change(&mut state.timeline);
+        }
+        self.revision += 1;
+    }
+
     /// Changes whenever the settled timeline does, so a listener can tell
     /// without comparing timelines.
     pub fn revision(&self) -> u64 {

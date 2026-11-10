@@ -940,6 +940,10 @@ impl Timeline {
     /// seconds: wherever another audible clip that does not itself duck
     /// is speaking. `speech` maps a source path to its audible
     /// source-time ranges. Empty unless `target.duck` is set.
+    ///
+    /// A range can begin before the clip or end after it. Speech just
+    /// outside a clip still shapes the ramp inside it, so a piece of split
+    /// music ducks exactly as the whole clip did.
     pub fn duck_ranges(
         &self,
         target: &Clip,
@@ -959,16 +963,18 @@ impl Timeline {
                 continue;
             };
             let source_end = clip.source_in + clip.duration;
+            let offset = clip.start - clip.source_in - target.start;
             for &(from, to) in spans {
                 let (from, to) = (from.max(clip.source_in), to.min(source_end));
-                let offset = clip.start - clip.source_in - target.start;
-                let (start, end) = ((from + offset).max(0.0), (to + offset).min(target.duration));
-                if end > start {
-                    ranges.push((start, end));
+                if to > from {
+                    ranges.push((from + offset, to + offset));
                 }
             }
         }
         ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Merge on the whole timeline before choosing what reaches this
+        // clip: a pause that stays down must not depend on where the clip
+        // happens to end.
         let mut merged: Vec<(f64, f64)> = Vec::new();
         for (start, end) in ranges {
             match merged.last_mut() {
@@ -976,6 +982,9 @@ impl Timeline {
                 _ => merged.push((start, end)),
             }
         }
+        merged.retain(|&(start, end)| {
+            end + DUCK_HOLD + DUCK_RELEASE > 0.0 && start - DUCK_ATTACK < target.duration
+        });
         merged
     }
 
@@ -1887,5 +1896,48 @@ mod tests {
         near(8.6, 1.0);
         near(9.5, 1.0);
         near(12.0, DUCK_LEVEL);
+    }
+
+    #[test]
+    fn splitting_ducked_music_does_not_change_how_it_ducks() {
+        // Speech at timeline 2..4 and 5..6 (a 1 s pause that stays down)
+        // over a 12 s music bed.
+        let mut tl = Timeline::new(30.0);
+        let music = tl.add_media_clip("bed", ClipKind::Audio, 1, 0.0, 12.0, 0.0, "/m/bed.mp3");
+        tl.clip_mut(music).unwrap().duck = true;
+        tl.add_media_clip("talk", ClipKind::Video, 0, 0.0, 12.0, 0.0, "/m/talk.mp4");
+        let speech: std::collections::HashMap<String, Vec<(f64, f64)>> =
+            [("/m/talk.mp4".to_owned(), vec![(2.0, 4.0), (5.0, 6.0)])].into();
+        let whole = tl.clip(music).unwrap().clone();
+        let whole = tl.duck_ranges(&whole, &speech);
+        let times = || (0..120).map(|step| f64::from(step) * 0.1 + 0.05);
+        let unsplit: Vec<f32> = times().map(|t| duck_gain(t, &whole)).collect();
+        // Cuts on the way down (1.9), in the pause (4.5), in the hold after
+        // speech (6.1) and on the way back up (6.7): each piece must carry
+        // on the curve of the speech just outside it.
+        for cut in [1.9, 4.5, 6.1, 6.7] {
+            let mut split = tl.clone();
+            let right = split.split_at(music, cut).expect("split");
+            let pieces = [music, right].map(|id| {
+                let clip = split.clip(id).unwrap().clone();
+                (clip.start, clip.end(), split.duck_ranges(&clip, &speech))
+            });
+            for (t, want) in times().zip(&unsplit) {
+                let (start, _, ranges) = pieces
+                    .iter()
+                    .find(|(start, end, _)| (*start..*end).contains(&t))
+                    .unwrap();
+                let got = duck_gain(t - start, ranges);
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "cut {cut}, {t:.2} s: {got} vs {want}"
+                );
+            }
+        }
+        // Speech far from a clip leaves it alone.
+        let late = tl.add_media_clip("late", ClipKind::Audio, 2, 7.2, 3.0, 0.0, "/m/bed.mp3");
+        tl.clip_mut(late).unwrap().duck = true;
+        let late = tl.clip(late).unwrap().clone();
+        assert!(tl.duck_ranges(&late, &speech).is_empty());
     }
 }

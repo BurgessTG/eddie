@@ -53,11 +53,24 @@ impl Editor {
         self.assets.iter().find(|a| a.info.path == path)
     }
 
-    /// The asset a script or command names, by path or by file name.
-    pub fn asset_named(&self, name: &str) -> Option<&BinAsset> {
-        self.assets
-            .iter()
-            .find(|a| a.info.path == name || a.info.name == name)
+    /// The asset a script or command names, by path or by file name. Two
+    /// files of one name in different folders are told apart by path, never
+    /// by which was imported first.
+    pub fn asset_named(&self, name: &str) -> Result<&BinAsset, String> {
+        if let Some(asset) = self.assets.iter().find(|a| a.info.path == name) {
+            return Ok(asset);
+        }
+        let mut named = self.assets.iter().filter(|a| a.info.name == name);
+        let asset = named
+            .next()
+            .ok_or_else(|| format!("no asset '{name}' in the project"))?;
+        match named.count() {
+            0 => Ok(asset),
+            others => Err(format!(
+                "{} assets are named '{name}'; use the path",
+                others + 1
+            )),
+        }
     }
 
     /// The picture size preview and export share: the largest source of the
@@ -81,6 +94,9 @@ impl Editor {
         let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if let Some(existing) = self.assets.iter_mut().find(|a| a.info.path == path_str) {
             existing.size_bytes = size_bytes;
+            if existing.state == AssetState::Ready {
+                self.refreshing.insert(path_str);
+            }
             existing.state = AssetState::Processing;
             return;
         }
@@ -206,6 +222,7 @@ impl Editor {
                         format!("Imported {}", info.name)
                     };
                     let ready_path = info.path.clone();
+                    self.refreshing.remove(&ready_path);
                     // Fill an empty selection only; a background batch
                     // must not take the curator card from the user.
                     let keep_selection = self
@@ -213,7 +230,7 @@ impl Editor {
                         .as_deref()
                         .is_some_and(|path| self.assets.iter().any(|a| a.info.path == path));
                     if !keep_selection {
-                        self.selected_asset = Some(ready_path.clone());
+                        self.selected_asset = Some(ready_path);
                     }
                     let size_bytes = std::fs::metadata(&info.path).map(|m| m.len()).unwrap_or(0);
                     if let Some(existing) =
@@ -241,9 +258,13 @@ impl Editor {
                     }
                     // Import only makes the asset ready. Curation is
                     // an explicit Curate action in the media bin.
-                    let _ = ready_path;
                 }
                 ImportMsg::Failed(path, err) => {
+                    if self.refreshing.remove(&path) {
+                        if let Some(asset) = self.assets.iter_mut().find(|a| a.info.path == path) {
+                            asset.state = AssetState::Ready;
+                        }
+                    }
                     self.assets
                         .retain(|a| !(a.info.path == path && a.state != AssetState::Ready));
                     self.status = format!("Could not import {path}: {err}");

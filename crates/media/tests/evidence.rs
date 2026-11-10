@@ -280,7 +280,7 @@ fn assert_frames_match_stills(fixture: &Fixture, path: &Path, batches: &[&[f64]]
 
 fn mean_rgb(rgba: &[u8]) -> [f64; 3] {
     let mut sum = [0.0; 3];
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         for channel in 0..3 {
             sum[channel] += pixel[channel] as f64;
         }

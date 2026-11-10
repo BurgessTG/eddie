@@ -1208,7 +1208,9 @@ pub fn pcm_mono_16k(path: &str, start: f64, duration: f64) -> MediaResult<Vec<f3
     ]))?;
     Ok(output
         .stdout
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         .collect())
 }

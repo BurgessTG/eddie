@@ -74,7 +74,7 @@ impl VoiceCleanup {
     pub(crate) fn process(&mut self, frames: &mut [f32]) {
         let makeup = linear(MAKEUP_DB);
         let knee_start = linear(THRESHOLD_DB) / KNEE.sqrt();
-        for frame in frames.chunks_exact_mut(2) {
+        for frame in frames.as_chunks_mut::<2>().0 {
             let mut filtered = [0.0_f64; 2];
             for ((sample, h), out) in frame
                 .iter()

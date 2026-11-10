@@ -103,7 +103,9 @@ fn peak(mix: &[f32], from: f64, to: f64) -> f32 {
     let rate = f64::from(AUDIO_RATE);
     let (a, b) = ((from * rate) as usize, (to * rate) as usize);
     mix[a * 2..b * 2]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|frame| frame[0].abs())
         .fold(0.0, f32::max)
 }
@@ -111,7 +113,9 @@ fn peak(mix: &[f32], from: f64, to: f64) -> f32 {
 /// Timeline second of the first frame louder than 0.05.
 fn onset(mix: &[f32]) -> f64 {
     let index = mix
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .position(|frame| frame[0].abs() > 0.05)
         .expect("tone never starts");
     index as f64 / f64::from(AUDIO_RATE)
@@ -483,4 +487,38 @@ fn offline_mix_measurement_matches_ffmpeg_ebur128() {
     eprintln!("in-process {ours:.2} LUFS, ffmpeg {theirs:.2} LUFS");
     // ebur128 prints one decimal.
     assert!((ours - theirs).abs() < 0.2, "{ours} vs {theirs}");
+}
+
+#[test]
+fn offline_mix_measurement_counts_long_silence_instead_of_mixing_it() {
+    // The same clip at the start and a day later, as when a clip is dropped
+    // far out by mistake. The far clip must measure as it does alone, and
+    // the day between (four billion frames) must not be mixed one by one.
+    const DAY: f64 = 86_400.0;
+    let path = tone_file("tone.wav", 0.0, &["-c:a", "pcm_s16le"]);
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let alone =
+        openreel_media::measure_mix(&[(1, segment(&path, 0.0, 3.0, 0.0, 0.4))], 3.0, &cancel)
+            .unwrap()
+            .integrated(0.0..3.0)
+            .unwrap();
+    let segments = [
+        (1, segment(&path, 0.0, 3.0, 0.0, 0.4)),
+        (2, segment(&path, DAY + 1.0, 3.0, 0.0, 0.4)),
+    ];
+    let started = Instant::now();
+    let mix = openreel_media::measure_mix(&segments, DAY + 4.0, &cancel).unwrap();
+    let took = started.elapsed();
+    assert_eq!(mix.duration(), DAY + 4.0);
+    for range in [0.0..3.0, DAY + 1.0..DAY + 4.0] {
+        let lufs = mix.integrated(range.clone()).unwrap();
+        assert!((lufs - alone).abs() < 0.05, "{range:?}: {lufs} vs {alone}");
+    }
+    assert_eq!(mix.integrated(10.0..DAY - 10.0), None);
+    assert_eq!(mix.true_peak(10.0..DAY - 10.0), None);
+    let quiet = mix.quiet_ranges(-60.0, 1.0);
+    assert_eq!(quiet.len(), 1, "{quiet:?}");
+    assert!((quiet[0].start - 3.0).abs() < 0.5 && (quiet[0].end - DAY - 1.0).abs() < 0.5);
+    // Mixing it would take minutes; counting it takes well under a second.
+    assert!(took < Duration::from_secs(60), "took {took:?}");
 }

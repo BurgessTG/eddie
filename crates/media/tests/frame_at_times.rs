@@ -178,7 +178,7 @@ fn make_color_segments_video() -> Fixture {
 fn mean_rgb(rgba: &[u8]) -> (f64, f64, f64) {
     let pixels = (rgba.len() / 4) as f64;
     let (mut r, mut g, mut b) = (0.0_f64, 0.0_f64, 0.0_f64);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         r += px[0] as f64;
         g += px[1] as f64;
         b += px[2] as f64;

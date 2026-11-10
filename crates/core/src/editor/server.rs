@@ -19,7 +19,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use super::commands::{self, Job, Note, Outcome, Reply};
 use super::media::AssetState;
-use super::project::file_name;
+use super::project::held_elsewhere;
 use super::sweep::SweepStatus;
 use super::{Editor, Wake};
 
@@ -39,6 +39,14 @@ const LINE_LIMIT: u64 = 4 << 20;
 const REPLY_LIMIT: u64 = 64 << 20;
 /// Lines waiting for a client that is not reading before it is dropped.
 const OUTBOX: usize = 1024;
+/// Request lines read and not yet taken in by the editor. Socket readers
+/// wait when it is full, so a client that floods fills its own socket
+/// instead of the editor's memory.
+const INBOX: usize = 16;
+/// Requests one connection may have waiting, and their bytes. Past either,
+/// a request is refused instead of queued.
+const QUEUE: usize = 256;
+const QUEUE_BYTES: usize = 16 << 20;
 /// A client that stops reading must not hold a writer thread forever.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Requests answered per frame stop here so a window keeps drawing.
@@ -83,15 +91,22 @@ struct Request {
     id: Value,
     method: String,
     params: Value,
+    /// Bytes of the line it came in.
+    size: usize,
 }
 
 struct Client {
     out: SyncSender<String>,
     writer: JoinHandle<()>,
     queue: VecDeque<Request>,
+    /// Bytes of the lines in `queue`.
+    waiting: usize,
     /// A job of this client's is running; its next request waits, so
     /// requests on one connection finish in the order they were sent.
     busy: bool,
+    /// It stopped sending. It may still be reading (`echo … | nc -U` closes
+    /// its sending side first), so what it asked is answered before it goes.
+    closed: bool,
 }
 
 /// What listeners were last told, to report only changes.
@@ -118,6 +133,8 @@ pub struct Server {
     seen: Seen,
     /// `stop` was asked: nothing new starts, and running jobs finish.
     stopping: bool,
+    /// The client answered last, so the next frame starts after it.
+    turn: u64,
 }
 
 impl Server {
@@ -135,10 +152,7 @@ impl Server {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
         if socket.symlink_metadata().is_ok() {
             if UnixStream::connect(&socket).is_ok() {
-                return Err(format!(
-                    "Another Eddie already has {} open.",
-                    file_name(project)
-                ));
+                return Err(held_elsewhere(project));
             }
             // Left by an editor that was killed.
             let _ = std::fs::remove_file(&socket);
@@ -146,13 +160,13 @@ impl Server {
         let listener = UnixListener::bind(&socket).map_err(failed)?;
         let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
 
-        let (tx, incoming) = channel();
+        let (tx, incoming) = sync_channel(INBOX);
         let stop = Arc::new(AtomicBool::new(false));
         let hello = format!(
             "{}\n",
             json!({
                 "event": "hello",
-                "project": canonical(project),
+                "project": canonical(project).to_string_lossy(),
                 "window": window,
                 "version": env!("CARGO_PKG_VERSION"),
             })
@@ -184,6 +198,7 @@ impl Server {
             jobs: Vec::new(),
             seen: Seen::default(),
             stopping: false,
+            turn: 0,
         })
     }
 
@@ -205,7 +220,16 @@ impl Server {
     /// after the editor took in its workers' results. `hold_edits` keeps
     /// timeline edits waiting while the user is mid-drag.
     pub fn poll(&mut self, app: &mut Editor, hold_edits: bool) {
-        while let Ok(incoming) = self.incoming.try_recv() {
+        let started = Instant::now();
+        loop {
+            // Parsing megabyte lines takes time a window needs for drawing.
+            if started.elapsed() > FRAME_BUDGET {
+                app.wake.wake();
+                break;
+            }
+            let Ok(incoming) = self.incoming.try_recv() else {
+                break;
+            };
             match incoming {
                 Incoming::Connected(id, out, writer) => {
                     self.clients.insert(
@@ -214,14 +238,17 @@ impl Server {
                             out,
                             writer,
                             queue: VecDeque::new(),
+                            waiting: 0,
                             busy: false,
+                            closed: false,
                         },
                     );
                 }
                 Incoming::Line(id, line) => self.receive(id, &line),
                 Incoming::Closed(id) => {
-                    // Its jobs finish for the editor's sake, unanswered.
-                    self.clients.remove(&id);
+                    if let Some(state) = self.clients.get_mut(&id) {
+                        state.closed = true;
+                    }
                 }
             }
         }
@@ -258,29 +285,47 @@ impl Server {
             }
         }
 
+        // One request per client in turn, starting after whoever was
+        // answered last, so a client with thousands waiting delays another
+        // by one request and not by all of them.
         let started = Instant::now();
         let mut clients: Vec<u64> = self.clients.keys().copied().collect();
         clients.sort_unstable();
-        'clients: for client in clients {
-            while let Some(state) = self.clients.get_mut(&client) {
+        let first = clients.partition_point(|client| *client <= self.turn);
+        clients.rotate_left(first);
+        'rounds: loop {
+            let mut answered = false;
+            for &client in &clients {
+                let Some(state) = self.clients.get_mut(&client) else {
+                    continue;
+                };
                 if state.busy {
-                    break;
+                    continue;
                 }
                 let Some(next) = state.queue.front() else {
-                    break;
+                    continue;
                 };
                 if hold_edits && commands::edits_timeline(&next.method) {
                     app.frame_within(Duration::from_millis(100));
-                    break;
+                    continue;
                 }
                 if started.elapsed() > FRAME_BUDGET {
                     app.wake.wake();
-                    break 'clients;
+                    break 'rounds;
                 }
                 let request = state.queue.pop_front().expect("a request in front");
+                state.waiting -= request.size;
+                self.turn = client;
                 self.answer(app, client, request);
+                answered = true;
+            }
+            if !answered {
+                break;
             }
         }
+        // A job of a closed client's finishes for the editor's sake.
+        self.clients
+            .retain(|_, state| !(state.closed && state.queue.is_empty() && !state.busy));
         self.observe(app);
     }
 
@@ -303,13 +348,34 @@ impl Server {
             );
             return;
         };
-        if let Some(state) = self.clients.get_mut(&client) {
-            state.queue.push_back(Request { id, method, params });
+        let Some(state) = self.clients.get_mut(&client) else {
+            return;
+        };
+        let size = line.len();
+        if state.queue.len() >= QUEUE || state.waiting + size > QUEUE_BYTES {
+            self.send(
+                client,
+                json!({
+                    "id": id,
+                    "ok": false,
+                    "error": "too many requests are waiting: read their answers before sending more",
+                }),
+            );
+            return;
         }
+        state.waiting += size;
+        state.queue.push_back(Request {
+            id,
+            method,
+            params,
+            size,
+        });
     }
 
     fn answer(&mut self, app: &mut Editor, client: u64, request: Request) {
-        let Request { id, method, params } = request;
+        let Request {
+            id, method, params, ..
+        } = request;
         let reply = match method.as_str() {
             // Whoever takes over reads the file as it is now.
             _ if self.stopping => Err("this editor is stopping".to_owned()),
@@ -356,13 +422,21 @@ impl Server {
         id: Value,
         result: Result<Outcome, String>,
     ) {
-        let result = result.and_then(|outcome| {
+        let result = result.map(|outcome| {
             let mut value = outcome.value;
             if outcome.changed && !self.window {
-                app.save_project_to(&self.project)?;
-                value["saved"] = json!(true);
+                // The change is in this editor either way, so the request
+                // did not fail: sending it again would apply it twice. The
+                // next change that saves writes this one too.
+                match app.save_project_to(&self.project) {
+                    Ok(()) => value["saved"] = json!(true),
+                    Err(error) => {
+                        value["saved"] = json!(false);
+                        value["saveError"] = json!(error);
+                    }
+                }
             }
-            Ok(value)
+            value
         });
         let mut value = result.unwrap_or_else(|error| json!({ "ok": false, "error": error }));
         if value.get("ok").is_none() {
@@ -427,7 +501,9 @@ impl Server {
         } else if self.seen.exporting {
             self.seen.exporting = false;
             events.push(match (&app.exported, &app.export_failed) {
-                (Some((file, _)), _) => json!({ "event": "export", "done": true, "output": file }),
+                (Some((file, _)), _) => {
+                    json!({ "event": "export", "done": true, "output": file.to_string_lossy() })
+                }
                 (None, error) => json!({ "event": "export", "done": true, "error": error }),
             });
         }
@@ -485,9 +561,16 @@ fn done(value: Value) -> Outcome {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Give the name up first. An editor that binds it from here on is
+        // not the one unlinked below.
+        let gone = self.socket.with_extension("gone");
+        let socket = match std::fs::rename(&self.socket, &gone) {
+            Ok(()) => &gone,
+            Err(_) => &self.socket,
+        };
         // The accept loop only looks at `stop` when someone connects.
-        drop(UnixStream::connect(&self.socket));
-        let _ = std::fs::remove_file(&self.socket);
+        drop(UnixStream::connect(socket));
+        let _ = std::fs::remove_file(socket);
         for (_, client) in self.clients.drain() {
             drop(client.out);
             // `eddie serve` exits next: let the answer to `stop` out first.
@@ -501,7 +584,7 @@ impl Drop for Server {
 
 /// Two threads per connection: one reads request lines into the editor's
 /// queue, one writes answers so a slow reader never blocks the editor.
-fn attach(id: u64, stream: UnixStream, hello: &str, tx: &Sender<Incoming>, wake: &Wake) {
+fn attach(id: u64, stream: UnixStream, hello: &str, tx: &SyncSender<Incoming>, wake: &Wake) {
     let Ok(mut write_half) = stream.try_clone() else {
         return;
     };
@@ -591,9 +674,14 @@ impl Editor {
                 return;
             }
         }
-        let bound = self
-            .socket_dir()
-            .and_then(|dir| Server::bind(dir, &project, true, self.wake.clone()));
+        // The file first, then the socket: of two editors that start on a
+        // socket a killed one left, only the file's holder replaces it.
+        let bound = if self.hold_project() {
+            self.socket_dir()
+                .and_then(|dir| Server::bind(dir, &project, true, self.wake.clone()))
+        } else {
+            Err(held_elsewhere(&project))
+        };
         match bound {
             Ok(mut server) => {
                 server.settle(self);
@@ -617,6 +705,9 @@ impl Editor {
     /// `serve_stopped`.
     pub fn serve(&mut self) -> Result<PathBuf, String> {
         let project = self.project_path.clone().ok_or("no project is open")?;
+        if !self.hold_project() {
+            return Err(held_elsewhere(&project));
+        }
         let mut server = Server::bind(self.socket_dir()?, &project, false, self.wake.clone())?;
         server.settle(self);
         let socket = server.socket().to_path_buf();
@@ -635,20 +726,21 @@ impl Editor {
     }
 
     /// A window about to open `project` takes over from `eddie serve`,
-    /// which has saved every change and only has to let go.
-    pub(crate) fn take_over(&self, project: &Path) {
+    /// which has saved every change and only has to let go. True when one
+    /// was asked to.
+    pub(crate) fn take_over(&self, project: &Path) -> bool {
         if !self.listen {
-            return;
+            return false;
         }
         let Some(mut live) = self
             .socket_dir
             .as_deref()
             .and_then(|dir| connect_in(dir, project))
         else {
-            return;
+            return false;
         };
         if live.window {
-            return;
+            return false;
         }
         // Usually gone within a frame. A job still running keeps it longer,
         // and a stuck one must not hold this window: after a second the
@@ -660,6 +752,7 @@ impl Editor {
         if live.request("stop", &json!({}), &mut |_| {}).is_ok() {
             while let Ok(Some(_)) = live.line(&mut || true) {}
         }
+        true
     }
 }
 

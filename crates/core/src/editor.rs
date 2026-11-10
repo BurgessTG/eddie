@@ -2,7 +2,7 @@
 //! scripting, curation, projects and export. A front end draws it, feeds it
 //! input and time, and owns the pixels; the command line drives it bare.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -44,6 +44,8 @@ use viewport::TimelineViewport;
 pub const PREVIEW_W: u32 = 960;
 pub const SCRUB_W: u32 = 480;
 const STILL_CACHE_CAP: usize = 24;
+/// How long a still that failed to decode waits before it is asked for again.
+const STILL_RETRY: Duration = Duration::from_secs(2);
 const SHUTTLE_MAX: f64 = 8.0;
 pub const MEDIA_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "flac", "m4a", "aac", "ogg",
@@ -180,6 +182,9 @@ pub struct Editor {
     /// Why each file that could not be imported failed, by path, until it
     /// is imported again.
     pub import_errors: HashMap<String, String>,
+    /// Ready files being imported again. One that now fails stays in the
+    /// bin as it was: clips may use it, and the file may come back.
+    refreshing: HashSet<String>,
     sweep_rx: Option<Receiver<SweepMsg>>,
     pub sweep_queue: Vec<String>,
     /// Shared by every running curation worker; dropped when none run.
@@ -205,6 +210,9 @@ pub struct Editor {
     still_shown: Option<StillKey>,
     /// Recently decoded stills, least recently used first.
     still_cache: VecDeque<(StillKey, RawFrame)>,
+    /// Stills that failed to decode and when, so a file that cannot be read
+    /// is not asked for again every frame.
+    still_failed: VecDeque<(StillKey, Instant)>,
 
     stream: Option<FrameStream>,
     stream_key: Option<VideoKey>,
@@ -250,9 +258,15 @@ pub struct Editor {
     pub project_path: Option<PathBuf>,
     /// The timeline as last saved or opened; a difference is unsaved.
     saved_timeline: Timeline,
+    /// The music-bed choice in the last project saved or opened.
+    saved_mute_music_beds: bool,
     /// Project media not found on open, in the order Locate asks for it.
     pub missing_media: Vec<String>,
 
+    /// The hold on the open project's file (`project::lock_project`), kept
+    /// by an editor that stays open. Declared before `server` so it is
+    /// dropped first: whoever sees the socket close can take the file.
+    pub(crate) project_lock: Option<std::fs::File>,
     /// Answers agents' requests for the open project (`server`).
     server: Option<server::Server>,
     /// A window listens for whichever project it has open.
@@ -281,6 +295,17 @@ pub struct EditSnapshot {
     magnet: bool,
     zoom: f32,
     mute_music_beds: bool,
+}
+
+/// Refuse a time before zero instead of moving it there: a script that
+/// computed one has a mistake its author should hear about.
+fn from_zero(command: &str, what: &str, value: f64) -> Result<(), String> {
+    if value < 0.0 {
+        return Err(format!(
+            "{command} needs a {what} of 0 or later, not {value}"
+        ));
+    }
+    Ok(())
 }
 
 /// A title style by its script name; the error names the ones that exist.
@@ -375,6 +400,7 @@ impl Editor {
         Self {
             history: history::History::new(&timeline),
             saved_timeline: timeline.clone(),
+            saved_mute_music_beds: true,
             timeline,
             viewport: TimelineViewport::default(),
             playhead: 0.0,
@@ -398,6 +424,7 @@ impl Editor {
             import_rx: None,
             import_queue: Vec::new(),
             import_errors: HashMap::new(),
+            refreshing: HashSet::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
             sweep_tx: None,
@@ -414,6 +441,7 @@ impl Editor {
             still_inflight: None,
             still_shown: None,
             still_cache: VecDeque::new(),
+            still_failed: VecDeque::new(),
             stream: None,
             stream_key: None,
             stream_generation: 0,
@@ -440,6 +468,7 @@ impl Editor {
             make_thumbnails: true,
             project_path: None,
             missing_media: Vec::new(),
+            project_lock: None,
             server: None,
             listen: false,
             listen_refused: None,
@@ -599,6 +628,9 @@ impl Editor {
         self.stop_sources();
         let mut cursor = target.start;
         let mut first_piece_ids: Vec<ClipId> = Vec::new();
+        // As a split does: the fade in stays on the first phrase and the
+        // fade out moves to the last.
+        let last = kept.len() - 1;
         for (range_index, range) in kept.iter().enumerate() {
             let mut piece_ids: Vec<ClipId> = Vec::new();
             for template in &templates {
@@ -611,6 +643,9 @@ impl Editor {
                         clip.start = start;
                         clip.duration = range.duration();
                         clip.source_in = source_in;
+                        if last > 0 {
+                            clip.fade_out = 0.0;
+                        }
                     }
                     template.id
                 } else {
@@ -637,6 +672,12 @@ impl Editor {
                         clip.opacity = template.opacity;
                         clip.volume = template.volume;
                         clip.embedded_audio = template.embedded_audio;
+                        clip.duck = template.duck;
+                        clip.clean_voice = template.clean_voice;
+                        clip.smooth_fades = template.smooth_fades;
+                        if range_index == last {
+                            clip.fade_out = template.fade_out;
+                        }
                     }
                     new_id
                 };
@@ -1032,6 +1073,7 @@ impl Editor {
     pub fn forget_stills(&mut self) {
         self.still_shown = None;
         self.still_cache.clear();
+        self.still_failed.clear();
         if let Some((_, key, _)) = &mut self.still_inflight {
             *key = None;
         }
@@ -1059,7 +1101,15 @@ impl Editor {
                 continue;
             }
             self.still_inflight = None;
-            let (Some(key), Ok(frame)) = (key, result) else {
+            let Some(key) = key else {
+                continue;
+            };
+            let Ok(frame) = result else {
+                self.still_failed.retain(|(failed, _)| *failed != key);
+                if self.still_failed.len() >= STILL_CACHE_CAP {
+                    self.still_failed.pop_front();
+                }
+                self.still_failed.push_back((key, Instant::now()));
                 continue;
             };
             // The newest finished picture of this clip shows even when the
@@ -1147,6 +1197,12 @@ impl Editor {
         let key = target.key;
         let cached =
             |app: &Self, key: StillKey| app.still_cache.iter().position(|(c, _)| *c == key);
+        // A relinked or repaired file gets another try, but not a busy loop.
+        let failed = |app: &Self, key: StillKey| {
+            app.still_failed
+                .iter()
+                .any(|(failed, at)| *failed == key && at.elapsed() < STILL_RETRY)
+        };
         if self.still_shown != Some(key) || !self.preview_shown {
             if let Some(index) = cached(self, key) {
                 // Most recently used moves to the back.
@@ -1158,7 +1214,7 @@ impl Editor {
                 // One request at a time: while it decodes, the pointer can
                 // move on; its answer shows, then this asks for wherever the
                 // pointer is.
-                if self.still_inflight.is_none() {
+                if self.still_inflight.is_none() && !failed(self, key) {
                     self.request_still(target, false);
                 }
                 return;
@@ -1176,7 +1232,7 @@ impl Editor {
                 continue;
             }
             if let Some(neighbor) = self.still_target(at, PREVIEW_W) {
-                if cached(self, neighbor.key).is_none() {
+                if cached(self, neighbor.key).is_none() && !failed(self, neighbor.key) {
                     self.request_still(neighbor, true);
                     return;
                 }
@@ -1570,6 +1626,12 @@ impl Editor {
                 Some(Ok(msg)) => msg,
                 Some(Err(TryRecvError::Empty)) => break,
                 Some(Err(TryRecvError::Disconnected)) => {
+                    if !done {
+                        // The worker ended without an answer: it panicked.
+                        let error = "Export stopped unexpectedly.".to_owned();
+                        self.export_failed = Some(error.clone());
+                        self.status = error;
+                    }
                     done = true;
                     break;
                 }
@@ -1647,7 +1709,7 @@ impl Editor {
 
     /// The name of the project file or imported media that `output` is.
     /// Exporting over one would destroy what the export is made from.
-    fn export_would_replace(&self, output: &Path) -> Option<String> {
+    pub(crate) fn export_would_replace(&self, output: &Path) -> Option<String> {
         let output = std::fs::canonicalize(output).ok()?;
         self.project_path
             .iter()
@@ -2111,6 +2173,10 @@ impl Editor {
 
     /// Undo an edit that must leave no trace: a failed one, or a dry run.
     pub fn restore_edit(&mut self, before: EditSnapshot) {
+        // An edit refused before it changed anything leaves playback alone.
+        let disturbed = self.timeline != before.timeline
+            || self.playhead != before.playhead
+            || self.playing != before.playing;
         self.timeline = before.timeline;
         self.selected = before.selected;
         self.playhead = before.playhead;
@@ -2118,9 +2184,11 @@ impl Editor {
         self.viewport.magnet = before.magnet;
         self.viewport.px_per_sec = before.zoom;
         self.mute_music_beds = before.mute_music_beds;
-        self.stop_sources();
-        self.last_now = None;
-        self.forget_stills();
+        if disturbed {
+            self.stop_sources();
+            self.last_now = None;
+            self.forget_stills();
+        }
     }
 
     pub fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) -> Vec<String> {
@@ -2175,8 +2243,20 @@ impl Editor {
                     self.selected = None;
                 }
             }
-            ScriptCommand::MoveClip { clip, start } => self.timeline.move_clip(clip, start),
+            ScriptCommand::MoveClip { clip, start } => {
+                from_zero("moveClip", "start", start)?;
+                self.timeline.move_clip(clip, start);
+            }
             ScriptCommand::TrimClip { clip, left, right } => {
+                if let Some(c) = self.timeline.clip(clip) {
+                    let (start, end) = (left.unwrap_or(c.start), right.unwrap_or(c.end()));
+                    if end <= start {
+                        return Err(format!(
+                            "trimClip would end clip {clip} at {end} s, not after its start at \
+                             {start} s: left is the new start and right the new end"
+                        ));
+                    }
+                }
                 // A request takes the nearest frame; the model then rounds
                 // one way only where a bound (the media's end) is off the grid.
                 if let Some(left) = left {
@@ -2276,6 +2356,10 @@ impl Editor {
                 style,
                 handle,
             } => {
+                from_zero("addTitle", "time", at)?;
+                if duration <= 0.0 {
+                    return Err(format!("addTitle needs a positive length, not {duration}"));
+                }
                 let style = title_style(&style)?;
                 let track = self.first_free_track(at, duration);
                 let id = self
@@ -2301,10 +2385,10 @@ impl Editor {
                 return Ok(Some(self.caption_clip(clip, style)?.note(clip)));
             }
             ScriptCommand::AddAsset { asset, at, handle } => {
+                from_zero("addAsset", "time", at)?;
                 let (path, name, duration) = self
                     .asset_named(&asset)
-                    .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration))
-                    .ok_or_else(|| format!("no asset '{asset}'"))?;
+                    .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration))?;
                 let id =
                     self.try_add_asset_range_to_timeline(&path, &name, None, at, 0.0, duration)?;
                 created.extend(handle.map(|handle| (handle, id)));
@@ -2316,10 +2400,16 @@ impl Editor {
                 duration,
                 handle,
             } => {
+                from_zero("addAssetRange", "time", at)?;
+                from_zero("addAssetRange", "source start", source_in)?;
+                if duration <= 0.0 {
+                    return Err(format!(
+                        "addAssetRange needs a positive length, not {duration}"
+                    ));
+                }
                 let (path, name) = self
                     .asset_named(&asset)
-                    .map(|a| (a.info.path.clone(), a.info.name.clone()))
-                    .ok_or_else(|| format!("no asset '{asset}'"))?;
+                    .map(|a| (a.info.path.clone(), a.info.name.clone()))?;
                 let id = self
                     .try_add_asset_range_to_timeline(&path, &name, None, at, source_in, duration)?;
                 created.extend(handle.map(|handle| (handle, id)));
@@ -2349,6 +2439,7 @@ impl Editor {
                 }
             }
             ScriptCommand::InsertTime { at, seconds } => {
+                from_zero("insertTime", "time", at)?;
                 if seconds <= 0.0 {
                     return Err(format!("insertTime needs a positive length, not {seconds}"));
                 }

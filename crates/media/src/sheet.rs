@@ -69,7 +69,7 @@ fn render(
     let width = columns * cell_w + (columns + 1) * GUTTER;
     let height = rows * (cell_h + LABEL_H) + (rows + 1) * GUTTER;
     let mut sheet = vec![0_u8; width * height * 4];
-    for pixel in sheet.chunks_exact_mut(4) {
+    for pixel in sheet.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[38, 38, 42, 255]);
     }
     let origin = |index: usize| {
@@ -86,7 +86,7 @@ fn render(
         let (x0, y0) = origin(index);
         for row in 0..cell_h {
             let start = ((y0 + row) * width + x0) * 4;
-            for pixel in sheet[start..start + cell_w * 4].chunks_exact_mut(4) {
+            for pixel in sheet[start..start + cell_w * 4].as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&[0, 0, 0, 255]);
             }
         }
@@ -124,8 +124,10 @@ fn render(
             let src = &frame.rgba[row * w * 4..(row + 1) * w * 4];
             let start = ((dy + row) * width + dx) * 4;
             for (dst, src) in sheet[start..start + w * 4]
-                .chunks_exact_mut(4)
-                .zip(src.chunks_exact(4))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<4>().0)
             {
                 for channel in 0..3 {
                     dst[channel] = (f32::from(src[channel]) * gain).round() as u8;

@@ -577,6 +577,42 @@ fn pictures_show_the_program_a_source_and_exact_frames() {
     assert!(!dir.0.join("late").exists());
     let (code, sound) = dir.eddie(&["strip", "p.eddie", "nope.mp4", "x.jpg"]);
     assert_eq!((code, &sound["ok"]), (1, &false.into()));
+
+    // A picture never replaces the project or its media: `sheet` called
+    // with `strip`'s arguments once turned the source into a JPEG.
+    let media = std::fs::read(dir.0.join("shots.mp4")).unwrap();
+    let project = std::fs::read(dir.0.join("p.eddie")).unwrap();
+    for arguments in [
+        &["sheet", "p.eddie", "shots.mp4"][..],
+        &["sheet", "p.eddie", "p.eddie"],
+        &["strip", "p.eddie", "shots.mp4", "shots.mp4"],
+        &["sheet", "p.eddie", "sheet.png"],
+    ] {
+        let (code, refused) = dir.eddie(arguments);
+        assert_eq!(
+            (code, &refused["ok"]),
+            (1, &false.into()),
+            "{arguments:?}: {refused}"
+        );
+        assert!(
+            refused["error"].as_str().unwrap().contains(".jpg"),
+            "{refused}"
+        );
+    }
+    assert!(!dir.0.join("sheet.png").exists());
+    // A .jpg name that is the media, through a link, is refused too.
+    std::os::unix::fs::symlink(dir.0.join("shots.mp4"), dir.0.join("link.jpg")).unwrap();
+    let (code, refused) = dir.eddie(&["sheet", "p.eddie", "link.jpg"]);
+    assert_eq!(code, 1, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot replace shots.mp4"),
+        "{refused}"
+    );
+    assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), project);
+    assert_eq!(std::fs::read(dir.0.join("shots.mp4")).unwrap(), media);
 }
 
 /// An OpenAI-style transcription server: answers each upload with two
@@ -698,6 +734,55 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     ]);
     assert_eq!(code, 0, "{run}");
     assert_eq!(run["output"], "2 word Second 1.6");
+
+    // --force transcribes again; the model and vocabulary named for this
+    // run reach the provider, and no language is sent when none is named.
+    let (code, forced) = dir.eddie(&[
+        "transcribe",
+        "p.eddie",
+        "--model",
+        "tiny-test",
+        "--vocabulary",
+        "Eddie, Wonder",
+        "--force",
+    ]);
+    assert_eq!(code, 0, "{forced}");
+    assert_eq!(
+        (
+            &forced["assets"][0]["reused"],
+            &forced["assets"][0]["source"]
+        ),
+        (&false.into(), &"openai:tiny-test".into()),
+        "{forced}"
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for field in [
+            "name=\"model\"\r\n\r\ntiny-test",
+            "name=\"prompt\"\r\n\r\nEddie, Wonder",
+        ] {
+            assert!(requests[1].contains(field), "missing {field}");
+        }
+        assert!(!requests[1].contains("name=\"language\""));
+    }
+
+    // --provider is for one run and does not borrow the saved provider's
+    // endpoint: no local model is installed here, so nothing is uploaded.
+    let (code, local) = dir.eddie(&["transcribe", "p.eddie", "--provider", "local", "--force"]);
+    assert_eq!((code, &local["ok"]), (1, &false.into()), "{local}");
+    // Each asset reports its own failure.
+    assert!(local.to_string().contains("no whisper model"), "{local}");
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    let (code, unknown) = dir.eddie(&["transcribe", "p.eddie", "--provider", "nope"]);
+    assert_eq!((code, &unknown["ok"]), (1, &false.into()), "{unknown}");
+    assert!(
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains("local, meta, openai"),
+        "{unknown}"
+    );
 
     // An unknown asset is an error, not an empty success.
     let (code, missing) = dir.eddie(&["transcribe", "p.eddie", "nope.wav"]);
@@ -856,6 +941,48 @@ fn a_served_project_takes_every_command_live() {
     assert_eq!(code, 0, "{sheet}");
     assert_eq!(sheet["live"], true);
     assert!(dir.0.join("sheet.jpg").metadata().unwrap().len() > 0);
+    let (code, strip) = dir.eddie(&["strip", "p.eddie", "shot.mp4", "strip.jpg"]);
+    assert_eq!((code, &strip["live"]), (0, &true.into()), "{strip}");
+    assert!(dir.0.join("strip.jpg").metadata().unwrap().len() > 0);
+    let (code, frames) = dir.eddie(&[
+        "frames", "p.eddie", "shot.mp4", "1..2", "frames", "--every", "0.5",
+    ]);
+    assert_eq!((code, &frames["live"]), (0, &true.into()), "{frames}");
+    let listed = frames["frames"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{frames}");
+    assert!(Path::new(listed[1]["file"].as_str().unwrap()).exists());
+
+    // The long jobs run there too: curation reaches the editor's scripts
+    // without a reload, and the export is the timeline it holds.
+    let (code, curated) = dir.eddie(&["curate", "p.eddie", "shot.mp4"]);
+    assert_eq!(code, 0, "{curated}");
+    assert_eq!(
+        (&curated["live"], &curated["assets"][0]["curated"]),
+        (&true.into(), &true.into()),
+        "{curated}"
+    );
+    let (_, scenes) = dir.eddie(&["run", "p.eddie", "-e", "return sceneClips().length"]);
+    assert_eq!(
+        (&scenes["live"], &scenes["output"]),
+        (&true.into(), &"1".into()),
+        "{scenes}"
+    );
+    // Neither file has sound, so there is nothing to transcribe.
+    let (code, transcribed) = dir.eddie(&["transcribe", "p.eddie"]);
+    assert_eq!(
+        (code, &transcribed["live"]),
+        (0, &true.into()),
+        "{transcribed}"
+    );
+    assert_eq!(
+        transcribed["assets"],
+        serde_json::json!([]),
+        "{transcribed}"
+    );
+    let (code, exported) = dir.eddie(&["export", "p.eddie", "out.mp4"]);
+    assert_eq!((code, &exported["live"]), (0, &true.into()), "{exported}");
+    let length = duration(&dir.0.join("out.mp4"));
+    assert!((length - 2.0).abs() < 0.1, "exported {length} s");
 
     let (code, saved) = dir.eddie(&["save", "p.eddie"]);
     assert_eq!((code, &saved["saved"]), (0, &true.into()), "{saved}");
@@ -979,4 +1106,125 @@ fn curation_runs_once_per_file_and_reaches_scripts() {
 
     let (code, missing) = dir.eddie(&["curate", "p.eddie", "nope.mp4"]);
     assert_eq!((code, &missing["ok"]), (1, &false.into()), "{missing}");
+}
+
+#[test]
+fn commands_at_the_same_time_take_turns_on_a_project() {
+    let dir = Dir::new("turns");
+    let (code, _) = dir.eddie(&["new", "p.eddie"]);
+    assert_eq!(code, 0);
+    let running: Vec<_> = (0..6)
+        .map(|n| {
+            let script = format!("addTitle('Title {n}', {}, 1)", n * 2);
+            dir.command(".", &["run", "p.eddie", "-e", script.as_str()])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in running {
+        let out = child.wait_with_output().unwrap();
+        let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            (out.status.code(), &reply["saved"]),
+            (Some(0), &true.into()),
+            "{reply}"
+        );
+    }
+    let project = dir.project();
+    let clips = project["timeline"]["clips"].as_array().unwrap();
+    let mut ids: Vec<_> = clips
+        .iter()
+        .map(|clip| clip["id"].as_u64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        (clips.len(), ids.len()),
+        (6, 6),
+        "every edit is kept and no clip ID is given out twice"
+    );
+}
+
+/// One request on its own connection to a served project's socket.
+/// `closing` shuts the sending side first, as `echo … | nc -U` does.
+#[cfg(unix)]
+fn ask(socket: &Path, request: &str, closing: bool) -> Value {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .unwrap();
+    writeln!(stream, "{request}").unwrap();
+    if closing {
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+    }
+    for line in BufReader::new(stream).lines() {
+        let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if value["id"] == 1 && value.get("ok").is_some() {
+            return value;
+        }
+    }
+    panic!("closed without answering {request}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_client_is_answered_after_it_closes_and_told_when_a_save_fails() {
+    let dir = Dir::new("socket");
+    // In its own folder, so the folder can go away under the editor.
+    std::fs::create_dir_all(dir.0.join("work")).unwrap();
+    let (code, _) = dir.eddie_in("work", &["new", "p.eddie"]);
+    assert_eq!(code, 0);
+    let mut serve = dir.spawn(&["serve", "work/p.eddie"]);
+    let ready = serve.line();
+    assert_eq!(ready["ok"], true, "{ready}");
+    let socket = PathBuf::from(ready["socket"].as_str().unwrap());
+
+    let run = |code: &str| serde_json::json!({ "id": 1, "method": "run", "code": code });
+    let first = ask(&socket, &run("addTitle('One', 0, 1)").to_string(), true);
+    assert_eq!(
+        (&first["ok"], &first["saved"]),
+        (&true.into(), &true.into()),
+        "{first}"
+    );
+
+    // Only true is a dry run; anything else there must not edit for real.
+    let mut dry = run("addTitle('Dry', 2, 1)");
+    dry["dryRun"] = "true".into();
+    let refused = ask(&socket, &dry.to_string(), false);
+    assert_eq!(
+        (&refused["ok"], &refused["error"]),
+        (&false.into(), &"dryRun is true or false".into()),
+        "{refused}"
+    );
+
+    // The edit is in the editor whether or not the file could be written,
+    // so the answer is not a failure to send again.
+    std::fs::rename(dir.0.join("work"), dir.0.join("moved")).unwrap();
+    let unsaved = ask(&socket, &run("addTitle('Two', 4, 1)").to_string(), false);
+    assert_eq!(
+        (&unsaved["ok"], &unsaved["changed"], &unsaved["saved"]),
+        (&true.into(), &true.into(), &false.into()),
+        "{unsaved}"
+    );
+    assert!(
+        unsaved["saveError"]
+            .as_str()
+            .unwrap()
+            .starts_with("Couldn't save p.eddie"),
+        "{unsaved}"
+    );
+    let count = ask(
+        &socket,
+        &run("return state().clips.length").to_string(),
+        false,
+    );
+    assert_eq!(count["output"], "2", "{count}");
+
+    let stopped = ask(&socket, r#"{"id":1,"method":"stop"}"#, false);
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(serve.exit_code(), 0);
 }

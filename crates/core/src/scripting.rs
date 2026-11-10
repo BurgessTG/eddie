@@ -179,6 +179,12 @@ impl ScriptCommand {
 
     /// Validate numeric inputs without changing finite values or clamping policy.
     pub fn validate(&self) -> Result<(), String> {
+        // A title's name is drawn by FFmpeg, whose arguments end at a NUL.
+        if let Self::AddTitle { text, .. } | Self::RenameClip { name: text, .. } = self {
+            if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+                return Err("clip names and title text cannot hold control characters".to_owned());
+            }
+        }
         let finite = match self {
             Self::Seek(value)
             | Self::SplitClip { at: value, .. }
@@ -335,11 +341,34 @@ impl CommandQueue {
 
 type Queue = Rc<RefCell<CommandQueue>>;
 
+/// A clip ID, handle or lane from JavaScript. rquickjs casts numbers with
+/// `as`, which made `deleteClip(1.9)` delete clip 1 and `NaN` name clip 0.
+struct Whole(u64);
+
+impl<'js> rquickjs::FromJs<'js> for Whole {
+    fn from_js(_: &rquickjs::Ctx<'js>, value: rquickjs::Value<'js>) -> rquickjs::Result<Self> {
+        // Every whole number below 2^53 is exact in a double.
+        const LIMIT: f64 = 9_007_199_254_740_992.0;
+        match value.as_number() {
+            Some(number) if (0.0..LIMIT).contains(&number) && number.fract() == 0.0 => {
+                Ok(Self(number as u64))
+            }
+            _ => Err(rquickjs::Error::new_from_js_message(
+                value.type_name(),
+                "whole number",
+                "clip IDs and lanes are whole numbers, 0 or more",
+            )),
+        }
+    }
+}
+
 pub struct ScriptEngine {
     context: Context,
     queue: Queue,
     next_handle: u64,
     read_audio: bool,
+    /// The last eval's value was a promise.
+    returned_promise: bool,
 }
 
 const PRELUDE: &str = r#"
@@ -359,9 +388,14 @@ function transcriptSegments() { return state().transcriptSegments || []; }
 function inspect() { return state().inspection || []; }
 function audioReport() { return state().audio || { status: "silent" }; }
 function __asset(nameOrPath) {
-  const a = assets().find((x) => x.path === String(nameOrPath) || x.name === String(nameOrPath));
-  if (!a) throw new Error("no asset " + nameOrPath);
-  return a;
+  const wanted = String(nameOrPath);
+  const all = assets();
+  const byPath = all.find((x) => x.path === wanted);
+  if (byPath) return byPath;
+  const named = all.filter((x) => x.name === wanted);
+  if (named.length > 1) throw new Error(named.length + " assets are named '" + wanted + "'; use the path");
+  if (!named.length) throw new Error("no asset " + nameOrPath);
+  return named[0];
 }
 function utterances(nameOrPath) { return __asset(nameOrPath).utterances || []; }
 function snapToSpeech(nameOrPath, start, end, handle) {
@@ -422,7 +456,11 @@ function split(at) {
 }
 function splitClip(id, at) { return __split_clip(id, __t(at)); }
 function deleteClip(id) {
-  __delete_clip(id === undefined ? (state().selected ?? -1) : id);
+  if (id === undefined) {
+    id = state().selected;
+    if (id == null) throw new Error("no clip selected");
+  }
+  __delete_clip(id);
 }
 function addTitle(text, at, dur, style) {
   return __add_title(String(text), at === undefined ? state().playhead : __t(at), dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
@@ -500,11 +538,11 @@ impl ScriptEngine {
                     .borrow_mut()
                     .push(0, || ScriptCommand::StepFrames(n)));
                 let q = Rc::clone(&queue);
-                reg!("selectClip", move |id: u64| q
+                reg!("selectClip", move |Whole(id): Whole| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SelectClip(id)));
                 let q = Rc::clone(&queue);
-                reg!("__split_clip", move |clip: u64, at: f64| q
+                reg!("__split_clip", move |Whole(clip): Whole, at: f64| q
                     .borrow_mut()
                     .push_addition(0, |handle| ScriptCommand::SplitClip {
                         clip,
@@ -512,78 +550,90 @@ impl ScriptEngine {
                         handle
                     }));
                 let q = Rc::clone(&queue);
-                reg!("__delete_clip", move |clip: i64| -> rquickjs::Result<()> {
-                    if clip >= 0 {
-                        q.borrow_mut()
-                            .push(0, || ScriptCommand::DeleteClip(clip as u64))
-                    } else {
-                        q.borrow_mut().check_active()
-                    }
-                });
+                reg!("__delete_clip", move |Whole(clip): Whole| q
+                    .borrow_mut()
+                    .push(0, || ScriptCommand::DeleteClip(clip)));
                 let q = Rc::clone(&queue);
-                reg!("__move_clip", move |clip: u64, start: f64| q
+                reg!("__move_clip", move |Whole(clip): Whole, start: f64| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::MoveClip { clip, start }));
                 let q = Rc::clone(&queue);
-                reg!("__trim_clip", move |clip: u64, left: f64, right: f64| q
-                    .borrow_mut()
-                    .push(0, || ScriptCommand::TrimClip {
-                        clip,
-                        left: Some(left),
-                        right: Some(right),
-                    }));
+                reg!(
+                    "__trim_clip",
+                    move |Whole(clip): Whole, left: f64, right: f64| q.borrow_mut().push(0, || {
+                        ScriptCommand::TrimClip {
+                            clip,
+                            left: Some(left),
+                            right: Some(right),
+                        }
+                    })
+                );
                 let q = Rc::clone(&queue);
-                reg!("renameClip", move |clip: u64, name: CString<'_>| q
-                    .borrow_mut()
-                    .push(name.len(), || ScriptCommand::RenameClip {
-                        clip,
-                        name: name.as_str().to_owned(),
-                    }));
+                reg!(
+                    "renameClip",
+                    move |Whole(clip): Whole, name: CString<'_>| q.borrow_mut().push(
+                        name.len(),
+                        || ScriptCommand::RenameClip {
+                            clip,
+                            name: name.as_str().to_owned(),
+                        }
+                    )
+                );
                 let q = Rc::clone(&queue);
-                reg!("setOpacity", move |clip: u64, value: f32| q
+                reg!("setOpacity", move |Whole(clip): Whole, value: f32| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetOpacity { clip, value }));
                 let q = Rc::clone(&queue);
-                reg!("setVolume", move |clip: u64, value: f32| q
+                reg!("setVolume", move |Whole(clip): Whole, value: f32| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetVolume { clip, value }));
                 let q = Rc::clone(&queue);
-                reg!("setCleanVoice", move |clip: u64, enabled: bool| q
+                reg!("setCleanVoice", move |Whole(clip): Whole, enabled: bool| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetCleanVoice { clip, enabled }));
                 let q = Rc::clone(&queue);
-                reg!("setSmoothFades", move |clip: u64, enabled: bool| q
-                    .borrow_mut()
-                    .push(0, || ScriptCommand::SetSmoothFades { clip, enabled }));
+                reg!(
+                    "setSmoothFades",
+                    move |Whole(clip): Whole, enabled: bool| q
+                        .borrow_mut()
+                        .push(0, || ScriptCommand::SetSmoothFades { clip, enabled })
+                );
                 let q = Rc::clone(&queue);
-                reg!("setFade", move |clip: u64, fade_in: f64, fade_out: f64| q
-                    .borrow_mut()
-                    .push(0, || ScriptCommand::SetFade {
-                        clip,
-                        fade_in,
-                        fade_out
-                    }));
+                reg!(
+                    "setFade",
+                    move |Whole(clip): Whole, fade_in: f64, fade_out: f64| q.borrow_mut().push(
+                        0,
+                        || ScriptCommand::SetFade {
+                            clip,
+                            fade_in,
+                            fade_out
+                        }
+                    )
+                );
                 let q = Rc::clone(&queue);
-                reg!("detachAudio", move |clip: u64| q
+                reg!("detachAudio", move |Whole(clip): Whole| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::DetachAudio { clip }));
                 let q = Rc::clone(&queue);
-                reg!("unlinkClip", move |clip: u64| q
+                reg!("unlinkClip", move |Whole(clip): Whole| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::UnlinkClip { clip }));
                 let q = Rc::clone(&queue);
-                reg!("setClipLane", move |clip: u64, lane: u64| q
-                    .borrow_mut()
-                    .push(0, || ScriptCommand::SetClipLane { clip, lane }));
+                reg!(
+                    "setClipLane",
+                    move |Whole(clip): Whole, Whole(lane): Whole| q
+                        .borrow_mut()
+                        .push(0, || ScriptCommand::SetClipLane { clip, lane })
+                );
                 let q = Rc::clone(&queue);
-                reg!("setEmbeddedAudio", move |clip: u64, enabled: bool| q
-                    .borrow_mut()
-                    .push(0, || ScriptCommand::SetEmbeddedAudio {
-                        clip,
-                        enabled
-                    }));
+                reg!(
+                    "setEmbeddedAudio",
+                    move |Whole(clip): Whole, enabled: bool| q
+                        .borrow_mut()
+                        .push(0, || ScriptCommand::SetEmbeddedAudio { clip, enabled })
+                );
                 let q = Rc::clone(&queue);
-                reg!("setDuck", move |clip: u64, enabled: bool| q
+                reg!("setDuck", move |Whole(clip): Whole, enabled: bool| q
                     .borrow_mut()
                     .push(0, || ScriptCommand::SetDuck { clip, enabled }));
                 let q = Rc::clone(&queue);
@@ -593,14 +643,17 @@ impl ScriptEngine {
                 let q = Rc::clone(&queue);
                 reg!(
                     "__tighten_silence",
-                    move |clip: u64, min_silence: f64, padding: f64, threshold: Opt<f32>| q
-                        .borrow_mut()
-                        .push(0, || ScriptCommand::TightenSilence {
+                    move |Whole(clip): Whole,
+                          min_silence: f64,
+                          padding: f64,
+                          threshold: Opt<f32>| q.borrow_mut().push(0, || {
+                        ScriptCommand::TightenSilence {
                             clip,
                             threshold: threshold.0,
                             min_silence,
                             padding,
-                        })
+                        }
+                    })
                 );
                 let q = Rc::clone(&queue);
                 reg!(
@@ -618,21 +671,28 @@ impl ScriptEngine {
                         })
                 );
                 let q = Rc::clone(&queue);
-                reg!("setTitleStyle", move |clip: u64, style: CString<'_>| q
-                    .borrow_mut()
-                    .push(style.len(), || ScriptCommand::SetTitleStyle {
-                        clip,
-                        style: style.as_str().to_owned(),
-                    }));
-                let q = Rc::clone(&queue);
                 reg!(
-                    "__add_captions_for_clip",
-                    move |clip: u64, style: CString<'_>| q.borrow_mut().push(style.len(), || {
-                        ScriptCommand::AddCaptionsForClip {
+                    "setTitleStyle",
+                    move |Whole(clip): Whole, style: CString<'_>| q.borrow_mut().push(
+                        style.len(),
+                        || ScriptCommand::SetTitleStyle {
                             clip,
                             style: style.as_str().to_owned(),
                         }
-                    })
+                    )
+                );
+                let q = Rc::clone(&queue);
+                reg!(
+                    "__add_captions_for_clip",
+                    move |Whole(clip): Whole, style: CString<'_>| q.borrow_mut().push(
+                        style.len(),
+                        || {
+                            ScriptCommand::AddCaptionsForClip {
+                                clip,
+                                style: style.as_str().to_owned(),
+                            }
+                        }
+                    )
                 );
                 let q = Rc::clone(&queue);
                 reg!("__add_asset", move |asset: CString<'_>, at: f64| q
@@ -702,7 +762,9 @@ impl ScriptEngine {
                             fps,
                             end,
                             clips: clips
-                                .chunks_exact(3)
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
                                 .map(|clip| (clip[0] as u64, clip[1], clip[2]))
                                 .collect(),
                         };
@@ -726,6 +788,7 @@ impl ScriptEngine {
             queue,
             next_handle: CLIP_HANDLE_BASE,
             read_audio: false,
+            returned_promise: false,
         })
     }
 
@@ -756,11 +819,18 @@ impl ScriptEngine {
         let isolated = format!("(() => {{\n{code}\n}})()");
         let (output, commands, success) = engine.eval_inner(&isolated, state_json);
         self.read_audio = engine.read_audio;
-        if success {
-            Ok((output, commands))
-        } else {
-            Err(output)
+        if !success {
+            return Err(output);
         }
+        // Nothing runs a promise's continuation, so the commands after an
+        // `await` or inside a `then` would be dropped and the rest applied.
+        if engine.returned_promise || engine.context.runtime().is_job_pending() {
+            return Err(
+                "error: scripts run synchronously; remove async, await and promise callbacks"
+                    .to_owned(),
+            );
+        }
+        Ok((output, commands))
     }
 
     fn eval_inner(&mut self, code: &str, state_json: &str) -> (String, Vec<ScriptCommand>, bool) {
@@ -770,12 +840,14 @@ impl ScriptEngine {
             ..CommandQueue::default()
         };
         let state_json = state_json.to_owned();
+        let mut returned_promise = false;
         let (output, success) = self.context.with(|ctx| -> (String, bool) {
             if ctx.globals().set("__state_json", state_json).is_err() {
                 return ("error: could not refresh state".to_owned(), false);
             }
             match ctx.eval::<rquickjs::Value, _>(code) {
                 Ok(value) => {
+                    returned_promise = value.is_promise();
                     let _ = ctx.globals().set("__last", value);
                     let text = ctx
                         .eval::<String, _>(
@@ -805,6 +877,7 @@ impl ScriptEngine {
         let queue = std::mem::take(&mut *self.queue.borrow_mut());
         self.next_handle = queue.next_handle;
         self.read_audio = queue.read_audio;
+        self.returned_promise = returned_promise;
         if let Some(error) = queue.error {
             (format!("error: {error}"), Vec::new(), false)
         } else {
@@ -1455,13 +1528,13 @@ mod tests {
     #[test]
     fn string_callbacks_preserve_utf8_nul_and_path_commands() {
         let mut engine = ScriptEngine::new().expect("quickjs engine");
-        let code = r#"renameClip(1, 'café\0🎬'); console.log('résumé', 3); importMedia('source.mp4'); exportTo('output.mp4');"#;
+        let code = r#"renameClip(1, 'café 🎬'); console.log('résumé\0', 3); importMedia('source.mp4'); exportTo('output.mp4');"#;
         let expected = vec![
             ScriptCommand::RenameClip {
                 clip: 1,
-                name: "café\0🎬".to_owned(),
+                name: "café 🎬".to_owned(),
             },
-            ScriptCommand::Log("résumé 3".to_owned()),
+            ScriptCommand::Log("résumé\0 3".to_owned()),
             ScriptCommand::Import("source.mp4".to_owned()),
             ScriptCommand::Export("output.mp4".to_owned()),
         ];
@@ -1470,6 +1543,78 @@ mod tests {
         assert_eq!(commands, expected);
         let (_, commands) = engine.eval_checked(code, "{}").unwrap();
         assert_eq!(commands, expected);
+    }
+
+    #[test]
+    fn drawn_text_refuses_control_characters_but_keeps_line_breaks() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        for code in [
+            r#"renameClip(1, 'nul\0tail')"#,
+            r#"addTitle('bell\u0007', 0, 2)"#,
+            r#"addTitle('escape\u001b[0m', 0, 2)"#,
+        ] {
+            let error = engine.eval_checked(code, "{}").unwrap_err();
+            assert!(error.contains("control characters"), "{code}: {error}");
+        }
+        // Preview and export both draw a line break as a space.
+        let (_, commands) = engine
+            .eval_checked(r#"addTitle('two\nlines\there', 0, 2)"#, "{}")
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn clip_ids_and_lanes_must_be_whole_numbers() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        let state = r#"{"selected": null, "playhead": 0}"#;
+        for code in [
+            "deleteClip(1.9)",
+            "moveClip(2.7, 20)",
+            "selectClip(NaN)",
+            "deleteClip(-5)",
+            "setClipLane(1, 0.5)",
+            "setClipLane(1, -1)",
+            "setOpacity(Infinity, 1)",
+            "renameClip('1', 'name')",
+            "detachAudio(2 ** 60)",
+        ] {
+            let error = engine.eval_checked(code, state).unwrap_err();
+            assert!(error.contains("whole numbers"), "{code}: {error}");
+        }
+        // Nothing selected is not "delete nothing".
+        let error = engine.eval_checked("deleteClip()", state).unwrap_err();
+        assert!(error.contains("no clip selected"), "{error}");
+        let (_, commands) = engine
+            .eval_checked("deleteClip(7); setClipLane(7, 0); deleteClip(7.0)", state)
+            .unwrap();
+        assert_eq!(
+            commands,
+            vec![
+                ScriptCommand::DeleteClip(7),
+                ScriptCommand::SetClipLane { clip: 7, lane: 0 },
+                ScriptCommand::DeleteClip(7),
+            ]
+        );
+    }
+
+    #[test]
+    fn asynchronous_scripts_are_refused_whole() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        for code in [
+            // Only the first title would have been queued.
+            "return (async () => { addTitle('t1', 10, 1); await null; addTitle('t2', 12, 1); })()",
+            // The callback would never have run.
+            "Promise.resolve().then(() => addTitle('late', 10, 1)); return 'sync done'",
+            "return Promise.resolve(3)",
+        ] {
+            let error = engine.eval_checked(code, "{}").unwrap_err();
+            assert!(error.contains("synchronously"), "{code}: {error}");
+        }
+        // The next run is a fresh runtime with nothing pending.
+        let (output, commands) = engine
+            .eval_checked("addTitle('t', 0, 1); return 4", "{}")
+            .unwrap();
+        assert_eq!((output.as_str(), commands.len()), ("4", 1));
     }
 
     #[test]

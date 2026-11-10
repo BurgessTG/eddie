@@ -303,8 +303,10 @@ fn audio_samples(path: &Path) -> Vec<f32> {
     ]));
     assert_eq!(pcm.stdout.len() % 4, 0, "complete audio samples");
     pcm.stdout
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -808,8 +810,10 @@ fn textured_bt601_sources_keep_their_average_color_through_export() {
                 "-",
             ]));
             out.stdout
-                .chunks_exact(320 * 180 * 3)
-                .map(<[u8]>::to_vec)
+                .as_chunks::<{ 320 * 180 * 3 }>()
+                .0
+                .iter()
+                .map(|frame| frame.to_vec())
                 .collect::<Vec<_>>()
         };
         let exported = accurate(&fixture.export(&format!("bt601-{range}-out.mp4"), &timeline));
@@ -817,7 +821,12 @@ fn textured_bt601_sources_keep_their_average_color_through_export() {
         assert_eq!(exported.len(), original.len());
         for (index, (actual, expected)) in exported.iter().zip(&original).enumerate() {
             let mut bias = [0.0_f64; 3];
-            for (pixel, reference) in actual.chunks_exact(3).zip(expected.chunks_exact(3)) {
+            for (pixel, reference) in actual
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<3>().0)
+            {
                 for channel in 0..3 {
                     bias[channel] += pixel[channel] as f64 - reference[channel] as f64;
                 }
@@ -962,7 +971,9 @@ fn titles_have_first_inserted_precedence_and_exclusive_ends() {
         let out = fixture.export(&format!("title-{id}.mp4"), &single);
         let decoded = frames(&out);
         let dark = decoded[0]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|rgb| rgb[0] < 200)
             .count();
         assert!(
@@ -982,7 +993,9 @@ fn titles_have_first_inserted_precedence_and_exclusive_ends() {
 /// Yellow highlight pixels in an RGB frame: their count and mean x.
 fn highlight_pixels(frame: &[u8], width: usize) -> (usize, f64) {
     let xs: Vec<usize> = frame
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, rgb)| rgb[0] > 200 && rgb[1] > 160 && rgb[2] < 90)
         .map(|(index, _)| index % width)
@@ -1080,7 +1093,7 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
         while preview.len() < 2 * 48_000 {
             let block = engine.render(1024);
             assert!(!block.is_empty(), "preview clock stopped");
-            preview.extend(block.chunks_exact(2).map(|frame| frame[0]));
+            preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
         }
         let preview_mid = rms(&preview, 0.49, 0.51) / rms(&preview, 1.4, 1.6);
         eprintln!(
@@ -1158,7 +1171,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
     while preview.len() < 3 * 48_000 {
         let block = engine.render(1024);
         assert!(!block.is_empty(), "preview clock stopped");
-        preview.extend(block.chunks_exact(2).map(|frame| frame[0]));
+        preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
     }
     let exported = audio_samples(&cleaned);
     let db = |samples: &[f32]| {
@@ -1221,8 +1234,10 @@ fn tone_window(path: &Path, frequency: f64, from: f64, to: f64) -> f64 {
     ]));
     let samples: Vec<_> = out
         .stdout
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()) as f64)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes) as f64)
         .collect();
     let window = &samples[(from * 48000.0) as usize..(to * 48000.0) as usize];
     let (mut sin, mut cos) = (0.0, 0.0);
@@ -1480,6 +1495,19 @@ fn ducked_music_dips_only_while_the_speech_source_is_audible() {
     assert!(
         (voice / tone_window(&ducked, 440.0, 0.1, 0.5) - 1.0).abs() < 0.1,
         "speech is untouched"
+    );
+
+    // Music cut 0.1 s after the speech ends carries on the same curve: the
+    // new piece starts held down and is halfway back at the same moment.
+    let mut cut = timeline.clone();
+    cut.split_at(music, 1.5).expect("split the bed");
+    let cut = fixture.export_with("ducked-cut.mp4", &cut, &options);
+    let held = tone_window(&cut, 880.0, 1.52, 1.68) / before;
+    assert!((0.2..0.32).contains(&held), "held after the cut: {held}");
+    let release = tone_window(&cut, 880.0, 2.05, 2.15) / before;
+    assert!(
+        (0.45..0.55).contains(&release),
+        "halfway back after the cut: {release}"
     );
 
     // Without speech evidence nothing ducks.

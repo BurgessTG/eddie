@@ -285,7 +285,7 @@ mod tests {
                 .iter()
                 .find(|(path, bits, _)| *path == source.path && *bits == time.to_bits())
                 .expect("each request decoded once");
-            for pixel in rgba.chunks_exact(4) {
+            for pixel in rgba.as_chunks::<4>().0 {
                 let distance: i32 = pixel[..3]
                     .iter()
                     .zip(expected)

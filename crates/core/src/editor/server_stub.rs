@@ -47,5 +47,7 @@ impl Editor {
         true
     }
 
-    pub(crate) fn take_over(&self, _project: &Path) {}
+    pub(crate) fn take_over(&self, _project: &Path) -> bool {
+        false
+    }
 }

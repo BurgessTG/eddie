@@ -40,6 +40,7 @@ const FRAMES_WIDTH: u32 = 384;
 /// drawn as export draws them. `shots` counts pictures, not title changes;
 /// `sampled` means some shot has no cell.
 pub fn sheet(app: &Editor, output: PathBuf, range: Option<&str>) -> Result<Render, String> {
+    picture_output(app, &output)?;
     let span = match range {
         Some(spec) => app.timeline.time_index().range(spec)?,
         None => (0.0, app.timeline.end()),
@@ -69,6 +70,7 @@ pub fn sheet(app: &Editor, output: PathBuf, range: Option<&str>) -> Result<Rende
 /// is instead of guessing a source time. Pictures inside ranges the
 /// timeline already shows are marked `*`.
 pub fn strip(app: &Editor, asset: &str, output: PathBuf) -> Result<Render, String> {
+    picture_output(app, &output)?;
     let asset = video_asset(app, asset)?;
     let source = StripSource::new(asset, &app.timeline, app.curation_dir.as_deref());
     Ok(Box::new(move || {
@@ -219,8 +221,14 @@ fn frame_times(
     };
     let count = ((end - start) / step - 1e-9).ceil().max(1.0);
     if count > FRAMES_MAX as f64 {
+        // `--every 1e-300` would otherwise print a 300-digit count.
+        let asked = if count < 1e6 {
+            format!("{count:.0}")
+        } else {
+            "Over a million".to_owned()
+        };
         return Err(format!(
-            "{count:.0} pictures asked for; one call gives at most {FRAMES_MAX}. Raise --every or shorten the range."
+            "{asked} pictures asked for; one call gives at most {FRAMES_MAX}. Raise --every or shorten the range."
         ));
     }
     let times = (0..count as usize)
@@ -230,9 +238,7 @@ fn frame_times(
 }
 
 fn video_asset<'a>(app: &'a Editor, name: &str) -> Result<&'a BinAsset, String> {
-    let asset = app
-        .asset_named(name)
-        .ok_or_else(|| format!("no asset '{name}' in the project"))?;
+    let asset = app.asset_named(name)?;
     if asset.state != AssetState::Ready {
         return Err(format!("{} is not imported yet", asset.info.name));
     }
@@ -240,6 +246,30 @@ fn video_asset<'a>(app: &'a Editor, name: &str) -> Result<&'a BinAsset, String> 
         return Err(format!("{} has no picture", asset.info.name));
     }
     Ok(asset)
+}
+
+/// A sheet or strip is a JPEG and never replaces what it pictures: `eddie
+/// sheet p.eddie a.mp4`, with the arguments of `strip`, once turned a.mp4
+/// into a picture.
+fn picture_output(app: &Editor, output: &Path) -> Result<(), String> {
+    let jpeg = output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+        });
+    if !jpeg {
+        return Err(format!(
+            "{} must end in .jpg; the picture is a JPEG",
+            output.display()
+        ));
+    }
+    match app.export_would_replace(output) {
+        Some(used) => Err(format!(
+            "The picture cannot replace {used}, which this project uses."
+        )),
+        None => Ok(()),
+    }
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {

@@ -1037,7 +1037,8 @@ pub fn export_timeline(
         // The preview mixer's `duck_gain` on clip-local time: raised-cosine
         // ramps in decibels. Merged ranges never share a ramp, so their
         // amounts add. Short frames keep each step under 6 ms so the ramps
-        // do not zipper.
+        // do not zipper. Speech just before the clip gives negative times,
+        // hence the brackets around each one.
         let ducks = timeline.duck_ranges(clip, &options.speech);
         if !ducks.is_empty() {
             use openreel_engine::{DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
@@ -1046,8 +1047,8 @@ pub fn export_timeline(
                 .map(|&(start, end)| {
                     let (down, hold) = (start - DUCK_ATTACK, end + DUCK_HOLD);
                     format!(
-                        "if(gte(t,{})*lt(t,{}),if(lt(t,{}),(1-cos((t-{})/{}*PI))/2,\
-                         if(lt(t,{}),1,(1+cos((t-{})/{}*PI))/2)),0)",
+                        "if(gte(t,({}))*lt(t,({})),if(lt(t,({})),(1-cos((t-({}))/{}*PI))/2,\
+                         if(lt(t,({})),1,(1+cos((t-({}))/{}*PI))/2)),0)",
                         f(down),
                         f(hold + DUCK_RELEASE),
                         f(start),
@@ -1346,7 +1347,12 @@ mod title_text_tests {
             &format!("textfile={}", filter_value(&file.to_string_lossy())),
         );
         let _ = std::fs::remove_file(&file);
-        let dark = expected.chunks_exact(3).filter(|rgb| rgb[0] < 128).count();
+        let dark = expected
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|rgb| rgb[0] < 128)
+            .count();
         assert!(dark > 500, "the text is drawn, dark pixels={dark}");
         assert!(
             drawn(&font, &format!("text={}", filter_value(typed))) == expected,

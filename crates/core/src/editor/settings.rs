@@ -55,6 +55,9 @@ pub fn config_path() -> Option<PathBuf> {
     }
 }
 
+/// Where a config that could not be read is moved when settings are saved.
+const UNREADABLE: &str = "config.unreadable.json";
+
 impl Settings {
     pub fn load() -> Self {
         let Some(value) = config_path()
@@ -116,6 +119,15 @@ impl Settings {
             file.write_all(body.to_string().as_bytes())?;
             file.sync_all()?;
             drop(file);
+            // A config that does not parse loaded as defaults. Whatever it
+            // held, a key say, is kept beside the new file, not replaced.
+            let damaged = std::fs::read(&path).is_ok_and(|raw| {
+                !raw.trim_ascii().is_empty()
+                    && serde_json::from_slice::<serde_json::Value>(&raw).is_err()
+            });
+            if damaged {
+                std::fs::rename(&path, parent.join(UNREADABLE))?;
+            }
             std::fs::rename(&temporary, &path)
         })();
         if result.is_err() {
@@ -311,6 +323,25 @@ mod tests {
                     std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
                     1
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn saving_settings_keeps_a_config_that_could_not_be_read() {
+        with_isolated_config(
+            "editor::settings::tests::saving_settings_keeps_a_config_that_could_not_be_read",
+            |path| {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                // Cut short, as after a full disk: the key is still in it.
+                let damaged = r#"{"api_key": "fixture-key-only", "format": "portr"#;
+                std::fs::write(&path, damaged).unwrap();
+                let settings = Settings::load();
+                assert_eq!(settings, Settings::default());
+                settings.save().unwrap();
+                assert_eq!(Settings::load(), settings);
+                let kept = path.with_file_name(UNREADABLE);
+                assert_eq!(std::fs::read_to_string(kept).unwrap(), damaged);
             },
         );
     }

@@ -174,7 +174,7 @@ impl LoudnessMeter {
 
     /// Interleaved stereo frames.
     pub fn push(&mut self, stereo: &[f32]) {
-        for frame in stereo.chunks_exact(2) {
+        for frame in stereo.as_chunks::<2>().0 {
             for (channel, &sample) in frame.iter().enumerate() {
                 let x = f64::from(sample);
                 if sample.abs() > 1.0 {
@@ -200,6 +200,35 @@ impl LoudnessMeter {
                 self.peaks.push(self.peak);
                 (self.in_hop, self.energy, self.peak) = (0, 0., 0.);
             }
+        }
+    }
+
+    /// `frames` of silence. The first second is fed as zeros, which empties
+    /// the weighting filters and the peak history (the slowest pole decays
+    /// by e^-239 at 48 kHz); the whole hops after it are counted, not
+    /// filtered, so hours of silence cost nothing.
+    pub fn push_silence(&mut self, frames: usize) {
+        let settle = self.rate + (self.hop - (self.in_hop + self.rate) % self.hop) % self.hop;
+        if frames <= settle {
+            return self.push_zeros(frames);
+        }
+        self.push_zeros(settle);
+        for stage in self.filters.iter_mut().flatten() {
+            stage.z = [0.; 2];
+        }
+        let hops = (frames - settle) / self.hop;
+        self.hops.resize(self.hops.len() + hops, 0.);
+        self.peaks.resize(self.peaks.len() + hops, 0.);
+        self.frames += hops * self.hop;
+        self.push_zeros(frames - settle - hops * self.hop);
+    }
+
+    fn push_zeros(&mut self, mut frames: usize) {
+        const ZEROS: [f32; 1024] = [0.; 1024];
+        while frames > 0 {
+            let take = frames.min(ZEROS.len() / 2);
+            self.push(&ZEROS[..take * 2]);
+            frames -= take;
         }
     }
 
@@ -344,7 +373,10 @@ impl Loudness {
 
 /// Render the mix of `segments` (as the preview mixer plays them, ducking
 /// included) from 0 to `end` seconds offline and measure it. Decoders start
-/// only near the render position, as in playback. `cancel` stops early.
+/// only near the render position, as in playback. Time with no clip
+/// sounding or about to is counted as silence instead of being mixed, so a
+/// clip parked hours out does not cost hours of rendering. `cancel` stops
+/// early.
 pub fn measure_mix(
     segments: &[(u64, AudioSegment)],
     end: f64,
@@ -372,6 +404,24 @@ pub fn measure_mix(
                 .filter(|(_, s)| s.start < now + LOOK_AHEAD && s.start + s.duration > now)
                 .cloned(),
         );
+        if live.is_empty() {
+            // Every clip still to come starts at least `LOOK_AHEAD` from
+            // here. A gap too short to skip is rendered as usual, which
+            // also moves on when the next clip is exactly that far away.
+            let next = segments
+                .iter()
+                .filter(|(_, s)| s.start + s.duration > now)
+                .map(|(_, s)| s.start - LOOK_AHEAD)
+                .fold(end, f64::min);
+            let gap = ((next - now) * f64::from(AUDIO_RATE)).floor().max(0.0) as usize;
+            let gap = gap.min(total - rendered);
+            if gap > BLOCK {
+                meter.push_silence(gap);
+                rendered += gap;
+                engine.seek(rendered as f64 / f64::from(AUDIO_RATE));
+                continue;
+            }
+        }
         engine.set_voices(&live);
         let block = engine.render(BLOCK.min(total - rendered));
         if block.is_empty() {
@@ -448,6 +498,63 @@ mod tests {
         let quiet = loudness.quiet_ranges(-60., 1.);
         assert_eq!(quiet.len(), 1);
         assert!(quiet[0].start < 0.1 && (quiet[0].end - 3.0).abs() < 0.35);
+    }
+
+    #[test]
+    fn counted_silence_measures_like_fed_silence() {
+        // A tone, a silence that starts and ends off the hop grid, a louder
+        // tone. Counting the silence must give what feeding zeros gives.
+        let first = sine(1000., 0.1, 1.234, 48000);
+        let second = sine(440., 0.3, 2.5, 48000);
+        let silence = 48000 * 20 + 12_345;
+        let stereo = |mono: &[f32]| mono.iter().flat_map(|s| [*s, *s]).collect::<Vec<f32>>();
+        let mut fed = LoudnessMeter::new(48000);
+        fed.push(&stereo(&first));
+        fed.push(&vec![0.; silence * 2]);
+        fed.push(&stereo(&second));
+        let fed = fed.finish();
+        let mut counted = LoudnessMeter::new(48000);
+        counted.push(&stereo(&first));
+        counted.push_silence(silence);
+        counted.push(&stereo(&second));
+        let counted = counted.finish();
+
+        assert_eq!(counted.duration(), fed.duration());
+        assert_eq!(counted.hops.len(), fed.hops.len());
+        assert_eq!(counted.peaks.len(), fed.peaks.len());
+        let end = fed.duration();
+        for range in [0.0..end, 0.0..1.2, 21.5..end] {
+            let (a, b) = (
+                counted.integrated(range.clone()),
+                fed.integrated(range.clone()),
+            );
+            assert!(
+                (a.unwrap() - b.unwrap()).abs() < 1e-9,
+                "{range:?}: {a:?} vs {b:?}"
+            );
+            let (a, b) = (
+                counted.true_peak(range.clone()),
+                fed.true_peak(range.clone()),
+            );
+            assert!(
+                (a.unwrap() - b.unwrap()).abs() < 1e-9,
+                "{range:?}: {a:?} vs {b:?}"
+            );
+        }
+        assert_eq!(counted.integrated(3.0..20.0), None);
+        assert_eq!(counted.true_peak(3.0..20.0), None);
+        let ranges = |l: &Loudness| l.quiet_ranges(-60., 1.);
+        assert_eq!(ranges(&counted), ranges(&fed));
+        assert_eq!(ranges(&counted).len(), 1);
+
+        // A silence shorter than the settling second is simply fed.
+        let mut short = LoudnessMeter::new(48000);
+        short.push(&stereo(&first));
+        short.push_silence(4_800);
+        assert_eq!(
+            short.finish().duration(),
+            (first.len() + 4_800) as f64 / 48000.
+        );
     }
 
     #[test]

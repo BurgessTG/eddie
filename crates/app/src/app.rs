@@ -409,11 +409,12 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     gallery::sync(ui);
     settings::sync(ui);
     console::sync(ui);
-    if ui.pump(clock) && asks_for_attention_only() {
-        if let Some(handle) = &ui.handle {
-            // A finished export asks to be noticed.
-            handle.focus();
-        }
+    if ui.pump(clock)
+        && asks_for_attention_only()
+        && let Some(handle) = &ui.handle
+    {
+        // A finished export asks to be noticed.
+        handle.focus();
     }
     if ui.quit {
         tx.quit();
@@ -439,7 +440,7 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         ui.frame_ms * 0.9 + ms * 0.1
     };
     ui.frames += 1;
-    if ui.frames % 60 == 0 {
+    if ui.frames.is_multiple_of(60) {
         ui.rss_mb = read_rss_mb();
     }
     true

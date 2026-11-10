@@ -11,7 +11,9 @@ fn mean_red_blue(frame: &RawFrame) -> (f64, f64) {
     let sum = |channel: usize| -> f64 {
         frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| f64::from(pixel[channel]))
             .sum::<f64>()
             / pixels

@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -84,7 +84,8 @@ the window, each `run` is one Undo step, and replies carry \"live\":true.
 Every command but help and guide prints one JSON object. Errors print
 {\"ok\":false,...} and exit 1. `saved` says whether the project file was
 written; transcribe and curate mark a file answered from its saved result
-with \"reused\":true.
+with \"reused\":true. run and import on one project take turns, so several
+started together each see what the one before saved.
 Without a command, eddie opens the editor window.";
 
 const COMMANDS: &[&str] = &[
@@ -160,12 +161,23 @@ fn script_help() -> String {
         .unwrap_or_else(|error| format!("scripting unavailable: {error}"))
 }
 
-fn absolute(path: &str) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path))
+/// Requests carry paths as text, so one made absolute in a folder whose
+/// name is not UTF-8 is refused here instead of being sent changed.
+fn absolute(path: &str) -> Result<String, String> {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .into_os_string()
+        .into_string()
+        .map_err(|path| {
+            format!(
+                "{} is not UTF-8; run eddie from a folder whose path is",
+                path.to_string_lossy()
+            )
+        })
 }
 
 fn project_arg(args: &[String]) -> Result<PathBuf, String> {
-    Ok(absolute(args.first().ok_or("missing <project>")?))
+    absolute(args.first().ok_or("missing <project>")?).map(PathBuf::from)
 }
 
 /// A command's arguments as the request it makes. Paths become absolute
@@ -231,7 +243,8 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
             if plain.is_empty() {
                 return Err("missing <media...>".to_owned());
             }
-            json!({ "media": plain.iter().map(|path| absolute(path)).collect::<Vec<_>>() })
+            let media: Result<Vec<_>, _> = plain.iter().map(|path| absolute(path)).collect();
+            json!({ "media": media? })
         }
         "transcribe" => {
             let mut request = json!({ "assets": plain, "force": flag("--force") });
@@ -248,25 +261,25 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
         "curate" => json!({ "assets": plain, "force": flag("--force") }),
         "sheet" => {
             at_most(2)?;
-            json!({ "output": absolute(at(0, "<out.jpg>")?), "range": plain.get(1) })
+            json!({ "output": absolute(at(0, "<out.jpg>")?)?, "range": plain.get(1) })
         }
         "strip" => {
             at_most(2)?;
-            json!({ "asset": at(0, "<asset>")?, "output": absolute(at(1, "<out.jpg>")?) })
+            json!({ "asset": at(0, "<asset>")?, "output": absolute(at(1, "<out.jpg>")?)? })
         }
         "frames" => {
             at_most(3)?;
             json!({
                 "asset": at(0, "<asset>")?,
                 "range": at(1, "<range|time>")?,
-                "directory": absolute(at(2, "<out-dir>")?),
+                "directory": absolute(at(2, "<out-dir>")?)?,
                 "every": positive("every")?,
                 "width": positive("width")?,
             })
         }
         "export" => {
             at_most(1)?;
-            json!({ "output": absolute(at(0, "<out.mp4>")?) })
+            json!({ "output": absolute(at(0, "<out.mp4>")?)? })
         }
         _ => {
             at_most(0)?;
@@ -274,6 +287,35 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
         }
     })
 }
+
+/// How long a command waits for another that is changing the same project.
+const TURN: Duration = Duration::from_secs(60);
+
+/// What a command that changes a project gets before it reads the file.
+enum Turn {
+    /// The file is this command's until it exits (`None`: nothing to hold).
+    Held(Option<std::fs::File>),
+    /// An editor has it and answers, so the request goes there.
+    Live(server::Connection),
+}
+
+/// Wait for whoever has `project`: a command lets go when it has saved; an
+/// editor holds on, and is asked instead as soon as it listens.
+fn turn(project: &Path) -> Result<Turn, String> {
+    let started = Instant::now();
+    loop {
+        if let Some(live) = server::connect(project) {
+            return Ok(Turn::Live(live));
+        }
+        match super::project::lock_project(project, Duration::from_millis(250)) {
+            Ok(lock) => return Ok(Turn::Held(lock)),
+            Err(error) if started.elapsed() >= TURN => return Err(error),
+            Err(_) => {}
+        }
+    }
+}
+/// The longest a windowless editor sleeps without looking at its workers.
+const IDLE: Duration = Duration::from_secs(1);
 
 /// A windowless editor that sleeps until a worker has something for it.
 struct Session {
@@ -319,10 +361,10 @@ impl Session {
             if let Some(answer) = answer {
                 return answer;
             }
-            match self.app.repaint_after() {
-                Some(after) => drop(self.woken.recv_timeout(after)),
-                None => drop(self.woken.recv()),
-            }
+            // A worker that panicked never wakes this: look again each
+            // second, so its closed channel ends the wait with an error.
+            let after = self.app.repaint_after().unwrap_or(IDLE).min(IDLE);
+            let _ = self.woken.recv_timeout(after);
         }
     }
 
@@ -379,7 +421,7 @@ fn request(command: &str, args: &[String]) -> Result<Value, String> {
     let project = project_arg(args)?;
     let request = params(command, &args[1..])?;
     let state = command == "state";
-    if let Some(mut live) = server::connect(&project) {
+    let ask = |mut live: server::Connection| {
         let mut value = live.request(command, &request, &mut |line| eprintln!("{line}"))?;
         if let Some(object) = value.as_object_mut() {
             // `state` is exactly what scripts see, here as there.
@@ -389,14 +431,27 @@ fn request(command: &str, args: &[String]) -> Result<Value, String> {
                 object.insert("live".to_owned(), json!(true));
             }
         }
-        return Ok(value);
+        Ok(value)
+    };
+    if let Some(live) = server::connect(&project) {
+        return ask(live);
     }
     if matches!(command, "stop" | "undo" | "redo" | "save") {
         return Err(format!(
             "{command} needs a running editor: open the project in Eddie, or run eddie serve"
         ));
     }
+    // Commands that change the project take turns: each reads what the one
+    // before it saved.
+    let lock = match command {
+        "run" | "import" => match turn(&project)? {
+            Turn::Live(live) => return ask(live),
+            Turn::Held(lock) => lock,
+        },
+        _ => None,
+    };
     let mut session = Session::open(&project)?;
+    session.app.project_lock = lock;
     let outcome = session.request(command, &request)?;
     let mut value = outcome.value;
     if outcome.changed {
@@ -414,12 +469,16 @@ fn request(command: &str, args: &[String]) -> Result<Value, String> {
 fn serve(args: &[String]) -> Result<Value, String> {
     let project = project_arg(args)?;
     params("serve", &args[1..])?;
+    let Turn::Held(lock) = turn(&project)? else {
+        return Err(super::project::held_elsewhere(&project));
+    };
     let mut session = Session::open(&project)?;
+    session.app.project_lock = lock;
     let socket = session.app.serve()?;
     let ready = json!({
         "ok": true,
         "serving": project,
-        "socket": socket,
+        "socket": socket.to_string_lossy(),
         "pid": std::process::id(),
     });
     let mut stdout = std::io::stdout();

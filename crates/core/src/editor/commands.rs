@@ -3,7 +3,7 @@
 //! server on a running editor, so a request means the same thing either way.
 //! Paths arrive absolute; the command line resolves them where it was run.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -225,7 +225,7 @@ fn paths(params: &Value, key: &str) -> Result<Vec<PathBuf>, String> {
 
 pub fn summary(app: &Editor) -> Value {
     json!({
-        "project": app.project_path,
+        "project": app.project_path.as_deref().map(Path::to_string_lossy),
         "clips": app.timeline.clips.len(),
         "duration": app.timeline.end(),
         "assets": app.assets.iter().map(|asset| &asset.info.name).collect::<Vec<_>>(),
@@ -246,7 +246,12 @@ fn measure(app: &mut Editor, method: &str, params: &Value) -> Reply {
 /// edit would do, then puts the editor back.
 fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     let code = text(params, "code")?;
-    let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+    // "true" or 1 must not run for real.
+    let dry_run = match &params["dryRun"] {
+        Value::Null => false,
+        Value::Bool(dry_run) => *dry_run,
+        _ => return Err("dryRun is true or false".to_owned()),
+    };
     let findings = inspect::inspect(&app.timeline, &app.assets);
     // Whatever the user had just changed is its own step, not this one's.
     app.commit_history();
@@ -330,9 +335,7 @@ fn transcribe(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     let wanted = strings(params, "assets")?;
     let mut targets = Vec::new();
     for name in &wanted {
-        let asset = app
-            .asset_named(name)
-            .ok_or_else(|| format!("no asset '{name}' in the project"))?;
+        let asset = app.asset_named(name)?;
         targets.push(asset.info.clone());
     }
     if wanted.is_empty() {
@@ -390,9 +393,7 @@ fn curate(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     let wanted = strings(params, "assets")?;
     let mut targets = Vec::new();
     for name in &wanted {
-        let asset = app
-            .asset_named(name)
-            .ok_or_else(|| format!("no asset '{name}' in the project"))?;
+        let asset = app.asset_named(name)?;
         targets.push(asset.info.path.clone());
     }
     if wanted.is_empty() {
@@ -455,7 +456,11 @@ impl Job {
                 let (imported, failed): (Vec<_>, Vec<_>) = media
                     .iter()
                     .map(|path| path.to_string_lossy().into_owned())
-                    .partition(|path| app.asset(path).is_some());
+                    // A file that was here and no longer reads stays in the
+                    // bin, and is still a failure.
+                    .partition(|path| {
+                        app.asset(path).is_some() && !app.import_errors.contains_key(path)
+                    });
                 let failed: Vec<Value> = failed
                     .into_iter()
                     .map(|path| {
@@ -483,7 +488,7 @@ impl Job {
                 }
                 Some(match &app.exported {
                     Some((file, _)) => Ok(Outcome::read(json!({
-                        "output": file,
+                        "output": file.to_string_lossy(),
                         "seconds": started.elapsed().as_secs_f64(),
                     }))),
                     None => Err(app

@@ -34,8 +34,11 @@ guide` prints this guide as written for the installed version.
   means the file was curated without speech data, not that it is silent.
   Fix the cause, run `transcribe`, then `curate --force`.
 - `new` and `import` list `media.imported` (paths) and `media.failed`
-  (`[{path, error}]`). A failed file is not in the project.
+  (`[{path, error}]`). A failed file is not in the project, unless an
+  earlier import read it: then the project keeps what it read then.
 - A reply's `saved` says whether the project file was written.
+- `run` and `import` on one project take turns, each waiting up to 60
+  seconds for the one before it. Starting several at once loses no edit.
 - An unknown command is an error too; it never opens the window.
 
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
@@ -53,6 +56,9 @@ same way; replies add `"live":true`.
   command takes about 50 ms instead of about a second. It prints one line
   when it is listening and saves every change. `eddie stop talk.eddie`
   ends it.
+  - A reply with `"saved":false` and a `saveError` means the edit is in
+    the editor but the file could not be written. Do not send the edit
+    again; fix the cause, then `eddie save talk.eddie`.
 - In the window, the user watches your edits arrive, and each `run` is one
   Undo step in their history.
   - The window saves only when its user does, so replies say
@@ -70,6 +76,9 @@ same way; replies add `"live":true`.
   change), `import`, `curation`, `transcription` and `export`.
 - One editor holds a project at a time. A window that opens a served
   project takes it over; a second `serve` is refused.
+  - "… is open in an Eddie this command cannot reach" means an editor
+    holds the project where this command cannot find its socket. Run the
+    command with that editor's `XDG_RUNTIME_DIR`, or close the editor.
 
 A program can use the socket itself instead of running `eddie` per
 command. `serve` prints its `socket` path; sockets live in
@@ -78,9 +87,12 @@ variable is unset. The editor's first line is `{"event":"hello","project",
 "window","version"}`. Send one JSON object per line,
 `{"id":1,"method":"run","code":"split('clip:7@50%')"}`, and read lines
 until one has your `id` and `ok`; lines with `progress` or `event` come in
-between. The methods are the commands, with these parameters:
+between. Read each answer before sending much more: a connection with 256
+requests or 16 MiB waiting gets errors for the rest. The methods are the
+commands, with these parameters:
 
-- `run`: `code`, `dryRun`.
+- `run`: `code`, `dryRun` (`true` or `false`; any other value is an
+  error, not a real run).
 - `import`: `media` (absolute paths).
 - `transcribe`: `assets`, `force`, `provider`, `model`, `language`,
   `vocabulary`, `apiKey` (the `eddie` command sends
@@ -93,7 +105,8 @@ between. The methods are the commands, with these parameters:
 ## Pictures
 
 JSON does not show what a shot looks like. Three commands write JPEGs for
-you to open; each also prints the times it pictured.
+you to open; each also prints the times it pictured. `sheet` and `strip`
+outputs must end in `.jpg`, and cannot replace the project or its media.
 
 - `eddie sheet <project> <out.jpg> [range]` shows the program: one cell
   per visible shot, labelled with its timeline time, clip ID and lane, and
@@ -126,6 +139,12 @@ filesystem, network or OS access, and limits of 500 ms, 2,048 commands
 and 1 MiB of strings. Queries read the project as it was when the script
 started; edits are queued and applied together at the end. If any edit
 fails, the project is left exactly as it was.
+
+- Scripts are synchronous. One that uses `async`, `await` or a promise
+  callback is refused whole.
+- The 500 ms limit is checked between JavaScript steps, so one built-in
+  call on a string of megabytes (`indexOf`, a regular expression) can
+  run past it and hold up a running editor. Keep strings small.
 
 - `run` prints `{changed, saved, output, notes, handles,
   introducedFindings, summary}`.
@@ -195,16 +214,23 @@ times (`dur`, `seconds`, `sourceIn`) are plain seconds.
 
 ### Editing
 
+Arguments out of range are errors, never moved into range: a clip ID or
+lane that is not a whole number, a negative time, a length of 0 or less.
+
 - **Select and cut:** `selectClip(id)`, `split(at)` (the selected clip),
-  `splitClip(id, at)`, `deleteClip(id?)`, `clearTimeline()`.
+  `splitClip(id, at)`, `deleteClip(id?)`, `clearTimeline()`. Without an
+  ID, `deleteClip` deletes the selected clip and fails when there is
+  none.
 - **Place:** `addAsset(nameOrPath, at?)`, `addAssetRange(nameOrPath, at,
   sourceIn, dur)`. A new clip lands on the first lane that is free for
   its whole span. Read its lane as `track` in the next `state()`, or set
   it with `setClipLane`.
+  - A name that two assets share is an error; pass the asset's `path`.
 - **Move and trim:** `moveClip(id, start)`, `setClipLane(id, lane)`,
   `insertTime(at, seconds)`, `closeGaps()`, `trimClip(id, left, right)`.
   - `left` is the clip's new start and `right` its new end, both timeline
-    times. `null` or -1 keeps that edge.
+    times. `null` or -1 keeps that edge. An end at or before the start
+    is an error.
   - A new start moves the source in-point by the same amount. A new end
     stops at the end of the source.
   - Two clips can't overlap on one lane. This is checked once, after the
@@ -230,6 +256,8 @@ times (`dur`, `seconds`, `sourceIn`) are plain seconds.
     needs word timing.
   - `addTitle` defaults to the playhead, 4 seconds and `lower-third`;
     `addCaptionsForClip` to `caption`.
+  - Title text cannot hold control characters. Line breaks are fine;
+    they are drawn as spaces.
   - One title shows at a time. Where two overlap, the one added first
     shows.
   - `addCaptionsForClip` returns no handle. Its line in `notes` says how

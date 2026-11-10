@@ -197,8 +197,10 @@ impl Voice {
                         }
                     } else {
                         for (index, (dst, src)) in out[target..target + count]
-                            .chunks_exact_mut(2)
-                            .zip(chunk.data[offset..offset + count].chunks_exact(2))
+                            .as_chunks_mut::<2>()
+                            .0
+                            .iter_mut()
+                            .zip(chunk.data[offset..offset + count].as_chunks::<2>().0)
                             .enumerate()
                         {
                             let g = gain(at + index as u64);
@@ -360,7 +362,7 @@ impl Mixer {
             return;
         }
         let release = 1.0 - (-1.0 / (0.05 * RATE as f32)).exp();
-        for frame in self.stereo[..frames * 2].chunks_exact_mut(2) {
+        for frame in self.stereo[..frames * 2].as_chunks_mut::<2>().0 {
             frame[0] *= gain;
             frame[1] *= gain;
             if limiting {
@@ -378,7 +380,7 @@ impl Mixer {
         self.render(frames);
         for (frame, stereo) in data
             .chunks_exact_mut(channels)
-            .zip(self.stereo.chunks_exact(2))
+            .zip(self.stereo.as_chunks::<2>().0)
         {
             match channels {
                 1 => frame[0] = (stereo[0] + stereo[1]) * 0.5,
