@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn best_first_puts_usable_picture_above_text_and_unreviewed_ranges() {
         // The highest scores belong to the ranges that must sink.
-        let mut clips = vec![
+        let mut clips = [
             clip(100.0, ReviewStatus::NeedsReview, &[]),
             clip(95.0, ReviewStatus::Reviewed, &["on-screen-text"]),
             clip(60.0, ReviewStatus::Reviewed, &[]),

@@ -340,20 +340,7 @@ impl VideoDecoder {
                 .streams()
                 .best(ffmpeg::media::Type::Video)
                 .ok_or_else(|| "no video stream".to_owned())?;
-            let turns = stream
-                .side_data()
-                .find(|data| {
-                    data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix
-                        && data.data().len() >= 36
-                })
-                .map_or(0, |data| {
-                    // SAFETY: a display matrix is nine i32 values in an
-                    // av_malloc-aligned side-data buffer owned by the stream.
-                    let degrees = unsafe {
-                        ffmpeg::ffi::av_display_rotation_get(data.data().as_ptr().cast())
-                    };
-                    clockwise_turns(degrees)
-                });
+            let turns = display_turns(&stream);
             (
                 stream.index(),
                 stream.time_base(),
@@ -501,7 +488,7 @@ impl VideoDecoder {
             let entry = ffmpeg::ffi::avformat_index_get_entry_from_timestamp(
                 stream,
                 ts,
-                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD as i32,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
             );
             (!entry.is_null()).then(|| (*entry).timestamp)?
         };
@@ -796,6 +783,23 @@ impl VideoDecoder {
             .ok_or_else(|| "no frame decoded at requested time".to_owned())?;
         self.scale_decoded_into(buffer).map(|frame| (pts, frame))
     }
+}
+
+/// Clockwise quarter turns that display `stream`, from its display matrix.
+pub(crate) fn display_turns(stream: &ffmpeg::format::stream::Stream) -> u8 {
+    stream
+        .side_data()
+        .find(|data| {
+            data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix
+                && data.data().len() >= 36
+        })
+        .map_or(0, |data| {
+            // SAFETY: a display matrix is nine i32 values in an
+            // av_malloc-aligned side-data buffer owned by the stream.
+            let degrees =
+                unsafe { ffmpeg::ffi::av_display_rotation_get(data.data().as_ptr().cast()) };
+            clockwise_turns(degrees)
+        })
 }
 
 /// Clockwise quarter turns that display a stream, from a display-matrix

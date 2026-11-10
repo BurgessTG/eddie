@@ -34,6 +34,9 @@ use super::{Editor, Wake};
 
 /// One request line. Scripts are far smaller; this only bounds a bad client.
 const LINE_LIMIT: u64 = 4 << 20;
+/// One answer line read by the command line. The submission project's whole
+/// state is 0.2 MB; this only bounds whatever else answers on the socket.
+const REPLY_LIMIT: u64 = 64 << 20;
 /// Lines waiting for a client that is not reading before it is dropped.
 const OUTBOX: usize = 1024;
 /// A client that stops reading must not hold a writer thread forever.
@@ -250,10 +253,7 @@ impl Server {
         let mut clients: Vec<u64> = self.clients.keys().copied().collect();
         clients.sort_unstable();
         'clients: for client in clients {
-            loop {
-                let Some(state) = self.clients.get_mut(&client) else {
-                    break;
-                };
+            while let Some(state) = self.clients.get_mut(&client) {
                 if state.busy {
                     break;
                 }
@@ -612,7 +612,7 @@ impl Editor {
     }
 
     pub fn serve_stopped(&self) -> bool {
-        self.server.as_ref().map_or(true, Server::stopped)
+        self.server.as_ref().is_none_or(Server::stopped)
     }
 
     fn socket_dir(&self) -> Result<&Path, String> {
@@ -672,7 +672,8 @@ pub(super) fn connect_in(dir: &Path, project: &Path) -> Option<Connection> {
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut hello = String::new();
-    reader.read_line(&mut hello).ok()?;
+    // Whatever answers on this socket is not trusted to stop sending.
+    (&mut reader).take(LINE_LIMIT).read_line(&mut hello).ok()?;
     let greeting: Value = serde_json::from_str(&hello).ok()?;
     if greeting["event"] != "hello"
         || Path::new(greeting["project"].as_str()?) != canonical(project)
@@ -695,7 +696,12 @@ impl Connection {
     fn line(&mut self, wait: &mut dyn FnMut() -> bool) -> Result<Option<String>, String> {
         let mut bytes = Vec::new();
         loop {
-            match self.reader.read_until(b'\n', &mut bytes) {
+            // A timeout keeps what arrived, so the room left shrinks.
+            let room = REPLY_LIMIT.saturating_sub(bytes.len() as u64);
+            match (&mut self.reader).take(room).read_until(b'\n', &mut bytes) {
+                Ok(_) if bytes.len() as u64 >= REPLY_LIMIT && !bytes.ends_with(b"\n") => {
+                    return Err("the editor's answer was too long".to_owned());
+                }
                 Ok(0) => return Ok(None),
                 Ok(_) => return Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
                 Err(error)

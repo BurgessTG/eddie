@@ -1,9 +1,10 @@
-//! Media engine built on FFmpeg: libav in process for preview decode and
-//! audio playback, the command-line tools for probe and export.
+//! Media engine built on FFmpeg: libav in process for probing, preview
+//! decode and audio playback, the `ffmpeg` command-line tool for export,
+//! waveforms and pictures.
 //!
-//! Rationale: `ffmpeg/ffprobe` ship on every target platform and
-//! track codec support for us. The module boundary is kept narrow so
-//! probe and export can move in process too.
+//! Rationale: `ffmpeg` ships on every target platform and tracks codec
+//! support for us. The module boundary is kept narrow so export can move
+//! in process too.
 
 mod audio;
 mod beats;
@@ -84,82 +85,60 @@ fn run(command: &mut Command) -> MediaResult<Output> {
     }
 }
 
-fn parse_rate(rate: &str) -> f64 {
-    let mut parts = rate.split('/');
-    let num: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let den: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    if den == 0.0 {
-        0.0
-    } else {
-        num / den
-    }
-}
-
-/// Probe a media file with ffprobe.
+/// Probe a media file in process: what it holds, how long it runs and the
+/// size its picture is displayed at.
 pub fn probe(path: &str) -> MediaResult<MediaInfo> {
-    let output = run(Command::new("ffprobe").args([
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=codec_type,width,height,avg_frame_rate,r_frame_rate,duration",
-        "-show_entries",
-        "stream_side_data=rotation",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "json",
-        path,
-    ]))?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("ffprobe JSON: {e}"))?;
+    use ffmpeg_next::format::stream::Disposition;
+    use ffmpeg_next::media::Type;
 
+    decode::ensure_init();
+    let input = ffmpeg_next::format::input(path).map_err(|error| format!("{path}: {error}"))?;
+    let rate = |rate: ffmpeg_next::Rational| match rate.denominator() {
+        0 => 0.0,
+        den => f64::from(rate.numerator()) / f64::from(den),
+    };
     let mut info = MediaInfo {
         path: path.to_owned(),
         name: Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_owned()),
-        duration: json["format"]["duration"]
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0),
+        // Unknown is a large negative number.
+        duration: (input.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE)).max(0.0),
         width: 0,
         height: 0,
         fps: 0.0,
         has_video: false,
         has_audio: false,
     };
-
-    if let Some(streams) = json["streams"].as_array() {
-        for stream in streams {
-            match stream["codec_type"].as_str() {
-                Some("video") if !info.has_video => {
-                    info.has_video = true;
-                    info.width = stream["width"].as_u64().unwrap_or(0) as u32;
-                    info.height = stream["height"].as_u64().unwrap_or(0) as u32;
-                    // Report displayed dimensions, as every decode path rotates.
-                    let rotation = stream["side_data_list"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find_map(|data| data["rotation"].as_f64());
-                    if rotation.is_some_and(|degrees| decode::clockwise_turns(degrees) % 2 == 1) {
-                        std::mem::swap(&mut info.width, &mut info.height);
-                    }
-                    info.fps = parse_rate(stream["avg_frame_rate"].as_str().unwrap_or("0/1"));
-                    if info.fps <= 0.0 {
-                        info.fps = parse_rate(stream["r_frame_rate"].as_str().unwrap_or("0/1"));
-                    }
+    for stream in input.streams() {
+        let parameters = stream.parameters();
+        // Cover art in a music file is one attached picture, not video.
+        let cover = stream.disposition().contains(Disposition::ATTACHED_PIC);
+        match parameters.medium() {
+            Type::Video if !info.has_video && !cover => {
+                info.has_video = true;
+                // SAFETY: the parameters are a valid AVCodecParameters owned
+                // by the stream, which outlives this read.
+                let (width, height) =
+                    unsafe { ((*parameters.as_ptr()).width, (*parameters.as_ptr()).height) };
+                info.width = width.max(0) as u32;
+                info.height = height.max(0) as u32;
+                // Report displayed dimensions, as every decode path rotates.
+                if decode::display_turns(&stream) % 2 == 1 {
+                    std::mem::swap(&mut info.width, &mut info.height);
                 }
-                Some("audio") => info.has_audio = true,
-                _ => {}
+                info.fps = rate(stream.avg_frame_rate());
+                if info.fps <= 0.0 {
+                    info.fps = rate(stream.rate());
+                }
             }
-            if info.duration <= 0.0 {
-                info.duration = stream["duration"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-            }
+            Type::Audio => info.has_audio = true,
+            _ => {}
+        }
+        if info.duration <= 0.0 && !cover {
+            let base = stream.time_base();
+            info.duration = (stream.duration() as f64 * rate(base)).max(0.0);
         }
     }
     if !info.has_video && !info.has_audio {

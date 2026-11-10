@@ -63,7 +63,7 @@ pub fn align_transcript(
     }
     let path = model.ok_or("no local model")?;
     whisper_rs::install_logging_hooks();
-    let context = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+    let context = WhisperContext::new_with_params(path, WhisperContextParameters::default())
         .map_err(|error| format!("local model could not load: {error}"))?;
     let mut state = context
         .create_state()

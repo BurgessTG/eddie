@@ -513,7 +513,7 @@ pub fn count(n: usize, noun: &str) -> String {
 /// Probe, waveform and thumbnails for one file. False once the app has
 /// dropped the receiver.
 fn import_one(
-    path: &PathBuf,
+    path: &std::path::Path,
     tx: &std::sync::mpsc::Sender<ImportMsg>,
     wake: &super::Wake,
     store_dir: Option<&std::path::Path>,
@@ -526,15 +526,21 @@ fn import_one(
                 return false;
             }
             wake.wake();
-            let peaks = if info.has_audio {
-                openreel_media::waveform_peaks(
-                    &path_str,
-                    info.duration,
-                    openreel_media::WAVEFORM_PEAKS_PER_SEC,
-                )
-                .unwrap_or_default()
-            } else {
-                Vec::new()
+            // Decoding a file's whole sound is the slow part of an import:
+            // do it once per file, not on every open or command.
+            let rate = openreel_media::WAVEFORM_PEAKS_PER_SEC;
+            let saved = store_dir.and_then(|dir| super::sweep::load_peaks(dir, &path_str, rate));
+            let peaks = match saved {
+                Some(peaks) => peaks,
+                None if info.has_audio => {
+                    let peaks = openreel_media::waveform_peaks(&path_str, info.duration, rate)
+                        .unwrap_or_default();
+                    if let Some(dir) = store_dir.filter(|_| !peaks.is_empty()) {
+                        let _ = super::sweep::save_peaks(dir, &path_str, rate, &peaks);
+                    }
+                    peaks
+                }
+                None => Vec::new(),
             };
             let thumbs = if thumbnails && info.has_video {
                 openreel_media::thumbnails(&path_str, info.width, info.height, info.duration)

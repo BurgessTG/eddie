@@ -119,6 +119,7 @@ fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
     snap_target(time, candidates, threshold).unwrap_or(time)
 }
 
+#[derive(Default)]
 pub struct TimelineView {
     /// The editor's viewport as drawn: the app copies it in before `show`
     /// and back out after, so drops from the bin hit-test against the
@@ -129,19 +130,6 @@ pub struct TimelineView {
     last_drag_pos: Option<Pos2>,
     seeking: bool,
     last_rect: Option<Rect>,
-}
-
-impl Default for TimelineView {
-    fn default() -> Self {
-        Self {
-            port: TimelineViewport::default(),
-            drag: None,
-            press_origin: None,
-            last_drag_pos: None,
-            seeking: false,
-            last_rect: None,
-        }
-    }
 }
 
 impl TimelineView {

@@ -139,15 +139,18 @@ impl Drop for FilterGraphFile {
     }
 }
 
-/// Escape user text for drawtext's `text=` value.
-pub(crate) fn escape_drawtext(text: &str) -> String {
-    text.replace('\\', "/")
-        .replace('\'', "’")
-        .replace(':', " -")
-        .replace('%', "pct")
-        .replace('\n', " ")
+/// `value` as one filter option, quoted for both parsers it passes: the
+/// option list (`:`, `'` and `\` are special) and then the filtergraph
+/// (`'`). With `expansion=none` drawtext draws the text exactly as written.
+pub(crate) fn filter_value(value: &str) -> String {
+    let option = value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace(':', "\\:");
+    format!("'{}'", option.replace('\'', "'\\''"))
 }
 
+/// The font titles are drawn with, as a path.
 pub(crate) fn font_file() -> Option<String> {
     if let Ok(out) = Command::new("fc-match")
         .args(["-f", "%{file}", "sans"])
@@ -155,7 +158,7 @@ pub(crate) fn font_file() -> Option<String> {
     {
         let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         if Path::new(&path).exists() {
-            return Some(path.replace(':', "\\:"));
+            return Some(path);
         }
     }
     [
@@ -167,7 +170,7 @@ pub(crate) fn font_file() -> Option<String> {
     ]
     .iter()
     .find(|p| Path::new(p).exists())
-    .map(|p| p.replace(':', "\\:"))
+    .map(|p| (*p).to_owned())
 }
 
 struct VideoLayer<'a> {
@@ -519,6 +522,7 @@ impl Titles<'_> {
         let mut filters = vec!["[0:v]null[base]".to_owned()];
         let mut current = "base".to_owned();
         if let Some(font) = &self.font {
+            let font = filter_value(font);
             for (i, (clip, ranges)) in self.clips.iter().enumerate() {
                 let ranges: Vec<_> = ranges
                     .iter()
@@ -545,8 +549,7 @@ impl Titles<'_> {
                     .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
                 let y = format!("h-{}", look.bottom);
                 let alpha = clip.opacity.clamp(0.0, 1.0);
-                let words: Vec<String> =
-                    clip.name.split_whitespace().map(escape_drawtext).collect();
+                let words: Vec<&str> = clip.name.split_whitespace().collect();
                 let highlight = look
                     .highlight
                     .zip(clip.word_times())
@@ -561,10 +564,11 @@ impl Titles<'_> {
                     _ => x,
                 };
                 filters.push(format!(
-                    "[{current}]drawtext=fontfile={font}:text='{}':fontcolor={font_color}@{alpha:.2}:\
+                    "[{current}]drawtext=fontfile={font}:expansion=none:text={}:\
+                     fontcolor={font_color}@{alpha:.2}:\
                      fontsize={font_size}:{box_options}:x={x}:y={y}:\
                      enable='{}'[t{i}]",
-                    words.join(" "),
+                    filter_value(&words.join(" ")),
                     enabled_frames(&ranges),
                 ));
                 current = format!("t{i}");
@@ -598,8 +602,9 @@ impl Titles<'_> {
                         layers.push((words[..n].join(" "), font_color.clone()));
                     }
                     for (layer, (text, color)) in layers.into_iter().enumerate() {
+                        let text = filter_value(&text);
                         filters.push(format!(
-                            "[{current}]drawtext=fontfile={font}:text='{text}':\
+                            "[{current}]drawtext=fontfile={font}:expansion=none:text={text}:\
                              fontcolor={color}@{alpha:.2}:fontsize={font_size}:{outline}:\
                              x={x}:y={y}:enable='{enable}'[t{i}w{n}l{layer}]"
                         ));
@@ -929,9 +934,7 @@ pub fn export_timeline(
 
     let font = font_file();
     let titles = Titles {
-        font_data: font
-            .as_deref()
-            .and_then(|path| fs::read(path.replace("\\:", ":")).ok()),
+        font_data: font.as_deref().and_then(|path| fs::read(path).ok()),
         font,
         clock,
         clips: title_clips
@@ -1268,6 +1271,56 @@ fn measure_loudness(
         .as_str()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > -70.0))
+}
+
+#[cfg(test)]
+mod title_text_tests {
+    use super::{filter_value, font_file};
+    use std::process::Command;
+
+    /// One 640x80 white frame with `text` options drawn on it by drawtext.
+    fn drawn(font: &str, text: &str) -> Vec<u8> {
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=c=white:s=640x80:r=1:d=1")
+            .arg("-vf")
+            .arg(format!(
+                "drawtext=fontfile={}:expansion=none:{text}:fontsize=24:x=10:y=20",
+                filter_value(font)
+            ))
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            out.status.success(),
+            "{text}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    #[test]
+    fn titles_draw_every_character_as_typed() {
+        let Some(font) = font_file() else {
+            return;
+        };
+        // What the two parsers and drawtext's own expansion treat specially.
+        let typed = r"7:05 100% it's a\b, [x]; = %{n} \'";
+        let file = std::env::temp_dir().join(format!("eddie-title-{}.txt", std::process::id()));
+        std::fs::write(&file, typed).unwrap();
+        // drawtext reads a text file without any parsing: the oracle.
+        let expected = drawn(
+            &font,
+            &format!("textfile={}", filter_value(&file.to_string_lossy())),
+        );
+        let _ = std::fs::remove_file(&file);
+        let dark = expected.chunks_exact(3).filter(|rgb| rgb[0] < 128).count();
+        assert!(dark > 500, "the text is drawn, dark pixels={dark}");
+        assert!(
+            drawn(&font, &format!("text={}", filter_value(typed))) == expected,
+            "the quoted text draws the same picture as the file"
+        );
+    }
 }
 
 #[cfg(test)]

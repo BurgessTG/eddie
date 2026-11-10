@@ -216,13 +216,10 @@ mod tests {
         assert_eq!(index.range("clip:7..clip:9").unwrap(), (10.0, 20.0));
         assert_eq!(index.range("1:00..").unwrap(), (60.0, 120.0));
         assert_eq!(index.range("..2s").unwrap(), (0.0, 2.0));
-        assert_eq!(
-            index
-                .range("clip:9@end..clip:9")
-                .unwrap_err()
-                .contains("empty"),
-            true
-        );
+        assert!(index
+            .range("clip:9@end..clip:9")
+            .unwrap_err()
+            .contains("empty"));
         assert!(index.range("12").is_err());
     }
 }

@@ -20,8 +20,8 @@ pub mod transcribe;
 pub use speech::utterances;
 pub(crate) use store::path_hash;
 pub use store::{
-    default_dir as default_curation_dir, load as load_curation, load_shots, load_transcript,
-    save_shots,
+    default_dir as default_curation_dir, load as load_curation, load_peaks, load_shots,
+    load_transcript, save_peaks, save_shots,
 };
 
 /// Clip type stays distinct from the app-assigned `prime` quality tag.

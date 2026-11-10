@@ -135,36 +135,6 @@ pub fn load_shots(dir: &Path, path: &str) -> Option<Vec<(f64, f64)>> {
         .filter(|shots: &Vec<(f64, f64)>| !shots.is_empty())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Saved shots come back for the same file and not after it changes.
-    #[test]
-    fn detected_shots_restore_only_for_the_unchanged_file() {
-        let dir = std::env::temp_dir().join(format!("openreel_shots_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("clip.mp4");
-        std::fs::write(&source, b"pictures").unwrap();
-        let source = source.to_str().unwrap();
-        let store = dir.join("store");
-        let shots = vec![(0.0, 3.43), (3.43, 10.7)];
-        assert_eq!(load_shots(&store, source), None);
-        save_shots(&store, source, &shots).unwrap();
-        assert_eq!(load_shots(&store, source), Some(shots));
-        // Its curation file is a different one.
-        assert!(load(&store, source).is_none());
-        std::fs::write(source, b"other pictures").unwrap();
-        assert_eq!(
-            load_shots(&store, source),
-            None,
-            "a changed file is rescanned"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 /// A finished transcript beside the file's curation (`<hash>.transcript.json`),
 /// so a file is transcribed once. `source` names the provider and model.
 pub fn save_transcript(
@@ -206,4 +176,92 @@ pub fn load_transcript(dir: &Path, path: &str) -> Option<(Vec<TranscriptSegment>
         segments,
         value["source"].as_str().unwrap_or("saved").to_owned(),
     ))
+}
+
+/// Waveform peaks beside the file's curation (`<hash>.peaks.json`), so a
+/// file's sound is decoded once instead of on every import. `rate` is
+/// peaks per second.
+pub fn save_peaks(dir: &Path, path: &str, rate: u32, peaks: &[f32]) -> Result<(), String> {
+    let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
+    let body = json!({
+        "version": VERSION,
+        "path": path,
+        "size": size,
+        "modified": modified.to_string(),
+        "rate": rate,
+        "peaks": peaks,
+    });
+    write_private(
+        dir,
+        &file_for(dir, path).with_extension("peaks.json"),
+        &body,
+    )
+}
+
+/// The saved peaks of this exact file at `rate` peaks per second, if any.
+pub fn load_peaks(dir: &Path, path: &str, rate: u32) -> Option<Vec<f32>> {
+    let (size, modified) = identity(path)?;
+    let raw = std::fs::read(file_for(dir, path).with_extension("peaks.json")).ok()?;
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if value["version"].as_u64() != Some(VERSION)
+        || value["path"].as_str() != Some(path)
+        || value["size"].as_u64() != Some(size)
+        || value["modified"].as_str() != Some(modified.to_string().as_str())
+        || value["rate"].as_u64() != Some(u64::from(rate))
+    {
+        return None;
+    }
+    serde_json::from_value(value["peaks"].take())
+        .ok()
+        .filter(|peaks: &Vec<f32>| !peaks.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saved shots come back for the same file and not after it changes.
+    #[test]
+    fn detected_shots_restore_only_for_the_unchanged_file() {
+        let dir = std::env::temp_dir().join(format!("openreel_shots_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, b"pictures").unwrap();
+        let source = source.to_str().unwrap();
+        let store = dir.join("store");
+        let shots = vec![(0.0, 3.43), (3.43, 10.7)];
+        assert_eq!(load_shots(&store, source), None);
+        save_shots(&store, source, &shots).unwrap();
+        assert_eq!(load_shots(&store, source), Some(shots));
+        // Its curation file is a different one.
+        assert!(load(&store, source).is_none());
+        std::fs::write(source, b"other pictures").unwrap();
+        assert_eq!(
+            load_shots(&store, source),
+            None,
+            "a changed file is rescanned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Saved peaks come back bit for bit, and only for the same file and rate.
+    #[test]
+    fn waveform_peaks_restore_exactly_for_the_unchanged_file() {
+        let dir = std::env::temp_dir().join(format!("eddie_peaks_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("talk.wav");
+        std::fs::write(&source, b"sound").unwrap();
+        let source = source.to_str().unwrap();
+        let store = dir.join("store");
+        let peaks = vec![0.0, 0.1, 1.0 / 3.0, 0.999_999_9, f32::MIN_POSITIVE];
+        assert_eq!(load_peaks(&store, source, 50), None);
+        save_peaks(&store, source, 50, &peaks).unwrap();
+        assert_eq!(load_peaks(&store, source, 50), Some(peaks));
+        assert_eq!(load_peaks(&store, source, 100), None, "another rate");
+        std::fs::write(source, b"other sound").unwrap();
+        assert_eq!(load_peaks(&store, source, 50), None, "a changed file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

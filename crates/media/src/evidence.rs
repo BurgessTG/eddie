@@ -39,10 +39,11 @@ pub struct EvidenceVideo {
 #[derive(Clone, Debug)]
 pub struct EvidenceDetail {
     pub frame: EvidenceFrame,
-    /// Population variance of the four-neighbor Laplacian, 4Y - left - right
-    /// - up - down, over interior crop pixels. Y = (0.2126R + 0.7152G + 0.0722B)
-    /// / 255. Units are normalized luma squared, in [0, 16]. A crop without
-    /// interior pixels returns zero. This proxy depends on sampler resolution.
+    /// Population variance of the four-neighbor Laplacian (4Y minus the left,
+    /// right, up and down neighbors) over interior crop pixels, with
+    /// Y = (0.2126R + 0.7152G + 0.0722B) / 255. Units are normalized luma
+    /// squared, in [0, 16]. A crop without interior pixels returns zero. This
+    /// proxy depends on sampler resolution.
     pub sharpness: f32,
     /// Mean Y in [0, 1], using the same gamma-encoded RGB luma as sharpness.
     pub luminance: f32,

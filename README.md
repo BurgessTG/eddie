@@ -71,8 +71,8 @@ results are saved per file. It runs on this computer:
 - Build: FFmpeg 9 development libraries, ALSA development headers,
   `pkg-config`, `clang` (for bindgen), `cmake` and a C++ compiler (for
   whisper.cpp).
-- Runtime: `ffmpeg` and `ffprobe` 9 on `PATH`; ALSA (or PipeWire/Pulse
-  through ALSA) for sound.
+- Runtime: `ffmpeg` 9 on `PATH`; ALSA (or PipeWire/Pulse through ALSA) for
+  sound. The tests also need `ffprobe`.
 - Optional: a key for a cloud transcription provider (Meta Voice
   Transcribe or any OpenAI-compatible API). Local transcription needs none.
 - For transcription: a whisper.cpp model in `whisper/` beside the settings

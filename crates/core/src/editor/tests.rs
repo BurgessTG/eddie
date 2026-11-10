@@ -2932,6 +2932,51 @@ fn saved_curation_returns_with_the_same_file_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An import decodes a file's sound once: later imports of the unchanged
+/// file read the peaks saved beside its curation.
+#[test]
+fn a_second_import_reads_saved_waveform_peaks() {
+    let dir = std::env::temp_dir().join(format!("eddie-saved-peaks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let music = dir.join("music.mp3");
+    std::fs::copy(&sample_media()[1], &music).unwrap();
+    let path = music.to_string_lossy().into_owned();
+    let store = dir.join("store");
+    let rate = openreel_media::WAVEFORM_PEAKS_PER_SEC;
+    let import = || {
+        let mut app = Editor::headless();
+        app.curation_dir = Some(store.clone());
+        app.spawn_import(vec![music.clone()]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while app.import_rx.is_some() {
+            app.poll_imports();
+            assert!(Instant::now() < deadline, "import timed out");
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.assets.remove(0)
+    };
+
+    let decoded = import();
+    assert!(decoded.peaks.iter().any(|&peak| peak > 0.05), "sound");
+    assert_eq!(
+        sweep::load_peaks(&store, &path, rate).as_ref(),
+        Some(&decoded.peaks)
+    );
+
+    // Peaks only the store holds show that the import read them.
+    let marked: Vec<f32> = decoded.peaks.iter().map(|peak| peak * 0.5).collect();
+    sweep::save_peaks(&store, &path, rate, &marked).unwrap();
+    let restored = import();
+    assert_eq!(restored.peaks, marked);
+    assert_eq!(
+        restored.beats.is_some(),
+        decoded.beats.is_some(),
+        "the beat grid is still found from the peaks"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
     let dir = std::env::temp_dir().join(format!("eddie-project-{}", std::process::id()));

@@ -165,7 +165,7 @@ fn fit_line(points: &[(f64, f64)]) -> Option<(f64, f64)> {
         return None;
     }
     let period = covariance / variance;
-    (period > 0.0).then(|| (period, mean_y - period * mean_k))
+    (period > 0.0).then_some((period, mean_y - period * mean_k))
 }
 
 #[cfg(test)]

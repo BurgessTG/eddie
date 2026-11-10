@@ -960,6 +960,151 @@ fn quadrant_colors(width: u32, height: u32, rgba: &[u8]) -> Vec<&'static str> {
     names
 }
 
+/// What ffprobe reports for a file: duration, displayed size, frame rate,
+/// and whether it holds video and audio. Cover art is not video.
+fn ffprobe_info(path: &Path) -> (f64, (u32, u32), f64, bool, bool) {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries"])
+        .arg(
+            "format=duration:stream=codec_type,width,height,avg_frame_rate:\
+             stream_disposition=attached_pic:stream_side_data=rotation",
+        )
+        .args(["-of", "json"])
+        .arg(path)
+        .output()
+        .expect("ffprobe");
+    assert!(out.status.success(), "{:?}", out.stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("probe JSON");
+    let duration = json["format"]["duration"]
+        .as_str()
+        .and_then(|text| text.parse().ok())
+        .expect("duration");
+    let streams = json["streams"].as_array().expect("streams");
+    let of = |kind: &str| {
+        streams.iter().find(|stream| {
+            stream["codec_type"] == kind && stream["disposition"]["attached_pic"] == 0
+        })
+    };
+    let (size, fps) = of("video").map_or(((0, 0), 0.0), |video| {
+        let side = |key: &str| video[key].as_u64().expect("size") as u32;
+        let turned = video["side_data_list"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|data| data["rotation"].as_i64())
+            .any(|degrees| degrees.rem_euclid(180) == 90);
+        let size = if turned {
+            (side("height"), side("width"))
+        } else {
+            (side("width"), side("height"))
+        };
+        let (num, den) = video["avg_frame_rate"]
+            .as_str()
+            .and_then(|rate| rate.split_once('/'))
+            .expect("frame rate");
+        let fps = num.parse::<f64>().unwrap() / den.parse::<f64>().unwrap();
+        (size, fps)
+    });
+    (
+        duration,
+        size,
+        fps,
+        of("video").is_some(),
+        of("audio").is_some(),
+    )
+}
+
+#[test]
+fn probe_agrees_with_ffprobe_and_cover_art_is_not_video() {
+    let dir = std::env::temp_dir().join(format!(
+        "eddie_probe_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = Fixture {
+        path: dir.join("talk.mp4"),
+        dir,
+    };
+    let make = |name: &str, args: &[&str]| {
+        let path = fixture.dir.join(name);
+        run_ffmpeg(
+            Command::new("ffmpeg")
+                .args(["-y", "-v", "error"])
+                .args(args)
+                .arg(&path),
+        );
+        path
+    };
+    let video = "testsrc2=s=320x180:r=30000/1001:d=1.5";
+    let tone = "sine=frequency=440:sample_rate=48000:d=1.3";
+    let talk = make(
+        "talk.mp4",
+        &[
+            "-f", "lavfi", "-i", video, "-f", "lavfi", "-i", tone, "-c:v", "libx264", "-pix_fmt",
+            "yuv420p", "-c:a", "aac",
+        ],
+    );
+    let talk_arg = talk.to_str().unwrap();
+    let cover = make(
+        "cover.jpg",
+        &["-f", "lavfi", "-i", "color=red:s=300x200", "-frames:v", "1"],
+    );
+    let files = [
+        make(
+            "phone.mp4",
+            &["-display_rotation", "90", "-i", talk_arg, "-c", "copy"],
+        ),
+        make("silent.mkv", &["-i", talk_arg, "-an", "-c", "copy"]),
+        make("voice.wav", &["-f", "lavfi", "-i", tone]),
+        make(
+            "cover.mp3",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                tone,
+                "-i",
+                cover.to_str().unwrap(),
+                "-map",
+                "0:a",
+                "-map",
+                "1:v",
+                "-c:v",
+                "copy",
+                "-disposition:v",
+                "attached_pic",
+            ],
+        ),
+        talk,
+    ];
+    for path in &files {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let info = openreel_media::probe(path.to_str().unwrap()).expect(name);
+        let (duration, size, fps, has_video, has_audio) = ffprobe_info(path);
+        eprintln!("{name}: {info:?}");
+        assert!((info.duration - duration).abs() < 1e-6, "{name} duration");
+        assert!(duration > 1.0, "{name} has a real duration");
+        assert_eq!((info.width, info.height), size, "{name} displayed size");
+        assert!((info.fps - fps).abs() < 1e-9, "{name} frame rate");
+        assert_eq!(
+            (info.has_video, info.has_audio),
+            (has_video, has_audio),
+            "{name}"
+        );
+        assert_eq!(info.name, name);
+    }
+    // The oracle saw what each fixture is for.
+    assert_eq!(
+        ffprobe_info(&files[0]).1,
+        (180, 320),
+        "phone footage is upright"
+    );
+    assert!(!ffprobe_info(&files[3]).3, "music with cover art");
+    let missing = openreel_media::probe(fixture.dir.join("nope.mp4").to_str().unwrap());
+    assert!(missing.unwrap_err().contains("nope.mp4"));
+}
+
 #[test]
 fn native_decoder_and_probe_honor_display_rotation() {
     // Phone footage stores a landscape picture plus a display rotation. The

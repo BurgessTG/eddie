@@ -1,5 +1,5 @@
 //! The `eddie` command line end to end: real binary, real media, a project
-//! file on disk. Needs `ffmpeg` and `ffprobe` on PATH, like the editor.
+//! file on disk. Needs `ffmpeg` on PATH, like the editor, and `ffprobe`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,8 @@ impl Dir {
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_RUNTIME_DIR", self.0.join("run"))
             .env("HOME", &self.0)
+            .env_remove("EDDIE_WHISPER_DIR")
+            .env_remove("EDDIE_WHISPER_MODEL")
             .args(args);
         command
     }
@@ -239,6 +241,25 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     assert_eq!(code, 0, "{exported}");
     let length = duration(&dir.0.join("out.mp4"));
     assert!((length - 3.0).abs() < 0.1, "exported {length} s");
+
+    // An export never replaces the project or the media it is made from.
+    let source = std::fs::read(&talk).unwrap();
+    for target in ["media/talk.mp4", "p.eddie"] {
+        let (code, refused) = dir.eddie(&["export", "p.eddie", target]);
+        assert_eq!(code, 1, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot replace"),
+            "{refused}"
+        );
+    }
+    assert!(
+        std::fs::read(&talk).unwrap() == source,
+        "media is untouched"
+    );
+    assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), saved);
 }
 
 /// The colour of one pixel of a picture file.

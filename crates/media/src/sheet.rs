@@ -9,7 +9,7 @@ use std::thread;
 
 use openreel_engine::TitleStyle;
 
-use crate::export::{escape_drawtext, font_file};
+use crate::export::{filter_value, font_file};
 use crate::{scaled_height, title_look, MediaResult, VideoDecoder};
 
 /// Strip under each cell holding its label.
@@ -137,12 +137,14 @@ fn render(
     // Labels and titles: export's drawtext table, scaled to the cell.
     let mut filters = Vec::new();
     if let Some(font) = font_file() {
+        let font = filter_value(&font);
         let scale = cell_h as f32 / canvas.1.max(1) as f32;
         for (index, cell) in cells.iter().enumerate() {
             let (x0, y0) = origin(index);
             filters.push(format!(
-                "drawtext=fontfile={font}:text='{}':fontcolor=white:fontsize=15:x={}:y={}",
-                escape_drawtext(&labels[index]),
+                "drawtext=fontfile={font}:expansion=none:text={}:fontcolor=white:\
+                 fontsize=15:x={}:y={}",
+                filter_value(&labels[index]),
                 x0 + 6,
                 y0 + cell_h + 6,
             ));
@@ -162,9 +164,11 @@ fn render(
             );
             let y = y0 + cell_h - (look.bottom as f32 * scale).round() as usize;
             filters.push(format!(
-                "drawtext=fontfile={font}:text='{}':fontcolor=0x{r:02X}{g:02X}{b:02X}@{:.2}:\
+                "drawtext=fontfile={font}:expansion=none:text={}:\
+                 fontcolor=0x{r:02X}{g:02X}{b:02X}@{:.2}:\
                  fontsize={}:{box_options}:x={x}:y={y}",
-                escape_drawtext(text),
+                // One line, as export draws it.
+                filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
                 opacity.clamp(0.0, 1.0),
                 ((look.font_size as f32 * scale).round() as u32).max(6),
             ));

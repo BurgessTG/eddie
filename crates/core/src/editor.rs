@@ -3,7 +3,7 @@
 //! input and time, and owns the pixels; the command line drives it bare.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -1228,7 +1228,6 @@ impl Editor {
             }
             // A held clock is not a seek, even if the next UI tick is late.
             self.last_sync_time = 0.0;
-            return;
         }
     }
 
@@ -1500,6 +1499,10 @@ impl Editor {
             self.status = "Nothing to export.".to_owned();
             return;
         }
+        if let Some(used) = self.export_would_replace(&output) {
+            self.status = format!("Export cannot replace {used}, which this project uses.");
+            return;
+        }
         let timeline = self.timeline.clone();
         let options = openreel_media::ExportOptions {
             normalize_loudness: true,
@@ -1532,6 +1535,23 @@ impl Editor {
             let _ = tx.send(ExportMsg::Done(result));
             wake.wake();
         });
+    }
+
+    /// The name of the project file or imported media that `output` is.
+    /// Exporting over one would destroy what the export is made from.
+    fn export_would_replace(&self, output: &Path) -> Option<String> {
+        let output = std::fs::canonicalize(output).ok()?;
+        self.project_path
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(self.assets.iter().map(|asset| Path::new(&asset.info.path)))
+            .find(|used| std::fs::canonicalize(used).is_ok_and(|used| used == output))
+            .map(|used| {
+                used.file_name()
+                    .unwrap_or(used.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            })
     }
 
     /// Make the timeline as it stands an undo step now, without waiting for

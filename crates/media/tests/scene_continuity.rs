@@ -126,7 +126,7 @@ impl Drop for Fixture {
 }
 
 fn texture(x: usize, y: usize) -> [u8; 3] {
-    let tile = (x / 8) * 73 ^ (y / 8) * 151;
+    let tile = ((x / 8) * 73) ^ ((y / 8) * 151);
     let detail = (x * 3 + y * 7) % 19;
     [
         (35 + tile % 91 + detail) as u8,

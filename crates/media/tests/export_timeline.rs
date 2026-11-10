@@ -895,7 +895,15 @@ fn titles_have_first_inserted_precedence_and_exclusive_ends() {
     let source = fixture.color("white.mp4", "white", None);
     let mut timeline = Timeline::new(10.0);
     video(&mut timeline, &source, 0, 0.0, 0.5, 0.0);
-    let a = timeline.add_clip("FIRST WIDE TITLE", ClipKind::Title, 9, 0.0, 0.2, 0.0);
+    // Punctuation the filter parsers treat specially is drawn as typed.
+    let a = timeline.add_clip(
+        r"FIRST: 100% 'WIDE' \TITLE",
+        ClipKind::Title,
+        9,
+        0.0,
+        0.2,
+        0.0,
+    );
     let b = timeline.add_clip("B", ClipKind::Title, 0, 0.1, 0.3, 0.0);
     let c = timeline.add_clip("C", ClipKind::Title, 0, 0.4, 0.1, 0.0);
     for id in [a, b, c] {
@@ -986,6 +994,14 @@ fn highlight_captions_light_only_the_word_being_spoken() {
     timeline.clip_mut(id).unwrap().name = "ONE TWO THREE".to_owned();
     let renamed = frames(&fixture.export("renamed.mp4", &timeline));
     assert!(renamed.iter().all(|f| highlight_pixels(f, 1280).0 == 0));
+
+    // Each word's layers quote their text like the line itself.
+    timeline.clip_mut(id).unwrap().name = "IT'S: 100%".to_owned();
+    let quoted = frames(&fixture.export("quoted.mp4", &timeline));
+    assert!(
+        quoted.iter().all(|f| highlight_pixels(f, 1280).0 > 100),
+        "a word with punctuation is lit in every frame"
+    );
 }
 
 #[test]
@@ -1099,7 +1115,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             volume: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
-            duck: Vec::new().into(),
+            duck: Vec::new(),
             clean_voice: true,
             smooth_fades: false,
         },
