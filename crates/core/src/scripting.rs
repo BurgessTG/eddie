@@ -125,7 +125,6 @@ pub enum ScriptCommand {
     Import(String),
     Export(String),
     ClearTimeline,
-    SetTool(String),
     SetMagnet(bool),
     SetMusicBedMuted(bool),
     SetZoom(f32),
@@ -231,7 +230,6 @@ impl ScriptCommand {
             | Self::Import(_)
             | Self::Export(_)
             | Self::ClearTimeline
-            | Self::SetTool(_)
             | Self::SetMagnet(_)
             | Self::SetMusicBedMuted(_)
             | Self::CloseGaps
@@ -675,12 +673,6 @@ impl ScriptEngine {
                 reg!("clearTimeline", move || q
                     .borrow_mut()
                     .push(0, || ScriptCommand::ClearTimeline));
-                let q = Rc::clone(&queue);
-                reg!("setTool", move |tool: CString<'_>| q
-                    .borrow_mut()
-                    .push(tool.len(), || ScriptCommand::SetTool(
-                        tool.as_str().to_owned()
-                    )));
                 let q = Rc::clone(&queue);
                 reg!("setMagnet", move |on: bool| q
                     .borrow_mut()
@@ -1130,7 +1122,6 @@ mod tests {
             "addAssetRange(text, 0, 0, 1)",
             "importMedia(text)",
             "exportTo(text)",
-            "setTool(text)",
         ] {
             assert_rejected(
                 &mut engine,
@@ -1146,7 +1137,7 @@ mod tests {
     fn string_budget_counts_combined_fields_and_commands_in_utf8_bytes() {
         let mut engine = ScriptEngine::new().expect("quickjs engine");
         for code in [
-            "const text = 'x'.repeat(512 * 1024); console.log(text); renameClip(1, text); try { setTool('x'); } catch (_) {}",
+            "const text = 'x'.repeat(512 * 1024); console.log(text); renameClip(1, text); try { renameClip(2, 'x'); } catch (_) {}",
             "const text = 'x'.repeat(512 * 1024); try { addTitle(text, 0, 1, text + 'x'); } catch (_) {}",
             "try { console.log('é'.repeat(512 * 1024 + 1)); } catch (_) {}",
         ] {
@@ -1464,7 +1455,7 @@ mod tests {
     #[test]
     fn string_callbacks_preserve_utf8_nul_and_path_commands() {
         let mut engine = ScriptEngine::new().expect("quickjs engine");
-        let code = r#"renameClip(1, 'café\0🎬'); console.log('résumé', 3); importMedia('source.mp4'); exportTo('output.mp4'); setTool('select');"#;
+        let code = r#"renameClip(1, 'café\0🎬'); console.log('résumé', 3); importMedia('source.mp4'); exportTo('output.mp4');"#;
         let expected = vec![
             ScriptCommand::RenameClip {
                 clip: 1,
@@ -1473,7 +1464,6 @@ mod tests {
             ScriptCommand::Log("résumé 3".to_owned()),
             ScriptCommand::Import("source.mp4".to_owned()),
             ScriptCommand::Export("output.mp4".to_owned()),
-            ScriptCommand::SetTool("select".to_owned()),
         ];
         let (output, commands) = engine.eval(code, "{}");
         assert_eq!(output, "undefined");
@@ -1605,7 +1595,6 @@ mod tests {
             "selected": (count > 0).then_some(count),
             "duration": count as f64,
             "fps": 30.0,
-            "tool": "select",
             "magnet": true,
             "musicBedMuted": true,
             "clips": clips,

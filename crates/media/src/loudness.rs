@@ -149,6 +149,7 @@ pub struct LoudnessMeter {
     energy: f64,
     peak: f64,
     clipped: usize,
+    frames: usize,
     hops: Vec<f64>,
     peaks: Vec<f64>,
 }
@@ -165,6 +166,7 @@ impl LoudnessMeter {
             energy: 0.,
             peak: 0.,
             clipped: 0,
+            frames: 0,
             hops: Vec::new(),
             peaks: Vec::new(),
         }
@@ -192,6 +194,7 @@ impl LoudnessMeter {
                 self.peak = self.peak.max(peak);
             }
             self.in_hop += 1;
+            self.frames += 1;
             if self.in_hop == self.hop {
                 self.hops.push(self.energy);
                 self.peaks.push(self.peak);
@@ -200,10 +203,16 @@ impl LoudnessMeter {
         }
     }
 
-    pub fn finish(self) -> Loudness {
+    pub fn finish(mut self) -> Loudness {
+        // Loudness counts whole hops only, as BS.1770 blocks do. A peak in
+        // the unfinished last hop still counts: export would limit it.
+        if self.in_hop > 0 {
+            self.peaks.push(self.peak);
+        }
         Loudness {
             hop_seconds: self.hop as f64 / self.rate as f64,
             hop: self.hop,
+            seconds: self.frames as f64 / self.rate as f64,
             hops: self.hops,
             peaks: self.peaks,
             clipped: self.clipped,
@@ -216,21 +225,46 @@ impl LoudnessMeter {
 pub struct Loudness {
     hop_seconds: f64,
     hop: usize,
+    seconds: f64,
     hops: Vec<f64>,
+    /// One per hop, plus one for an unfinished last hop.
     peaks: Vec<f64>,
     /// Samples beyond full scale, counted per channel.
     pub clipped: usize,
 }
 
 impl Loudness {
+    /// The measured length in seconds.
     pub fn duration(&self) -> f64 {
-        self.hops.len() as f64 * self.hop_seconds
+        self.seconds
     }
 
+    /// A time in hops. The margin keeps a time on a hop edge (2.9 s is
+    /// 28.999... hops) from falling into the hop before it.
+    fn hops_at(&self, seconds: f64) -> f64 {
+        const MARGIN: f64 = 1e-9;
+        if self.hop_seconds > 0.0 {
+            // `max` drops a NaN; an infinite end saturates to the last hop.
+            (seconds / self.hop_seconds + MARGIN).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The whole hops inside `seconds`; empty when the range is reversed.
     fn hop_range(&self, seconds: Range<f64>) -> Range<usize> {
-        let index =
-            |t: f64| ((t / self.hop_seconds).floor().max(0.0) as usize).min(self.hops.len());
-        index(seconds.start)..index(seconds.end)
+        let index = |t: f64| (self.hops_at(t).floor() as usize).min(self.hops.len());
+        let start = index(seconds.start);
+        start..index(seconds.end).max(start)
+    }
+
+    /// Every hop `seconds` touches, the unfinished last one included.
+    fn peak_range(&self, seconds: Range<f64>) -> Range<usize> {
+        const MARGIN: f64 = 2e-9;
+        let start = (self.hops_at(seconds.start).floor() as usize).min(self.peaks.len());
+        let end =
+            ((self.hops_at(seconds.end) - MARGIN).ceil().max(0.0) as usize).min(self.peaks.len());
+        start..end.max(start)
     }
 
     /// Mean squares of `width`-hop windows starting at every hop of `range`.
@@ -263,7 +297,7 @@ impl Loudness {
 
     /// Highest true peak in dBTP; `None` for digital silence.
     pub fn true_peak(&self, seconds: Range<f64>) -> Option<f64> {
-        let peak = self.peaks[self.hop_range(seconds)]
+        let peak = self.peaks[self.peak_range(seconds)]
             .iter()
             .fold(0.0_f64, |a, b| a.max(*b));
         (peak > 0.).then(|| 20. * peak.log10())
@@ -293,8 +327,9 @@ impl Loudness {
                 (Some(s), false) => {
                     // A block covers four hops: the quiet part ends where
                     // the first block that hears sound ends.
+                    let measured = self.hops.len() as f64 * self.hop_seconds;
                     let range = s as f64 * self.hop_seconds
-                        ..((i + 3) as f64 * self.hop_seconds).min(self.duration());
+                        ..((i + 3) as f64 * self.hop_seconds).min(measured);
                     if range.end - range.start >= min_seconds {
                         ranges.push(range);
                     }
@@ -413,6 +448,46 @@ mod tests {
         let quiet = loudness.quiet_ranges(-60., 1.);
         assert_eq!(quiet.len(), 1);
         assert!(quiet[0].start < 0.1 && (quiet[0].end - 3.0).abs() < 0.35);
+    }
+
+    #[test]
+    fn a_peak_in_the_unfinished_last_hop_is_measured() {
+        // 1.05 s: ten whole hops of quiet tone, then a click 20 ms from the
+        // end, inside the half hop that loudness does not count.
+        let mut signal = sine(1000., 0.1, 1.05, 48000);
+        let click = signal.len() - 960;
+        signal[click] = 0.9;
+        let loudness = measure(&signal, &signal, 48000, 4096);
+        assert!((loudness.duration() - 1.05).abs() < 1e-9);
+        let whole = loudness.true_peak(0.0..loudness.duration()).unwrap();
+        assert!(whole > -1.5, "the click is {whole} dBTP");
+        // Before the click's hop only the tone is heard.
+        let body = loudness.true_peak(0.0..1.0).unwrap();
+        assert!((body + 20.).abs() < 0.5, "{body}");
+        // The half hop adds no loudness block.
+        let lufs = loudness.integrated(0.0..loudness.duration()).unwrap();
+        assert_eq!(Some(lufs), loudness.integrated(0.0..1.0));
+    }
+
+    #[test]
+    fn reversed_and_outside_ranges_are_empty() {
+        let signal = sine(1000., 0.5, 2., 48000);
+        let loudness = measure(&signal, &signal, 48000, 4096);
+        assert_eq!(loudness.true_peak(1.5..0.5), None);
+        assert_eq!(loudness.integrated(1.5..0.5), None);
+        assert_eq!(loudness.true_peak(5.0..9.0), None);
+        assert!(loudness.true_peak(f64::NAN..1.0).is_some());
+        assert_eq!(
+            loudness.integrated(-3.0..f64::INFINITY),
+            loudness.integrated(0.0..2.0)
+        );
+        // A hop edge belongs to the hop that starts there: 1.9 s is
+        // 18.999... hops in floating point.
+        assert_eq!(loudness.hop_range(0.0..1.9), 0..19);
+        assert_eq!(loudness.peak_range(0.0..1.9), 0..19);
+        assert_eq!(loudness.peak_range(0.0..2.9), 0..20);
+        assert_eq!(loudness.peak_range(0.3..0.31), 3..4);
+        assert_eq!(Loudness::default().true_peak(0.0..1.0), None);
     }
 
     #[test]

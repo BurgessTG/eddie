@@ -456,6 +456,13 @@ impl Job {
                     .iter()
                     .map(|path| path.to_string_lossy().into_owned())
                     .partition(|path| app.asset(path).is_some());
+                let failed: Vec<Value> = failed
+                    .into_iter()
+                    .map(|path| {
+                        let error = app.import_errors.get(&path).cloned();
+                        json!({ "path": path, "error": error })
+                    })
+                    .collect();
                 Some(Ok(Outcome {
                     changed: !imported.is_empty(),
                     value: json!({

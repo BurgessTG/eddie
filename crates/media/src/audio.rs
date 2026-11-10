@@ -14,7 +14,9 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -99,7 +101,15 @@ impl Voice {
     /// Take the next decoded chunk; `wait` blocks (manual output only).
     fn pull(&mut self, wait: bool, errors: &Mutex<Option<String>>) -> bool {
         let next = if wait {
-            self.chunks.recv_timeout(MANUAL_WAIT).ok()
+            match self.chunks.recv_timeout(MANUAL_WAIT) {
+                Ok(chunk) => Some(chunk),
+                Err(RecvTimeoutError::Disconnected) => None,
+                // Rendering on would measure this clip as silence.
+                Err(RecvTimeoutError::Timeout) => Some(Err(format!(
+                    "audio decode produced nothing for {} s",
+                    MANUAL_WAIT.as_secs()
+                ))),
+            }
         } else {
             match self.chunks.try_recv() {
                 Ok(chunk) => Some(chunk),
@@ -240,6 +250,9 @@ struct Shared {
     /// steps back between seeks (a released hold is heard one queue later).
     reported: AtomicU64,
     errors: Mutex<Option<String>>,
+    /// The device stopped calling back for good (unplugged, or its sound
+    /// server went away), so this engine's clock will never move again.
+    device_lost: AtomicBool,
 }
 
 impl Shared {
@@ -418,6 +431,7 @@ impl AudioEngine {
             limiting: AtomicBool::new(false),
             reported: AtomicU64::new(0),
             errors: Mutex::new(None),
+            device_lost: AtomicBool::new(false),
         });
         let (commands, receiver) = channel();
         let mixer = Mixer {
@@ -668,6 +682,19 @@ impl AudioEngine {
     pub fn take_error(&self) -> Option<String> {
         self.shared.errors.lock().unwrap().take()
     }
+
+    /// The sound device went away and this engine's clock has stopped for
+    /// good. Open a new engine: it takes the default device there is now, or
+    /// paces silently without one.
+    pub fn device_lost(&self) -> bool {
+        self.shared.device_lost.load(Ordering::Acquire)
+    }
+
+    /// Behave as if the device had just been unplugged (tests).
+    #[doc(hidden)]
+    pub fn lose_device(&self) {
+        self.shared.device_lost.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for AudioEngine {
@@ -743,6 +770,7 @@ fn open_device(
     let slot = Arc::new(Mutex::new(Some(mixer)));
     let callback_slot = Arc::clone(&slot);
     let latency_shared = Arc::clone(shared);
+    let error_shared = Arc::clone(shared);
     let mut owned: Option<Mixer> = None;
     let stream = device.build_output_stream(
         config,
@@ -758,7 +786,17 @@ fn open_device(
                 .store(latency.as_nanos() as u64, Ordering::Relaxed);
             mixer.write(data, channels);
         },
-        |error| eprintln!("audio output: {error}"),
+        move |error| {
+            eprintln!("audio output: {error}");
+            // cpal's worker returns after these two; an underrun or a
+            // rerouted default device keeps calling back.
+            if matches!(
+                error.kind(),
+                cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::HostUnavailable
+            ) {
+                error_shared.device_lost.store(true, Ordering::Release);
+            }
+        },
         None,
     );
     let error = match stream {
@@ -829,7 +867,11 @@ fn decode_voice(
         input.seek(ts, ..ts).map_err(|e| fail("audio seek", e))?;
     }
 
-    let mut resampler: Option<(ffmpeg::software::resampling::Context, u32)> = None;
+    // A stream may change format, channels or rate part-way (broadcast
+    // recordings switching 5.1 to stereo, joined files). The resampler reads
+    // as many planes as it was built for, so each change needs a new one.
+    type Shape = (ffmpeg::format::Sample, ffmpeg::ChannelLayout, u32);
+    let mut resampler: Option<(ffmpeg::software::resampling::Context, Shape)> = None;
     let mut frame = ffmpeg::frame::Audio::empty();
     // Source sample (at RATE) of the next resampled frame.
     let mut cursor: Option<i64> = None;
@@ -838,37 +880,66 @@ fn decode_voice(
         .clean_voice
         .then(|| crate::voice::VoiceCleanup::new(RATE));
     let mut eof = false;
-    let mut packets = input.packets();
+    // Damaged packets in a row. Each costs its own sound, as in the FFmpeg
+    // CLI; a stream that never recovers is reported, not played as silence.
+    let mut damage = 0u32;
+    let damaged = |damage: &mut u32, context: &str, error: ffmpeg::Error| {
+        *damage += 1;
+        if *damage > crate::decode::DAMAGE_LIMIT {
+            return Err(fail(context, error));
+        }
+        Ok(())
+    };
     loop {
-        // Feed until a frame is ready.
-        let got = decoder.receive_frame(&mut frame).is_ok();
-        if !got {
-            if eof {
-                break;
-            }
-            match packets.next() {
-                Some((stream, packet)) => {
-                    if stream.index() == index {
-                        let _ = decoder.send_packet(&packet);
+        // Feed until a frame is ready. Only the demuxer's own end of file
+        // ends the voice: any other read or decode error is reported, since
+        // the rest of the clip would otherwise play and measure as silence.
+        match decoder.receive_frame(&mut frame) {
+            Ok(()) => {}
+            // Nothing is left to read, so a failed drain loses at most the
+            // decoder's delay.
+            Err(_) if eof => break,
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                let mut packet = ffmpeg::Packet::empty();
+                match packet.read(&mut input) {
+                    Ok(()) if packet.stream() == index => match decoder.send_packet(&packet) {
+                        Ok(()) => {}
+                        Err(e) if crate::decode::is_damage(&e) => {
+                            damaged(&mut damage, "send audio packet", e)?;
+                        }
+                        Err(e) => return Err(fail("send audio packet", e)),
+                    },
+                    Ok(()) => {}
+                    Err(e @ ffmpeg::Error::InvalidData) => {
+                        damaged(&mut damage, "read audio packet", e)?;
                     }
+                    Err(ffmpeg::Error::Eof) => {
+                        decoder
+                            .send_eof()
+                            .map_err(|e| fail("end audio stream", e))?;
+                        eof = true;
+                    }
+                    Err(e) => return Err(fail("read audio packet", e)),
                 }
-                None => {
-                    let _ = decoder.send_eof();
-                    eof = true;
-                }
+                continue;
             }
-            continue;
+            Err(e) if crate::decode::is_damage(&e) => {
+                damaged(&mut damage, "decode audio", e)?;
+                continue;
+            }
+            Err(e) => return Err(fail("decode audio", e)),
         }
         let rate = frame.rate();
         if rate == 0 || frame.samples() == 0 {
             continue;
         }
-        if resampler.as_ref().is_none_or(|(_, r)| *r != rate) {
-            let layout = if frame.channel_layout().channels() > 0 {
-                frame.channel_layout()
-            } else {
-                ffmpeg::ChannelLayout::default(i32::from(frame.channels()))
-            };
+        let layout = if frame.channel_layout().channels() > 0 {
+            frame.channel_layout()
+        } else {
+            ffmpeg::ChannelLayout::default(i32::from(frame.channels()))
+        };
+        let shape: Shape = (frame.format(), layout, rate);
+        if resampler.as_ref().is_none_or(|(_, built)| *built != shape) {
             if let Some(cleanup) = cleanup.as_mut() {
                 // Upmixing puts mono 3 dB down on each channel; export
                 // compresses the mono source itself, so detect at its level.
@@ -881,10 +952,19 @@ fn decode_voice(
                 ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
                 ffmpeg::ChannelLayout::STEREO,
                 AUDIO_RATE,
-            )
-            .map_err(|e| fail("audio resampler", e))?;
-            resampler = Some((context, rate));
+            );
+            match context {
+                Ok(context) => resampler = Some((context, shape)),
+                // Damage can decode without an error into a shape nothing
+                // plays (38 channels from a garbage AAC packet).
+                Err(e) => {
+                    resampler = None;
+                    damaged(&mut damage, "audio resampler", e)?;
+                    continue;
+                }
+            }
         }
+        damage = 0;
         if let Some(pts) = frame.timestamp() {
             let source = pts.saturating_sub(origin) as f64 * f64::from(time_base.numerator())
                 / f64::from(time_base.denominator());

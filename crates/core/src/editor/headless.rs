@@ -18,6 +18,9 @@ use super::sweep::transcribe;
 use super::{server, Editor, NoPreview, Settings, Wake};
 use crate::scripting::ScriptEngine;
 
+/// The guide for agents, as written for this build.
+const GUIDE: &str = include_str!("../../../../docs/agents.md");
+
 const USAGE: &str = "\
 Usage: eddie <command> <project.eddie> ...
 
@@ -60,6 +63,9 @@ Usage: eddie <command> <project.eddie> ...
                                      clip 7 shows
   export <project> <out.mp4>         render the timeline
   help                               this text and the script API
+  guide                              the guide for agents: the API, the time
+                                     grammar and the rules that prevent the
+                                     usual mistakes
 
 Live editing. While a project is open in the Eddie window or in `serve`,
 every command above goes to that editor instead of the file: edits show in
@@ -75,9 +81,10 @@ the window, each `run` is one Undo step, and replies carry \"live\":true.
   events <project>                   one JSON line per change in the running
                                      editor, until it closes
 
-Every command prints one JSON object. Errors print {\"ok\":false,...} and
-exit 1. `saved` says whether the project file was written; transcribe and
-curate mark a file answered from its saved result with \"reused\":true.
+Every command but help and guide prints one JSON object. Errors print
+{\"ok\":false,...} and exit 1. `saved` says whether the project file was
+written; transcribe and curate mark a file answered from its saved result
+with \"reused\":true.
 Without a command, eddie opens the editor window.";
 
 const COMMANDS: &[&str] = &[
@@ -99,15 +106,27 @@ const COMMANDS: &[&str] = &[
     "save",
     "events",
     "help",
+    "guide",
 ];
 
 /// Run a command-line command, or `None` when `args` (without the program
-/// name) do not start with one, so the window should open instead.
+/// name) are empty or start with a flag or a file to open, so the window
+/// should open instead. Any other first word is a mistyped command: an
+/// agent waiting on JSON must not get a window.
 pub fn cli_main(args: &[OsString]) -> Option<i32> {
-    let command = args.first()?.to_str()?;
-    if !COMMANDS.contains(&command) && command != "--help" && command != "-h" {
-        return None;
-    }
+    let first = args.first()?;
+    let known = |word: &&str| COMMANDS.contains(word) || matches!(*word, "--help" | "-h");
+    let Some(command) = first.to_str().filter(known) else {
+        let word = first.to_string_lossy();
+        if word.starts_with('-') || Path::new(first).exists() {
+            return None;
+        }
+        let error = format!(
+            "unknown command '{word}' (and no such file to open); `eddie help` lists the commands"
+        );
+        println!("{}", json!({ "ok": false, "error": error }));
+        return Some(1);
+    };
     let args: Vec<String> = args[1..]
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -115,6 +134,10 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
     let result = match command {
         "help" | "--help" | "-h" => {
             println!("{USAGE}\n\nScript API:\n{}", script_help());
+            return Some(0);
+        }
+        "guide" => {
+            print!("{GUIDE}");
             return Some(0);
         }
         "new" => new(&args),

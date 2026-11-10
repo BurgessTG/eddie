@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use openreel_media::{MediaInfo, SegmentVisualEvidence, SweepSegment};
+use openreel_media::{MediaInfo, MotionSample, SegmentVisualEvidence, SweepSegment};
 use serde::{Deserialize, Serialize};
 
 use super::media::AssetState;
@@ -62,11 +62,39 @@ pub const CURATOR_TAGS: [&str; 27] = [
     "on-screen-text",
 ];
 
-/// A mixed music bed (finished montages, scored footage) keeps
-/// nearly every audio bucket audible. This is only a hint: continuous
-/// speech can do the same, so it must not gate transcription.
-fn is_music_bed(segment: &SweepSegment) -> bool {
+/// What transcription says about a range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Speech {
+    Heard,
+    /// Transcription ran and found none here.
+    Silent,
+    /// Transcription failed: uncertainty, not silence.
+    Unknown,
+}
+
+/// A mixed music bed (finished montages, scored footage) keeps nearly
+/// every audio bucket audible. Continuous speech does the same, so this
+/// waveform hint never gates transcription.
+fn continuous_audio(segment: &SweepSegment) -> bool {
     segment.audio_coverage >= 0.75 && segment.audio_energy >= 0.2
+}
+
+/// Continuous audio is a music bed only where a transcription that ran
+/// heard no speech.
+fn is_music_bed(segment: &SweepSegment, speech: Speech) -> bool {
+    speech == Speech::Silent && continuous_audio(segment)
+}
+
+/// Continuous audio without heard speech may be a soundtrack, so its
+/// loudness says nothing about this range and is left out of the score.
+fn unattributed_audio(segment: &SweepSegment, speech: Speech) -> bool {
+    speech != Speech::Heard && continuous_audio(segment)
+}
+
+/// Mean frame difference on the scale `stability` uses, so it compares
+/// across files: 0 is a locked shot, 1 handheld shake or a busy picture.
+fn motion_score(segment: &SweepSegment) -> f32 {
+    (1.0 - segment.stability).clamp(0.0, 1.0)
 }
 
 /// Prime quota: at most this share of one asset's candidates, and
@@ -418,8 +446,9 @@ pub struct SweepCandidate {
     pub category: String,
     /// Subset of `CURATOR_TAGS`.
     pub tags: Vec<String>,
-    /// Quality subscores, 0..1 per asset: normalized mean motion
-    /// and a blended audio score (energy + peak).
+    /// Quality subscores, 0..1: mean motion on one scale for every file,
+    /// and a blended audio score (energy + peak) against the file's own
+    /// loudest range.
     pub motion_score: f32,
     pub audio_score: f32,
     /// Baked-in music bed suspected: audio signals were discounted
@@ -615,6 +644,14 @@ pub struct SweepData {
     /// ranked `candidates` picks, these spans are meant to cover
     /// the whole asset so an edited video can be deconstructed.
     pub scene_clips: Vec<SweepCandidate>,
+    /// False when this curation's transcription failed. Its ranges then
+    /// carry no speech and no music-bed hint: what they hold is unknown.
+    #[serde(default = "yes")]
+    pub transcribed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for SweepData {
@@ -625,6 +662,7 @@ impl Default for SweepData {
             transcript: Vec::new(),
             candidates: Vec::new(),
             scene_clips: Vec::new(),
+            transcribed: true,
         }
     }
 }
@@ -675,7 +713,8 @@ pub enum SweepMsg {
 
 impl Editor {
     /// Explicit user-triggered curation for one ready asset.
-    /// Re-curation replaces the previous transcript and candidates.
+    /// Re-curation replaces the previous candidates and scenes. A saved
+    /// transcript is kept; `eddie transcribe --force` replaces that.
     pub fn curate_asset(&mut self, path: String) {
         if self.queue_curation(path) {
             self.open_curator_gallery();
@@ -820,12 +859,18 @@ impl Editor {
                     {
                         let pick_count = data.candidates.len();
                         let scene_count = data.scene_clips.len();
+                        let transcribed = data.transcribed;
                         asset.sweep = data;
                         self.status = format!(
-                            "Curator found {pick_count} clip{} and {scene_count} scene{} in {}.",
+                            "Curator found {pick_count} clip{} and {scene_count} scene{} in {}{}.",
                             if pick_count == 1 { "" } else { "s" },
                             if scene_count == 1 { "" } else { "s" },
-                            asset.info.name
+                            asset.info.name,
+                            if transcribed {
+                                ""
+                            } else {
+                                "; transcription failed"
+                            }
                         );
                     }
                     finished = true;
@@ -1041,8 +1086,10 @@ fn run_sweep(
         ));
     }
     let mut stage_notes = Vec::new();
+    stage_notes.extend(picture_end_note(&motion, info.duration));
     // Waveform coverage cannot tell a soundtrack from continuous speech, so
     // it never suppresses transcription.
+    let mut transcribed = true;
     let transcript = if info.has_audio {
         progress("Transcribing audio…");
         match transcribe::transcribe_cached(settings, store_dir, info, false, progress) {
@@ -1051,6 +1098,7 @@ fn run_sweep(
                 transcript.segments
             }
             Err(error) => {
+                transcribed = false;
                 stage_notes.push(format!("Transcription failed: {error}"));
                 Vec::new()
             }
@@ -1059,12 +1107,12 @@ fn run_sweep(
         stage_notes.push("Transcription: no audio stream.".to_owned());
         Vec::new()
     };
-    let mut scene_clips = local_candidates(info, &segments, &transcript);
+    let mut scene_clips = local_candidates(info, &segments, &transcript, transcribed);
     for (index, scene) in scene_clips.iter_mut().enumerate() {
         scene.id = format!("{}#scene-{index}", info.path);
     }
     let covered_seconds: f64 = segments.iter().map(|segment| segment.duration()).sum();
-    let mut candidates = local_candidates(info, &segments, &transcript);
+    let mut candidates = local_candidates(info, &segments, &transcript, transcribed);
     stage_notes.push(format!(
         "Clips: {}. Scenes: {}, {:.1}s covered.",
         candidates.len(),
@@ -1079,13 +1127,33 @@ fn run_sweep(
         candidates,
         scene_clips,
         note: stage_notes.join(" "),
+        transcribed,
     })
 }
 
+/// A picture stream may end before the file does (sound runs on, or the
+/// file is cut short). The last shot still reaches the file's end, so the
+/// note says nothing was seen there.
+fn picture_end_note(motion: &[MotionSample], duration: f64) -> Option<String> {
+    let [.., before, last] = motion else {
+        return None;
+    };
+    // A slow frame rate legitimately leaves a long last picture.
+    let allowed = (3.0 * (last.time - before.time)).max(1.0);
+    (duration - last.time > allowed).then(|| {
+        format!(
+            "Picture ends at {}; nothing after it was analyzed.",
+            minute_second(last.time)
+        )
+    })
+}
+
+/// Audio is scored against the file's own loudest range, because a quiet
+/// recording of speech is still that file's speech. Motion is not: it uses
+/// one scale for every file (`motion_score`).
 struct SegmentNorms {
     max_energy: f32,
     max_peak: f32,
-    max_motion: f32,
 }
 
 fn segment_norms(segments: &[SweepSegment]) -> SegmentNorms {
@@ -1100,30 +1168,26 @@ fn segment_norms(segments: &[SweepSegment]) -> SegmentNorms {
             .map(|segment| segment.audio_peak)
             .fold(0.0_f32, f32::max)
             .max(0.001),
-        max_motion: segments
-            .iter()
-            .map(|segment| segment.mean_motion)
-            .fold(0.0_f32, f32::max)
-            .max(0.001),
     }
 }
 
 /// Local category + tags from measured signals only. Rule order
 /// matters: reactions and speech are the strongest editorial
-/// signals, then motion, then scene-openers, else b-roll. `prime`
-/// is never returned here; `apply_prime` promotes after ranking.
+/// signals, then motion, then wide views without a subject, else b-roll.
+/// `prime` is never returned here; `apply_prime` promotes after ranking.
 fn classify_local(
     segment: &SweepSegment,
-    has_speech: bool,
+    speech: Speech,
     motion_score: f32,
     audio_score: f32,
 ) -> (String, Vec<String>) {
     let mut tags: Vec<String> = Vec::new();
     let mut tag = |name: &str| tags.push(name.to_owned());
+    let has_speech = speech == Speech::Heard;
     if has_speech {
         tag("speech");
     }
-    let music_bed = is_music_bed(segment);
+    let music_bed = is_music_bed(segment, speech);
     if music_bed {
         tag("music-bed");
     } else if segment.audio_peak >= 0.75 {
@@ -1170,8 +1234,12 @@ fn classify_local(
             && segment.stability >= 0.6
             && segment.duration() >= 3.0;
     }
-    let reactionish =
-        !music_bed && segment.audio_peak >= 0.75 && audio_score >= 0.4 && segment.duration() <= 7.0;
+    // A reaction is a burst against a quieter background. Continuous sound,
+    // whether a soundtrack or someone talking loudly, has no such burst.
+    let reactionish = !continuous_audio(segment)
+        && segment.audio_peak >= 0.75
+        && audio_score >= 0.4
+        && segment.duration() <= 7.0;
     let category = if reactionish {
         "reaction"
     } else if has_speech {
@@ -1184,7 +1252,8 @@ fn classify_local(
             .unwrap_or(false)
     {
         "action"
-    } else if (segment.scene_change >= 0.18 && segment.stability >= 0.6) || wide_without_subject {
+    } else if wide_without_subject {
+        // Starting on a cut says nothing: every shot but a file's first does.
         "establishing"
     } else {
         "broll"
@@ -1220,10 +1289,13 @@ fn apply_prime(candidates: &mut [SweepCandidate]) {
     }
 }
 
+/// `transcribed` is false when transcription failed, so an empty
+/// `transcript` is not evidence of silence.
 fn local_candidates(
     info: &MediaInfo,
     segments: &[SweepSegment],
     transcript: &[TranscriptSegment],
+    transcribed: bool,
 ) -> Vec<SweepCandidate> {
     let norms = segment_norms(segments);
     let max_energy = norms.max_energy;
@@ -1248,7 +1320,14 @@ fn local_candidates(
                 0.75
             };
             let overlaps = overlapping_transcript(segment, transcript);
-            let mut score = if is_music_bed(segment) {
+            let speech = if !overlaps.is_empty() {
+                Speech::Heard
+            } else if transcribed {
+                Speech::Silent
+            } else {
+                Speech::Unknown
+            };
+            let mut score = if unattributed_audio(segment, speech) {
                 100.0 * (0.65 * stability + 0.35 * duration_score)
             } else {
                 100.0 * (0.42 * stability + 0.28 * energy + 0.15 * peak + 0.15 * duration_score)
@@ -1262,7 +1341,9 @@ fn local_candidates(
                 score = (score + visual_bonus).min(100.0);
             }
             let reason = local_reason(info, segment, &overlaps);
-            candidate_from_segment(info, index, segment, &norms, score, reason, overlaps)
+            candidate_from_segment(
+                info, index, segment, &norms, score, reason, overlaps, speech,
+            )
         })
         .collect()
 }
@@ -1314,6 +1395,7 @@ fn local_reason(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn candidate_from_segment(
     info: &MediaInfo,
     index: usize,
@@ -1322,14 +1404,14 @@ fn candidate_from_segment(
     score: f32,
     reason: String,
     transcript: Vec<TranscriptSegment>,
+    speech: Speech,
 ) -> SweepCandidate {
-    let motion_score = (segment.mean_motion / norms.max_motion).clamp(0.0, 1.0);
+    let motion_score = motion_score(segment);
     let audio_score = (0.6 * (segment.audio_energy / norms.max_energy)
         + 0.4 * (segment.audio_peak / norms.max_peak))
         .clamp(0.0, 1.0);
-    let (category, tags) =
-        classify_local(segment, !transcript.is_empty(), motion_score, audio_score);
-    let music_bed = is_music_bed(segment) && transcript.is_empty();
+    let (category, tags) = classify_local(segment, speech, motion_score, audio_score);
+    let music_bed = is_music_bed(segment, speech);
     SweepCandidate {
         id: format!("{}#{index}", info.path),
         asset_path: info.path.clone(),
@@ -1458,7 +1540,14 @@ fn parse_transcript_row(row: &serde_json::Value, offset: f64) -> Option<Transcri
     })
 }
 
-fn parse_transcript_response(value: &serde_json::Value, offset: f64) -> Vec<TranscriptSegment> {
+/// Voice Transcribe's answer for the `seconds` of sound sent from
+/// `offset`. An answer with text but no turns was said somewhere in what
+/// was sent, so it spans it.
+fn parse_transcript_response(
+    value: &serde_json::Value,
+    offset: f64,
+    seconds: f64,
+) -> Vec<TranscriptSegment> {
     let rows = value["turns"]
         .as_array()
         .or_else(|| value["segments"].as_array());
@@ -1476,7 +1565,9 @@ fn parse_transcript_response(value: &serde_json::Value, offset: f64) -> Vec<Tran
             .filter(|text| !text.trim().is_empty())
         {
             let words = parse_transcript_words(value, offset);
-            let duration = value["audioDurationMs"].as_f64().unwrap_or(0.0) / 1000.0;
+            let duration = value["audioDurationMs"]
+                .as_f64()
+                .map_or(seconds, |milliseconds| milliseconds / 1000.0);
             let end = words
                 .last()
                 .map(|word| word.end)
@@ -1630,7 +1721,7 @@ mod tests {
                 {"startMs": 2000, "endMs": 3000, "transcript": "Hi.", "speaker": "B"}
             ]
         });
-        let turns = parse_transcript_response(&value, 10.0);
+        let turns = parse_transcript_response(&value, 10.0, 60.0);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].start, 10.5);
         assert_eq!(turns[1].speaker.as_deref(), Some("B"));
@@ -1683,7 +1774,7 @@ mod tests {
                 "speaker": "B"
             }]
         });
-        let turns = parse_transcript_response(&value, 10.0);
+        let turns = parse_transcript_response(&value, 10.0, 60.0);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].timing_precision(), "word");
         assert_eq!(turns[0].words.len(), 4);
@@ -1863,21 +1954,94 @@ mod tests {
             scene_change: 0.0,
             visual: None,
         };
-        let (category, tags) = classify_local(&base, true, 0.1, 0.3);
+        let (category, tags) = classify_local(&base, Speech::Heard, 0.1, 0.3);
         assert_eq!(category, "talking");
         assert!(tags.iter().any(|t| t == "speech"));
         assert!(tags.iter().any(|t| t == "steady"));
-        let (category, _) = classify_local(&base, false, 0.1, 0.6);
+        let (category, _) = classify_local(&base, Speech::Silent, 0.1, 0.6);
         assert_eq!(category, "reaction", "loud short peak reads as reaction");
-        let (category, _) = classify_local(&base, false, 0.9, 0.2);
+        let (category, _) = classify_local(&base, Speech::Silent, 0.9, 0.2);
         assert_eq!(category, "action");
+        // Every shot but a file's first starts on a cut, so that alone is
+        // b-roll with a tag, not an establishing shot.
         let opener = SweepSegment {
             scene_change: 0.3,
             audio_peak: 0.2,
             ..base
         };
-        let (category, _) = classify_local(&opener, false, 0.1, 0.2);
+        let (category, tags) = classify_local(&opener, Speech::Silent, 0.1, 0.2);
+        assert_eq!(category, "broll");
+        assert!(tags.iter().any(|t| t == "scene-open"));
+        let wide = SweepSegment {
+            visual: Some(SegmentVisualEvidence {
+                subject_coverage: 0.01,
+                subject_motion: 0.0,
+                center_saliency: 0.2,
+                ..centered_visual()
+            }),
+            ..opener.clone()
+        };
+        let (category, _) = classify_local(&wide, Speech::Silent, 0.1, 0.2);
         assert_eq!(category, "establishing");
+    }
+
+    /// A steady shot of something busy (0.05 measured on a phone game seen
+    /// over a shoulder) is b-roll; only a subject crossing the frame is
+    /// action. The old measure read 1.0 for both.
+    #[test]
+    fn only_a_travelling_subject_makes_a_quiet_shot_action() {
+        let shot = |subject_motion: f32| SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.016,
+            peak_motion: 0.03,
+            stability: 0.84,
+            audio_energy: 0.1,
+            audio_peak: 0.2,
+            audio_coverage: 0.2,
+            scene_change: 0.4,
+            visual: Some(SegmentVisualEvidence {
+                subject_motion,
+                ..centered_visual()
+            }),
+        };
+        let classify = |subject_motion: f32| {
+            let segment = shot(subject_motion);
+            classify_local(&segment, Speech::Silent, motion_score(&segment), 0.2)
+        };
+        let (category, tags) = classify(0.05);
+        assert_eq!(category, "broll");
+        assert!(!tags.iter().any(|t| t == "subject-moving"));
+        assert!(!tags.iter().any(|t| t == "fast-motion"));
+        let (category, tags) = classify(0.13);
+        assert_eq!(category, "broll", "a pan moves the subject without action");
+        assert!(tags.iter().any(|t| t == "subject-moving"));
+        assert_eq!(classify(0.3).0, "action");
+    }
+
+    /// One seated 45 s shot used to score motion 1.0 and read `fast-motion`,
+    /// because motion was divided by the file's own maximum.
+    #[test]
+    fn motion_is_scored_on_one_scale_for_every_file() {
+        let seated = SweepSegment {
+            start: 0.0,
+            end: 45.0,
+            mean_motion: 0.0101,
+            peak_motion: 0.03,
+            stability: 0.899,
+            audio_energy: 0.028,
+            audio_peak: 0.11,
+            audio_coverage: 0.3,
+            scene_change: 0.0,
+            visual: None,
+        };
+        let candidate = local_candidates(&test_info(), &[seated], &[], true)
+            .pop()
+            .unwrap();
+        assert!((candidate.motion_score - 0.101).abs() < 0.001);
+        assert!(candidate.tags.iter().any(|tag| tag == "slow"));
+        assert!(!candidate.tags.iter().any(|tag| tag == "fast-motion"));
+        assert_ne!(candidate.category, "action");
     }
 
     #[test]
@@ -1895,7 +2059,7 @@ mod tests {
             scene_change: 0.0,
             visual: Some(centered_visual()),
         };
-        let (category, tags) = classify_local(&segment, true, 0.1, 0.3);
+        let (category, tags) = classify_local(&segment, Speech::Heard, 0.1, 0.3);
         assert_eq!(category, "talking");
         assert!(tags.iter().any(|tag| tag == "subject-centered"));
         assert!(tags.iter().any(|tag| tag == "subject-large"));
@@ -1917,6 +2081,7 @@ mod tests {
                 words: Vec::new(),
                 session: None,
             }],
+            Speech::Heard,
         );
         assert!(candidate.talking_score() > 0.8);
         let visual = candidate.visual_json();
@@ -1953,6 +2118,7 @@ mod tests {
                         *score,
                         "r".into(),
                         Vec::new(),
+                        Speech::Silent,
                     )
                 })
                 .collect();
@@ -1983,15 +2149,101 @@ mod tests {
             scene_change: 0.0,
             visual: None,
         };
-        assert!(is_music_bed(&bed));
-        let (category, tags) = classify_local(&bed, false, 0.1, 0.9);
+        assert!(is_music_bed(&bed, Speech::Silent));
+        let (category, tags) = classify_local(&bed, Speech::Silent, 0.1, 0.9);
         assert_ne!(category, "reaction");
         assert!(tags.iter().any(|t| t == "music-bed"));
         assert!(!tags.iter().any(|t| t == "loud-peak"));
-        let mut candidate = local_candidates(&test_info(), &[bed], &[]).pop().unwrap();
+        let mut candidate = local_candidates(&test_info(), std::slice::from_ref(&bed), &[], true)
+            .pop()
+            .unwrap();
         candidate.reason = "No reaction here.".to_owned();
         assert!(!candidate.is_reaction());
         assert_eq!(candidate.reaction_score(), 0.0);
+
+        // Loud continuous speech is not a music bed anywhere: not in the
+        // tag, the flag, or the score, which keeps its loudness terms.
+        let spoken = TranscriptSegment {
+            start: 0.5,
+            end: 4.5,
+            speaker: None,
+            text: "This booth is the busiest one here.".to_owned(),
+            words: Vec::new(),
+            session: None,
+        };
+        let bed_score = candidate.score;
+        let talking = local_candidates(&test_info(), std::slice::from_ref(&bed), &[spoken], true)
+            .pop()
+            .unwrap();
+        assert!(!talking.music_bed);
+        assert!(!talking.tags.iter().any(|tag| tag == "music-bed"));
+        assert!(talking.tags.iter().any(|tag| tag == "loud-peak"));
+        // 0.42*0.9 + 0.28 + 0.15 + 0.15 = 0.958, plus 8 for speech, capped.
+        assert_eq!(talking.score, 100.0);
+        // 0.65*0.9 + 0.35 = 0.935.
+        assert!((bed_score - 93.5).abs() < 0.01, "{bed_score}");
+    }
+
+    #[test]
+    fn a_picture_that_stops_early_is_noted() {
+        let at = |times: &[f64]| -> Vec<MotionSample> {
+            times
+                .iter()
+                .map(|time| MotionSample {
+                    time: *time,
+                    difference: 0.0,
+                    scene_score: 0.0,
+                    visual: Default::default(),
+                })
+                .collect()
+        };
+        // 30 pictures a second ending 0.2 s before the sound does.
+        assert_eq!(picture_end_note(&at(&[9.7, 9.7333, 9.7667]), 10.0), None);
+        // The same picture stream in a 75 s file.
+        assert_eq!(
+            picture_end_note(&at(&[9.7, 9.7333, 9.7667]), 75.0).as_deref(),
+            Some("Picture ends at 0:10; nothing after it was analyzed.")
+        );
+        // A slideshow at one picture every 4 s ends on a 4 s picture.
+        assert_eq!(picture_end_note(&at(&[0.0, 4.0, 8.0]), 12.0), None);
+        assert!(picture_end_note(&at(&[0.0, 4.0, 8.0]), 30.0).is_some());
+        assert_eq!(picture_end_note(&at(&[0.0]), 30.0), None);
+    }
+
+    /// Without a whisper model every curation's transcription fails. Loud
+    /// talking then looked like a music bed, was added muted, and
+    /// tightenSilence refused it.
+    #[test]
+    fn failed_transcription_is_unknown_not_a_music_bed() {
+        let loud = SweepSegment {
+            start: 0.0,
+            end: 5.0,
+            mean_motion: 0.01,
+            peak_motion: 0.02,
+            stability: 0.9,
+            audio_energy: 0.55,
+            audio_peak: 0.95,
+            audio_coverage: 0.97,
+            scene_change: 0.0,
+            visual: None,
+        };
+        let candidate = local_candidates(&test_info(), std::slice::from_ref(&loud), &[], false)
+            .pop()
+            .unwrap();
+        assert!(!candidate.music_bed);
+        assert!(!candidate.tags.iter().any(|tag| tag == "music-bed"));
+        assert!(!candidate.tags.iter().any(|tag| tag == "speech"));
+        assert_ne!(candidate.category, "reaction");
+        assert_ne!(candidate.category, "talking");
+
+        // A curation saved before the flag existed transcribed successfully
+        // or said so in its note; it loads as transcribed.
+        let saved: SweepData = serde_json::from_value(serde_json::json!({
+            "status": "Ready", "note": "", "transcript": [],
+            "candidates": [], "scene_clips": [],
+        }))
+        .unwrap();
+        assert!(saved.transcribed);
     }
 
     /// Whisper hears "Thank you." across 30 s of music. That is not speech,
@@ -2028,6 +2280,7 @@ mod tests {
             &test_info(),
             std::slice::from_ref(&bed),
             std::slice::from_ref(&imagined),
+            true,
         )
         .pop()
         .unwrap();
@@ -2042,7 +2295,7 @@ mod tests {
             candidate.reason
         );
 
-        let candidate = local_candidates(&test_info(), &[bed], &[imagined, spoken.clone()])
+        let candidate = local_candidates(&test_info(), &[bed], &[imagined, spoken.clone()], true)
             .pop()
             .unwrap();
         assert_eq!(candidate.category, "talking");

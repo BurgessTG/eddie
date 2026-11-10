@@ -298,15 +298,15 @@ fn colorspace_filter(path: &str) -> Option<String> {
     let stream = input.streams().best(ffmpeg_next::media::Type::Video)?;
     // SAFETY: the parameters belong to the open input and outlive this read.
     let (space, range, format) = unsafe {
-        let parameters = &*stream.parameters().as_ptr();
+        let parameters = stream.parameters().as_ptr();
         (
-            parameters.color_space,
-            parameters.color_range,
-            parameters.format,
+            crate::decode::raw_enum(std::ptr::addr_of!((*parameters).color_space)),
+            crate::decode::raw_enum(std::ptr::addr_of!((*parameters).color_range)),
+            (*parameters).format,
         )
     };
-    // Compare raw values: a pixel format newer than these bindings is not
-    // a valid Rust enum value.
+    // Compare raw values: a pixel format newer than these bindings, or a
+    // matrix the file made up, is not a valid Rust enum value.
     let is = |f: AVPixelFormat| f as i32 == format;
     use AVPixelFormat::*;
     // The colorspace filter keeps a yuvj input's pixel format while tagging
@@ -329,22 +329,25 @@ fn colorspace_filter(path: &str) -> Option<String> {
     .into_iter()
     .find(|&(f, ..)| is(f))
     .map(|(_, output, full)| (output, full))?;
-    let matrix = match space {
-        AVColorSpace::AVCOL_SPC_BT709 => "bt709",
-        AVColorSpace::AVCOL_SPC_UNSPECIFIED
-        | AVColorSpace::AVCOL_SPC_RESERVED
-        | AVColorSpace::AVCOL_SPC_SMPTE170M => "smpte170m",
-        AVColorSpace::AVCOL_SPC_BT470BG => "bt470bg",
-        AVColorSpace::AVCOL_SPC_SMPTE240M => "smpte240m",
-        AVColorSpace::AVCOL_SPC_FCC => "fcc",
-        AVColorSpace::AVCOL_SPC_BT2020_NCL => "bt2020ncl",
-        _ => return None,
-    };
-    let range = match range {
-        AVColorRange::AVCOL_RANGE_JPEG => "pc",
-        AVColorRange::AVCOL_RANGE_MPEG => "tv",
-        _ if full_range_format => "pc",
-        _ => "tv",
+    let matrix = [
+        (AVColorSpace::AVCOL_SPC_BT709, "bt709"),
+        (AVColorSpace::AVCOL_SPC_UNSPECIFIED, "smpte170m"),
+        (AVColorSpace::AVCOL_SPC_RESERVED, "smpte170m"),
+        (AVColorSpace::AVCOL_SPC_SMPTE170M, "smpte170m"),
+        (AVColorSpace::AVCOL_SPC_BT470BG, "bt470bg"),
+        (AVColorSpace::AVCOL_SPC_SMPTE240M, "smpte240m"),
+        (AVColorSpace::AVCOL_SPC_FCC, "fcc"),
+        (AVColorSpace::AVCOL_SPC_BT2020_NCL, "bt2020ncl"),
+    ]
+    .into_iter()
+    .find(|&(named, _)| named as u32 == space)
+    .map(|(_, matrix)| matrix)?;
+    let range = if range == AVColorRange::AVCOL_RANGE_JPEG as u32 {
+        "pc"
+    } else if range == AVColorRange::AVCOL_RANGE_MPEG as u32 || !full_range_format {
+        "tv"
+    } else {
+        "pc"
     };
     ((matrix, range) != (VIDEO_COLOR_SPACE, VIDEO_COLOR_RANGE)).then(|| {
         format!(
@@ -900,6 +903,7 @@ pub fn export_timeline(
     if total <= 0.0 {
         return Err("timeline is empty".to_owned());
     }
+    let output = &*argument_path(output);
     let fps = timeline.fps;
     if !fps.is_finite() || fps <= 0.0 || !total.is_finite() {
         return Err("timeline has an invalid frame rate or duration".to_owned());
@@ -1006,7 +1010,10 @@ pub fn export_timeline(
             inputs.len()
         };
         let label = format!("a{}", labels.len());
-        let delay_ms = (clip.start * 1000.0).round() as i64;
+        // To the sample, as the preview mixer places it. Whole milliseconds
+        // left a gap or an overlap of up to 24 samples between clips that
+        // meet off the millisecond grid, such as at a 1/30 s frame edge.
+        let delay = (clip.start.max(0.0) * 48_000.0).round() as i64;
         // afade's default curve is linear and its qsin is
         // `openreel_engine::fade_shape`'s quarter sine, matching the preview.
         let (fade_in, fade_out) = clip.fade_lengths();
@@ -1060,7 +1067,7 @@ pub fn export_timeline(
         }
         filters.push(format!(
             "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{cleanup},\
-             volume={:.3}{fades},adelay={delay_ms}|{delay_ms}[{label}]",
+             volume={:.3}{fades},adelay=delays={delay}S:all=1[{label}]",
             f(clip.source_in),
             f(clip.source_in + clip.duration),
             clip.volume,
@@ -1273,10 +1280,35 @@ fn measure_loudness(
         .filter(|value| value.is_finite() && *value > -70.0))
 }
 
+/// `path` as FFmpeg can take it as an argument. A relative path such as
+/// `-cut.mp4` would be read as an option, and so would the scratch folder
+/// beside `-clips/out.mp4`.
+fn argument_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    if path.is_relative() && path.to_string_lossy().starts_with('-') {
+        Path::new(".").join(path).into()
+    } else {
+        path.into()
+    }
+}
+
 #[cfg(test)]
 mod title_text_tests {
-    use super::{filter_value, font_file};
+    use super::{argument_path, filter_value, font_file};
+    use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn an_output_path_is_never_read_as_an_option() {
+        for (given, passed) in [
+            ("-cut.mp4", "./-cut.mp4"),
+            ("-clips/out.mp4", "./-clips/out.mp4"),
+            ("clips/-out.mp4", "clips/-out.mp4"),
+            ("/tmp/-cut.mp4", "/tmp/-cut.mp4"),
+            ("out.mp4", "out.mp4"),
+        ] {
+            assert_eq!(argument_path(Path::new(given)), Path::new(passed));
+        }
+    }
 
     /// One 640x80 white frame with `text` options drawn on it by drawtext.
     fn drawn(font: &str, text: &str) -> Vec<u8> {
@@ -1301,9 +1333,9 @@ mod title_text_tests {
 
     #[test]
     fn titles_draw_every_character_as_typed() {
-        let Some(font) = font_file() else {
-            return;
-        };
+        // Without a font export draws no titles at all, so there is nothing
+        // to compare: say so instead of passing.
+        let font = font_file().expect("a font fc-match can find (titles are drawn with it)");
         // What the two parsers and drawtext's own expansion treat specially.
         let typed = r"7:05 100% it's a\b, [x]; = %{n} \'";
         let file = std::env::temp_dir().join(format!("eddie-title-{}.txt", std::process::id()));

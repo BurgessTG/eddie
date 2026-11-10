@@ -77,6 +77,11 @@ impl Editor {
         }
         let mut timeline: Timeline =
             serde_json::from_value(value["timeline"].take()).map_err(|_| unreadable())?;
+        // A hand-edited or damaged file: a zero frame rate or a clip days
+        // away would break every later calculation.
+        if !timeline.in_supported_range() {
+            return Err(unreadable());
+        }
         timeline.ensure_fresh_ids();
         let media: Vec<String> = serde_json::from_value(value["media"].take()).unwrap_or_default();
         let saved_dir = value["projectDir"].as_str().map(PathBuf::from);

@@ -492,7 +492,9 @@ impl TimelineView {
                         // to the pointer time would instantly cut away the
                         // grab offset inside the edge handle.
                         let desired = orig_start + (time - press_time);
-                        let snapped = snap_to(desired, &candidates, threshold);
+                        // The pointer takes the nearest frame; only a bound
+                        // (the previous clip) makes the model round one way.
+                        let snapped = timeline.snap(snap_to(desired, &candidates, threshold));
                         let prev_end = Self::prev_end(timeline, &clip, orig_start);
                         timeline.trim_left(id, snapped.max(prev_end));
                     }
@@ -504,8 +506,7 @@ impl TimelineView {
                         Some(clip),
                     ) => {
                         let desired = orig_end + (time - press_time);
-                        let snapped = snap_to(desired, &candidates, threshold);
-                        let mut new_end = snapped;
+                        let mut new_end = timeline.snap(snap_to(desired, &candidates, threshold));
                         if let Some(visual) = clip
                             .source
                             .as_ref()

@@ -29,11 +29,13 @@ pub(super) const MIN_KEEP_SECONDS: f64 = 0.04;
 
 /// The multilingual base model (`ggml-base.bin`): `EDDIE_WHISPER_MODEL`, or
 /// `ggml-base.bin` in `installed`, the user's model folder. Absent means no
-/// local alignment; curation keeps turn-level timing.
+/// local alignment; curation keeps turn-level timing. Without `installed`
+/// (an editor built for a test) the environment is not read either.
 pub fn model_path(installed: Option<&Path>) -> Option<PathBuf> {
+    let installed = installed?;
     std::env::var_os("EDDIE_WHISPER_MODEL")
         .map(PathBuf::from)
-        .or_else(|| Some(installed?.join("ggml-base.bin")))
+        .or_else(|| Some(installed.join("ggml-base.bin")))
         .filter(|path| path.is_file())
 }
 

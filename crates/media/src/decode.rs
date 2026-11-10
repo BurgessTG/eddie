@@ -14,6 +14,32 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{scaled_height, MediaResult, RawFrame};
 
+/// Damaged packets in a row a decoder skips before it reports the file as
+/// unreadable: about ten seconds of pictures at 30 a second, six or seven
+/// of sound.
+pub(crate) const DAMAGE_LIMIT: u32 = 300;
+
+/// The value of a C enum field. libavformat copies colour tags from the
+/// file unchecked (Matroska's `MatrixCoefficients`, for one), and a value
+/// the bindings do not name must never be read as their Rust enum.
+///
+/// # Safety
+/// `field` points at a live, initialised C enum.
+pub(crate) unsafe fn raw_enum<T>(field: *const T) -> u32 {
+    const { assert!(std::mem::size_of::<T>() == 4) };
+    field.cast::<u32>().read()
+}
+
+/// What a decoder returns for a packet it cannot use: damaged data, or a
+/// feature the damage appears to ask for (AAC gain control is one flag bit).
+/// The FFmpeg CLI skips both and decodes on.
+pub(crate) fn is_damage(error: &ffmpeg::Error) -> bool {
+    matches!(
+        error,
+        ffmpeg::Error::InvalidData | ffmpeg::Error::PatchWelcome
+    )
+}
+
 /// Without a container index, decode forward rather than seek only this far.
 pub(crate) const FORWARD_WITHOUT_INDEX: f64 = 0.5;
 /// Still decoders keep this many pictures before the current one, so a
@@ -288,6 +314,8 @@ pub struct VideoDecoder {
     /// Opened with a VAAPI device (or the test fault), and pictures decoded.
     pub(crate) hardware: bool,
     hardware_pictures: u32,
+    /// Damaged packets and pictures skipped since the last good picture.
+    damage: u32,
     /// The last downloaded VAAPI surface.
     transfer: ffmpeg::frame::Video,
 }
@@ -427,6 +455,7 @@ impl VideoDecoder {
             recent_limit: 0,
             hardware: attached,
             hardware_pictures: 0,
+            damage: 0,
             transfer: ffmpeg::frame::Video::empty(),
         })
     }
@@ -460,6 +489,7 @@ impl VideoDecoder {
         self.decoder.flush();
         self.eof_sent = false;
         self.drained = false;
+        self.damage = 0;
         self.decoded_pts = None;
         self.lookahead_pts = None;
         self.recent.clear();
@@ -510,12 +540,24 @@ impl VideoDecoder {
             .unwrap_or(0.0)
     }
 
+    /// Skip one piece of damaged data, or fail with `error` once a run of
+    /// them is longer than a damaged stretch plausibly is. A hardware
+    /// decoder fails at once, so the session falls back to software first.
+    fn damaged(&mut self, error: String) -> MediaResult<()> {
+        self.damage += 1;
+        if self.hardware || self.damage > DAMAGE_LIMIT {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Decode one frame, including delayed frames after send_eof. Only a
     /// receive-side EOF means the decoder has actually finished draining.
     fn receive_decoded(&mut self) -> MediaResult<Option<f64>> {
         loop {
             match self.decoder.receive_frame(&mut self.decoded) {
                 Ok(()) => {
+                    self.damage = 0;
                     if self.hardware {
                         self.hardware_pictures += 1;
                         if INJECT_FAULT.load(Ordering::Relaxed) && self.hardware_pictures > 5 {
@@ -531,6 +573,12 @@ impl VideoDecoder {
                 }
                 Err(ffmpeg::Error::Other { errno })
                     if errno == ffmpeg::error::EAGAIN && !self.eof_sent => {}
+                // Damaged data costs its pictures, not the file: the decoder
+                // picks up at a later packet, as the FFmpeg CLI does.
+                Err(e) if is_damage(&e) && !self.eof_sent => {
+                    self.damaged(err("receive frame", e))?;
+                    continue;
+                }
                 Err(e) => return Err(err("receive frame", e)),
             }
             // A receive-side EAGAIN guarantees that sending can make progress.
@@ -539,12 +587,19 @@ impl VideoDecoder {
                 let mut packet = ffmpeg::Packet::empty();
                 match packet.read(&mut self.input) {
                     Ok(()) if packet.stream() == self.stream_index => {
-                        self.decoder
-                            .send_packet(&packet)
-                            .map_err(|e| err("send packet", e))?;
+                        match self.decoder.send_packet(&packet) {
+                            Ok(()) => {}
+                            Err(e) if is_damage(&e) => {
+                                self.damaged(err("send packet", e))?;
+                            }
+                            Err(e) => return Err(err("send packet", e)),
+                        }
                         break;
                     }
                     Ok(()) => continue,
+                    Err(ffmpeg::Error::InvalidData) => {
+                        self.damaged(err("read packet", ffmpeg::Error::InvalidData))?;
+                    }
                     Err(ffmpeg::Error::Eof) => {
                         self.decoder.send_eof().map_err(|e| err("send EOF", e))?;
                         self.eof_sent = true;
@@ -884,20 +939,35 @@ impl Scaler {
     }
 
     fn run(&mut self, picture: &ffmpeg::frame::Video) -> MediaResult<&ffmpeg::frame::Video> {
-        use ffmpeg::color::{Range, Space};
-        use ffmpeg::ffi;
+        use ffmpeg::ffi::{self, AVColorRange, AVColorSpace};
+        const BT709: u32 = AVColorSpace::AVCOL_SPC_BT709 as u32;
+        const FCC: u32 = AVColorSpace::AVCOL_SPC_FCC as u32;
+        const SMPTE240M: u32 = AVColorSpace::AVCOL_SPC_SMPTE240M as u32;
+        const BT2020_NCL: u32 = AVColorSpace::AVCOL_SPC_BT2020_NCL as u32;
+        const BT2020_CL: u32 = AVColorSpace::AVCOL_SPC_BT2020_CL as u32;
+        const JPEG: u32 = AVColorRange::AVCOL_RANGE_JPEG as u32;
+        const MPEG: u32 = AVColorRange::AVCOL_RANGE_MPEG as u32;
+        // SAFETY: the frame is alive for this call and both fields are C
+        // enums.
+        let (space, range) = unsafe {
+            let frame = picture.as_ptr();
+            (
+                raw_enum(std::ptr::addr_of!((*frame).colorspace)),
+                raw_enum(std::ptr::addr_of!((*frame).color_range)),
+            )
+        };
         // Untagged matrices use swscale's default (BT.601), as the FFmpeg
         // CLI and export do; yuvj formats are full range by definition.
-        let matrix = match picture.color_space() {
-            Space::BT709 => ffi::SWS_CS_ITU709,
-            Space::FCC => ffi::SWS_CS_FCC,
-            Space::SMPTE240M => ffi::SWS_CS_SMPTE240M,
-            Space::BT2020NCL | Space::BT2020CL => ffi::SWS_CS_BT2020,
+        let matrix = match space {
+            BT709 => ffi::SWS_CS_ITU709,
+            FCC => ffi::SWS_CS_FCC,
+            SMPTE240M => ffi::SWS_CS_SMPTE240M,
+            BT2020_NCL | BT2020_CL => ffi::SWS_CS_BT2020,
             _ => ffi::SWS_CS_DEFAULT,
         };
-        let full = match picture.color_range() {
-            Range::JPEG => 1,
-            Range::MPEG => 0,
+        let full = match range {
+            JPEG => 1,
+            MPEG => 0,
             _ => i32::from(matches!(
                 picture.format(),
                 ffmpeg::format::Pixel::YUVJ420P
@@ -952,6 +1022,11 @@ pub(crate) fn filmstrip_stills(
     )?;
     let mut stills: Vec<(f64, RawFrame)> = Vec::new();
     let mut position: Option<f64> = None;
+    // The last still was read keyframes-only. With B-frames the decoder
+    // holds a keyframe until later keyframes arrive, so the demuxer is GOPs
+    // past `position` and decoding forward from here would skip the
+    // pictures in between.
+    let mut read_ahead = false;
     for &time in times {
         let key = decoder.keyframe_before(time);
         let same_gop = matches!((position, key), (Some(at), Some(key)) if key <= at);
@@ -964,13 +1039,15 @@ pub(crate) fn filmstrip_stills(
             // take it without decoding the next one to bound its interval.
             decoder.seek(time)?;
             decoder.seek_target = None;
+            read_ahead = true;
         } else {
             decoder.decoder.skip_frame(ffmpeg::Discard::Default);
-            if same_gop || (key.is_none() && position.is_some()) {
+            if !read_ahead && (same_gop || (key.is_none() && position.is_some())) {
                 decoder.skip_to(time);
             } else {
                 decoder.seek(time)?;
             }
+            read_ahead = false;
         }
         let Some(pts) = decoder.next_decoded()? else {
             break;

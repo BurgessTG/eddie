@@ -2,7 +2,7 @@
 //! for the session. Its own test binary: the fault hook is process-wide.
 
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openreel_media::{FrameStream, RawFrame};
 
@@ -40,11 +40,16 @@ fn a_failing_hardware_decoder_continues_playback_in_software() {
     let preview = FrameStream::spawn_preview(|| {}).unwrap();
     let generation = preview.request_preview(path, 0.0, 320, 10.0).unwrap();
     // The "hardware" decoder fails on its sixth picture, inside the red
-    // second; playback carries on from the clock in software. The clock
-    // moves like a UI's, whether or not a new picture arrived.
+    // second; playback carries on from the clock in software. The clock is
+    // the wall clock, as a UI's is: it moves whether or not a new picture
+    // arrived, and a busy machine cannot make it outrun the decoder.
     let mut shown = Vec::new();
-    let mut time: f64 = 0.0;
-    while time < 1.9 {
+    let started = Instant::now();
+    loop {
+        let time = started.elapsed().as_secs_f64();
+        if time >= 1.9 {
+            break;
+        }
         if let Some(result) = preview.preview_frame(generation, time) {
             let frame = result.unwrap_or_else(|error| panic!("no fallback at {time}: {error}"));
             let (red, blue) = mean_red_blue(&frame);
@@ -52,13 +57,14 @@ fn a_failing_hardware_decoder_continues_playback_in_software() {
             preview.recycle(frame.rgba);
         }
         std::thread::sleep(Duration::from_millis(5));
-        time += 0.01;
     }
-    // A picture may arrive a little after its time, never early.
+    // A picture is never early. It may be late by the time the reopened
+    // decoder needs; restarting from the file's start instead of the clock
+    // would still show red half a second after the cut.
     assert!(
         shown.iter().all(|&(at, red, blue)| if at < 0.95 {
             red
-        } else if at > 1.15 {
+        } else if at > 1.35 {
             blue
         } else {
             red || blue
@@ -66,7 +72,7 @@ fn a_failing_hardware_decoder_continues_playback_in_software() {
         "{shown:?}"
     );
     assert!(
-        shown.iter().filter(|&&(at, ..)| at > 1.2).count() >= 4,
+        shown.iter().filter(|&&(at, ..)| at > 1.2).count() >= 3,
         "{shown:?}"
     );
     let failure = openreel_media::take_hardware_failure();

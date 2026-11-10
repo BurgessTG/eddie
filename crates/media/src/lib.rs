@@ -286,7 +286,10 @@ pub fn waveform_peaks(path: &str, duration: f64, peaks_per_sec: u32) -> MediaRes
         .take()
         .ok_or_else(|| "ffmpeg stdout unavailable".to_owned())?;
     let per_peak = (sample_rate / peaks_per_sec.max(1)).max(1) as usize;
-    let mut peaks = Vec::with_capacity((duration * peaks_per_sec as f64) as usize + 1);
+    // The duration comes from the file, so it is a hint and never a size
+    // to trust: a container claiming years would reserve gigabytes.
+    let expected = (duration * f64::from(peaks_per_sec)).clamp(0.0, (1 << 22) as f64);
+    let mut peaks = Vec::with_capacity(expected as usize + 1);
     let mut current = 0.0_f32;
     let mut count = 0_usize;
     let mut buffer = [0_u8; 64 * 1024];
@@ -453,8 +456,7 @@ pub fn audible_ranges(
     let mut groups: Vec<TimeRange> = Vec::new();
     let mut group_start: Option<usize> = None;
     let mut previous_audible: Option<usize> = None;
-    for index in start_index..end_index {
-        let peak = peaks[index];
+    for (index, &peak) in peaks.iter().enumerate().take(end_index).skip(start_index) {
         if !peak.is_finite() || peak <= threshold {
             continue;
         }
@@ -594,7 +596,7 @@ mod tests {
     #[test]
     fn samples_probe_decode_and_export_end_to_end() {
         if !ffmpeg_available() {
-            panic!("ffmpeg is required for OpenReel media tests");
+            panic!("ffmpeg is required for the media tests");
         }
         let dir = std::env::temp_dir().join(format!("openreel-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -718,5 +720,6 @@ mod tests {
             "{}",
             exported.duration
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

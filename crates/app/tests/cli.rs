@@ -164,7 +164,22 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     // Relative media paths are stored absolute; a missing file is reported.
     let (code, made) = dir.eddie(&["new", "p.eddie", "media/talk.mp4", "media/nope.mp4"]);
     assert_eq!(code, 0, "{made}");
-    assert_eq!(made["media"]["failed"].as_array().unwrap().len(), 1);
+    let failed = made["media"]["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "{made}");
+    assert!(
+        failed[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("media/nope.mp4"),
+        "{made}"
+    );
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("No such file"),
+        "{made}"
+    );
     let talk = dir.0.join("media/talk.mp4").to_string_lossy().into_owned();
     assert_eq!(dir.project()["media"], serde_json::json!([talk]));
 
@@ -238,6 +253,31 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     assert_eq!(code, 0);
     assert_eq!(state["clips"][0]["id"], clip_id);
 
+    // A script can come from a file; one that cannot be read is an error.
+    std::fs::write(dir.0.join("count.js"), "return state().clips.length").unwrap();
+    let (code, counted) = dir.eddie(&["run", "p.eddie", "count.js"]);
+    assert_eq!((code, &counted["output"]), (0, &"1".into()), "{counted}");
+    assert_eq!(
+        counted["saved"], false,
+        "a script that changes nothing saves nothing"
+    );
+    let (code, unread) = dir.eddie(&["run", "p.eddie", "absent.js"]);
+    assert_eq!(code, 1, "{unread}");
+    assert!(
+        unread["error"].as_str().unwrap().contains("absent.js"),
+        "{unread}"
+    );
+
+    // inspect measures the saved timeline: the same black second.
+    let (code, inspected) = dir.eddie(&["inspect", "p.eddie"]);
+    assert_eq!(code, 0, "{inspected}");
+    assert!(inspected["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["kind"] == "picture-gap"));
+    assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), saved);
+
     // The export holds the black lead-in and the 2 s clip.
     let (code, exported) = dir.eddie(&["export", "p.eddie", "out.mp4"]);
     assert_eq!(code, 0, "{exported}");
@@ -262,6 +302,80 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
         "media is untouched"
     );
     assert_eq!(std::fs::read(dir.0.join("p.eddie")).unwrap(), saved);
+
+    // import adds media to the saved project and leaves the timeline alone.
+    std::fs::copy(&talk, dir.0.join("media/more.mp4")).unwrap();
+    let (code, imported) = dir.eddie(&["import", "p.eddie", "media/more.mp4"]);
+    assert_eq!(code, 0, "{imported}");
+    assert_eq!(
+        (&imported["saved"], imported.get("live")),
+        (&true.into(), None)
+    );
+    let project = dir.project();
+    let more = dir.0.join("media/more.mp4").to_string_lossy().into_owned();
+    assert_eq!(project["media"], serde_json::json!([talk, more]));
+    assert_eq!(project["timeline"]["clips"], clips);
+    let (code, nothing) = dir.eddie(&["import", "p.eddie"]);
+    assert_eq!((code, &nothing["ok"]), (1, &false.into()), "{nothing}");
+
+    // A raw stream has no timestamps to place or seek by: it is refused
+    // with the remedy instead of becoming media nothing can use.
+    dir.ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=320x180:r=30:d=1",
+        "-c:v",
+        "libx264",
+        "-f",
+        "h264",
+        "media/raw.h264",
+    ]);
+    let (_, raw) = dir.eddie(&["import", "p.eddie", "media/raw.h264"]);
+    assert_eq!(raw["media"]["imported"], serde_json::json!([]), "{raw}");
+    assert!(
+        raw["media"]["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("container"),
+        "{raw}"
+    );
+    assert_eq!(dir.project()["media"], serde_json::json!([talk, more]));
+}
+
+#[test]
+fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
+    let dir = Dir::new("help");
+    for flag in ["help", "--help", "-h"] {
+        let out = dir.command(".", &[flag]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let text = String::from_utf8_lossy(&out.stdout);
+        for command in ["new", "run", "sheet", "serve", "events"] {
+            assert!(text.contains(&format!("\n  {command} ")), "{command}");
+        }
+        assert!(text.contains("addAssetRange("), "the script API follows");
+    }
+    let out = dir.command(".", &["guide"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let guide = String::from_utf8_lossy(&out.stdout);
+    assert!(guide.starts_with("# Editing with Eddie from an agent"));
+    assert!(guide.contains("## Rules that prevent the usual mistakes"));
+
+    // A typo must answer in JSON, never open the window: without a display
+    // a regression fails here instead of hanging.
+    let mut typo = dir.command(".", &["statee", "p.eddie"]);
+    typo.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+    let out = typo.output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply["ok"], false);
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown command 'statee'"),
+        "{reply}"
+    );
 }
 
 /// The colour of one pixel of a picture file.

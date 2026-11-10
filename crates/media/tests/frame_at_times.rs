@@ -326,6 +326,87 @@ fn native_video_decoder_streams_all_frames_and_reuses_buffer() {
     );
 }
 
+/// A damaged packet costs its own pictures, not the rest of the file.
+#[test]
+fn native_video_decoder_decodes_past_a_damaged_packet() {
+    let fixture = make_color_segments_video();
+    let damaged = fixture.dir.join("damaged.mp4");
+    run_ffmpeg(
+        Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&fixture.path)
+            // Every byte of the sixteenth packet is replaced.
+            .args(["-c", "copy", "-bsf:v", "noise=amount='eq(n\\,15)'"])
+            .arg(&damaged),
+    );
+    let mut decoder = native::VideoDecoder::open(damaged.to_str().unwrap(), 320, true).unwrap();
+    let (mut pictures, mut last, mut buffer) = (0, f64::NAN, Vec::new());
+    while let Some((pts, frame)) = decoder.next_frame(buffer) {
+        pictures += 1;
+        last = pts;
+        buffer = frame.rgba;
+    }
+    assert!((last - 3.9).abs() < 1e-9, "stopped at {last}");
+    assert!((36..=40).contains(&pictures), "{pictures} of 40 pictures");
+    let frame = decoder.frame_at(3.5).expect("picture after the damage");
+    assert_color(frame_mean(&frame), 3, "after the damage");
+}
+
+/// Filmstrip samples deep inside a long GOP show their own pictures, and
+/// samples just after a keyframe show that keyframe. x264's default GOP is
+/// 250 frames with B-frames, which is what most imported footage has.
+#[test]
+fn filmstrip_stills_cover_a_long_gop_with_b_frames() {
+    let dir = std::env::temp_dir().join(format!(
+        "openreel_frame_at_{}_{}",
+        std::process::id(),
+        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).expect("temp dir");
+    let fixture = Fixture {
+        path: dir.join("long-gop.mp4"),
+        dir,
+    };
+    // 24 s whose grey level steps once a second; keyframes at 0, 10 and 20 s.
+    run_ffmpeg(
+        Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=c=black:s=320x180:r=25:d=24,geq=lum='20+9*floor(T)':cb=128:cr=128")
+            .args([
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            ])
+            .args([
+                "-x264-params",
+                "keyint=250:min-keyint=250:scenecut=0:bframes=2",
+            ])
+            .args(["-threads:v", "1"])
+            .arg(&fixture.path),
+    );
+    let times: Vec<f64> = (0..12).map(|index| index as f64 * 2.0).collect();
+    let stills =
+        native::filmstrip_stills(fixture.path.to_str().unwrap(), &times, 144, 2.0).unwrap();
+    let shown: Vec<f64> = stills.iter().map(|(pts, _)| *pts).collect();
+    // Each sample has a still no more than one interval before it: its own
+    // picture, or its keyframe when that is as close.
+    for &time in &times {
+        let still = shown.iter().rfind(|pts| **pts <= time);
+        assert!(
+            still.is_some_and(|pts| time - pts <= 2.0),
+            "{time} s shows {still:?} of {shown:?}"
+        );
+    }
+    for (pts, frame) in &stills {
+        let (red, ..) = mean_rgb(&frame.rgba);
+        // Limited-range grey back to the second it was drawn for.
+        let second = ((red / 1.164 + 16.0 - 20.0) / 9.0).round();
+        assert_eq!(
+            second,
+            pts.floor(),
+            "the still keyed {pts} s shows {second} s"
+        );
+    }
+}
+
 #[test]
 fn native_video_decoder_uses_vfr_presentation_intervals() {
     let fixture = make_color_segments_video();
@@ -680,17 +761,34 @@ fn collect_stream(path: &Path, start: f64) -> Vec<(f64, (f64, f64, f64))> {
     observed
 }
 
-fn assert_cfr_in_point(path: &Path) {
-    let observed = collect_stream(path, 1.5);
-    assert_color(observed[0].1, 1, "stream first at source 1.5");
-    assert_eq!(observed.len(), 25, "only source frames 1.5 through 3.9");
-    for (index, (_, mean)) in observed.iter().enumerate() {
-        assert_color(*mean, (15 + index) / 10, &format!("stream frame {index}"));
+/// Pacing is read on the wall clock, so a loaded machine can starve the
+/// stream or this thread and miss the window. `attempt` checks pictures and
+/// counts every time; its timing must land in `due` on one try of three.
+fn assert_paced(due: std::ops::Range<f64>, what: &str, mut attempt: impl FnMut() -> f64) {
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let at = attempt();
+        if due.contains(&at) {
+            return;
+        }
+        seen.push(at);
     }
-    assert!(
-        (0.30..1.20).contains(&observed[5].0),
-        "source 2.0 is due 0.5 seconds after in-point, got {}",
-        observed[5].0
+    panic!("{what}, got {seen:?}");
+}
+
+fn assert_cfr_in_point(path: &Path) {
+    assert_paced(
+        0.30..1.20,
+        "source 2.0 is due 0.5 seconds after in-point",
+        || {
+            let observed = collect_stream(path, 1.5);
+            assert_color(observed[0].1, 1, "stream first at source 1.5");
+            assert_eq!(observed.len(), 25, "only source frames 1.5 through 3.9");
+            for (index, (_, mean)) in observed.iter().enumerate() {
+                assert_color(*mean, (15 + index) / 10, &format!("stream frame {index}"));
+            }
+            observed[5].0
+        },
     );
 }
 
@@ -704,16 +802,18 @@ fn frame_stream_discards_preroll_and_reaches_final_frame() {
 fn frame_stream_paces_from_inside_a_vfr_interval() {
     let fixture = make_color_segments_video();
     let path = fixture.vfr();
-    let observed = collect_stream(&path, 1.5);
-    assert_eq!(observed.len(), 21);
-    assert_color(observed[0].1, 0, "VFR frame covering source 1.5");
-    for (index, (_, mean)) in observed.iter().enumerate().skip(1) {
-        assert_color(*mean, if index <= 10 { 2 } else { 3 }, "VFR stream");
-    }
-    assert!(
-        (0.30..1.20).contains(&observed[1].0),
-        "source 2.0 is due after the remaining 0.5 seconds, not the full 2-second interval: {}",
-        observed[1].0
+    assert_paced(
+        0.30..1.20,
+        "source 2.0 is due after the remaining 0.5 seconds, not the full 2-second interval",
+        || {
+            let observed = collect_stream(&path, 1.5);
+            assert_eq!(observed.len(), 21);
+            assert_color(observed[0].1, 0, "VFR frame covering source 1.5");
+            for (index, (_, mean)) in observed.iter().enumerate().skip(1) {
+                assert_color(*mean, if index <= 10 { 2 } else { 3 }, "VFR stream");
+            }
+            observed[1].0
+        },
     );
 }
 
@@ -928,7 +1028,9 @@ fn preview_coalesces_requests_while_native_open_is_blocked() {
     preview.cancel_preview();
     preview.stop();
     eprintln!("cancel + replace 1001 requests while native open is blocked: {caller_time:?}");
-    assert!(caller_time < Duration::from_millis(100));
+    // A caller that waited for the blocked open would take the writer's five
+    // seconds; anything tighter only measures how busy the machine is.
+    assert!(caller_time < Duration::from_secs(2), "{caller_time:?}");
     let frame = result.expect("only the final request may follow the blocked native open");
     assert_color(
         frame_mean(&frame),

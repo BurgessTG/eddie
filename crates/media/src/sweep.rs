@@ -41,8 +41,9 @@ pub struct SegmentVisualEvidence {
     pub subject_coverage: f32,
     pub subject_center_x: Option<f32>,
     pub subject_center_y: Option<f32>,
-    /// Foreground-centroid travel per second, normalized to frame
-    /// dimensions and capped at 1.
+    /// Travel of the foreground centroid per second, between half-second
+    /// averages, in frame dimensions and capped at 1. A steady shot of a
+    /// busy subject reads about 0.05, a pan about 0.13.
     pub subject_motion: f32,
     pub center_saliency: f32,
     pub edge_density: f32,
@@ -302,13 +303,34 @@ pub fn frame_visual_evidence(
     }
 }
 
+/// Subject travel is measured between foreground centroids averaged over
+/// this long. Frame-to-frame the centroid of a difference mask jumps around
+/// a still subject, which read as full-speed movement on nearly all footage.
+const SUBJECT_WINDOW: f64 = 0.5;
+/// A frame whose foreground covers less than this says nothing reliable
+/// about where a subject is.
+const SUBJECT_MIN_COVERAGE: f32 = 0.03;
+
+/// `samples` are the pictures in `[start, start + duration)`, in time order.
 fn aggregate_visual_evidence(
     samples: &[&MotionSample],
+    start: f64,
     duration: f64,
 ) -> Option<SegmentVisualEvidence> {
     if samples.is_empty() {
         return None;
     }
+    // The picture at the range's first instant was compared with the one
+    // before the range. At a cut that is the previous shot, so nearly the
+    // whole frame reads as foreground. It is left out unless it is the only
+    // picture (a one-frame insert), which then has no foreground evidence.
+    let inside: Vec<&MotionSample> = samples
+        .iter()
+        .copied()
+        .filter(|sample| start <= 0.0 || sample.time > start)
+        .collect();
+    let foreground_known = !inside.is_empty();
+    let samples: &[&MotionSample] = if foreground_known { &inside } else { samples };
     let count = samples.len() as f32;
     let mean = |pick: &dyn Fn(&FrameVisualEvidence) -> f32| {
         samples
@@ -323,28 +345,45 @@ fn aggregate_visual_evidence(
     let mut center_count = 0_usize;
     let mut unweighted_x = 0.0_f32;
     let mut unweighted_y = 0.0_f32;
-    let mut travel = 0.0_f32;
-    let mut previous_center: Option<(f32, f32)> = None;
-    for sample in samples {
-        if let (Some(x), Some(y)) = (
+    // (window index, coverage, coverage-weighted x, coverage-weighted y)
+    let mut windows: Vec<(i64, f32, f32, f32)> = Vec::new();
+    for sample in samples.iter().filter(|_| foreground_known) {
+        let (Some(x), Some(y)) = (
             sample.visual.foreground_center_x,
             sample.visual.foreground_center_y,
-        ) {
-            center_count += 1;
-            unweighted_x += x;
-            unweighted_y += y;
-            let weight = sample.visual.foreground_coverage;
-            center_weight += weight;
-            center_x_sum += x * weight;
-            center_y_sum += y * weight;
-            if let Some((previous_x, previous_y)) = previous_center {
-                travel += ((x - previous_x).powi(2) + (y - previous_y).powi(2)).sqrt();
+        ) else {
+            continue;
+        };
+        center_count += 1;
+        unweighted_x += x;
+        unweighted_y += y;
+        let weight = sample.visual.foreground_coverage;
+        center_weight += weight;
+        center_x_sum += x * weight;
+        center_y_sum += y * weight;
+        if weight < SUBJECT_MIN_COVERAGE {
+            continue;
+        }
+        let index = ((sample.time - start) / SUBJECT_WINDOW).floor() as i64;
+        match windows.last_mut() {
+            Some(window) if window.0 == index => {
+                window.1 += weight;
+                window.2 += x * weight;
+                window.3 += y * weight;
             }
-            previous_center = Some((x, y));
-        } else {
-            previous_center = None;
+            _ => windows.push((index, weight, x * weight, y * weight)),
         }
     }
+    // Only neighbouring windows count: across a stretch without foreground
+    // the subject may be a different one.
+    let travel: f32 = windows
+        .windows(2)
+        .filter(|pair| pair[1].0 == pair[0].0 + 1)
+        .map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            (to.2 / to.1 - from.2 / from.1).hypot(to.3 / to.1 - from.3 / from.1)
+        })
+        .sum();
     let (subject_center_x, subject_center_y) = if center_weight > 0.0 {
         (
             Some((center_x_sum / center_weight).clamp(0.0, 1.0)),
@@ -360,7 +399,11 @@ fn aggregate_visual_evidence(
     };
 
     Some(SegmentVisualEvidence {
-        subject_coverage: mean(&|visual| visual.foreground_coverage),
+        subject_coverage: if foreground_known {
+            mean(&|visual| visual.foreground_coverage)
+        } else {
+            0.0
+        },
         subject_center_x,
         subject_center_y,
         subject_motion: if duration > 0.0 {
@@ -822,13 +865,17 @@ fn histogram_difference(previous: &[f32; 64], current: &[f32; 64]) -> f32 {
     (total * 0.5).clamp(0.0, 1.0)
 }
 
+const DIFFERENCE_STRIDE: usize = 17;
+
 fn frame_difference(previous: &[u8], current: &[u8]) -> f32 {
     let len = previous.len().min(current.len());
     if len < 4 {
         return 0.0;
     }
-    // Sample every 16th pixel. That is enough for shake/scene detection and
+    // Sample every 17th pixel. That is enough for shake/scene detection and
     // keeps a long recording's sweep proportional to decode, not analysis.
+    // The stride shares no factor with the 64-pixel analysis width; 16 read
+    // the same four columns of every row, one of them the picture's edge.
     let mut total = 0_u64;
     let mut count = 0_u64;
     let mut index = 0_usize;
@@ -837,7 +884,7 @@ fn frame_difference(previous: &[u8], current: &[u8]) -> f32 {
         total += (previous[index + 1] as i32 - current[index + 1] as i32).unsigned_abs() as u64;
         total += (previous[index + 2] as i32 - current[index + 2] as i32).unsigned_abs() as u64;
         count += 3;
-        index += 16 * 4;
+        index += DIFFERENCE_STRIDE * 4;
     }
     if count == 0 {
         0.0
@@ -1093,9 +1140,16 @@ pub fn analyze_segment(
         audio_peak,
         audio_coverage,
         scene_change,
-        visual: aggregate_visual_evidence(&visual_samples, end - start),
+        visual: aggregate_visual_evidence(&visual_samples, start, end - start),
     }
 }
+
+/// Keeps an excerpt's first sample at the time asked for. Without it FFmpeg
+/// starts the output at the first sound it finds, so sound that begins after
+/// the picture (or after a gap) came out early, and a caller advancing by
+/// what it received read the same sound twice. Silence fills the lead and
+/// any gap of 0.1 s or more.
+const EXCERPT_ON_ITS_CLOCK: &str = "aresample=async=1:first_pts=0";
 
 /// Extract a mono 24 kHz PCM WAV chunk in the shape Meta's batch ASR accepts.
 /// Metadata is stripped so caller context does not ride along in the upload.
@@ -1112,6 +1166,8 @@ pub fn write_wav_24k(path: &str, start: f64, duration: f64, output: &Path) -> Me
             "-i",
             path,
             "-vn",
+            "-af",
+            EXCERPT_ON_ITS_CLOCK,
             "-ac",
             "1",
             "-ar",
@@ -1140,6 +1196,8 @@ pub fn pcm_mono_16k(path: &str, start: f64, duration: f64) -> MediaResult<Vec<f3
         "-i",
         path,
         "-vn",
+        "-af",
+        EXCERPT_ON_ITS_CLOCK,
         "-ac",
         "1",
         "-ar",
@@ -1158,6 +1216,47 @@ pub fn pcm_mono_16k(path: &str, start: f64, duration: f64) -> MediaResult<Vec<f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sound that starts after the picture must keep its place: speech
+    /// models stamp words from the first sample they are given.
+    #[test]
+    fn excerpts_keep_late_starting_sound_at_its_own_time() {
+        let dir = std::env::temp_dir().join(format!("openreel_late_audio_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("late.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=blue:s=64x36:r=30:d=3")
+            .args(["-itsoffset", "1.5", "-f", "lavfi", "-i", "sine=f=440:d=1.5"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let file = path.to_str().unwrap();
+        let first_sound = |pcm: &[f32]| {
+            pcm.iter()
+                .position(|s| s.abs() > 0.01)
+                .map(|i| i as f64 / 16_000.0)
+        };
+
+        let whole = pcm_mono_16k(file, 0.0, 3.0).unwrap();
+        assert!((whole.len() as i64 - 48_000).abs() < 800, "{}", whole.len());
+        let heard = first_sound(&whole).unwrap();
+        assert!((heard - 1.5).abs() < 0.05, "sound at {heard}");
+
+        // From inside the silent lead, the remaining silence is kept.
+        let part = pcm_mono_16k(file, 1.0, 1.5).unwrap();
+        let heard = first_sound(&part).unwrap();
+        assert!((heard - 0.5).abs() < 0.05, "sound at {heard}");
+
+        // An upload chunk has the same shape: 3 s of 24 kHz 16-bit mono.
+        let wav = dir.join("chunk.wav");
+        write_wav_24k(file, 0.0, 3.0, &wav).unwrap();
+        let bytes = std::fs::metadata(&wav).unwrap().len() as i64;
+        assert!((bytes - 144_000).abs() < 3_000, "{bytes}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn frame_difference_detects_changed_pixels() {
@@ -1610,6 +1709,105 @@ mod tests {
             .expect("video segment carries visual evidence");
         assert!((evidence.subject_coverage - 0.25).abs() < 0.001);
         assert!((evidence.subject_center_x.expect("center x") - 0.5).abs() < 0.001);
+    }
+
+    fn subject_sample(time: f64, coverage: f32, x: f32) -> MotionSample {
+        MotionSample {
+            time,
+            difference: 0.02,
+            scene_score: 0.0,
+            visual: FrameVisualEvidence {
+                foreground_coverage: coverage,
+                foreground_center_x: Some(x),
+                foreground_center_y: Some(0.5),
+                ..FrameVisualEvidence::default()
+            },
+        }
+    }
+
+    /// The centroid of a difference mask jumps around a still subject from
+    /// frame to frame. Summing those jumps read 1.0 on nearly all real
+    /// footage; travel between half-second averages does not.
+    #[test]
+    fn subject_motion_is_travel_not_frame_to_frame_jitter() {
+        // 40 pictures a second: 20 in each half-second window.
+        let frames = |x: &dyn Fn(usize) -> f32| -> Vec<MotionSample> {
+            (0..160)
+                .map(|index| subject_sample(index as f64 / 40.0, 0.1, x(index)))
+                .collect()
+        };
+        let motion_of = |samples: &[MotionSample]| {
+            analyze_segment(0.0, 4.0, samples, &[], 50)
+                .visual
+                .expect("visual evidence")
+                .subject_motion
+        };
+        // Jitter of 0.4 of the frame width every frame, going nowhere.
+        let jitter = frames(&|index| if index % 2 == 0 { 0.3 } else { 0.7 });
+        assert!(motion_of(&jitter) < 0.01, "{}", motion_of(&jitter));
+        // The same jitter on a subject crossing 0.6 of the frame in 4 s:
+        // each of the 8 window means is 0.075 past the last, 0.525 in 4 s.
+        let crossing = frames(&|index| {
+            0.2 + 0.6 * index as f32 / 160.0 + if index % 2 == 0 { -0.2 } else { 0.2 }
+        });
+        assert!(
+            (motion_of(&crossing) - 0.131).abs() < 0.005,
+            "{}",
+            motion_of(&crossing)
+        );
+        // Frames with almost no foreground say nothing about a subject.
+        let faint: Vec<MotionSample> = (0..160)
+            .map(|index| subject_sample(index as f64 / 40.0, 0.01, (index / 20) as f32 / 8.0))
+            .collect();
+        assert_eq!(motion_of(&faint), 0.0);
+    }
+
+    /// The first picture after a cut was compared with the previous shot,
+    /// so almost all of it differs. That is the cut, not a subject.
+    #[test]
+    fn the_cut_frame_is_not_the_new_shots_subject() {
+        let mut samples: Vec<MotionSample> = (0..40)
+            .map(|index| subject_sample(index as f64 * 0.1, 0.01, 0.2))
+            .collect();
+        samples[20] = subject_sample(2.0, 0.9, 0.5);
+        let after_cut = analyze_segment(2.0, 4.0, &samples, &[], 50)
+            .visual
+            .expect("visual evidence");
+        assert!((after_cut.subject_coverage - 0.01).abs() < 1e-6);
+        assert!((after_cut.subject_center_x.unwrap() - 0.2).abs() < 1e-6);
+        // A file's first picture has nothing before it and is kept.
+        let first = analyze_segment(0.0, 0.05, &samples, &[], 50)
+            .visual
+            .expect("visual evidence");
+        assert!((first.subject_coverage - 0.01).abs() < 1e-6);
+        // A one-frame insert has no picture of its own to compare with.
+        let insert = analyze_segment(2.0, 2.05, &samples, &[], 50)
+            .visual
+            .expect("a one-frame shot still has a picture");
+        assert_eq!(insert.subject_coverage, 0.0);
+        assert_eq!(insert.subject_center_x, None);
+        assert_eq!(insert.subject_motion, 0.0);
+    }
+
+    /// A stride of 16 pixels on a 64-pixel row read columns 0, 16, 32 and
+    /// 48 of every row and nothing else.
+    #[test]
+    fn frame_difference_samples_every_column() {
+        let (width, height) = (64_usize, 36_usize);
+        let previous = vec![0_u8; width * height * 4];
+        for column in [5_usize, 21, 47, 63] {
+            let mut current = previous.clone();
+            for row in 0..height {
+                let index = (row * width + column) * 4;
+                current[index..index + 3].fill(255);
+            }
+            let difference = frame_difference(&previous, &current);
+            // One column in 64 changed fully: about 1/64 = 0.0156.
+            assert!(
+                (0.005..0.03).contains(&difference),
+                "column {column}: {difference}"
+            );
+        }
     }
 
     #[test]

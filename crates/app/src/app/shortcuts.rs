@@ -1,291 +1,71 @@
-//! Keyboard shortcuts. One table drives key handling, menu labels,
-//! tooltips and the Keyboard shortcuts window, so they cannot disagree.
+//! Keyboard shortcuts for the egui window. The table, labels and matching
+//! rules live in `eddie_core::shortcuts`; this file reads egui's key
+//! events and draws the Keyboard shortcuts window.
 
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
+use eddie_core::shortcuts::{self as table, Chord, KeyName, BINDINGS};
+use eframe::egui::{self, Key, Modifiers, RichText};
 
 use super::Action;
 use crate::theme;
 
-const NONE: Modifiers = Modifiers::NONE;
-const SHIFT: Modifiers = Modifiers::SHIFT;
-const CMD: Modifiers = Modifiers::COMMAND;
-const CMD_SHIFT: Modifiers = Modifiers {
-    shift: true,
-    ..Modifiers::COMMAND
-};
-
-const fn key(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
-    KeyboardShortcut::new(modifiers, key)
+/// egui's key as the shared table names it. Keys no binding uses are `None`.
+fn key_name(key: Key) -> Option<KeyName> {
+    Some(match key {
+        Key::Space => KeyName::Space,
+        Key::ArrowLeft => KeyName::Left,
+        Key::ArrowRight => KeyName::Right,
+        Key::ArrowUp => KeyName::Up,
+        Key::ArrowDown => KeyName::Down,
+        Key::Home => KeyName::Home,
+        Key::End => KeyName::End,
+        Key::Delete => KeyName::Delete,
+        Key::Backspace => KeyName::Backspace,
+        Key::Escape => KeyName::Escape,
+        Key::F1 => KeyName::Function(1),
+        Key::Equals => KeyName::Char('='),
+        Key::Plus => KeyName::Char('+'),
+        Key::Minus => KeyName::Char('-'),
+        Key::Comma => KeyName::Char(','),
+        Key::Slash => KeyName::Char('/'),
+        Key::OpenBracket => KeyName::Char('['),
+        Key::CloseBracket => KeyName::Char(']'),
+        other => {
+            // Letters are named by their capital: "S".
+            let mut name = other.name().chars();
+            match (name.next(), name.next()) {
+                (Some(letter), None) if letter.is_ascii_uppercase() => {
+                    KeyName::Char(letter.to_ascii_lowercase())
+                }
+                _ => return None,
+            }
+        }
+    })
 }
 
-pub(super) struct Binding {
-    pub action: Action,
-    pub group: &'static str,
-    pub label: &'static str,
-    /// The first chord is the one menus and tooltips show.
-    pub keys: &'static [KeyboardShortcut],
-    /// Held keys repeat (stepping); toggles fire once per press.
-    pub repeats: bool,
-    /// Also works while a text field has focus. Only Ctrl chords whose
-    /// keys mean nothing to text editing qualify.
-    pub in_text: bool,
-}
-
-const fn bind(
-    action: Action,
-    group: &'static str,
-    label: &'static str,
-    keys: &'static [KeyboardShortcut],
-) -> Binding {
-    Binding {
-        action,
-        group,
-        label,
-        keys,
-        repeats: false,
-        in_text: false,
+/// A pressed key as a chord, when its modifiers are ones the table uses.
+fn chord(key: Key, modifiers: Modifiers) -> Option<Chord> {
+    let command = modifiers.matches_exact(Modifiers::COMMAND)
+        || modifiers.matches_exact(Modifiers::COMMAND | Modifiers::SHIFT);
+    let plain =
+        modifiers.matches_exact(Modifiers::NONE) || modifiers.matches_exact(Modifiers::SHIFT);
+    if !command && !plain {
+        return None;
     }
-}
-
-const fn repeating(binding: Binding) -> Binding {
-    Binding {
-        repeats: true,
-        ..binding
-    }
-}
-
-const fn anywhere(binding: Binding) -> Binding {
-    Binding {
-        in_text: true,
-        ..binding
-    }
-}
-
-pub(super) const BINDINGS: &[Binding] = &[
-    anywhere(bind(
-        Action::NewProject,
-        "Project",
-        "New project",
-        &[key(CMD, Key::N)],
-    )),
-    anywhere(bind(
-        Action::OpenProject,
-        "Project",
-        "Open project",
-        &[key(CMD, Key::O)],
-    )),
-    anywhere(bind(
-        Action::SaveProject,
-        "Project",
-        "Save project",
-        &[key(CMD, Key::S)],
-    )),
-    anywhere(bind(
-        Action::SaveProjectAs,
-        "Project",
-        "Save project as",
-        &[key(CMD_SHIFT, Key::S)],
-    )),
-    anywhere(bind(
-        Action::Import,
-        "Project",
-        "Import media",
-        &[key(CMD, Key::I)],
-    )),
-    anywhere(bind(
-        Action::Export,
-        "Project",
-        "Export MP4",
-        &[key(CMD, Key::E)],
-    )),
-    bind(Action::Undo, "Edit", "Undo", &[key(CMD, Key::Z)]),
-    bind(
-        Action::Redo,
-        "Edit",
-        "Redo",
-        &[key(CMD_SHIFT, Key::Z), key(CMD, Key::Y)],
-    ),
-    bind(
-        Action::SplitSelected,
-        "Edit",
-        "Split at playhead",
-        &[key(NONE, Key::S), key(NONE, Key::B)],
-    ),
-    bind(
-        Action::DeleteSelected,
-        "Edit",
-        "Delete clip",
-        &[key(NONE, Key::Delete), key(NONE, Key::Backspace)],
-    ),
-    bind(Action::AddTitle, "Edit", "Add title", &[key(NONE, Key::T)]),
-    bind(
-        Action::ToggleMagnet,
-        "Edit",
-        "Magnet on or off",
-        &[key(NONE, Key::M)],
-    ),
-    bind(
-        Action::Deselect,
-        "Edit",
-        "Deselect",
-        &[key(NONE, Key::Escape)],
-    ),
-    bind(
-        Action::PlayPause,
-        "Playback",
-        "Play or pause",
-        &[key(NONE, Key::Space)],
-    ),
-    bind(
-        Action::ShuttleReverse,
-        "Playback",
-        "Reverse, faster each press",
-        &[key(NONE, Key::J)],
-    ),
-    bind(
-        Action::ShuttleStop,
-        "Playback",
-        "Stop",
-        &[key(NONE, Key::K)],
-    ),
-    bind(
-        Action::ShuttleForward,
-        "Playback",
-        "Forward, faster each press",
-        &[key(NONE, Key::L)],
-    ),
-    repeating(bind(
-        Action::StepBack,
-        "Playback",
-        "Back one frame",
-        &[key(NONE, Key::ArrowLeft)],
-    )),
-    repeating(bind(
-        Action::StepForward,
-        "Playback",
-        "Forward one frame",
-        &[key(NONE, Key::ArrowRight)],
-    )),
-    repeating(bind(
-        Action::StepBackSecond,
-        "Playback",
-        "Back one second",
-        &[key(SHIFT, Key::ArrowLeft)],
-    )),
-    repeating(bind(
-        Action::StepForwardSecond,
-        "Playback",
-        "Forward one second",
-        &[key(SHIFT, Key::ArrowRight)],
-    )),
-    repeating(bind(
-        Action::PrevEdit,
-        "Playback",
-        "Previous cut",
-        &[key(NONE, Key::ArrowUp), key(NONE, Key::OpenBracket)],
-    )),
-    repeating(bind(
-        Action::NextEdit,
-        "Playback",
-        "Next cut",
-        &[key(NONE, Key::ArrowDown), key(NONE, Key::CloseBracket)],
-    )),
-    bind(
-        Action::GoStart,
-        "Playback",
-        "Go to start",
-        &[key(NONE, Key::Home)],
-    ),
-    bind(
-        Action::GoEnd,
-        "Playback",
-        "Go to end",
-        &[key(NONE, Key::End)],
-    ),
-    // Ctrl and + is Shift+= on most layouts, so accept both spellings.
-    repeating(anywhere(bind(
-        Action::ZoomIn,
-        "View",
-        "Zoom in",
-        &[
-            key(CMD, Key::Equals),
-            key(CMD, Key::Plus),
-            key(CMD_SHIFT, Key::Plus),
-            key(CMD_SHIFT, Key::Equals),
-        ],
-    ))),
-    repeating(anywhere(bind(
-        Action::ZoomOut,
-        "View",
-        "Zoom out",
-        &[key(CMD, Key::Minus)],
-    ))),
-    bind(
-        Action::ZoomFit,
-        "View",
-        "Fit timeline",
-        &[key(SHIFT, Key::Z)],
-    ),
-    anywhere(bind(
-        Action::OpenSettings,
-        "View",
-        "Settings",
-        &[key(CMD, Key::Comma)],
-    )),
-    anywhere(bind(
-        Action::ShowShortcuts,
-        "View",
-        "Keyboard shortcuts",
-        &[key(CMD, Key::Slash), key(NONE, Key::F1)],
-    )),
-];
-
-fn binding(action: Action) -> Option<&'static Binding> {
-    BINDINGS.iter().find(|binding| binding.action == action)
-}
-
-fn format(ctx: &egui::Context, shortcut: &KeyboardShortcut) -> String {
-    let mac = ctx.os().is_mac();
-    let mods = shortcut.modifiers;
-    let mut text = String::new();
-    if mods.command || mods.ctrl || mods.mac_cmd {
-        text.push_str(if mac { "Cmd+" } else { "Ctrl+" });
-    }
-    if mods.alt {
-        text.push_str(if mac { "Option+" } else { "Alt+" });
-    }
-    if mods.shift {
-        text.push_str("Shift+");
-    }
-    text.push_str(match shortcut.logical_key {
-        Key::ArrowLeft => "←",
-        Key::ArrowRight => "→",
-        Key::ArrowUp => "↑",
-        Key::ArrowDown => "↓",
-        Key::Equals | Key::Plus => "+",
-        Key::Minus => "-",
-        Key::Slash => "/",
-        Key::Escape => "Esc",
-        Key::Delete => "Del",
-        other => other.name(),
-    });
-    text
+    Some(Chord {
+        command,
+        shift: modifiers.shift,
+        key: key_name(key)?,
+    })
 }
 
 /// The chord a menu shows for `action`, or "" when it has none.
-pub(super) fn label(ctx: &egui::Context, action: Action) -> String {
-    binding(action)
-        .and_then(|binding| binding.keys.first())
-        .map(|shortcut| format(ctx, shortcut))
-        .unwrap_or_default()
+pub(super) fn label(_ctx: &egui::Context, action: Action) -> String {
+    table::label(action)
 }
 
 /// `text` followed by the action's chord in parentheses, for tooltips.
-pub(super) fn tip(ctx: &egui::Context, text: &str, action: Action) -> String {
-    match label(ctx, action) {
-        chord if chord.is_empty() => text.to_owned(),
-        chord => format!("{text} ({chord})"),
-    }
+pub(super) fn tip(_ctx: &egui::Context, text: &str, action: Action) -> String {
+    table::tip(text, action)
 }
 
 /// Consume the first key press this frame that a binding owns. `typing`
@@ -307,20 +87,9 @@ pub(super) fn take_action(ctx: &egui::Context, typing: bool) -> Option<Action> {
             else {
                 return true;
             };
-            let hit = BINDINGS.iter().find(|binding| {
-                (!typing || binding.in_text)
-                    && (!*repeat || binding.repeats)
-                    && binding.keys.iter().any(|shortcut| {
-                        shortcut.logical_key == *key && modifiers.matches_exact(shortcut.modifiers)
-                    })
-            });
-            match hit {
-                Some(binding) => {
-                    found = Some(binding.action);
-                    false
-                }
-                None => true,
-            }
+            found =
+                chord(*key, *modifiers).and_then(|chord| table::action_for(chord, typing, *repeat));
+            found.is_none()
         });
         found
     })
@@ -338,7 +107,7 @@ fn keycap(ui: &mut egui::Ui, text: String) {
         });
 }
 
-fn group(ui: &mut egui::Ui, ctx: &egui::Context, name: &str) {
+fn group(ui: &mut egui::Ui, name: &str) {
     ui.label(RichText::new(name).family(theme::semibold()));
     ui.add_space(4.0);
     for binding in BINDINGS.iter().filter(|binding| binding.group == name) {
@@ -348,14 +117,7 @@ fn group(ui: &mut egui::Ui, ctx: &egui::Context, name: &str) {
             ui.label(RichText::new(binding.label).color(theme::MUTED_FG));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                // Zoom's Plus spellings are one key on the keyboard; show it once.
-                let shown = binding.keys.iter().enumerate().filter(|(index, shortcut)| {
-                    *index == 0
-                        || !(shortcut.logical_key == Key::Plus
-                            || (shortcut.logical_key == Key::Equals && shortcut.modifiers.shift))
-                });
-                let chords: Vec<String> =
-                    shown.map(|(_, shortcut)| format(ctx, shortcut)).collect();
+                let chords = table::keycaps(binding);
                 for chord in chords.into_iter().rev() {
                     keycap(ui, chord);
                 }
@@ -376,12 +138,12 @@ pub(super) fn window(ctx: &egui::Context, open: &mut bool) {
             ui.add_space(4.0);
             ui.spacing_mut().item_spacing.x = 32.0;
             ui.columns(2, |columns| {
-                group(&mut columns[0], ctx, "Project");
+                group(&mut columns[0], "Project");
                 columns[0].add_space(12.0);
-                group(&mut columns[0], ctx, "Edit");
-                group(&mut columns[1], ctx, "Playback");
+                group(&mut columns[0], "Edit");
+                group(&mut columns[1], "Playback");
                 columns[1].add_space(12.0);
-                group(&mut columns[1], ctx, "View");
+                group(&mut columns[1], "View");
             });
         });
 }
@@ -409,14 +171,25 @@ mod tests {
         found
     }
 
+    const NONE: Modifiers = Modifiers::NONE;
+    const SHIFT: Modifiers = Modifiers::SHIFT;
+    const CMD: Modifiers = Modifiers::COMMAND;
+    const CMD_SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..Modifiers::COMMAND
+    };
+
     #[test]
-    fn every_chord_belongs_to_one_action() {
-        let mut seen = Vec::new();
+    fn every_bound_key_has_an_egui_key() {
+        // A binding whose key egui cannot name would never fire here.
+        let named: Vec<KeyName> = Key::ALL.iter().filter_map(|key| key_name(*key)).collect();
         for binding in BINDINGS {
-            for shortcut in binding.keys {
-                let chord = (shortcut.logical_key, shortcut.modifiers);
-                assert!(!seen.contains(&chord), "{chord:?} is bound twice");
-                seen.push(chord);
+            for chord in binding.keys {
+                assert!(
+                    named.contains(&chord.key),
+                    "{:?} has no egui key",
+                    chord.key
+                );
             }
         }
     }

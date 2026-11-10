@@ -175,6 +175,9 @@ pub struct Editor {
 
     pub import_rx: Option<Receiver<ImportMsg>>,
     pub import_queue: Vec<PathBuf>,
+    /// Why each file that could not be imported failed, by path, until it
+    /// is imported again.
+    pub import_errors: HashMap<String, String>,
     sweep_rx: Option<Receiver<SweepMsg>>,
     pub sweep_queue: Vec<String>,
     /// Shared by every running curation worker; dropped when none run.
@@ -392,6 +395,7 @@ impl Editor {
             status: "Ready.".to_owned(),
             import_rx: None,
             import_queue: Vec::new(),
+            import_errors: HashMap::new(),
             sweep_rx: None,
             sweep_queue: Vec::new(),
             sweep_tx: None,
@@ -796,6 +800,14 @@ impl Editor {
     }
 
     pub fn audio_engine(&mut self) -> &mut AudioEngine {
+        // An unplugged device (or a restarted sound server) stops calling
+        // back, and the transport clock with it. Start again on whatever is
+        // the default output now.
+        if self.audio.as_ref().is_some_and(AudioEngine::device_lost) {
+            self.audio = None;
+            self.clock_playhead = None;
+            self.status = "Audio device lost; switched output.".to_owned();
+        }
         if self.audio.is_none() {
             let engine = if self.manual_audio {
                 AudioEngine::manual()
@@ -805,6 +817,9 @@ impl Editor {
             eprintln!("audio output: {}", engine.description);
             if engine.description.starts_with("no audio device") {
                 self.status = "No audio device; playing silently.".to_owned();
+            }
+            if self.match_export_loudness {
+                engine.set_loudness(self.loudness_gain);
             }
             self.audio = Some(engine);
         }
@@ -1266,10 +1281,15 @@ impl Editor {
         }
         // Preroll the next visible clip while this one plays or buffers, so
         // its first picture is ready when the playhead lands on the cut.
-        if let (Some(stream), Some((_, Some((source, time))))) =
+        if let (Some(stream), Some((edge, Some((source, time))))) =
             (&self.stream, self.next_video_change(self.playhead))
         {
-            let _ = stream.prefetch_preview(source, time, PREVIEW_W);
+            // Where the playing clip's decoder will be when the cut comes.
+            let active_until = self
+                .timeline
+                .active_video(self.playhead)
+                .map(|clip| clip.source_in + (edge - clip.start));
+            let _ = stream.prefetch_preview(source, time, PREVIEW_W, active_until);
         }
         self.sync_audio();
         if self.waiting_for_video() {
@@ -1980,7 +2000,6 @@ impl Editor {
             "selected": self.selected,
             "duration": self.timeline.end(),
             "fps": self.timeline.fps,
-            "tool": "select",
             "magnet": self.viewport.magnet,
             "musicBedMuted": self.mute_music_beds,
             "format": self.timeline.orientation.as_str(),
@@ -2010,21 +2029,16 @@ impl Editor {
             command.validate()?;
         }
         let before = self.edit_snapshot();
+        let overlaps_before = self.timeline.lane_overlaps();
         let started = Instant::now();
         let mut created = HashMap::new();
         let result = (|| {
             let mut notes = Vec::new();
             for command in commands {
                 notes.extend(self.apply_script_command(command, &mut created)?);
-                // Finite input can still overflow frame-grid arithmetic.
-                if !self.playhead.is_finite()
-                    || self.timeline.clips.iter().any(|clip| {
-                        !clip.start.is_finite()
-                            || !clip.duration.is_finite()
-                            || !clip.source_in.is_finite()
-                            || !clip.end().is_finite()
-                    })
-                {
+                // Finite input can still overflow frame-grid arithmetic, or
+                // send a clip days away.
+                if !self.playhead.is_finite() || !self.timeline.in_supported_range() {
                     return Err("edit exceeds the supported timeline range".to_owned());
                 }
                 // Cooperative bound: individual native commands are not
@@ -2032,6 +2046,25 @@ impl Editor {
                 if started.elapsed() > Duration::from_millis(250) {
                     return Err("edit took too long; try a smaller batch".to_owned());
                 }
+            }
+            // Checked once the whole edit has run, so commands may pass
+            // through an overlap on the way to a valid timeline.
+            if let Some(&(a, b)) = self
+                .timeline
+                .lane_overlaps()
+                .iter()
+                .find(|pair| !overlaps_before.contains(pair))
+            {
+                let describe = |id: ClipId| match self.timeline.clip(id) {
+                    Some(clip) => format!("clip {id} ({})", clip.name),
+                    None => format!("clip {id}"),
+                };
+                let lane = self.timeline.clip(a).map_or(0, |clip| clip.track);
+                return Err(format!(
+                    "{} and {} would overlap on lane {lane}; trim one, or move it in time or to another lane with setClipLane",
+                    describe(a),
+                    describe(b)
+                ));
             }
             Ok(notes)
         })();
@@ -2142,11 +2175,13 @@ impl Editor {
             }
             ScriptCommand::MoveClip { clip, start } => self.timeline.move_clip(clip, start),
             ScriptCommand::TrimClip { clip, left, right } => {
+                // A request takes the nearest frame; the model then rounds
+                // one way only where a bound (the media's end) is off the grid.
                 if let Some(left) = left {
-                    self.timeline.trim_left(clip, left);
+                    self.timeline.trim_left(clip, self.timeline.snap(left));
                 }
                 if let Some(right) = right {
-                    let mut end = right;
+                    let mut end = self.timeline.snap(right);
                     if let Some(c) = self.timeline.clip(clip) {
                         if let Some(asset) = c.source.as_ref().and_then(|s| self.asset(s)) {
                             end = end.min(c.start + (asset.info.duration - c.source_in).max(0.0));
@@ -2290,11 +2325,6 @@ impl Editor {
             ScriptCommand::Import(path) => self.spawn_import(vec![PathBuf::from(path)]),
             ScriptCommand::Export(path) => self.start_export(PathBuf::from(path)),
             ScriptCommand::ClearTimeline => self.clear_timeline(),
-            ScriptCommand::SetTool(tool) => match tool.as_str() {
-                // One pointer mode remains; split is an action at the playhead.
-                "select" => {}
-                other => return Err(format!("unknown tool '{other}'")),
-            },
             ScriptCommand::SetMagnet(on) => self.viewport.magnet = on,
             ScriptCommand::SetMusicBedMuted(on) => self.mute_music_beds = on,
             ScriptCommand::SetZoom(px) => self.viewport.set_zoom(px),

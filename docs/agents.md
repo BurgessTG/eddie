@@ -2,9 +2,8 @@
 
 Eddie has no AI inside it. You, the agent, do the thinking; Eddie is the
 editor you drive. It runs locally and does the same thing every time.
-This guide covers the command line and the JavaScript API. It started
-from the rules the removed built-in chat followed; each of those rules
-fixed a real mistake.
+This guide covers the command line and the JavaScript API. Each rule in
+it fixed a real mistake.
 
 ## The loop
 
@@ -22,7 +21,8 @@ eddie export talk.eddie out.mp4
 ```
 
 Every command prints one JSON object. Errors print `{"ok":false,"error":...}`
-and exit 1. `eddie help` lists the commands and the script API.
+and exit 1. `eddie help` lists the commands and the script API; `eddie
+guide` prints this guide as written for the installed version.
 
 - `curate` also transcribes each file that has no saved transcript, with
   the Speech provider from Settings. Run `transcribe` first to choose the
@@ -30,7 +30,13 @@ and exit 1. `eddie help` lists the commands and the script API.
 - `transcribe` and `curate` list each file under `assets`. `reused: true`
   means a saved result answered; `--force` computes it again. `curate
   --force` keeps a saved transcript; `transcribe --force` replaces it.
+- Read each file's `note`. A `curate` note with "Transcription failed: …"
+  means the file was curated without speech data, not that it is silent.
+  Fix the cause, run `transcribe`, then `curate --force`.
+- `new` and `import` list `media.imported` (paths) and `media.failed`
+  (`[{path, error}]`). A failed file is not in the project.
 - A reply's `saved` says whether the project file was written.
+- An unknown command is an error too; it never opens the window.
 
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
 `sheet`, and fix what the edit broke. `run --dry-run` keeps nothing: its
@@ -66,7 +72,10 @@ same way; replies add `"live":true`.
   project takes it over; a second `serve` is refused.
 
 A program can use the socket itself instead of running `eddie` per
-command. `serve` prints its `socket` path. Send one JSON object per line,
+command. `serve` prints its `socket` path; sockets live in
+`$XDG_RUNTIME_DIR/eddie`, or in `run/` beside the settings file when that
+variable is unset. The editor's first line is `{"event":"hello","project",
+"window","version"}`. Send one JSON object per line,
 `{"id":1,"method":"run","code":"split('clip:7@50%')"}`, and read lines
 until one has your `id` and `ok`; lines with `progress` or `event` come in
 between. The methods are the commands, with these parameters:
@@ -74,7 +83,8 @@ between. The methods are the commands, with these parameters:
 - `run`: `code`, `dryRun`.
 - `import`: `media` (absolute paths).
 - `transcribe`: `assets`, `force`, `provider`, `model`, `language`,
-  `vocabulary`. `curate`: `assets`, `force`.
+  `vocabulary`, `apiKey` (the `eddie` command sends
+  `EDDIE_TRANSCRIBE_API_KEY` here). `curate`: `assets`, `force`.
 - `sheet`: `output`, `range`. `strip`: `asset`, `output`. `frames`:
   `asset`, `range`, `directory`, `every`, `width`. `export`: `output`.
   Output paths are absolute.
@@ -126,10 +136,12 @@ fails, the project is left exactly as it was.
   - `handles` maps each handle to the ID of the clip it created.
 - `importMedia` and `exportTo` are refused here. Use `eddie import` and
   `eddie export` instead.
+- The queued edits get 250 ms to apply. "edit took too long; try a
+  smaller batch" means split the script into several runs.
 
 ### Reading the project
 
-`state()` returns `{playhead, selected, duration, fps, magnet,
+`state()` returns `{playhead, playing, selected, duration, fps, magnet,
 musicBedMuted, format, clips, assets, sweepCandidates, sceneClips,
 transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
 `assets()`, `sweepCandidates()`, `sceneClips()`, `transcriptSegments()`,
@@ -160,6 +172,13 @@ transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
   visual, review {status, model}`.
   - New curations are local measurements, not judgments; `review.status`
     is `local`.
+  - `category` is the first of these that fits: `reaction` (a loud burst
+    of at most 7 s), `talking` (heard speech), `action` (strong picture or
+    subject motion), `establishing` (steady, 3 s or more, no subject in
+    frame), else `broll`.
+  - `quality.motion` is `1 - quality.stability`, on one scale for every
+    file. `quality.audio` is relative to the file's own loudest range, so
+    compare it only within one file.
   - The `music-bed` tag is the sound alone: steady, like music.
     `musicBed: true` also needs the range to have no transcribed speech.
   - Curations saved by the old model reviewer can still say `reviewed`,
@@ -188,6 +207,11 @@ times (`dur`, `seconds`, `sourceIn`) are plain seconds.
     times. `null` or -1 keeps that edge.
   - A new start moves the source in-point by the same amount. A new end
     stops at the end of the source.
+  - Two clips can't overlap on one lane. This is checked once, after the
+    whole script: clips may cross on the way, but a script that ends with
+    a new overlap is refused with an error naming both clips. Trim one,
+    or move it in time or to another lane.
+  - Lanes run from 0 to 64 and times to 1,000,000 seconds.
 - **Picture and sound:** `setOpacity(id, 0..1)`, `setVolume(id, gain)`,
   `setFade(id, inSeconds, outSeconds)`, `setSmoothFades(id, bool)`,
   `setDuck(id, bool)`, `setCleanVoice(id, bool)`, `setEmbeddedAudio(id,
@@ -212,6 +236,10 @@ times (`dur`, `seconds`, `sourceIn`) are plain seconds.
     many captions it added; read their IDs from `state()` in the next
     run.
 - **Settings:** `setMagnet(bool)`, `setMusicBedMuted(bool)`.
+- **Transport and view:** `play()`, `pause()`, `toggle()`, `seek(t)`,
+  `step(nFrames)`, `setZoom(pxPerSec)`. In the window these move the
+  user's playhead and view, so use them to show the user something, not
+  to edit. Pass times to edits instead of seeking first.
 
 ## Rules that prevent the usual mistakes
 

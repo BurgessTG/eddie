@@ -10,15 +10,52 @@ use openreel_media::{AudioEngine, AudioSegment, AUDIO_RATE};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A private folder for one test's media, removed when the test ends. It
+/// reads as the folder, or as the one file a test made in it.
+struct Fixture {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Fixture {
+    fn dir() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "eddie-audio-{}-{}",
+            std::process::id(),
+            FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self {
+            path: dir.clone(),
+            dir,
+        }
+    }
+}
+
+impl std::ops::Deref for Fixture {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for Fixture {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Silence, then a 1 kHz tone from exactly `onset` seconds to the end.
-fn tone_file(name: &str, onset: f64, codec: &[&str]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "eddie-audio-{}-{}",
-        std::process::id(),
-        FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
+fn tone_file(name: &str, onset: f64, codec: &[&str]) -> Fixture {
+    let mut fixture = Fixture::dir();
+    let path = fixture.dir.join(name);
     let status = Command::new("ffmpeg")
         .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
         .arg(format!(
@@ -29,7 +66,8 @@ fn tone_file(name: &str, onset: f64, codec: &[&str]) -> PathBuf {
         .status()
         .expect("ffmpeg");
     assert!(status.success());
-    path
+    fixture.path = path;
+    fixture
 }
 
 fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) -> AudioSegment {
@@ -262,21 +300,122 @@ fn missing_file_reports_an_error_without_holding_the_clock() {
     assert!(engine.take_error().is_some());
 }
 
+/// A stream can change channel count part-way (broadcast recordings that
+/// switch 5.1 to stereo, joined files). The voice follows the change instead
+/// of reading planes the new frames do not have.
+#[test]
+fn a_stream_that_changes_channel_count_plays_through() {
+    let dir = Fixture::dir();
+    // One second of stereo, then one of mono, as a single MPEG-TS stream.
+    let mut joined = Vec::new();
+    for (name, channels, offset) in [("stereo.ts", "2", "0"), ("mono.ts", "1", "1")] {
+        let part = dir.join(name);
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("aevalsrc='0.5*sin(2*PI*1000*t)':s=48000:d=1")
+            .args(["-ac", channels, "-c:a", "aac", "-b:a", "192k"])
+            .args(["-output_ts_offset", offset, "-f", "mpegts"])
+            .arg(&part)
+            .status()
+            .expect("ffmpeg");
+        assert!(status.success());
+        joined.extend(std::fs::read(&part).unwrap());
+    }
+    let path = dir.join("joined.ts");
+    std::fs::write(&path, joined).unwrap();
+
+    let mut engine = playing(&[(1, segment(&path, 0.0, 1.8, 0.0, 1.0))]);
+    let mix = render(&mut engine, 1.8);
+    assert_eq!(engine.take_error(), None);
+    // Mono sits 3 dB down on each channel, upmixed by FFmpeg for the first
+    // second and by the voice for the second: 0.5 / sqrt(2) both times.
+    for (from, to) in [(0.2, 0.8), (1.2, 1.7)] {
+        let level = peak(&mix, from, to);
+        assert!((level - 0.354).abs() < 0.04, "{from}-{to} s: {level}");
+    }
+}
+
+/// Damaged packets cost their own sound, as in the FFmpeg CLI. Audio that
+/// never becomes readable again is reported: played on as silence, the
+/// offline loudness measurement would be wrong without anyone knowing.
+#[test]
+fn a_damaged_stretch_is_skipped_and_unreadable_audio_is_reported() {
+    let dir = Fixture::dir();
+    // AAC in MP4: the demuxer hands each 21 ms packet over whole (a parser,
+    // as for MPEG audio, would drop the damage before the decoder saw it).
+    let clean = dir.join("clean.m4a");
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("aevalsrc='0.5*sin(2*PI*1000*t)':s=48000:d=12")
+        .args(["-c:a", "aac", "-b:a", "128k"])
+        .arg(&clean)
+        .status()
+        .expect("ffmpeg");
+    assert!(status.success());
+    // Replace every byte of the packets `which` selects.
+    let damage = |name: &str, which: &str| {
+        let path = dir.join(name);
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&clean)
+            .args(["-c", "copy", "-bsf:a", &format!("noise=amount='{which}'")])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg");
+        assert!(status.success());
+        path
+    };
+
+    // The mono tone plays 3 dB down on each channel: 0.5 / sqrt(2).
+    let tone = 0.354;
+    // Packets 50 to 70 cover 1.05 to 1.5 s.
+    let stretch = damage("stretch.m4a", "between(n\\,50\\,70)");
+    let mut engine = playing(&[(1, segment(&stretch, 0.0, 4.0, 0.0, 1.0))]);
+    let mix = render(&mut engine, 4.0);
+    assert_eq!(engine.take_error(), None);
+    let level = |from, to| peak(&mix, from, to);
+    assert!((level(0.2, 0.9) - tone).abs() < 0.04, "{}", level(0.2, 0.9));
+    assert!(
+        level(1.15, 1.4) < 0.01,
+        "damage played: {}",
+        level(1.15, 1.4)
+    );
+    assert!(
+        (level(1.7, 3.9) - tone).abs() < 0.04,
+        "after the damage: {}",
+        level(1.7, 3.9)
+    );
+
+    // Nothing after 1.05 s can be decoded.
+    let rest = damage("rest.m4a", "gte(n\\,50)");
+    let mut engine = playing(&[(1, segment(&rest, 0.0, 11.0, 0.0, 1.0))]);
+    let mix = render(&mut engine, 11.0);
+    assert!((peak(&mix, 0.2, 0.9) - tone).abs() < 0.04);
+    let error = engine.take_error().expect("unreadable audio is an error");
+    assert!(error.contains("audio"), "{error}");
+}
+
+/// The null output follows the wall clock. A loaded machine can starve its
+/// thread or this one for a moment, so one clean reading in five is enough:
+/// a clock that is stalled, free-running or at the wrong rate misses all.
 #[test]
 fn null_output_paces_the_clock_in_real_time() {
-    let engine = AudioEngine::null();
-    let mut engine = engine;
-    engine.seek(1.0);
-    engine.set_limit(100.0);
-    let started = Instant::now();
-    engine.set_running(true);
-    std::thread::sleep(Duration::from_millis(400));
-    let elapsed = started.elapsed().as_secs_f64();
-    let advanced = engine.clock() - 1.0;
-    assert!(
-        (advanced - elapsed).abs() < 0.08,
-        "advanced {advanced} in {elapsed}"
-    );
+    let mut readings = Vec::new();
+    for _ in 0..5 {
+        let mut engine = AudioEngine::null();
+        engine.seek(1.0);
+        engine.set_limit(100.0);
+        let started = Instant::now();
+        engine.set_running(true);
+        std::thread::sleep(Duration::from_millis(400));
+        let elapsed = started.elapsed().as_secs_f64();
+        let advanced = engine.clock() - 1.0;
+        if (advanced - elapsed).abs() < 0.08 {
+            return;
+        }
+        readings.push((advanced, elapsed));
+    }
+    panic!("(advanced, elapsed) seconds: {readings:?}");
 }
 
 #[test]

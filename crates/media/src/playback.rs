@@ -238,8 +238,17 @@ impl FrameStream {
     /// `request_preview` at that time can show it without opening, seeking or
     /// decoding first. Repeating the current target is free. A target that
     /// continues the active request's file forward is left to the active
-    /// lane, which decodes forward instead of reseeking.
-    pub fn prefetch_preview(&self, path: &str, source_time: f64, target_w: u32) -> MediaResult<()> {
+    /// lane, which decodes forward instead of reseeking. `active_until` is
+    /// the source time the active request will have reached by then (the
+    /// playing clip's out point): a target before it is a cut backward, which
+    /// the active lane could only reach by seeking at the cut.
+    pub fn prefetch_preview(
+        &self,
+        path: &str,
+        source_time: f64,
+        target_w: u32,
+        active_until: Option<f64>,
+    ) -> MediaResult<()> {
         if !source_time.is_finite() || target_w == 0 {
             return Err("invalid preview time or size".to_owned());
         }
@@ -250,7 +259,9 @@ impl FrameStream {
             .active_source
             .as_ref()
             .is_some_and(|(active, width, start)| {
-                active == path && *width == target_w && *start <= time
+                active == path
+                    && *width == target_w
+                    && active_until.unwrap_or(*start) <= time + 1e-6
             });
         let target = (!continues).then(|| PrefetchTarget {
             path: path.to_owned(),
@@ -295,6 +306,14 @@ impl FrameStream {
         self.preview
             .as_ref()
             .map_or(0, |preview| preview.state.lock().unwrap().opens)
+    }
+
+    /// Native decoders the preview holds open now, parked ones included.
+    pub fn preview_decoders(&self) -> u64 {
+        self.preview.as_ref().map_or(0, |preview| {
+            let state = preview.state.lock().unwrap();
+            state.opens - state.closes
+        })
     }
 
     /// Requests served by the prefetch lane since the worker started.
@@ -347,9 +366,12 @@ impl FrameStream {
             state.keep_parked = false;
             let parked = std::mem::take(&mut state.parked);
             state.retired.extend(parked);
-            for lane in &mut state.lanes {
+            let active = state.active;
+            for (index, lane) in state.lanes.iter_mut().enumerate() {
                 lane.request = None;
-                if lane.prefetch.take().is_some() {
+                // The idle lane wakes to drop its decoder even when it had
+                // no target: after a hand-over it still holds the last file.
+                if lane.prefetch.take().is_some() || index != active {
                     lane.serial = lane.serial.wrapping_add(1);
                 }
                 lane.ready = false;
@@ -445,6 +467,7 @@ struct PreviewState {
     active_source: Option<(String, u32, f64)>,
     handoffs: u64,
     opens: u64,
+    closes: u64,
     result: Option<MediaResult<Picture>>,
     closed: bool,
     /// Lanes left by a lane that switched files, oldest first.
@@ -490,10 +513,21 @@ impl PreviewMailbox {
         }
         let retired = std::mem::take(&mut state.retired);
         drop(state);
-        for mut lane in retired {
+        self.close(retired, pool);
+        found.unwrap_or_default()
+    }
+
+    /// Drop `lanes` and their decoders. Native teardown is slow, so this
+    /// runs on lane threads only, never under the state lock.
+    fn close(&self, lanes: impl IntoIterator<Item = Lane>, pool: &BufferPool) {
+        let mut closed = 0;
+        for mut lane in lanes {
+            closed += u64::from(lane.decoder.is_some());
             lane.reset(pool);
         }
-        found.unwrap_or_default()
+        if closed > 0 {
+            self.state.lock().unwrap().closes += closed;
+        }
     }
 
     fn time(&self, generation: u64) -> Option<f64> {
@@ -600,7 +634,7 @@ impl Lane {
             *self = mailbox.exchange(left, Some((path, target_w)), pool);
             if stale(self) {
                 // A hardware decoder after a hardware failure reopens in software.
-                self.reset(pool);
+                mailbox.close([std::mem::take(self)], pool);
                 let decoder = VideoDecoder::open_playback(path, target_w)?;
                 self.decoder = Some(((path.to_owned(), target_w), decoder));
                 mailbox.state.lock().unwrap().opens += 1;
@@ -676,9 +710,7 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                 if !state.retired.is_empty() {
                     let retired = std::mem::take(&mut state.retired);
                     drop(state);
-                    for mut lane in retired {
-                        lane.reset(pool);
-                    }
+                    mailbox.close(retired, pool);
                     state = mailbox.state.lock().unwrap();
                     continue;
                 }
@@ -712,7 +744,7 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                         hardware_failed(&error);
                     }
                     // The real request reopens and reports the error.
-                    lane.reset(pool);
+                    mailbox.close([std::mem::take(&mut lane)], pool);
                 } else {
                     let mut state = mailbox.state.lock().unwrap();
                     let slot = &mut state.lanes[index];
@@ -730,7 +762,7 @@ fn preview_lane(mailbox: &PreviewMailbox, index: usize, pool: &BufferPool, wake:
                         break;
                     };
                     let hardware = lane.on_hardware();
-                    lane.reset(pool);
+                    mailbox.close([std::mem::take(&mut lane)], pool);
                     if hardware && !retry {
                         hardware_failed(&error);
                         continue;

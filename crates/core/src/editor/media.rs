@@ -116,6 +116,7 @@ impl Editor {
             return;
         }
         for path in &paths {
+            self.import_errors.remove(&*path.to_string_lossy());
             self.insert_placeholder(path);
         }
         if self.import_rx.is_some() {
@@ -246,6 +247,7 @@ impl Editor {
                     self.assets
                         .retain(|a| !(a.info.path == path && a.state != AssetState::Ready));
                     self.status = format!("Could not import {path}: {err}");
+                    self.import_errors.insert(path, err);
                 }
                 ImportMsg::Finished => finished = true,
             }
@@ -520,7 +522,15 @@ fn import_one(
     thumbnails: bool,
 ) -> bool {
     let path_str = path.to_string_lossy().into_owned();
-    let msg = match openreel_media::probe(&path_str) {
+    // A raw stream has no timestamps to seek or place by.
+    let probed = openreel_media::probe(&path_str).and_then(|info| match info.duration > 0.0 {
+        true => Ok(info),
+        false => Err(
+            "no duration; put a raw stream in a container first (ffmpeg -i in -c copy out.mp4)"
+                .to_owned(),
+        ),
+    });
+    let msg = match probed {
         Ok(info) => {
             if tx.send(ImportMsg::Probed(Box::new(info.clone()))).is_err() {
                 return false;

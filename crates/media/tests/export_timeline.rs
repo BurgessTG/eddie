@@ -439,6 +439,40 @@ fn off_grid_end_limits_delayed_audio_on_the_sample_clock() {
     }
 }
 
+/// A clip on the frame grid is rarely on the millisecond grid: 1/30 s is
+/// 1600 samples but 33.33 ms. Its sound starts on the sample the preview
+/// uses, not up to half a millisecond away.
+#[test]
+fn audio_starts_on_its_exact_sample_not_the_nearest_millisecond() {
+    let fixture = Fixture::new();
+    let source = fixture.color("tone.mp4", "red", Some(440));
+    let omega = std::f64::consts::TAU * 440.0 / 48000.0;
+    let period = 48000.0 / 440.0;
+    // How far the exported tone lags a sine from output sample 0, in samples
+    // modulo the tone's period. Phase survives the AAC encode; an onset does
+    // not, to the sample.
+    let lag = |name: &str, start: f64| {
+        let mut timeline = Timeline::new(30.0);
+        let picture = video(&mut timeline, &source, 0, 0.0, 2.0, 0.0);
+        timeline.clip_mut(picture).unwrap().embedded_audio = false;
+        timeline.add_media_clip("sound", ClipKind::Audio, 1, start, 1.5, 0.0, &source);
+        let samples = audio_samples(&fixture.export(name, &timeline));
+        let (mut sin, mut cos) = (0.0, 0.0);
+        for (n, sample) in samples.iter().enumerate().take(57600).skip(24000) {
+            sin += f64::from(*sample) * (omega * n as f64).sin();
+            cos += f64::from(*sample) * (omega * n as f64).cos();
+        }
+        (-cos).atan2(sin).rem_euclid(std::f64::consts::TAU) / omega
+    };
+    let shift = (lag("late.mp4", 1.0 / 30.0) - lag("first.mp4", 0.0)).rem_euclid(period);
+    // 1600 samples is 14 periods and 72.7 samples; 33 ms would leave 56.7.
+    let expected = 1600.0 - 14.0 * period;
+    assert!(
+        (shift - expected).abs() < 2.0,
+        "the tone starts {shift:.1} samples into its period, not {expected:.1}"
+    );
+}
+
 #[test]
 fn gaps_and_adjacent_cuts_use_exact_output_frame_offsets() {
     let fixture = Fixture::new();

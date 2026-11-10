@@ -97,9 +97,10 @@ pub struct TranscribeSettings {
     pub vocabulary: String,
     pub base_url: String,
     pub api_key: String,
-    /// Where installed local models are looked up; never saved. `None`
-    /// leaves only `EDDIE_WHISPER_DIR` and `EDDIE_WHISPER_MODEL`, which
-    /// keeps tests off whatever the user has installed.
+    /// Where installed local models are looked up (`installed_model_dir`);
+    /// never saved. `None` means no installed model is used, not even one
+    /// named by `EDDIE_WHISPER_DIR` or `EDDIE_WHISPER_MODEL`, which keeps
+    /// tests off the developer's models.
     pub model_dir: Option<PathBuf>,
 }
 
@@ -222,7 +223,11 @@ pub fn transcribe(
         if model.is_some() {
             progress("Aligning words…");
         }
-        match align::align_transcript(info, model.as_deref(), &mut segments) {
+        let aligned = {
+            let _turn = one_model_at_a_time();
+            align::align_transcript(info, model.as_deref(), &mut segments)
+        };
+        match aligned {
             Ok((_, 0)) => {}
             Ok((aligned, candidates)) => note.push_str(&format!(
                 " Word timing: {aligned}/{candidates} multi-sentence turns aligned locally."
@@ -240,21 +245,19 @@ pub fn transcribe(
 
 // -- local -------------------------------------------------------------------
 
-/// Where the user's local models are installed: `whisper/` beside the
-/// settings file.
+/// Where the user's local models are installed: `EDDIE_WHISPER_DIR`, else
+/// `whisper/` beside the settings file. Only the window and the CLI call
+/// this, so the environment never reaches an editor built for a test.
 pub fn installed_model_dir() -> Option<PathBuf> {
-    Some(
-        crate::editor::settings::config_path()?
-            .parent()?
-            .join("whisper"),
-    )
-}
-
-/// Where local models are looked up: `EDDIE_WHISPER_DIR`, else `installed`.
-fn model_dir(installed: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("EDDIE_WHISPER_DIR")
         .map(PathBuf::from)
-        .or_else(|| installed.map(Path::to_path_buf))
+        .or_else(|| {
+            Some(
+                crate::editor::settings::config_path()?
+                    .parent()?
+                    .join("whisper"),
+            )
+        })
 }
 
 /// Most accurate first, for what this build can run in reasonable time:
@@ -285,8 +288,8 @@ fn preferred_models() -> &'static [&'static str] {
 /// The model file to use: a configured name or path, else the best installed.
 pub fn local_model(settings: &TranscribeSettings) -> Result<PathBuf, String> {
     let requested = settings.model.as_str();
-    let dir = model_dir(settings.model_dir.as_deref());
-    let file = |name: &str| dir.as_ref().map(|dir| dir.join(format!("ggml-{name}.bin")));
+    let dir = settings.model_dir.as_deref();
+    let file = |name: &str| dir.map(|dir| dir.join(format!("ggml-{name}.bin")));
     if !requested.is_empty() {
         let path = PathBuf::from(requested);
         if path.is_file() {
@@ -294,12 +297,12 @@ pub fn local_model(settings: &TranscribeSettings) -> Result<PathBuf, String> {
         }
         return file(requested)
             .filter(|path| path.is_file())
-            .ok_or_else(|| missing_model(dir.as_deref(), requested));
+            .ok_or_else(|| missing_model(dir, requested));
     }
     preferred_models()
         .iter()
         .find_map(|name| file(name).filter(|path| path.is_file()))
-        .ok_or_else(|| missing_model(dir.as_deref(), preferred_models()[0]))
+        .ok_or_else(|| missing_model(dir, preferred_models()[0]))
 }
 
 fn missing_model(dir: Option<&Path>, name: &str) -> String {
@@ -310,8 +313,21 @@ fn missing_model(dir: Option<&Path>, name: &str) -> String {
     )
 }
 
+/// One local model at a time, transcribing or aligning: each holds up to
+/// 3 GB and already uses every core (or the GPU), so parallel curations
+/// wait their turn here.
+fn one_model_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn dtw_preset(model: &Path) -> Option<DtwModelPreset> {
     let name = model.file_name()?.to_string_lossy().to_lowercase();
+    // English-only models have their own alignment heads; the multilingual
+    // preset of the same size gives wrong word onsets without an error.
+    let english = name.contains(".en.") || name.contains(".en-");
     Some(if name.contains("large-v3-turbo") {
         DtwModelPreset::LargeV3Turbo
     } else if name.contains("large-v3") {
@@ -319,13 +335,29 @@ fn dtw_preset(model: &Path) -> Option<DtwModelPreset> {
     } else if name.contains("large-v2") {
         DtwModelPreset::LargeV2
     } else if name.contains("medium") {
-        DtwModelPreset::Medium
+        if english {
+            DtwModelPreset::MediumEn
+        } else {
+            DtwModelPreset::Medium
+        }
     } else if name.contains("small") {
-        DtwModelPreset::Small
+        if english {
+            DtwModelPreset::SmallEn
+        } else {
+            DtwModelPreset::Small
+        }
     } else if name.contains("base") {
-        DtwModelPreset::Base
+        if english {
+            DtwModelPreset::BaseEn
+        } else {
+            DtwModelPreset::Base
+        }
     } else if name.contains("tiny") {
-        DtwModelPreset::Tiny
+        if english {
+            DtwModelPreset::TinyEn
+        } else {
+            DtwModelPreset::Tiny
+        }
     } else {
         return None;
     })
@@ -337,12 +369,7 @@ fn local(
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Vec<TranscriptSegment>, String), String> {
     let model = local_model(settings)?;
-    // One local model at a time: each holds 1.6-3 GB and already uses every
-    // core (or the GPU), so parallel curations wait their turn here.
-    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _turn = one_model_at_a_time();
     let model_name = model
         .file_name()
         .unwrap_or_default()
@@ -771,10 +798,12 @@ fn turns_from_words(
 }
 
 /// Walk a file's sound in windows of about ten minutes, each ending in a
-/// quiet half second. `decode(start, seconds)` returns 16 kHz samples and
-/// `hear(start, samples)` takes each window. The sound can end before the
-/// file does (a picture that runs a frame longer, or a silent tail): a
-/// read that comes back short is the last of it.
+/// quiet half second. `decode(start, seconds)` returns 16 kHz samples whose
+/// first sample is at `start` (silence fills any lead) and `hear(start,
+/// samples)` takes each window. The sound can end before the file does (a
+/// picture that runs a frame longer, or a silent tail), so a read can come
+/// back short. A read with nothing in it moves on a whole window: sound
+/// that starts later is still heard, and the walk always ends.
 fn local_windows(
     duration: f64,
     mut decode: impl FnMut(f64, f64) -> Result<Vec<f32>, String>,
@@ -786,7 +815,8 @@ fn local_windows(
         let length = (LOCAL_WINDOW_SECONDS + LOCAL_CUT_SEARCH_SECONDS).min(duration - start);
         let mut pcm = decode(start, length)?;
         if pcm.len() < least {
-            break;
+            start += length;
+            continue;
         }
         let asked = (length * SAMPLE_RATE as f64) as usize;
         let last = start + length >= duration || pcm.len() + least < asked;
@@ -841,16 +871,82 @@ fn agent() -> ureq::Agent {
     )
 }
 
-/// Upload each chunk of 24 kHz WAV through `send`, in order.
+/// At most this much file (a header and 0.1 s of 24 kHz 16-bit mono) is
+/// a chunk with nothing to hear: the sound starts later or has ended.
+const SILENT_CHUNK_BYTES: u64 = 78 + 4_800;
+
+/// A folder only this user can read, for audio on its way to a service.
+/// The shared temp folder alone would leave each chunk readable by every
+/// local user while it uploads.
+struct ChunkDir(PathBuf);
+
+impl ChunkDir {
+    fn new() -> Result<Self, String> {
+        // Concurrent transcriptions in one process must not share a folder.
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "eddie-asr-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            // Never an existing folder: someone else could own it.
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("Transcription audio could not be prepared.".to_owned()),
+            }
+        }
+    }
+}
+
+impl Drop for ChunkDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A service's turns for the chunk `start..end`, in order, with every
+/// time clamped to the chunk. A turn left without length is dropped:
+/// nothing can be cut or captioned from it, and it would read as "no
+/// speech here". One reaching far past the chunk would have alignment
+/// hear the rest of the file.
+fn inside_chunk(turns: Vec<TranscriptSegment>, start: f64, end: f64) -> Vec<TranscriptSegment> {
+    // A time that is not a number stays one and fails both comparisons.
+    let clamp = |from: f64, to: f64| (from.clamp(start, end), to.clamp(start, end));
+    let mut turns: Vec<TranscriptSegment> = turns
+        .into_iter()
+        .filter_map(|mut turn| {
+            (turn.start, turn.end) = clamp(turn.start, turn.end);
+            turn.words.retain_mut(|word| {
+                (word.start, word.end) = clamp(word.start, word.end);
+                // Services do return words without length.
+                word.end >= word.start
+            });
+            (turn.end > turn.start).then_some(turn)
+        })
+        .collect();
+    turns.sort_by(|a, b| a.start.total_cmp(&b.start));
+    turns
+}
+
+/// Upload each chunk of 24 kHz WAV through `send(file, start, seconds)`,
+/// in order. A chunk without sound is not sent.
 fn upload_chunks(
     info: &MediaInfo,
     chunk_seconds: f64,
     max_bytes: u64,
     progress: &mut dyn FnMut(&str),
-    mut send: impl FnMut(&Path, f64) -> Result<Vec<TranscriptSegment>, String>,
+    mut send: impl FnMut(&Path, f64, f64) -> Result<Vec<TranscriptSegment>, String>,
 ) -> Result<Vec<TranscriptSegment>, String> {
-    // Concurrent transcriptions in one process must not share a chunk file.
-    static CHUNK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let scratch = ChunkDir::new()?;
+    let temp = scratch.0.join("chunk.wav");
     let mut segments = Vec::new();
     let mut start = 0.0;
     while start < info.duration {
@@ -861,21 +957,16 @@ fn upload_chunks(
             clock(start + duration),
             clock(info.duration)
         ));
-        let temp = std::env::temp_dir().join(format!(
-            "eddie-asr-{}-{}.wav",
-            std::process::id(),
-            CHUNK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        ));
-        let result = openreel_media::write_wav_24k(&info.path, start, duration, &temp)
-            .map_err(|_| "Transcription audio could not be prepared.".to_owned())
-            .and_then(|_| {
-                if std::fs::metadata(&temp).map_or(0, |meta| meta.len()) > max_bytes {
-                    return Err("Transcription chunk was too large.".to_owned());
-                }
-                send(&temp, start)
-            });
-        let _ = std::fs::remove_file(&temp);
-        segments.extend(result?);
+        openreel_media::write_wav_24k(&info.path, start, duration, &temp)
+            .map_err(|_| "Transcription audio could not be prepared.".to_owned())?;
+        let bytes = std::fs::metadata(&temp).map_or(0, |meta| meta.len());
+        if bytes > max_bytes {
+            return Err("Transcription chunk was too large.".to_owned());
+        }
+        if bytes > SILENT_CHUNK_BYTES {
+            let turns = send(&temp, start, duration)?;
+            segments.extend(inside_chunk(turns, start, start + duration));
+        }
         start += duration;
     }
     Ok(segments)
@@ -942,12 +1033,12 @@ fn meta(
         META_CHUNK_SECONDS,
         META_MAX_BYTES,
         progress,
-        |wav, offset| {
+        |wav, offset, seconds| {
             let form = ureq::unversioned::multipart::Form::new()
                 .text("request", &request)
                 .part("audio", wav_part(wav)?);
             let value = post_form(&url, &settings.api_key, form)?;
-            Ok(super::parse_transcript_response(&value, offset))
+            Ok(super::parse_transcript_response(&value, offset, seconds))
         },
     )?;
     Ok((segments, format!("meta:{model}")))
@@ -978,7 +1069,7 @@ fn openai(
         OPENAI_CHUNK_SECONDS,
         OPENAI_MAX_BYTES,
         progress,
-        |wav, offset| {
+        |wav, offset, seconds| {
             let mut form = ureq::unversioned::multipart::Form::new()
                 .text("model", model)
                 .text("response_format", "verbose_json")
@@ -992,16 +1083,17 @@ fn openai(
             }
             let form = form.part("file", wav_part(wav)?);
             let value = post_form(&url, &settings.api_key, form)?;
-            Ok(parse_openai(&value, offset))
+            Ok(parse_openai(&value, offset, seconds))
         },
     )?;
     Ok((segments, format!("openai:{model}")))
 }
 
-/// `verbose_json`: segments with text and times, and (with word
-/// granularity) one top-level word list, placed in the segment holding
-/// each word's midpoint.
-fn parse_openai(value: &serde_json::Value, offset: f64) -> Vec<TranscriptSegment> {
+/// `verbose_json` for the `seconds` of sound sent from `offset`: segments
+/// with text and times, and (with word granularity) one top-level word
+/// list, placed in the segment holding each word's midpoint. An answer
+/// with text alone was said somewhere in what was sent, so it spans it.
+fn parse_openai(value: &serde_json::Value, offset: f64, seconds: f64) -> Vec<TranscriptSegment> {
     let words: Vec<TranscriptWord> = value["words"]
         .as_array()
         .into_iter()
@@ -1027,7 +1119,7 @@ fn parse_openai(value: &serde_json::Value, offset: f64) -> Vec<TranscriptSegment
             let text = row["text"].as_str()?.trim();
             let start = row["start"].as_f64()?;
             let end = row["end"].as_f64()?;
-            (!text.is_empty() && end >= start).then(|| TranscriptSegment {
+            (!text.is_empty() && end > start).then(|| TranscriptSegment {
                 start: offset + start,
                 end: offset + end,
                 speaker: None,
@@ -1045,7 +1137,7 @@ fn parse_openai(value: &serde_json::Value, offset: f64) -> Vec<TranscriptSegment
         {
             segments.push(TranscriptSegment {
                 start: words.first().map_or(offset, |word| word.start),
-                end: words.last().map_or(offset, |word| word.end),
+                end: words.last().map_or(offset + seconds, |word| word.end),
                 speaker: None,
                 text: text.to_owned(),
                 words: Vec::new(),
@@ -1096,7 +1188,7 @@ mod tests {
                 {"word": "line.", "start": 2.2, "end": 2.8}
             ]
         });
-        let segments = parse_openai(&value, 100.0);
+        let segments = parse_openai(&value, 100.0, 4.0);
         assert_eq!(segments.len(), 2);
         assert_eq!((segments[0].start, segments[0].end), (100.0, 101.6));
         let texts =
@@ -1105,6 +1197,138 @@ mod tests {
         assert_eq!(texts(1), ["Second", "line."]);
         assert_eq!(segments[1].words[0].start, 101.5);
         assert_eq!(segments[0].timing_precision(), "word");
+    }
+
+    fn turn(start: f64, end: f64, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            start,
+            end,
+            speaker: None,
+            text: text.to_owned(),
+            words: Vec::new(),
+            session: None,
+        }
+    }
+
+    #[test]
+    fn turns_from_a_service_stay_inside_what_was_sent() {
+        let word = |start: f64, end: f64| TranscriptWord {
+            start,
+            end,
+            text: "w".to_owned(),
+            confidence: None,
+            estimated: false,
+        };
+        let mut worded = turn(405.0, 9_000.0, "runs far past the chunk");
+        worded.words = vec![word(405.0, 405.0), word(406.0, 405.5), word(900.0, 901.0)];
+        let turns = inside_chunk(
+            vec![
+                worded,
+                turn(400.0, 400.0, "no times at all"),
+                turn(410.0, 409.0, "ends before it starts"),
+                turn(f64::NAN, 420.0, "not a number"),
+                turn(390.0, 402.0, "starts before the chunk"),
+            ],
+            400.0,
+            800.0,
+        );
+        let kept: Vec<(&str, f64, f64)> = turns
+            .iter()
+            .map(|turn| (turn.text.as_str(), turn.start, turn.end))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("starts before the chunk", 400.0, 402.0),
+                ("runs far past the chunk", 405.0, 800.0),
+            ]
+        );
+        // A word without length is real; one running backwards is not.
+        let words: Vec<(f64, f64)> = turns[1].words.iter().map(|w| (w.start, w.end)).collect();
+        assert_eq!(words, [(405.0, 405.0), (800.0, 800.0)]);
+    }
+
+    #[test]
+    fn an_answer_with_text_alone_spans_what_was_sent() {
+        let value = serde_json::json!({"text": " Only the words. "});
+        let turns = parse_openai(&value, 400.0, 30.0);
+        assert_eq!(turns.len(), 1);
+        assert_eq!((turns[0].start, turns[0].end), (400.0, 430.0));
+        assert_eq!(turns[0].text, "Only the words.");
+
+        let value = serde_json::json!({"transcript": "Only the words."});
+        let turns = super::super::parse_transcript_response(&value, 540.0, 30.0);
+        assert_eq!(turns.len(), 1);
+        assert_eq!((turns[0].start, turns[0].end), (540.0, 570.0));
+    }
+
+    #[test]
+    fn english_only_models_use_their_own_alignment_heads() {
+        let preset = |name: &str| dtw_preset(Path::new(name));
+        assert!(matches!(
+            preset("ggml-base.en.bin"),
+            Some(DtwModelPreset::BaseEn)
+        ));
+        assert!(matches!(
+            preset("ggml-base.bin"),
+            Some(DtwModelPreset::Base)
+        ));
+        assert!(matches!(
+            preset("ggml-small.en-q5_1.bin"),
+            Some(DtwModelPreset::SmallEn)
+        ));
+        assert!(matches!(
+            preset("ggml-large-v3-turbo.bin"),
+            Some(DtwModelPreset::LargeV3Turbo)
+        ));
+        assert!(preset("mystery.bin").is_none());
+    }
+
+    /// 3 s of picture whose sound stops after the first second.
+    #[test]
+    fn chunks_without_sound_are_not_sent_and_stay_private() {
+        let dir = std::env::temp_dir().join(format!("eddie-chunks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("short-sound.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=blue:s=64x36:r=30:d=3")
+            .args(["-f", "lavfi", "-i", "sine=f=440:d=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let info = openreel_media::probe(path.to_str().unwrap()).unwrap();
+        assert!(info.duration > 2.5, "{}", info.duration);
+
+        let mut sent = Vec::new();
+        let turns = upload_chunks(&info, 1.0, u64::MAX, &mut |_| {}, |wav, start, seconds| {
+            let folder = wav.parent().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(folder).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700, "only this user reads a chunk");
+            }
+            sent.push((wav.to_path_buf(), start));
+            Ok(vec![turn(start + 0.2, start + seconds + 5.0, "Heard.")])
+        })
+        .unwrap();
+        assert_eq!(sent.len(), 1, "only the second with sound: {sent:?}");
+        assert_eq!(sent[0].1, 0.0);
+        assert_eq!((turns[0].start, turns[0].end), (0.2, 1.0));
+        assert!(!sent[0].0.parent().unwrap().exists(), "chunks are removed");
+
+        // A failed upload fails the transcription and still cleans up.
+        let mut folder = None;
+        let failed = upload_chunks(&info, 1.0, u64::MAX, &mut |_| {}, |wav, _, _| {
+            folder = wav.parent().map(Path::to_path_buf);
+            Err("Couldn't reach transcription.".to_owned())
+        });
+        assert_eq!(failed.unwrap_err(), "Couldn't reach transcription.");
+        assert!(!folder.unwrap().exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn token(start: f64, end: f64, text: &str) -> Token {
@@ -1343,6 +1567,37 @@ mod tests {
         assert!((windows[1].0 + windows[1].1 - 700.0).abs() < 0.001);
 
         assert!(heard_windows(30.0, 0.0).is_empty(), "no sound at all");
+        assert!(heard_windows(3000.0, 0.0).is_empty(), "nor in a long file");
+    }
+
+    #[test]
+    fn sound_that_starts_after_the_first_window_is_still_heard() {
+        // 200 s of sound from 700 s in a 1500 s file. A window that holds
+        // sound comes back with its silent lead, as `pcm_mono_16k` reads it.
+        let (from, to) = (700.0, 900.0);
+        let mut heard = Vec::new();
+        local_windows(
+            1500.0,
+            |start, length| {
+                let seconds = if start + length <= from || start >= to {
+                    0.0
+                } else {
+                    length.min(to - start)
+                };
+                Ok(vec![0.5; (seconds * SAMPLE_RATE as f64).round() as usize])
+            },
+            |start, pcm| {
+                heard.push((start, pcm.len() as f64 / SAMPLE_RATE as f64));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        let (start, seconds) = heard[0];
+        assert!(
+            start <= from && (start + seconds - to).abs() < 0.001,
+            "{heard:?}"
+        );
     }
 
     #[test]

@@ -37,6 +37,46 @@ mod script_edit_tests {
     }
 
     #[test]
+    fn an_edit_that_leaves_clips_sharing_a_lane_is_refused() {
+        let mut app = Editor::headless();
+        app.assets.push(asset("a.mp4", 20.0, true));
+        app.assets.push(asset("b.mp4", 20.0, true));
+        run(
+            &mut app,
+            "addAssetRange('a.mp4', 0, 0, 5); addAssetRange('b.mp4', 5, 0, 5);",
+        )
+        .unwrap();
+        let before = app.timeline.clone();
+        let ids: Vec<ClipId> = before.clips.iter().map(|c| c.id).collect();
+        let (a, b) = (ids[0], ids[1]);
+        assert_eq!(before.clip(a).unwrap().track, before.clip(b).unwrap().track);
+
+        // Moving b onto a, or trimming a over b, leaves both on one lane.
+        for code in [
+            format!("moveClip({b}, 2)"),
+            format!("setClipLane({b}, 1); moveClip({b}, 2); setClipLane({b}, 0)"),
+        ] {
+            let error = run(&mut app, &code).unwrap_err();
+            assert!(error.contains("would overlap on lane 0"), "{error}");
+            assert!(
+                error.contains("a.mp4") && error.contains("b.mp4"),
+                "{error}"
+            );
+            assert_eq!(app.timeline, before, "a refused edit changes nothing");
+        }
+        // Passing through an overlap on the way to a valid timeline is fine.
+        run(&mut app, &format!("moveClip({b}, 0); moveClip({a}, 5)")).unwrap();
+        assert_eq!(app.timeline.clip(b).unwrap().start, 0.0);
+        assert_eq!(app.timeline.clip(a).unwrap().start, 5.0);
+        // So is another lane.
+        run(&mut app, &format!("setClipLane({a}, 1); moveClip({a}, 2)")).unwrap();
+
+        // A clip sent days away would keep the loudness worker rendering.
+        let error = run(&mut app, &format!("moveClip({a}, 1e12)")).unwrap_err();
+        assert!(error.contains("supported timeline range"), "{error}");
+    }
+
+    #[test]
     fn a_cutaway_moved_to_lane_zero_shows_over_the_base_clip() {
         let mut app = Editor::headless();
         app.assets.push(asset("talk.mp4", 20.0, true));
@@ -236,11 +276,24 @@ mod script_edit_tests {
     }
 }
 
-/// Generated sample media (video, music), made once per test run.
+/// Generated sample media (video, music), made once per test run. Every
+/// test shares the folder, so no test can remove it: the next run removes
+/// the folders of runs whose process has gone.
 fn sample_media() -> &'static [PathBuf] {
+    const PREFIX: &str = "eddie-samples-";
     static SAMPLES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
     SAMPLES.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("eddie-samples-{}", std::process::id()));
+        let temp = std::env::temp_dir();
+        let running =
+            |pid: &str| !Path::new("/proc/self").exists() || Path::new("/proc").join(pid).exists();
+        for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let pid = name.to_str().and_then(|name| name.strip_prefix(PREFIX));
+            if pid.is_some_and(|pid| pid.parse::<u32>().is_ok() && !running(pid)) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let dir = temp.join(format!("{PREFIX}{}", std::process::id()));
         openreel_media::generate_samples(&dir).expect("generate samples")
     })
 }
@@ -645,8 +698,16 @@ mod playback_tests {
         add_asset(&mut app, &fixture.path);
         // Red is source [0, 1), blue [1, 2), with one keyframe at 0. The
         // backward cuts need the idle lane's preroll; the forward cut
-        // continues on the active decoder instead of reseeking.
-        let cuts = [(1.0, true), (0.0, false), (1.5, true), (0.5, false)];
+        // continues on the active decoder instead of reseeking. Cutting to
+        // 1.6 from a clip that plays 1.5 to 1.7 is backward too: it is after
+        // that clip's in point but before where its decoder will be.
+        let cuts = [
+            (1.0, true),
+            (0.0, false),
+            (1.5, true),
+            (1.6, true),
+            (0.5, false),
+        ];
         for (source_in, _) in cuts {
             let start = app.timeline.end();
             app.timeline.add_media_clip(
@@ -672,7 +733,7 @@ mod playback_tests {
                 break;
             };
             let source = source.to_owned();
-            if time < source_in {
+            if time < source_in + 0.2 {
                 let stream = app.stream.as_ref().unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while !stream.prefetch_ready(&source, time, PREVIEW_W) {
@@ -690,9 +751,101 @@ mod playback_tests {
         }
         assert_eq!(
             app.stream.as_ref().unwrap().prefetch_handoffs(),
-            2,
-            "both backward cuts must be served from their prerolled pictures"
+            3,
+            "every backward cut must be served from its prerolled picture"
         );
+        app.set_playing(false);
+    }
+
+    /// After a cut the lane that played the previous file is idle, and with
+    /// no later cut it has nothing to preroll. Pausing drops its decoder
+    /// all the same, so a paused editor holds one.
+    #[test]
+    fn pausing_after_a_cut_keeps_one_preview_decoder() {
+        let fixture = Fixture::new();
+        let other = fixture.dir.join("b.mp4");
+        std::fs::copy(&fixture.path, &other).unwrap();
+        let other = other.to_string_lossy().into_owned();
+        let (mut app, monitor) = watched_editor();
+        add_asset(&mut app, &fixture.path);
+        add_asset(&mut app, &other);
+        for (start, path) in [(0.0, &fixture.path), (0.2, &other)] {
+            app.timeline
+                .add_media_clip("Cut", ClipKind::Video, 0, start, 0.2, 0.0, path);
+        }
+        // No parking, as on machines with eight or more cores.
+        let stream = FrameStream::spawn_preview(|| {}).unwrap();
+        stream.set_parked_decoders(0);
+        app.stream = Some(stream);
+        app.last_now = Some(0.0);
+        app.set_playing(true);
+        await_picture(&mut app, &monitor);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app
+            .stream
+            .as_ref()
+            .unwrap()
+            .prefetch_ready(&other, 0.0, PREVIEW_W)
+        {
+            assert!(Instant::now() < deadline, "second cut was not prerolled");
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.advance_playback(0.3);
+        assert_eq!(app.playhead, 0.2);
+        await_picture(&mut app, &monitor);
+        let decoders = |app: &Editor| app.stream.as_ref().unwrap().preview_decoders();
+        assert_eq!(
+            decoders(&app),
+            2,
+            "one per file while both lanes are in use"
+        );
+
+        app.set_playing(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while decoders(&app) != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "paused with {} decoders open",
+                decoders(&app)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// An unplugged device stops its engine's clock for good. The editor
+    /// opens a new engine and playback goes on from the same place.
+    #[test]
+    fn a_lost_audio_device_is_replaced_and_playback_continues() {
+        let fixture = Fixture::new();
+        let tone = fixture.dir.join("tone.wav");
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000:d=3")
+            .arg(&tone)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let tone = tone.to_string_lossy().into_owned();
+        let mut app = Editor::headless();
+        add_asset(&mut app, &tone);
+        let clip = app
+            .timeline
+            .add_media_clip("tone", ClipKind::Audio, 0, 0.0, 3.0, 0.0, &tone);
+        app.last_now = Some(0.0);
+        app.set_playing(true);
+        app.sync_playback();
+        app.advance_playback(0.1);
+        assert!((app.playhead - 0.1).abs() < 1e-9, "{}", app.playhead);
+
+        app.audio.as_ref().unwrap().lose_device();
+        app.sync_playback();
+        let audio = app.audio.as_ref().unwrap();
+        assert!(!audio.device_lost(), "the lost engine is still in use");
+        assert_eq!(audio.voice_ids(), vec![clip], "the clip plays on");
+        assert_eq!(app.status, "Audio device lost; switched output.");
+        app.advance_playback(0.2);
+        assert!((app.playhead - 0.2).abs() < 1e-9, "{}", app.playhead);
+        assert!(app.playing);
         app.set_playing(false);
     }
 
@@ -1271,305 +1424,6 @@ fn finished_import_keeps_the_users_selection() {
         Some("/media/picked.mp4"),
         "a finished import must not replace the user's selection"
     );
-}
-
-/// Full JS surface end to end, offline: queued imports of real
-/// downloads, local curator sweep, console JS building fast
-/// cuts (the same eval + ScriptCommand path scripts use),
-/// then export. Ignored by default; needs /tmp/clips and
-/// /tmp/rockets populated.
-#[test]
-#[ignore = "needs downloaded clips in /tmp/clips and /tmp/rockets"]
-fn js_console_fast_cuts_export_e2e() {
-    let mut app = Editor::headless();
-    let batch1 = vec![
-        PathBuf::from("/tmp/clips/ocean02.webm"),
-        PathBuf::from("/tmp/clips/interview60.mp4"),
-    ];
-    let batch2 = vec![
-        PathBuf::from("/tmp/clips/cairo.webm"),
-        PathBuf::from("/tmp/rockets/crew12.webm"),
-    ];
-    for path in batch1.iter().chain(&batch2) {
-        assert!(path.exists(), "missing test asset {}", path.display());
-    }
-    app.spawn_import(batch1);
-    app.spawn_import(batch2);
-    assert_eq!(app.import_queue.len(), 2, "second batch queues");
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    let mut curation_started = false;
-    loop {
-        app.poll_imports();
-        app.poll_sweeps();
-        let imports_done = app.import_rx.is_none() && app.import_queue.is_empty();
-        if imports_done && app.assets.len() == 4 && !curation_started {
-            assert!(
-                app.assets
-                    .iter()
-                    .all(|a| a.sweep.status == sweep::SweepStatus::NotStarted),
-                "import must not auto-curate"
-            );
-            app.curate_all_new();
-            curation_started = true;
-        }
-        let sweeps_done = curation_started
-            && app.sweep_rx.is_none()
-            && app.sweep_queue.is_empty()
-            && app.assets.iter().all(|a| {
-                matches!(
-                    a.sweep.status,
-                    sweep::SweepStatus::Ready | sweep::SweepStatus::Failed
-                )
-            });
-        if imports_done && sweeps_done && app.assets.len() == 4 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "import/sweep timed out: assets={} queue={}",
-            app.assets.len(),
-            app.import_queue.len()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(
-        app.assets.iter().all(|a| a.state == AssetState::Ready),
-        "all assets ready"
-    );
-
-    // Curator output is classified and inside the vocabularies.
-    let mut total_candidates = 0;
-    for asset in &app.assets {
-        let candidates = &asset.sweep.candidates;
-        total_candidates += candidates.len();
-        let primes = candidates.iter().filter(|c| c.is_prime()).count();
-        let quota = (candidates.len() as f32 * 0.2).ceil() as usize;
-        assert!(primes <= quota, "prime quota per asset");
-        for c in candidates {
-            assert!(
-                sweep::CURATOR_CATEGORIES.contains(&c.category.as_str()),
-                "bad category {}",
-                c.category
-            );
-            assert!(
-                c.tags
-                    .iter()
-                    .all(|t| sweep::CURATOR_TAGS.contains(&t.as_str())),
-                "bad tags {:?}",
-                c.tags
-            );
-            if c.is_prime() {
-                assert!(c.score >= 75.0, "prime below score floor");
-            }
-        }
-    }
-    assert!(total_candidates > 0, "curator produced candidates");
-
-    // The console path: eval JS, apply ScriptCommands.
-    app.run_console(
-        "var primes = sweepCandidates().filter(c => c.tags.includes('prime'));\n\
-         console.log('prime-count:' + primes.length);"
-            .to_owned(),
-    );
-    app.run_console(
-        "addAssetRange('ocean02.webm', 0, 2, 4);\n\
-         addAssetRange('cairo.webm', 4, 1, 3);\n\
-         addAssetRange('interview60.mp4', 7, 5, 5);\n\
-         addAssetRange('crew12.webm', 12, 20, 6);\n\
-         addTitle('FAST CUTS', 0, 2);"
-            .to_owned(),
-    );
-    app.run_console(
-        "var cs = clips().filter(c => c.kind === 'video').sort((a, b) => a.start - b.start);\n\
-         trimClip(cs[0].id, 0.5, -1);\n\
-         trimClip(cs[3].id, -1, 17);\n\
-         splitClip(cs[2].id, cs[2].start + 2);\n\
-         moveClip(cs[1].id, 40);\n\
-         closeGaps();\n\
-         seek(3);"
-            .to_owned(),
-    );
-    let errors: Vec<&String> = app
-        .console_output
-        .iter()
-        .filter(|line| line.starts_with("error"))
-        .collect();
-    assert!(errors.is_empty(), "console errors: {errors:?}");
-    assert!(
-        app.console_output
-            .iter()
-            .any(|line| line.contains("prime-count:")),
-        "curator categories visible to JS: {:?}",
-        app.console_output
-    );
-    assert!((app.playhead - 3.0).abs() < 0.02, "seek via JS");
-    let videos = app
-        .timeline
-        .clips
-        .iter()
-        .filter(|c| c.kind == ClipKind::Video)
-        .count();
-    assert_eq!(videos, 5, "4 adds + 1 split");
-    // No same-lane overlaps survive a JS edit session.
-    for a in &app.timeline.clips {
-        for b in &app.timeline.clips {
-            if a.id < b.id && a.track == b.track {
-                assert!(
-                    a.end() <= b.start + 1e-6 || b.end() <= a.start + 1e-6,
-                    "overlap on lane {}: {} vs {}",
-                    a.track,
-                    a.name,
-                    b.name
-                );
-            }
-        }
-    }
-    let expected_end = app.timeline.end();
-    assert!(expected_end > 10.0, "timeline built, end {expected_end}");
-
-    let output = "/tmp/js_fastcuts.mp4";
-    let _ = std::fs::remove_file(output);
-    app.run_console(format!("exportTo('{output}')"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    loop {
-        app.poll_export();
-        if app.export_rx.is_none() && PathBuf::from(output).exists() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "export timed out, status: {}",
-            app.status
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let info = openreel_media::probe(output).expect("probe JS export");
-    println!(
-        "JS export: {:.2}s {}x{} status={}",
-        info.duration, info.width, info.height, app.status
-    );
-    assert!(info.has_video);
-    assert!(
-        (info.duration - expected_end).abs() < 0.6,
-        "export duration {} vs timeline {expected_end}",
-        info.duration
-    );
-}
-
-/// Recap rehearsal, offline: finished pieces go in as assets,
-/// the curator slices and grades them, then console JS written
-/// the way the model is taught to builds a grouped mashup with
-/// title cards and exports it. Ignored; needs prior renders.
-#[test]
-#[ignore = "needs rendered pieces in /tmp plus downloads"]
-fn recap_rehearsal_from_finished_pieces_e2e() {
-    let mut app = Editor::headless();
-    let pieces = vec![
-        PathBuf::from("/tmp/spacex_countdown.mp4"),
-        PathBuf::from("/tmp/js_fastcuts.mp4"),
-        PathBuf::from("/tmp/clips/ocean02.webm"),
-    ];
-    for path in &pieces {
-        assert!(path.exists(), "missing piece {}", path.display());
-    }
-    app.spawn_import(pieces);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    let mut curation_started = false;
-    loop {
-        app.poll_imports();
-        app.poll_sweeps();
-        if app.import_rx.is_none() && app.assets.len() == 3 && !curation_started {
-            app.curate_all_new();
-            curation_started = true;
-        }
-        let done = curation_started
-            && app.import_rx.is_none()
-            && app.sweep_rx.is_none()
-            && app.sweep_queue.is_empty()
-            && app.assets.len() == 3
-            && app.assets.iter().all(|a| {
-                matches!(
-                    a.sweep.status,
-                    sweep::SweepStatus::Ready | sweep::SweepStatus::Failed
-                )
-            });
-        if done {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "rehearsal import timeout"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let bed_candidates: usize = app
-        .assets
-        .iter()
-        .flat_map(|a| a.sweep.candidates.iter())
-        .filter(|c| c.music_bed)
-        .count();
-    println!("music-bed candidates across pieces: {bed_candidates}");
-
-    app.run_console(
-        "var byAsset = {};\n\
-         sweepCandidates().forEach(function (c) { if (c.hasVideo) { (byAsset[c.asset] = byAsset[c.asset] || []).push(c); } });\n\
-         clips().forEach(function (c) { deleteClip(c.id); });\n\
-         var cursor = 0;\n\
-         Object.keys(byAsset).forEach(function (asset) {\n\
-           var picks = byAsset[asset].slice(0, 3);\n\
-           addTitle(picks[0].assetName, cursor, 1.5);\n\
-           picks.forEach(function (c) { var d = Math.min(c.duration, 4); addAssetRange(c.asset, cursor, c.sourceIn, d); cursor += d; });\n\
-         });\n\
-         console.log('Done — recap rehearsal built.');"
-            .to_owned(),
-    );
-    let errors: Vec<&String> = app
-        .console_output
-        .iter()
-        .filter(|line| line.starts_with("error"))
-        .collect();
-    assert!(errors.is_empty(), "console errors: {errors:?}");
-    let videos = app
-        .timeline
-        .clips
-        .iter()
-        .filter(|c| c.kind == ClipKind::Video)
-        .count();
-    let titles = app
-        .timeline
-        .clips
-        .iter()
-        .filter(|c| c.kind == ClipKind::Title)
-        .count();
-    assert!(videos >= 6, "grouped picks landed: {videos}");
-    assert!(titles >= 3, "place cards per asset: {titles}");
-    let expected_end = app.timeline.end();
-
-    let output = "/tmp/recap_rehearsal.mp4";
-    let _ = std::fs::remove_file(output);
-    app.run_console(format!("exportTo('{output}')"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    loop {
-        app.poll_export();
-        if app.export_rx.is_none() && PathBuf::from(output).exists() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "export timeout: {}",
-            app.status
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let info = openreel_media::probe(output).expect("probe rehearsal");
-    println!(
-        "rehearsal: {:.2}s clips={} status={}",
-        info.duration,
-        app.timeline.clips.len(),
-        app.status
-    );
-    assert!((info.duration - expected_end).abs() < 0.6);
 }
 
 #[test]
@@ -3210,6 +3064,19 @@ fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
     reopened.timeline.clips.retain(|clip| clip.source.is_none());
     reopened.remove_asset(&source);
     assert!(reopened.assets.is_empty(), "{}", reopened.status);
+
+    // A project whose numbers the editor cannot work with is refused
+    // before it replaces anything.
+    let saved = std::fs::read_to_string(dir.join("expo.eddie")).unwrap();
+    let mut broken: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    broken["timeline"]["fps"] = serde_json::json!(0.0);
+    std::fs::write(dir.join("broken.eddie"), broken.to_string()).unwrap();
+    let kept = reopened.timeline.clone();
+    let error = reopened
+        .open_project(&dir.join("broken.eddie"))
+        .unwrap_err();
+    assert_eq!(error, "broken.eddie is not an Eddie project.");
+    assert_eq!(reopened.timeline, kept);
 
     // A new project starts empty.
     reopened.spawn_import(vec![media.clone()]);

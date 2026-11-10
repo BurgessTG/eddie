@@ -1,6 +1,7 @@
 //! Headless screenshot render for slice verification.
 //!
-//! Test-only and opt-in (`OPENREEL_SCREENSHOT=1`). The sandbox has
+//! Test-only and ignored by default (`cargo test -p openreel-app
+//! render_editor_screenshot -- --ignored`). The sandbox has
 //! no compositor socket, no Xvfb, and no GPU, so this renders the
 //! real panel code through a headless egui `Context` and rasterizes
 //! the tessellated frame in software. It is the app's own UI code
@@ -237,11 +238,8 @@ fn run_frames_n(
 }
 
 #[test]
+#[ignore = "writes /tmp/openreel_editor.ppm for a person to look at; run it by name"]
 fn render_editor_screenshot() {
-    if std::env::var("OPENREEL_SCREENSHOT").as_deref() != Ok("1") {
-        eprintln!("SKIP screenshot render: set OPENREEL_SCREENSHOT=1");
-        return;
-    }
     let ctx = egui::Context::default();
     let mut app = EditorApp::headless(&ctx);
     // A small representative edit so timeline/inspector have content.
