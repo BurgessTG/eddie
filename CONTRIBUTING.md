@@ -31,6 +31,11 @@ follow from it:
   (`crates/core/src/scripting.rs`). It never touches editor state, files
   or the operating system.
 
+Inside a crate, a module is `name.rs` plus a `name/` folder for its parts
+and its `tests.rs`. `name.rs` re-exports what callers use, so splitting a
+module never changes a public path. Split a file at a seam before it
+passes about 700 lines.
+
 Keyboard shortcuts live in one table, `crates/core/src/shortcuts.rs`. It
 drives key handling, menu labels, tooltips and the shortcuts window, so add
 a shortcut there.
