@@ -1,0 +1,16 @@
+name: Feature request
+description: Something Eddie should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The edit or workflow, and where Eddie gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: A control, a command or a script function, if you have one in mind.

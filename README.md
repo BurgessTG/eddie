@@ -16,6 +16,11 @@ Codex, Amp, your own script) edits through the `eddie` command line and a
 sandboxed JavaScript API, and you keep editing by hand in the window. See
 [docs/agents.md](docs/agents.md).
 
+![The Eddie window: media bin, program monitor, clip details and a three-lane timeline](docs/screenshot.png)
+
+Eddie runs on Linux, on Wayland and X11. macOS and Windows are not tested
+yet.
+
 ## Features
 
 **Editor**
@@ -80,9 +85,8 @@ results are saved per file. It runs on this computer:
 - For transcription: a whisper.cpp model in `whisper/` beside the settings
   file (or `EDDIE_WHISPER_DIR`), from
   [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
-  `ggml-large-v3-turbo.bin` (1.6 GB) is the CPU default. GPU builds
-  (`--features cuda`, or `--features vulkan`, which also needs
-  `vulkan-headers` and `shaderc` to build) use `ggml-large-v3.bin`
+  `ggml-large-v3-turbo.bin` (1.6 GB) is the CPU default. GPU builds (see
+  [GPU transcription](#gpu-transcription)) use `ggml-large-v3.bin`
   (3.1 GB) when it fits the GPU's free memory and otherwise the best
   installed model that does; without a usable GPU they run on the CPU.
   Settings → Speech model picks one installed model by hand. Add
@@ -114,19 +118,38 @@ container, which has FFmpeg 9.
 Open Settings with the gear beside Export (Ctrl+,) for hardware decode,
 the speech provider, its model and the project format.
 
-### Install on Arch
+### GPU transcription
 
-Install from the AUR with `yay -S eddie` (the latest release) or
-`yay -S eddie-git` (latest `master`). Release 0.1.0 predates the command
-line described below, so use `eddie-git` for it until the next release.
-`packaging/aur/PKGBUILD` is the release package (`packaging/aur-git/` is
-`eddie-git`) and installs `eddie`, a desktop entry that opens `.eddie`
-projects, the icon and these docs:
+Local transcription runs on the CPU unless Eddie is built with a GPU
+feature. `eddie --version` says which build you have.
 
 ```sh
-mkdir -p /tmp/eddie-aur && cp packaging/aur/PKGBUILD /tmp/eddie-aur/ && cd /tmp/eddie-aur
+mise exec -- cargo build --release -p openreel-app --features vulkan   # any GPU with a Vulkan driver
+mise exec -- cargo build --release -p openreel-app --features cuda     # NVIDIA, needs the CUDA toolkit
+```
+
+- `vulkan` needs `vulkan-headers` and `shaderc` to build. The binary links
+  only `libvulkan`, which the window already uses, and it transcribes on
+  the CPU where no GPU is usable. The packages are built this way.
+- `cuda` is faster on NVIDIA cards: 45 s of speech with large-v3 on an RTX
+  2070 SUPER took 4.9 s, and 7.1 s with Vulkan (separate sessions). The
+  binary does not start without the CUDA libraries.
+
+### Install on Arch
+
+`packaging/aur-git/PKGBUILD` builds the latest `master` as `eddie-git`. It
+installs `eddie`, a desktop entry that opens `.eddie` projects, the icon
+and these docs:
+
+```sh
+mkdir -p /tmp/eddie-pkg && cp packaging/aur-git/PKGBUILD /tmp/eddie-pkg/ && cd /tmp/eddie-pkg
 makepkg -si
 ```
+
+The AUR has `eddie` and `eddie-git`. `eddie` is release 0.1.0, the editor
+from before the command line described below, and both packages wait for
+0.2.0 to be updated. Until then, build from this repository.
+[packaging/README.md](packaging/README.md) says how a release is cut.
 
 ## Command line
 
@@ -149,6 +172,7 @@ eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
 eddie export talk.eddie out.mp4
 eddie help                                      # commands and the script API
 eddie guide                                     # the guide for agents
+eddie --version                                 # the version and its transcription backend
 ```
 
 `eddie transcribe talk.eddie [asset...]` transcribes media with the
@@ -229,6 +253,12 @@ macOS.
   not editorial judgment. That judgment is the agent's or yours.
 - Undo history is not saved with a project.
 - Sound-card output latency is not compensated.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers building, tests and the rules the
+code follows. Report a vulnerability as [SECURITY.md](SECURITY.md) says.
+[CHANGELOG.md](CHANGELOG.md) lists what each release changed.
 
 ## License
 

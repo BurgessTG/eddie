@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in Eddie does not work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what Eddie did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        The commands or clicks, from a fresh start. For the command line,
+        paste the command and the JSON it printed.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Eddie version
+      description: The output of `eddie --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distribution, Wayland or X11, GPU and driver, and `ffmpeg -version` (first line).
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Media
+      description: >-
+        For a problem with one file, its `ffprobe` output: codec, resolution,
+        frame rate and container.
