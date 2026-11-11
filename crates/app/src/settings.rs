@@ -2,9 +2,10 @@
 //! format. `eddie_core` loads, saves and applies the settings; this file
 //! draws the controls and copies what is typed into `Editor::settings`.
 
-use eddie_core::editor::sweep::transcribe::{Provider, TranscribeSettings};
+use eddie_core::editor::sweep::transcribe::{self, Provider, TranscribeSettings};
 use openreel_engine::Orientation;
-use rune::{Align, El, Side, TextEdit, col, el, row, text};
+use rune::{Align, El, ScrollSpec, Side, TextEdit, col, el, row, text};
+use rune_kit::{ScrollBar, ScrollBarStyle};
 
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
@@ -16,6 +17,18 @@ const CONTROL_W: f32 = 316.0;
 const ROW_GAP: f32 = 10.0;
 /// The card's padding, its border included.
 const PAD: f32 = 21.0;
+const OPTION_GAP: f32 = 6.0;
+/// The local model list scrolls past this many choices.
+const MODEL_ROWS: usize = 8;
+/// The local model choice that saves no name.
+const BEST_MODEL: &str = "Best installed";
+
+/// The open local model list, as the model folder was when it opened.
+pub struct Models {
+    /// The installed model an empty setting uses.
+    best: Option<&'static str>,
+    installed: Vec<String>,
+}
 
 /// A typed setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +87,8 @@ pub struct State {
     typed: [bool; 5],
     /// The speech provider list is open.
     pub providers_open: bool,
+    /// The local model list, while it is open.
+    pub models: Option<Models>,
 }
 
 impl Default for State {
@@ -89,6 +104,7 @@ impl Default for State {
             }),
             typed: [false; 5],
             providers_open: false,
+            models: None,
         }
     }
 }
@@ -104,6 +120,21 @@ impl State {
 pub fn close(ui: &mut Ui) {
     ui.show_settings = false;
     ui.settings.providers_open = false;
+    ui.settings.models = None;
+}
+
+/// Open the local model list on what is installed now, or shut it.
+fn toggle_models(ui: &mut Ui) {
+    ui.settings.models = match ui.settings.models {
+        Some(_) => None,
+        None => {
+            let dir = ui.editor.model_dir.as_deref();
+            Some(Models {
+                best: transcribe::best_installed(dir),
+                installed: transcribe::installed_models(dir),
+            })
+        }
+    };
 }
 
 /// Change the settings through `change`, then apply and save them.
@@ -187,13 +218,40 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
     )
     .w(CONTROL_W)
     .on_press(|ui: &mut Ui| ui.settings.providers_open = !ui.settings.providers_open);
-    let (model_hint, model_help) = match speech.provider {
-        Provider::Local => (
-            "Best installed",
-            "A whisper model name such as large-v3 or large-v3-turbo, or a path to a ggml file. Empty uses the most accurate one installed.",
+    let model = match speech.provider {
+        Provider::Local => {
+            let folder = ui.editor.model_dir.as_deref().map_or_else(
+                || "the whisper folder".to_owned(),
+                |dir| dir.display().to_string(),
+            );
+            let choice = if speech.model.is_empty() {
+                BEST_MODEL
+            } else {
+                &speech.model
+            };
+            let select = theme::select(
+                "settings-local-model",
+                choice,
+                &format!(
+                    "The whisper model that transcribes on this computer. Models are ggml-<name>.bin files in {folder}."
+                ),
+                theme::field_fill(),
+                ui.settings.models.is_some(),
+                true,
+            )
+            .w(CONTROL_W)
+            .on_press(toggle_models);
+            setting(Field::Model.label(), select)
+        }
+        Provider::Meta => typed(
+            ui,
+            Field::Model,
+            "muse-voice-transcribe-1.0",
+            "Meta transcription model ID",
         ),
-        Provider::Meta => ("muse-voice-transcribe-1.0", "Meta transcription model ID"),
-        Provider::OpenAi => (
+        Provider::OpenAi => typed(
+            ui,
+            Field::Model,
             "whisper-1",
             "Model ID. Word timing needs a whisper model, such as whisper-1 or Groq's whisper-large-v3.",
         ),
@@ -204,7 +262,7 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
         .gap(ROW_GAP)
         .child(setting("Playback", hardware))
         .child(setting("Speech", provider))
-        .child(typed(ui, Field::Model, model_hint, model_help));
+        .child(model);
     if speech.provider != Provider::Local {
         let (url_hint, key_hint) = match speech.provider {
             Provider::Meta if settings.has_meta_key() => {
@@ -332,6 +390,67 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
                 .modal(true, shut),
         );
     }
+
+    if let Some(models) = &ui.settings.models {
+        let shut = |ui: &mut Ui| ui.settings.models = None;
+        let pick = |key: String, label: &str, help: &str, model: &str| {
+            let model = model.to_owned();
+            theme::option(key, label, help, speech.model == model).on_press(move |ui: &mut Ui| {
+                ui.settings.models = None;
+                edit(ui, |settings| {
+                    settings.transcription.model.clone_from(&model);
+                });
+            })
+        };
+        let best = match models.best {
+            Some(name) if transcribe::gpu_build() => {
+                format!(
+                    "Use the most accurate model that fits the GPU's free memory: {name} at best"
+                )
+            }
+            Some(name) => format!("Use the most accurate model this build runs well: {name} now"),
+            None => "Use the most accurate model this build runs well; none is installed".into(),
+        };
+        let mut options = vec![pick("settings-best-model".into(), BEST_MODEL, &best, "")];
+        options.extend(models.installed.iter().map(|name| {
+            pick(
+                format!("settings-model-{name}"),
+                name,
+                &format!("Transcribe with ggml-{name}.bin"),
+                name,
+            )
+        }));
+        if !speech.model.is_empty() && !models.installed.contains(&speech.model) {
+            options.push(pick(
+                "settings-other-model".into(),
+                &speech.model,
+                "The saved choice: a path, or a model that is not in the model folder",
+                &speech.model,
+            ));
+        }
+        let count = options.len();
+        let mut list = col().w_full().gap(OPTION_GAP).children(options);
+        if count > MODEL_ROWS {
+            let rows = MODEL_ROWS as f32;
+            list = col()
+                .key("settings-models-scroll")
+                .w_full()
+                .h(rows * FIELD_H + (rows - 1.0) * OPTION_GAP)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(list)
+                .scroll_bar_styled(ScrollBarStyle::native(c.border_strong, c.subtle_fg).inside());
+        }
+        overlays.push(rune_kit::scrim("settings-models-scrim", shut));
+        overlays.push(
+            theme::popup("settings-models")
+                .w(CONTROL_W)
+                .child(list)
+                .anchored("settings-local-model", Side::Bottom, Align::Start, 0.0)
+                .modal(true, shut),
+        );
+    }
 }
 
 fn provider_key(provider: Provider) -> String {
@@ -402,7 +521,9 @@ mod tests {
     use rune::{Key, Mods, Runtime};
 
     use super::*;
-    use crate::testing::{chord, click, isolated_config, press, shown, tooltip, window};
+    use crate::testing::{
+        chord, click, frames, input_arrives, isolated_config, press, shown, tooltip, window,
+    };
 
     /// The window with Settings opened by its shortcut.
     fn settings() -> Runtime<Ui> {
@@ -512,6 +633,137 @@ mod tests {
                 rt.paste("fixture-key-only");
                 press(&mut rt, Key::Escape);
                 assert_eq!(Settings::load().transcription.api_key, "fixture-key-only");
+            },
+        );
+    }
+
+    /// A model folder beside the isolated config file, holding empty files.
+    fn model_folder(config: &std::path::Path, files: &[&str]) -> std::path::PathBuf {
+        let folder = config.with_file_name("test-models");
+        std::fs::create_dir_all(&folder).unwrap();
+        for file in files {
+            std::fs::write(folder.join(file), b"").unwrap();
+        }
+        folder
+    }
+
+    #[test]
+    fn the_local_model_is_picked_from_the_installed_ones() {
+        isolated_config(
+            "settings::tests::the_local_model_is_picked_from_the_installed_ones",
+            |path| {
+                let mut ui = Ui::headless();
+                ui.editor.model_dir = Some(model_folder(
+                    &path,
+                    &[
+                        "ggml-base.bin",
+                        "ggml-large-v3-turbo.bin",
+                        "ggml-silero-v5.1.2.bin",
+                    ],
+                ));
+                let mut rt = window(ui);
+                open(&mut rt);
+                assert!(
+                    shown(&rt, "settings-local-model") && !shown(&rt, "settings-model"),
+                    "a local model is picked, not typed"
+                );
+
+                click(&mut rt, "settings-local-model");
+                for key in [
+                    "settings-best-model",
+                    "settings-model-large-v3-turbo",
+                    "settings-model-base",
+                ] {
+                    assert!(
+                        tooltip(&mut rt, key).is_some_and(|words| !words.is_empty()),
+                        "{key} has no tooltip"
+                    );
+                }
+                assert!(
+                    !shown(&rt, "settings-model-silero-v5.1.2"),
+                    "the voice detector is not a speech model"
+                );
+                assert!(!shown(&rt, "settings-other-model"));
+                press(&mut rt, Key::Escape);
+                assert!(!shown(&rt, "settings-best-model"), "Esc shuts the list");
+                assert!(shown(&rt, "settings"), "and leaves the dialog open");
+                assert!(!path.exists(), "looking saves nothing");
+
+                click(&mut rt, "settings-local-model");
+                click(&mut rt, "settings-model-base");
+                assert!(!shown(&rt, "settings-model-base"), "a choice shuts it");
+                assert_eq!(Settings::load().transcription.model, "base");
+
+                click(&mut rt, "settings-local-model");
+                click(&mut rt, "settings-best-model");
+                assert_eq!(Settings::load().transcription.model, "");
+            },
+        );
+    }
+
+    #[test]
+    fn a_saved_model_outside_the_folder_stays_a_choice() {
+        isolated_config(
+            "settings::tests::a_saved_model_outside_the_folder_stays_a_choice",
+            |path| {
+                let mut ui = Ui::headless();
+                ui.editor.model_dir = Some(model_folder(&path, &["ggml-base.bin"]));
+                ui.editor.settings.transcription.model = "/models/custom.bin".into();
+                let mut rt = window(ui);
+                open(&mut rt);
+                assert!(
+                    tooltip(&mut rt, "settings-local-model").is_some_and(|words| !words.is_empty())
+                );
+                click(&mut rt, "settings-local-model");
+                assert!(tooltip(&mut rt, "settings-other-model").is_some());
+                click(&mut rt, "settings-other-model");
+                assert!(!shown(&rt, "settings-other-model"));
+                assert_eq!(
+                    rt.state.editor.settings.transcription.model,
+                    "/models/custom.bin"
+                );
+                assert!(!path.exists(), "keeping the choice saves nothing");
+
+                click(&mut rt, "settings-local-model");
+                click(&mut rt, "settings-model-base");
+                click(&mut rt, "settings-local-model");
+                assert!(
+                    !shown(&rt, "settings-other-model"),
+                    "only the saved choice is listed from outside the folder"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_long_model_list_scrolls_inside_the_window() {
+        isolated_config(
+            "settings::tests::a_long_model_list_scrolls_inside_the_window",
+            |path| {
+                let names: Vec<String> = (10..30).map(|n| format!("ggml-model-{n}.bin")).collect();
+                let files: Vec<&str> = names.iter().map(String::as_str).collect();
+                let mut ui = Ui::headless();
+                ui.editor.model_dir = Some(model_folder(&path, &files));
+                let mut rt = window(ui);
+                open(&mut rt);
+                click(&mut rt, "settings-local-model");
+
+                // 21 choices in a list eight rows tall, inside the window.
+                let ([_, top, _, height], _) = rt.presented("settings-models").unwrap();
+                let rows = MODEL_ROWS as f32;
+                assert_eq!(height, rows * FIELD_H + (rows - 1.0) * OPTION_GAP + 14.0);
+                assert!(top >= 0.0 && top + height <= 900.0, "{top} + {height}");
+                let (_, last) = rt.find("settings-model-model-29").unwrap();
+                assert!(last > top + height, "the last choice starts out of sight");
+
+                let (x, y) = rt.find("settings-models-scroll").unwrap();
+                input_arrives();
+                rt.wheel(x, y, -2000.0);
+                frames(&mut rt, 3);
+                let (_, last) = rt.find("settings-model-model-29").unwrap();
+                assert!(last > top && last < top + height, "the wheel reaches it");
+                click(&mut rt, "settings-model-model-29");
+                assert_eq!(Settings::load().transcription.model, "model-29");
             },
         );
     }

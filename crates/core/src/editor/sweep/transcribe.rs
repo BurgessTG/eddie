@@ -1,7 +1,8 @@
 //! Transcription providers: local whisper.cpp by default, or a cloud API.
 //!
-//! Local runs anywhere without a key. It uses the most accurate model the
-//! build can afford (large-v3 with a GPU, large-v3-turbo on the CPU), the
+//! Local runs anywhere without a key. It uses the most accurate model that
+//! runs well (large-v3 on a GPU with room for it, large-v3-turbo on the
+//! CPU), the
 //! Silero voice detector when its model is present so music and room tone
 //! are not "heard" as words, beam search, and DTW word timing. Cloud
 //! providers are Meta's Voice Transcribe (turns with speakers; words come
@@ -21,7 +22,7 @@ use whisper_rs::{
     WhisperContextParameters, WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
 };
 
-use super::{align, speech, store, TranscriptSegment, TranscriptSession, TranscriptWord};
+use super::{align, gpu, speech, store, TranscriptSegment, TranscriptSession, TranscriptWord};
 
 const SAMPLE_RATE: usize = 16_000;
 /// Local audio is decoded and heard this much at a time, so an hour-long
@@ -31,9 +32,6 @@ const LOCAL_WINDOW_SECONDS: f64 = 600.0;
 const LOCAL_CUT_SEARCH_SECONDS: f64 = 30.0;
 /// Silero voice detection (`ggml-silero-v5.1.2.bin`), beside the models.
 const VAD_MODEL: &str = "ggml-silero-v5.1.2.bin";
-/// Whether this build runs whisper on a GPU (`cuda` or `vulkan` feature).
-const GPU: bool = cfg!(any(feature = "cuda", feature = "vulkan"));
-
 const META_MODEL: &str = "muse-voice-transcribe-1.0";
 const META_BASE_URL: &str = "https://api.meta.ai/v1";
 // Voice Transcribe accepts WAV mono 16-bit PCM at 16/24 kHz, at most
@@ -211,12 +209,20 @@ pub fn transcribe(
             cached: false,
         });
     }
-    let (mut segments, source) = match settings.provider {
+    let (mut segments, source, placed) = match settings.provider {
         Provider::Local => local(settings, info, progress)?,
-        Provider::Meta => meta(settings, info, progress)?,
-        Provider::OpenAi => openai(settings, info, progress)?,
+        Provider::Meta => {
+            meta(settings, info, progress).map(|(turns, source)| (turns, source, None))?
+        }
+        Provider::OpenAi => {
+            openai(settings, info, progress).map(|(turns, source)| (turns, source, None))?
+        }
     };
     let mut note = format!("Transcription: {} turns ({source}).", segments.len());
+    // Why a local model other than the preferred one was used.
+    if let Some(placed) = placed {
+        note.push_str(&format!(" {placed}."));
+    }
     // Turn-level providers gain word timing from local alignment.
     if segments.iter().any(|segment| segment.words.is_empty()) {
         let model = align::model_path(settings.model_dir.as_deref());
@@ -260,11 +266,11 @@ pub fn installed_model_dir() -> Option<PathBuf> {
         })
 }
 
-/// Most accurate first, for what this build can run in reasonable time:
-/// on the CPU, large-v3 takes several times longer than turbo for a small
-/// accuracy gain, so turbo leads there.
-fn preferred_models() -> &'static [&'static str] {
-    if GPU {
+/// Most accurate first, for what runs in reasonable time on a GPU or on
+/// the CPU: there large-v3 takes several times longer than turbo for a
+/// small accuracy gain, so turbo leads.
+fn preferred_models(on_gpu: bool) -> &'static [&'static str] {
+    if on_gpu {
         &[
             "large-v3",
             "large-v3-turbo",
@@ -285,24 +291,157 @@ fn preferred_models() -> &'static [&'static str] {
     }
 }
 
-/// The model file to use: a configured name or path, else the best installed.
-pub fn local_model(settings: &TranscribeSettings) -> Result<PathBuf, String> {
+fn model_file(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("ggml-{name}.bin"))
+}
+
+/// Whether this build runs local models on a GPU when one has room.
+pub fn gpu_build() -> bool {
+    gpu::BUILD
+}
+
+/// The model an empty setting uses, by name: the first of this build's
+/// preferred models installed in `dir`. A GPU build without room on the
+/// GPU uses a smaller one (`place`).
+pub fn best_installed(dir: Option<&Path>) -> Option<&'static str> {
+    best_for(dir, gpu::BUILD)
+}
+
+fn best_for(dir: Option<&Path>, on_gpu: bool) -> Option<&'static str> {
+    let dir = dir?;
+    preferred_models(on_gpu)
+        .iter()
+        .copied()
+        .find(|name| model_file(dir, name).is_file())
+}
+
+/// The whisper models installed in `dir`, by name (`large-v3` for
+/// `ggml-large-v3.bin`): this build's preferred models first, in the
+/// order `best_installed` tries them, then the rest by name. The voice
+/// detector beside them is not one.
+pub fn installed_models(dir: Option<&Path>) -> Vec<String> {
+    let Some(entries) = dir.and_then(|dir| std::fs::read_dir(dir).ok()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            let name = file.strip_prefix("ggml-")?.strip_suffix(".bin")?;
+            (file != VAD_MODEL && entry.path().is_file()).then(|| name.to_owned())
+        })
+        .collect();
+    let rank = |name: &str| {
+        preferred_models(gpu::BUILD)
+            .iter()
+            .position(|preferred| *preferred == name)
+            .unwrap_or(usize::MAX)
+    };
+    names.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    names
+}
+
+/// The model file to use: a configured name or path, else the best
+/// installed for a GPU or for the CPU.
+fn local_model(settings: &TranscribeSettings, on_gpu: bool) -> Result<PathBuf, String> {
     let requested = settings.model.as_str();
     let dir = settings.model_dir.as_deref();
-    let file = |name: &str| dir.map(|dir| dir.join(format!("ggml-{name}.bin")));
+    let file = |name: &str| {
+        dir.map(|dir| model_file(dir, name))
+            .filter(|path| path.is_file())
+    };
     if !requested.is_empty() {
         let path = PathBuf::from(requested);
         if path.is_file() {
             return Ok(path);
         }
-        return file(requested)
-            .filter(|path| path.is_file())
-            .ok_or_else(|| missing_model(dir, requested));
+        return file(requested).ok_or_else(|| missing_model(dir, requested));
     }
-    preferred_models()
+    best_for(dir, on_gpu)
+        .and_then(file)
+        .ok_or_else(|| missing_model(dir, preferred_models(on_gpu)[0]))
+}
+
+/// A local model and where it runs.
+#[derive(Debug, PartialEq)]
+struct Placed {
+    model: PathBuf,
+    on_gpu: bool,
+    /// Why this is not the model the build prefers.
+    note: Option<String>,
+}
+
+fn model_name(model: &Path) -> String {
+    model
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Choose the model and where it runs, given the GPU's memory (`None`
+/// without a usable GPU). whisper.cpp crashes the process when a model
+/// does not fit (`gpu`), so a chosen model that does not fit is refused,
+/// and an empty setting takes the best installed model that fits, or the
+/// CPU when none does.
+fn place(settings: &TranscribeSettings, memory: Option<gpu::Memory>) -> Result<Placed, String> {
+    let Some(memory) = memory else {
+        return Ok(Placed {
+            model: local_model(settings, false)?,
+            on_gpu: false,
+            note: None,
+        });
+    };
+    let short = |model: &Path| {
+        let bytes = std::fs::metadata(model).map_or(0, |file| file.len());
+        format!(
+            "{} needs about {} of GPU memory and {} is free",
+            model_name(model),
+            gpu::gigabytes(gpu::need(bytes)),
+            gpu::gigabytes(memory.free)
+        )
+    };
+    let first = local_model(settings, true)?;
+    if memory.fits(&first) {
+        return Ok(Placed {
+            model: first,
+            on_gpu: true,
+            note: None,
+        });
+    }
+    if !settings.model.is_empty() {
+        return Err(format!(
+            "{}; close other programs using the GPU or choose a smaller model",
+            short(&first)
+        ));
+    }
+    let dir = settings.model_dir.as_deref();
+    // small and base lose too many words to be worth their speed: when
+    // nothing better fits, the CPU's best model is used instead.
+    let smaller = preferred_models(true)
         .iter()
-        .find_map(|name| file(name).filter(|path| path.is_file()))
-        .ok_or_else(|| missing_model(dir, preferred_models()[0]))
+        .take_while(|name| **name != "small")
+        .filter_map(|name| dir.map(|dir| model_file(dir, name)))
+        .find(|model| model.is_file() && memory.fits(model));
+    Ok(match smaller {
+        Some(model) => Placed {
+            note: Some(format!("{}; using {}", short(&first), model_name(&model))),
+            model,
+            on_gpu: true,
+        },
+        None => {
+            let model = local_model(settings, false)?;
+            Placed {
+                note: Some(format!(
+                    "{}; using {} on the CPU",
+                    short(&first),
+                    model_name(&model)
+                )),
+                model,
+                on_gpu: false,
+            }
+        }
+    })
 }
 
 fn missing_model(dir: Option<&Path>, name: &str) -> String {
@@ -367,22 +506,28 @@ fn local(
     settings: &TranscribeSettings,
     info: &MediaInfo,
     progress: &mut dyn FnMut(&str),
-) -> Result<(Vec<TranscriptSegment>, String), String> {
-    let model = local_model(settings)?;
+) -> Result<(Vec<TranscriptSegment>, String, Option<String>), String> {
+    // A model that is not installed fails before waiting for a turn.
+    local_model(settings, gpu::BUILD)?;
     let _turn = one_model_at_a_time();
-    let model_name = model
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
+    whisper_rs::install_logging_hooks();
+    // Read once the turn is ours: the model before us has left the GPU.
+    let Placed {
+        model,
+        on_gpu,
+        note,
+    } = place(settings, gpu::memory())?;
+    let model_name = model_name(&model);
     let detector = model.with_file_name(VAD_MODEL);
     progress(&format!("Loading {model_name}…"));
-    whisper_rs::install_logging_hooks();
     // A detector that will not load is the same as none installed.
     let mut detector = detector.is_file().then_some(detector).and_then(|path| {
         WhisperVadContext::new(&path.to_string_lossy(), WhisperVadContextParams::default()).ok()
     });
-    let mut context_params = WhisperContextParameters::default();
+    let mut context_params = WhisperContextParameters {
+        use_gpu: on_gpu,
+        ..Default::default()
+    };
     if let Some(model_preset) = dtw_preset(&model) {
         context_params.dtw_parameters.mode = DtwMode::ModelPreset { model_preset };
     }
@@ -504,7 +649,7 @@ fn local(
     } else {
         ", no voice detector"
     };
-    Ok((segments, format!("local:{model_name}{detector}")))
+    Ok((segments, format!("local:{model_name}{detector}"), note))
 }
 
 /// The stretches of a window that hold speech. whisper hears only these,
@@ -1282,6 +1427,116 @@ mod tests {
             Some(DtwModelPreset::LargeV3Turbo)
         ));
         assert!(preset("mystery.bin").is_none());
+    }
+
+    #[test]
+    fn installed_models_list_whisper_models_with_the_preferred_ones_first() {
+        let dir = std::env::temp_dir().join(format!("eddie-models-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ggml-folder.bin")).unwrap();
+        for file in [
+            "ggml-base.bin",
+            "ggml-tiny.en.bin",
+            "ggml-large-v3-turbo.bin",
+            "ggml-medium.bin.part",
+            "notes.txt",
+            VAD_MODEL,
+        ] {
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+        let models = installed_models(Some(&dir));
+        let best = best_installed(Some(&dir));
+        let named = local_model(
+            &TranscribeSettings {
+                model: "tiny.en".into(),
+                model_dir: Some(dir.clone()),
+                ..TranscribeSettings::default()
+            },
+            gpu::BUILD,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Turbo leads base in both the CPU and the GPU order.
+        assert_eq!(models, ["large-v3-turbo", "base", "tiny.en"]);
+        assert_eq!(best, Some("large-v3-turbo"));
+        assert_eq!(named, Ok(dir.join("ggml-tiny.en.bin")));
+        assert!(installed_models(None).is_empty());
+        assert!(installed_models(Some(&dir)).is_empty(), "a missing folder");
+        assert_eq!(best_installed(None), None);
+    }
+
+    /// whisper.cpp crashes the process when a model does not fit the GPU,
+    /// so the choice is made from the memory that is free.
+    #[test]
+    fn a_model_goes_on_the_gpu_only_when_it_fits() {
+        let dir = std::env::temp_dir().join(format!("eddie-place-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sizes = [
+            ("large-v3", 3_000),
+            ("large-v3-turbo", 1_600),
+            ("base", 150),
+        ];
+        for (name, bytes) in sizes {
+            std::fs::write(model_file(&dir, name), vec![0; bytes]).unwrap();
+        }
+        let settings = |model: &str| TranscribeSettings {
+            model: model.into(),
+            model_dir: Some(dir.clone()),
+            ..TranscribeSettings::default()
+        };
+        // Room for a model of `bytes` and nothing larger.
+        let room = |bytes: u64| {
+            Some(gpu::Memory {
+                free: gpu::need(bytes),
+                total: 8 << 30,
+            })
+        };
+        let file = |name: &str| model_file(&dir, name);
+
+        let no_gpu = place(&settings(""), None);
+        let no_gpu_named = place(&settings("large-v3"), None);
+        let roomy = place(&settings(""), room(3_000));
+        let tight = place(&settings(""), room(1_600));
+        let tight_named = place(&settings("large-v3"), room(1_600));
+        let tight_turbo = place(&settings("large-v3-turbo"), room(1_600));
+        let base_only = place(&settings(""), room(150));
+        let unknown = place(&settings(""), Some(gpu::Memory { free: 0, total: 0 }));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let on = |model: &str, on_gpu: bool| Placed {
+            model: file(model),
+            on_gpu,
+            note: None,
+        };
+        assert_eq!(no_gpu, Ok(on("large-v3-turbo", false)), "the CPU's order");
+        assert_eq!(no_gpu_named, Ok(on("large-v3", false)));
+        assert_eq!(roomy, Ok(on("large-v3", true)));
+        assert_eq!(tight_turbo, Ok(on("large-v3-turbo", true)));
+        assert_eq!(unknown, Ok(on("large-v3", true)));
+
+        let tight = tight.unwrap();
+        assert_eq!((tight.model, tight.on_gpu), (file("large-v3-turbo"), true));
+        let note = tight.note.unwrap();
+        assert!(note.starts_with("ggml-large-v3.bin needs about "), "{note}");
+        assert!(note.ends_with("; using ggml-large-v3-turbo.bin"), "{note}");
+
+        let refused = tight_named.unwrap_err();
+        assert!(
+            refused.starts_with("ggml-large-v3.bin needs about "),
+            "{refused}"
+        );
+        assert!(refused.ends_with("choose a smaller model"), "{refused}");
+
+        // base would fit, but turbo on the CPU hears far more.
+        let base_only = base_only.unwrap();
+        assert_eq!(
+            (base_only.model, base_only.on_gpu),
+            (file("large-v3-turbo"), false)
+        );
+        let note = base_only.note.unwrap();
+        assert!(
+            note.ends_with("; using ggml-large-v3-turbo.bin on the CPU"),
+            "{note}"
+        );
     }
 
     /// 3 s of picture whose sound stops after the first second.

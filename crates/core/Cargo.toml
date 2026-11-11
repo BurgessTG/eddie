@@ -19,5 +19,6 @@ openreel-media = { path = "../media" }
 rquickjs = "0.14"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-whisper-rs = "0.16"
+# `raw-api` exposes ggml's device list, which reports GPU memory.
+whisper-rs = { version = "0.16", features = ["raw-api"] }
 ureq = { version = "3", features = ["multipart"] }

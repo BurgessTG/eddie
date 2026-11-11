@@ -359,6 +359,7 @@ impl Ui {
             Action::Deselect if self.settings.providers_open => {
                 self.settings.providers_open = false;
             }
+            Action::Deselect if self.settings.models.is_some() => self.settings.models = None,
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
             Action::Deselect if self.show_settings => settings::close(self),
             _ => {

@@ -80,9 +80,13 @@ results are saved per file. It runs on this computer:
 - For transcription: a whisper.cpp model in `whisper/` beside the settings
   file (or `EDDIE_WHISPER_DIR`), from
   [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
-  `ggml-large-v3-turbo.bin` (1.6 GB) is the CPU default; GPU builds
-  (`--features cuda` or `--features vulkan`) prefer `ggml-large-v3.bin`
-  (3.1 GB). Add `ggml-silero-v5.1.2.bin` from
+  `ggml-large-v3-turbo.bin` (1.6 GB) is the CPU default. GPU builds
+  (`--features cuda`, or `--features vulkan`, which also needs
+  `vulkan-headers` and `shaderc` to build) use `ggml-large-v3.bin`
+  (3.1 GB) when it fits the GPU's free memory and otherwise the best
+  installed model that does; without a usable GPU they run on the CPU.
+  Settings → Speech model picks one installed model by hand. Add
+  `ggml-silero-v5.1.2.bin` from
   [ggml-org/whisper-vad](https://huggingface.co/ggml-org/whisper-vad) so
   music and room tone are skipped instead of misheard. `ggml-base.bin`
   times the words of turn-only cloud transcripts.
@@ -108,7 +112,7 @@ formatting, then builds and tests the whole workspace in an Arch Linux
 container, which has FFmpeg 9.
 
 Open Settings with the gear beside Export (Ctrl+,) for hardware decode,
-the speech provider and the project format.
+the speech provider, its model and the project format.
 
 ### Install on Arch
 
