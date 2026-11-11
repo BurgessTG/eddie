@@ -28,30 +28,62 @@ pub struct Settings {
     meta_base_url: String,
 }
 
-pub fn config_path() -> Option<PathBuf> {
+/// The settings folder's name, and the name it had while the editor was
+/// called OpenReel.
+#[cfg(all(unix, not(target_os = "macos")))]
+const FOLDER: (&str, &str) = ("eddie", "openreel");
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+const FOLDER: (&str, &str) = ("Eddie", "OpenReel");
+
+/// Where the system keeps each program's settings folder.
+fn config_home() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("APPDATA")
-            .map(|dir| PathBuf::from(dir).join("OpenReel").join("config.json"))
+        std::env::var_os("APPDATA").map(PathBuf::from)
     }
     #[cfg(target_os = "macos")]
     {
-        std::env::var_os("HOME").map(|home| {
-            PathBuf::from(home).join("Library/Application Support/OpenReel/config.json")
-        })
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-            Some(PathBuf::from(dir).join("openreel/config.json"))
-        } else {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".config/openreel/config.json"))
-        }
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
     }
     #[cfg(not(any(unix, target_os = "windows", target_os = "macos")))]
     {
         None
+    }
+}
+
+/// The settings folder and the old one it replaces.
+fn config_dirs() -> Option<(PathBuf, PathBuf)> {
+    let home = config_home()?;
+    Some((home.join(FOLDER.0), home.join(FOLDER.1)))
+}
+
+/// The settings file. Saved curations, transcripts and local models sit
+/// beside it. A folder still under its old name is used where it is.
+pub fn config_path() -> Option<PathBuf> {
+    let (dir, old) = config_dirs()?;
+    let dir = if !dir.exists() && old.is_dir() {
+        old
+    } else {
+        dir
+    };
+    Some(dir.join("config.json"))
+}
+
+/// Give a settings folder still under its old name the new one, with
+/// everything in it. The window and the command line do this as they
+/// start; a folder that cannot be moved keeps being read where it is, and
+/// one that already has the new name is never replaced.
+pub fn adopt_old_config() {
+    if let Some((dir, old)) = config_dirs() {
+        if !dir.exists() && old.is_dir() {
+            let _ = std::fs::rename(old, dir);
+        }
     }
 }
 
@@ -236,6 +268,48 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_under_the_old_name_is_read_then_renamed_once() {
+        with_isolated_config(
+            "editor::settings::tests::a_folder_under_the_old_name_is_read_then_renamed_once",
+            |path| {
+                let (new, old) = config_dirs().unwrap();
+                assert_eq!(path, new.join("config.json"));
+                #[cfg(target_os = "linux")]
+                assert!(new.ends_with("eddie") && old.ends_with("openreel"));
+
+                let save_old = |format: &str| {
+                    std::fs::create_dir_all(old.join("whisper")).unwrap();
+                    std::fs::write(old.join("whisper/model.bin"), "model").unwrap();
+                    std::fs::write(
+                        old.join("config.json"),
+                        format!(r#"{{"format":"{format}"}}"#),
+                    )
+                    .unwrap();
+                };
+                save_old("portrait");
+                // Read where it is until something moves it.
+                assert_eq!(config_path().unwrap(), old.join("config.json"));
+                assert_eq!(Settings::load().format, Orientation::Portrait);
+
+                adopt_old_config();
+                assert!(!old.exists(), "the whole folder moved");
+                assert_eq!(config_path().unwrap(), new.join("config.json"));
+                assert_eq!(Settings::load().format, Orientation::Portrait);
+                assert_eq!(
+                    std::fs::read_to_string(new.join("whisper/model.bin")).unwrap(),
+                    "model"
+                );
+
+                // An older program writing the old folder again changes nothing.
+                save_old("landscape");
+                adopt_old_config();
+                assert!(old.exists());
+                assert_eq!(Settings::load().format, Orientation::Portrait);
+            },
+        );
+    }
+
+    #[test]
     fn settings_save_atomically_replaces_previous_file() {
         with_isolated_config(
             "editor::settings::tests::settings_save_atomically_replaces_previous_file",
@@ -388,6 +462,15 @@ mod tests {
                 assert_eq!(editor.timeline.orientation, Orientation::Portrait);
                 assert_eq!(Settings::load().format, Orientation::Portrait);
                 assert_eq!(editor.status, "1 clip doesn't match the new format.");
+
+                // Undo takes the project back, and the setting shown with it.
+                editor.commit_history();
+                editor.perform(crate::Action::Undo);
+                assert_eq!(editor.timeline.orientation, Orientation::Landscape);
+                assert_eq!(editor.settings.format, Orientation::Landscape);
+                editor.perform(crate::Action::Redo);
+                assert_eq!(editor.timeline.orientation, Orientation::Portrait);
+                assert_eq!(editor.settings.format, Orientation::Portrait);
 
                 // An unchanged settings value writes and says nothing.
                 editor.status = "untouched".to_owned();

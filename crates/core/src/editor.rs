@@ -224,6 +224,10 @@ pub struct Editor {
     /// The mixer renders only when the editor advances it: no device, so
     /// tests and windowless runs are deterministic.
     manual_audio: bool,
+    /// A dry run is applying an edit it puts back before the frame ends.
+    /// Playback follows the timeline, playhead and transport, and all three
+    /// come back, so nothing a playing editor has open is stopped meanwhile.
+    pub rehearsing: bool,
     audio_failed: bool,
     /// The playhead the audio clock last produced; any other value means
     /// something moved the playhead and the clock must follow it.
@@ -449,6 +453,7 @@ impl Editor {
             stream_failed: false,
             audio: None,
             manual_audio: true,
+            rehearsing: false,
             audio_failed: false,
             clock_playhead: None,
             last_sync_playhead: 0.0,
@@ -826,6 +831,9 @@ impl Editor {
     }
 
     pub fn stop_sources(&mut self) {
+        if self.rehearsing {
+            return;
+        }
         if let Some(stream) = &self.stream {
             stream.cancel_preview();
         }
@@ -1071,6 +1079,9 @@ impl Editor {
     /// Drop cached stills and the answer in flight after the timeline is
     /// replaced, so no picture from before can show.
     pub fn forget_stills(&mut self) {
+        if self.rehearsing {
+            return;
+        }
         self.still_shown = None;
         self.still_cache.clear();
         self.still_failed.clear();
@@ -1751,6 +1762,8 @@ impl Editor {
         }
         self.set_playing(false);
         self.playhead = self.playhead.min(self.timeline.end());
+        // A format change is a step too; Settings shows the project's format.
+        self.settings.format = self.timeline.orientation;
         self.forget_stills();
         self.status = if redo {
             "Redid the edit."
@@ -1804,8 +1817,10 @@ impl Editor {
                 self.selected = Some(id);
                 self.status = "Title added.".to_owned();
             }
-            Action::ZoomIn => self.viewport.zoom(1.5, self.playhead),
-            Action::ZoomOut => self.viewport.zoom(1.0 / 1.5, self.playhead),
+            Action::ZoomIn => self.viewport.zoom(1.5, self.playhead, self.timeline.end()),
+            Action::ZoomOut => self
+                .viewport
+                .zoom(1.0 / 1.5, self.playhead, self.timeline.end()),
             Action::ZoomFit => self.viewport.zoom_to_fit(self.timeline.end()),
             Action::GoStart => self.seek_and_reveal(0.0),
             Action::GoEnd => self.seek_and_reveal(self.timeline.end()),
@@ -2184,7 +2199,7 @@ impl Editor {
         self.viewport.magnet = before.magnet;
         self.viewport.px_per_sec = before.zoom;
         self.mute_music_beds = before.mute_music_beds;
-        if disturbed {
+        if disturbed && !self.rehearsing {
             self.stop_sources();
             self.last_now = None;
             self.forget_stills();
@@ -2419,7 +2434,7 @@ impl Editor {
             ScriptCommand::ClearTimeline => self.clear_timeline(),
             ScriptCommand::SetMagnet(on) => self.viewport.magnet = on,
             ScriptCommand::SetMusicBedMuted(on) => self.mute_music_beds = on,
-            ScriptCommand::SetZoom(px) => self.viewport.set_zoom(px),
+            ScriptCommand::SetZoom(px) => self.viewport.set_zoom(px, self.timeline.end()),
             ScriptCommand::CloseGaps => {
                 self.timeline.close_gaps();
             }

@@ -87,9 +87,10 @@ results are saved per file. It runs on this computer:
   music and room tone are skipped instead of misheard. `ggml-base.bin`
   times the words of turn-only cloud transcripts.
 
-Settings live in `~/.config/openreel/config.json` on Linux,
-`~/Library/Application Support/OpenReel/` on macOS and
-`%APPDATA%\OpenReel\` on Windows.
+Settings live in `~/.config/eddie/config.json` on Linux,
+`~/Library/Application Support/Eddie/` on macOS and `%APPDATA%\Eddie\`
+on Windows. A folder from before the rename (`openreel`, `OpenReel`) is
+moved there the first time Eddie starts.
 
 ## Run
 

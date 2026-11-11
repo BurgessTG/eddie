@@ -9,7 +9,7 @@ use eddie_core::editor::lanes::{
     self, ClipHit, Gesture, HEADER_W, Point, RULER_H, Scene, TRACK_H, ViewRect,
 };
 use eddie_core::editor::media::BinAsset;
-use eddie_core::editor::viewport::TimelineViewport;
+use eddie_core::editor::viewport::{MAX_ZOOM, TimelineViewport};
 use eddie_core::shortcuts;
 use eddie_core::{Action, Editor};
 use openreel_engine::{Clip, ClipKind, Timeline, format_timecode};
@@ -31,8 +31,6 @@ const AUTOSCROLL_EVERY: Duration = Duration::from_millis(16);
 /// in view is laid out, and its cut ends stay out of sight.
 const OVERHANG: f32 = 8.0;
 
-const ZOOM_MIN: f32 = 4.0;
-const ZOOM_MAX: f32 = 600.0;
 const SLIDER_W: f32 = 110.0;
 const SLIDER_HANDLE: f32 = 24.0;
 
@@ -211,9 +209,10 @@ fn pointer(ui: &mut Ui, drag: &mut Drag, tx: &mut Tx) {
 /// A wheel or two-finger scroll over the view: along time, or zoom about
 /// the pointer with Ctrl.
 fn wheel(ui: &mut Ui, wheel: WheelEvent, tx: &mut Tx) -> bool {
+    let end = ui.editor.timeline.end();
     let port = &mut ui.editor.viewport;
     if wheel.mods.ctrl || wheel.mods.cmd {
-        lanes::zoom_about(port, HEADER_W, wheel.x, (wheel.dy * 0.002).exp());
+        lanes::zoom_about(port, HEADER_W, wheel.x, (wheel.dy * 0.002).exp(), end);
     } else {
         lanes::scroll_by(port, wheel.dx, wheel.dy);
     }
@@ -749,20 +748,22 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
 }
 
 /// Where the zoom handle's centre sits along the slider: logarithmic, so
-/// each step of the way zooms by the same factor.
-fn zoom_fraction(px_per_sec: f32) -> f32 {
-    ((px_per_sec / ZOOM_MIN).ln() / (ZOOM_MAX / ZOOM_MIN).ln()).clamp(0.0, 1.0)
+/// each step of the way zooms by the same factor. The left end is `min`,
+/// as far out as the timeline zooms.
+fn zoom_fraction(px_per_sec: f32, min: f32) -> f32 {
+    ((px_per_sec / min).ln() / (MAX_ZOOM / min).ln()).clamp(0.0, 1.0)
 }
 
-fn zoom_at(fraction: f32) -> f32 {
-    ZOOM_MIN * (ZOOM_MAX / ZOOM_MIN).powf(fraction.clamp(0.0, 1.0))
+fn zoom_at(fraction: f32, min: f32) -> f32 {
+    min * (MAX_ZOOM / min).powf(fraction.clamp(0.0, 1.0))
 }
 
 fn zoom_slider(ui: &Ui) -> El {
     let c = c();
     let zoom = ui.editor.viewport.px_per_sec;
+    let min = ui.editor.viewport.min_zoom(ui.editor.timeline.end());
     let travel = SLIDER_W - SLIDER_HANDLE;
-    let x = SLIDER_HANDLE / 2.0 + zoom_fraction(zoom) * travel;
+    let x = SLIDER_HANDLE / 2.0 + zoom_fraction(zoom, min) * travel;
     let rail = (SLIDER_HANDLE - 8.0) / 2.0;
     el().key("timeline-zoom")
         .size(SLIDER_W, SLIDER_HANDLE)
@@ -790,7 +791,7 @@ fn zoom_slider(ui: &Ui) -> El {
         .cursor(Cursor::Pointer)
         .help("Timeline zoom. Ctrl+scroll over the timeline also zooms.")
         .label("Timeline zoom")
-        .range_value(f64::from(zoom), f64::from(ZOOM_MIN), f64::from(ZOOM_MAX))
+        .range_value(f64::from(zoom), f64::from(min), f64::from(MAX_ZOOM))
         .on_step(|ui: &mut Ui, steps: i32, _| {
             ui.act(if steps > 0 {
                 Action::ZoomIn
@@ -804,8 +805,10 @@ fn zoom_slider(ui: &Ui) -> El {
             }
             let fraction = (drag.x - SLIDER_HANDLE / 2.0) / (drag.w - SLIDER_HANDLE);
             // As the zoom keys do, keep the playhead where it is.
+            let (end, playhead) = (ui.editor.timeline.end(), ui.editor.playhead);
             let port = &mut ui.editor.viewport;
-            port.zoom(zoom_at(fraction) / port.px_per_sec, ui.editor.playhead);
+            let zoom = zoom_at(fraction, port.min_zoom(end));
+            port.zoom(zoom / port.px_per_sec, playhead, end);
         })
 }
 
@@ -910,6 +913,7 @@ pub fn panel(ui: &Ui, cx: &mut Cx<Ui>) -> El {
 
 #[cfg(test)]
 mod tests {
+    use eddie_core::editor::viewport::MIN_ZOOM;
     use rune::{Env, Mods, Runtime};
 
     use super::*;
@@ -1104,13 +1108,30 @@ mod tests {
     #[test]
     fn the_zoom_slider_is_logarithmic_and_drags() {
         // Half way along is the geometric middle of the range.
-        assert!((zoom_at(0.5) - (ZOOM_MIN * ZOOM_MAX).sqrt()).abs() < 0.01);
-        assert!((zoom_fraction(zoom_at(0.3)) - 0.3).abs() < 1e-4);
+        assert!((zoom_at(0.5, MIN_ZOOM) - (MIN_ZOOM * MAX_ZOOM).sqrt()).abs() < 0.01);
+        assert!((zoom_fraction(zoom_at(0.3, 0.5), 0.5) - 0.3).abs() < 1e-4);
 
         let (mut rt, _) = window();
         let (x, y) = rt.find("timeline-zoom").expect("the zoom slider");
-        let right = x + SLIDER_W / 2.0;
+        let (left, right) = (x - SLIDER_W / 2.0, x + SLIDER_W / 2.0);
         press_drag_release(&mut rt, (x, y), (right + 20.0, y));
-        assert_eq!(rt.state.editor.viewport.px_per_sec, ZOOM_MAX);
+        assert_eq!(rt.state.editor.viewport.px_per_sec, MAX_ZOOM);
+        press_drag_release(&mut rt, (right - 4.0, y), (left - 20.0, y));
+        assert_eq!(rt.state.editor.viewport.px_per_sec, MIN_ZOOM);
+
+        // The left end shows all of a timeline too long for the usual floor.
+        // The editor pump tells the viewport how wide the lanes are.
+        let mut ui = Ui::headless();
+        ui.editor
+            .timeline
+            .add_clip("Long", ClipKind::Title, 0, 0.0, 3600.0, 0.0);
+        let mut rt = crate::testing::window(ui);
+        let (x, y) = rt.find("timeline-zoom").expect("the zoom slider");
+        let left = x - SLIDER_W / 2.0;
+        press_drag_release(&mut rt, (left + 4.0, y), (left - 20.0, y));
+        let port = rt.state.editor.viewport;
+        let width = port.width.expect("the lanes are laid out");
+        let span = 3600.0 * port.px_per_sec;
+        assert!(span < width && span > width - 30.0, "{span} of {width}");
     }
 }

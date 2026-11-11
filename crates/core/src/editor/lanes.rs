@@ -149,16 +149,28 @@ pub fn snap_to(time: f64, candidates: &[f64], threshold: f64) -> f64 {
 /// Seconds between labelled ruler ticks: the first step at least 72
 /// points wide. Three minor ticks sit between each pair.
 pub fn ruler_step(px_per_sec: f32) -> f64 {
-    [0.25_f64, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+    const STEPS: [f64; 13] = [
+        0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+    ];
+    // Past an hour the step doubles: a long timeline zoomed out to fit
+    // still draws a handful of ticks, not thousands.
+    let hours = (1..=30).map(|doublings| 3600.0 * f64::from(1_u32 << doublings));
+    STEPS
         .into_iter()
+        .chain(hours)
         .find(|step| *step as f32 * px_per_sec >= 72.0)
-        .unwrap_or(60.0)
+        .unwrap_or(3600.0 * f64::from(1_u32 << 30))
 }
 
-/// Ruler label: `M:SS`, with hundredths only when the step needs them.
+/// Ruler label: `M:SS`, or `H:MM:SS` from an hour on, with hundredths
+/// only when the step needs them.
 pub fn ruler_label(t: f64, step: f64) -> String {
-    let minutes = (t / 60.0).floor() as u64;
-    let seconds = t - minutes as f64 * 60.0;
+    let whole_minutes = (t / 60.0).floor() as u64;
+    let seconds = t - whole_minutes as f64 * 60.0;
+    let minutes = match (whole_minutes / 60, whole_minutes % 60) {
+        (0, minutes) => minutes.to_string(),
+        (hours, minutes) => format!("{hours}:{minutes:02}"),
+    };
     if step < 1.0 {
         let text = format!("{minutes}:{seconds:05.2}");
         text.trim_end_matches('0').trim_end_matches('.').to_owned()
@@ -290,10 +302,16 @@ pub fn scroll_by(port: &mut TimelineViewport, dx: f32, dy: f32) {
 }
 
 /// Zoom by `factor`, keeping the time under window x `pointer_x` where it
-/// is.
-pub fn zoom_about(port: &mut TimelineViewport, content_left: f32, pointer_x: f32, factor: f32) {
+/// is. `end` is the timeline's, which sets how far out it goes.
+pub fn zoom_about(
+    port: &mut TimelineViewport,
+    content_left: f32,
+    pointer_x: f32,
+    factor: f32,
+    end: f64,
+) {
     let anchor_time = time_at(port, content_left, pointer_x);
-    port.set_zoom(port.px_per_sec * factor);
+    port.set_zoom(port.px_per_sec * factor, end);
     port.scroll_x = (anchor_time as f32 * port.px_per_sec - (pointer_x - content_left)).max(0.0);
 }
 
@@ -933,6 +951,24 @@ mod tests {
     }
 
     #[test]
+    fn the_ruler_keeps_its_labels_apart_however_far_out() {
+        // From the closest zoom to a 1,000,000 s timeline fitted in 40 px.
+        for px_per_sec in [600.0, 48.0, 4.0, 0.25, 0.01, 0.000_04_f32] {
+            let step = ruler_step(px_per_sec);
+            let apart = step as f32 * px_per_sec;
+            assert!(apart >= 72.0, "{px_per_sec} px/s: labels {apart} px apart");
+        }
+        assert_eq!(ruler_step(48.0), 2.0);
+        assert_eq!(ruler_step(0.25), 300.0);
+        assert_eq!(ruler_step(0.01), 7200.0);
+
+        assert_eq!(ruler_label(0.5, 0.25), "0:00.5");
+        assert_eq!(ruler_label(75.0, 5.0), "1:15");
+        assert_eq!(ruler_label(3725.0, 5.0), "1:02:05");
+        assert_eq!(ruler_label(7200.0, 3600.0), "2:00:00");
+    }
+
+    #[test]
     fn wheel_scrolls_along_time_and_zoom_keeps_the_time_under_the_pointer() {
         let mut port = TimelineViewport::default();
         scroll_by(&mut port, 0.0, -120.0);
@@ -944,7 +980,7 @@ mod tests {
         port.scroll_x = 96.0;
         let pointer_x = content_left + 240.0;
         let under = time_at(&port, content_left, pointer_x);
-        zoom_about(&mut port, content_left, pointer_x, 2.0);
+        zoom_about(&mut port, content_left, pointer_x, 2.0, 10.0);
         assert_eq!(port.px_per_sec, 96.0);
         assert!((time_at(&port, content_left, pointer_x) - under).abs() < 1e-4);
 

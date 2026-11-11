@@ -264,7 +264,13 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
         return Ok(measure(app, "run", params));
     }
     let (output, commands) = evaluated?;
-    let (notes, handles) = app.apply_edit(commands)?;
+    app.rehearsing = dry_run;
+    let applied = app.apply_edit(commands);
+    if applied.is_err() {
+        // `apply_edit` has already put a refused edit back.
+        app.rehearsing = false;
+    }
+    let (notes, handles) = applied?;
     let changed = app.differs_from(&before);
     let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
         .into_iter()
@@ -284,6 +290,7 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
         // timeline the edit would leave.
         value["clips"] = app.script_clips().into();
         app.restore_edit(before);
+        app.rehearsing = false;
     } else {
         app.commit_history();
     }

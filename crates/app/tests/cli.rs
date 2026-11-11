@@ -350,6 +350,9 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
 #[test]
 fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
     let dir = Dir::new("help");
+    // Settings saved under the editor's old name move on the first start.
+    std::fs::create_dir_all(dir.0.join("config/openreel/whisper")).unwrap();
+    std::fs::write(dir.0.join("config/openreel/config.json"), "{}").unwrap();
     for flag in ["help", "--help", "-h"] {
         let out = dir.command(".", &[flag]).output().unwrap();
         assert_eq!(out.status.code(), Some(0));
@@ -359,6 +362,9 @@ fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
         }
         assert!(text.contains("addAssetRange("), "the script API follows");
     }
+    assert!(dir.0.join("config/eddie/config.json").exists());
+    assert!(dir.0.join("config/eddie/whisper").is_dir());
+    assert!(!dir.0.join("config/openreel").exists());
     let out = dir.command(".", &["guide"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     let guide = String::from_utf8_lossy(&out.stdout);
@@ -677,9 +683,9 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     dir.ffmpeg(&["-f", "lavfi", "-i", "sine=f=300:d=3", "voice.wav"]);
     let (base, requests) = fake_transcriber();
     // A loopback endpoint needs no key.
-    std::fs::create_dir_all(dir.0.join("config/openreel")).unwrap();
+    std::fs::create_dir_all(dir.0.join("config/eddie")).unwrap();
     std::fs::write(
-        dir.0.join("config/openreel/config.json"),
+        dir.0.join("config/eddie/config.json"),
         serde_json::json!({"transcription": {"provider": "openai", "base_url": base}}).to_string(),
     )
     .unwrap();

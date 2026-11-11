@@ -26,6 +26,8 @@ use rune::{App, AppSpec};
 use app::Ui;
 
 fn main() {
+    // Before anything reads settings, saved curations or local models.
+    eddie_core::editor::settings::adopt_old_config();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) = eddie_core::cli_main(&args) {
         std::process::exit(code);

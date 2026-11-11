@@ -942,6 +942,64 @@ mod playback_tests {
         app.set_playing(false);
     }
 
+    /// A dry run puts back everything it changed, so what a playing editor
+    /// has open plays on through it. The same edit for real starts again.
+    #[test]
+    fn a_dry_run_leaves_playback_running() {
+        use commands::Reply;
+        let fixture = Fixture::new();
+        let tone = fixture.dir.join("tone.wav");
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000:d=3")
+            .arg(&tone)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let tone = tone.to_string_lossy().into_owned();
+        let mut app = Editor::headless();
+        add_asset(&mut app, &tone);
+        let clip = app
+            .timeline
+            .add_media_clip("tone", ClipKind::Audio, 0, 0.0, 3.0, 0.0, &tone);
+        app.last_now = Some(0.0);
+        app.set_playing(true);
+        app.sync_playback();
+        app.advance_playback(0.1);
+        app.sync_playback();
+        let voices = |app: &Editor| app.audio.as_ref().unwrap().voice_ids();
+        assert_eq!(voices(&app), vec![clip]);
+
+        let run = |app: &mut Editor, code: &str, dry_run: bool| {
+            let params = serde_json::json!({ "code": code, "dryRun": dry_run });
+            match commands::start(app, "run", &params) {
+                Ok(Reply::Done(outcome)) => Ok(outcome.value),
+                Ok(Reply::Later(_)) => panic!("{code} waited"),
+                Err(error) => Err(error),
+            }
+        };
+        let edit = "addTitle('Opening', 1, 1); seek(2); pause()";
+        let dry = run(&mut app, edit, true).unwrap();
+        assert_eq!(dry["changed"], true);
+        assert_eq!(dry["clips"].as_array().unwrap().len(), 2);
+        assert_eq!(app.timeline.clips.len(), 1);
+        assert!(app.playing);
+        assert_eq!(voices(&app), vec![clip], "the sound started again");
+        app.advance_playback(0.2);
+        assert!((app.playhead - 0.2).abs() < 1e-9, "{}", app.playhead);
+
+        // A dry run that fails part way is put back the same way.
+        let refused = run(&mut app, "seek(2); deleteClip(999)", true);
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(voices(&app), vec![clip], "the sound started again");
+        assert!((app.playhead - 0.2).abs() < 1e-9, "{}", app.playhead);
+
+        run(&mut app, edit, false).unwrap();
+        assert_eq!(app.timeline.clips.len(), 2);
+        assert!(voices(&app).is_empty(), "a real edit starts sources again");
+        assert!(!app.playing);
+    }
+
     #[test]
     fn preview_reentering_a_file_reuses_its_parked_decoder() {
         let fixture = Fixture::new();
