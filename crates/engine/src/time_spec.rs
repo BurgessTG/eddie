@@ -160,6 +160,22 @@ fn seconds(text: &str) -> Option<f64> {
     number(text).filter(|value| *value >= 0.0 && *value < 60.0 && !text.starts_with(['-', '+']))
 }
 
+/// Format seconds as `HH:MM:SS:FF` at the given frame rate.
+pub fn format_timecode(seconds: f64, fps: f64) -> String {
+    let total_frames = (seconds.max(0.0) * fps).round() as u64;
+    // A rate that rounds to zero would divide by zero.
+    let f = (fps.round() as u64).max(1);
+    let frames = total_frames % f;
+    let total_seconds = total_frames / f;
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        total_seconds / 3600,
+        (total_seconds % 3600) / 60,
+        total_seconds % 60,
+        frames
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
