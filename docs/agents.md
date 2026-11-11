@@ -142,9 +142,12 @@ fails, the project is left exactly as it was.
 
 - Scripts are synchronous. One that uses `async`, `await` or a promise
   callback is refused whole.
-- The 500 ms limit is checked between JavaScript steps, so one built-in
-  call on a string of megabytes (`indexOf`, a regular expression) can
-  run past it and hold up a running editor. Keep strings small.
+- The 500 ms limit is checked between JavaScript steps, so it cannot stop
+  one built-in call on strings of megabytes (`indexOf`). After 1 s such a
+  script fails with "inside one built-in call" and applies nothing. Do
+  not send it again: in a running editor the call goes on in the
+  background, and once four are running every script is refused until
+  one returns or the editor restarts. Keep strings small.
 
 - `run` prints `{changed, saved, output, notes, handles,
   introducedFindings, summary}`.

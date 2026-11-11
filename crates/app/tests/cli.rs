@@ -1234,3 +1234,83 @@ fn a_socket_client_is_answered_after_it_closes_and_told_when_a_save_fails() {
     assert_eq!(stopped["stopped"], true, "{stopped}");
     assert_eq!(serve.exit_code(), 0);
 }
+
+/// One built-in call that the 500 ms limit cannot interrupt: a search that
+/// compares 7 MB at each of 7 million places. It queues a title first.
+#[cfg(unix)]
+const STUCK_SCRIPT: &str = "addTitle('Never', 0, 1); const hay = 'a'.repeat(1.4e7); \
+                            const needle = 'a'.repeat(7e6) + 'b'; return hay.indexOf(needle)";
+
+#[cfg(unix)]
+#[test]
+fn a_script_stuck_in_one_built_in_call_is_refused_and_the_editor_goes_on() {
+    use std::time::{Duration, Instant};
+
+    let dir = Dir::new("stuck");
+    let (code, _) = dir.eddie(&["new", "p.eddie"]);
+    assert_eq!(code, 0);
+
+    // Standalone: an error and an exit, not a command that never returns.
+    let mut alone = dir
+        .command(".", &["run", "p.eddie", "-e", STUCK_SCRIPT])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while alone.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(10) {
+            alone.kill().unwrap();
+            alone.wait().unwrap();
+            panic!("eddie run was still running after 10 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = alone.wait_with_output().unwrap();
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (out.status.code(), &reply["ok"]),
+        (Some(1), &false.into()),
+        "{reply}"
+    );
+    assert!(
+        reply["error"].as_str().unwrap().contains("time limit"),
+        "{reply}"
+    );
+
+    // Live: the editor answers the next request and applied nothing.
+    let mut serve = dir.spawn(&["serve", "p.eddie"]);
+    let ready = serve.line();
+    assert_eq!(ready["ok"], true, "{ready}");
+    let socket = PathBuf::from(ready["socket"].as_str().unwrap());
+    let run = |code: &str| serde_json::json!({ "id": 1, "method": "run", "code": code });
+    let refused = ask(&socket, &run(STUCK_SCRIPT).to_string(), false);
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("time limit"),
+        "{refused}"
+    );
+    let asked = Instant::now();
+    let next = ask(
+        &socket,
+        &run("addTitle('After', 0, 1); return state().clips.length").to_string(),
+        false,
+    );
+    assert_eq!(
+        (&next["ok"], &next["output"]),
+        (&true.into(), &"0".into()),
+        "{next}"
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+
+    let stopped = ask(&socket, r#"{"id":1,"method":"stop"}"#, false);
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(serve.exit_code(), 0);
+    let project = dir.project();
+    let clips = project["timeline"]["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    assert_eq!(clips[0]["name"], "After");
+}

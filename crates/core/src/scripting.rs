@@ -7,12 +7,15 @@
 //! refreshed before every eval.
 //!
 //! Sandboxed: no module loader, no OS access, and a 32 MB memory cap.
-//! A 500 ms cooperative deadline is checked by the VM and command callbacks;
-//! it cannot preempt a single native operation.
+//! A 500 ms cooperative deadline is checked by the VM and command callbacks.
+//! It cannot preempt a single native operation, so every VM runs on a thread
+//! of its own and a caller stops waiting after `STALL_LIMIT`.
 //! Each eval can queue at most 2,048 commands and 1 MiB of owned string bytes.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use rquickjs::{function::Opt, CString, Context, Function, Runtime};
@@ -362,13 +365,22 @@ impl<'js> rquickjs::FromJs<'js> for Whole {
     }
 }
 
-pub struct ScriptEngine {
+/// One QuickJS runtime and context. It stays on the thread that made it.
+struct Vm {
     context: Context,
     queue: Queue,
     next_handle: u64,
+}
+
+/// What one evaluation left behind.
+struct Evaluated {
+    output: String,
+    commands: Vec<ScriptCommand>,
+    success: bool,
+    next_handle: u64,
     read_audio: bool,
-    /// The last eval's value was a promise.
-    returned_promise: bool,
+    /// It returned a promise or left a job waiting.
+    asynchronous: bool,
 }
 
 const PRELUDE: &str = r#"
@@ -485,8 +497,8 @@ function tightenSilence(id, threshold, minSilence, padding) {
 }
 "#;
 
-impl ScriptEngine {
-    pub fn new() -> Result<Self, String> {
+impl Vm {
+    fn new(next_handle: u64) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         runtime.set_memory_limit(32 * 1024 * 1024);
         runtime.set_max_stack_size(256 * 1024);
@@ -777,6 +789,13 @@ impl ScriptEngine {
                     }
                 );
 
+                // One native call the VM cannot interrupt, without the
+                // megabyte strings a real one needs.
+                #[cfg(test)]
+                reg!("__test_stall", |ms: u64| std::thread::sleep(
+                    Duration::from_millis(ms)
+                ));
+
                 globals.set("__state_json", "{}")?;
                 ctx.eval::<(), _>(PRELUDE)?;
                 Ok(())
@@ -786,60 +805,16 @@ impl ScriptEngine {
         Ok(Self {
             context,
             queue,
-            next_handle: CLIP_HANDLE_BASE,
-            read_audio: false,
-            returned_promise: false,
+            next_handle,
         })
     }
 
-    /// Whether the last evaluation looked at the measured mix
-    /// (`audioReport()`, `state().audio`). Measuring takes a moment, so a
-    /// caller that had no measurement yet can make one and evaluate again.
-    pub fn read_audio(&self) -> bool {
-        self.read_audio
-    }
-
-    /// Evaluate one REPL line. Returns display text and queued commands.
-    pub fn eval(&mut self, code: &str, state_json: &str) -> (String, Vec<ScriptCommand>) {
-        let (output, commands, _) = self.eval_inner(code, state_json);
-        (output, commands)
-    }
-
-    /// Evaluate for `eddie run` in a fresh runtime and context. Global assignments
-    /// and prototype changes cannot affect the REPL or later requests.
-    /// Keep the function wrapper for top-level declarations and `return`.
-    /// On a JavaScript error the queued commands are discarded, so
-    /// a rejected script makes no edit at all.
-    pub fn eval_checked(
-        &mut self,
-        code: &str,
-        state_json: &str,
-    ) -> Result<(String, Vec<ScriptCommand>), String> {
-        let mut engine = Self::new()?;
-        let isolated = format!("(() => {{\n{code}\n}})()");
-        let (output, commands, success) = engine.eval_inner(&isolated, state_json);
-        self.read_audio = engine.read_audio;
-        if !success {
-            return Err(output);
-        }
-        // Nothing runs a promise's continuation, so the commands after an
-        // `await` or inside a `then` would be dropped and the rest applied.
-        if engine.returned_promise || engine.context.runtime().is_job_pending() {
-            return Err(
-                "error: scripts run synchronously; remove async, await and promise callbacks"
-                    .to_owned(),
-            );
-        }
-        Ok((output, commands))
-    }
-
-    fn eval_inner(&mut self, code: &str, state_json: &str) -> (String, Vec<ScriptCommand>, bool) {
+    fn eval(&mut self, code: &str, state_json: String) -> Evaluated {
         *self.queue.borrow_mut() = CommandQueue {
             deadline: Some(Instant::now() + EVAL_TIMEOUT),
             next_handle: self.next_handle,
             ..CommandQueue::default()
         };
-        let state_json = state_json.to_owned();
         let mut returned_promise = false;
         let (output, success) = self.context.with(|ctx| -> (String, bool) {
             if ctx.globals().set("__state_json", state_json).is_err() {
@@ -876,13 +851,245 @@ impl ScriptEngine {
         let _ = self.queue.borrow_mut().check_active();
         let queue = std::mem::take(&mut *self.queue.borrow_mut());
         self.next_handle = queue.next_handle;
-        self.read_audio = queue.read_audio;
-        self.returned_promise = returned_promise;
-        if let Some(error) = queue.error {
-            (format!("error: {error}"), Vec::new(), false)
-        } else {
-            (output, queue.commands, success)
+        let (output, commands, success) = match queue.error {
+            Some(error) => (format!("error: {error}"), Vec::new(), false),
+            None => (output, queue.commands, success),
+        };
+        Evaluated {
+            output,
+            commands,
+            success,
+            next_handle: queue.next_handle,
+            read_audio: queue.read_audio,
+            asynchronous: returned_promise || self.context.runtime().is_job_pending(),
         }
+    }
+}
+
+/// How long a caller waits for an evaluation. The VM stops a script at
+/// `EVAL_TIMEOUT` unless it is inside one built-in call, which nothing can
+/// interrupt: `indexOf` of a 7 MB string in a 14 MB one was still running
+/// after 10 s. The caller then stops waiting and the thread finishes alone.
+const STALL_LIMIT: Duration = Duration::from_millis(1000);
+/// An abandoned evaluation keeps its VM's memory and a processor until its
+/// call returns, so no script starts while this many are stuck.
+const MAX_STUCK: usize = 4;
+static STUCK: AtomicUsize = AtomicUsize::new(0);
+
+/// One abandoned evaluation, counted until its thread lets go of it.
+struct Stuck;
+
+impl Stuck {
+    fn count() -> Self {
+        STUCK.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Stuck {
+    fn drop(&mut self) {
+        STUCK.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn room_for_a_script() -> Result<(), String> {
+    let stuck = STUCK.load(Ordering::Relaxed);
+    if stuck < MAX_STUCK {
+        return Ok(());
+    }
+    Err(format!(
+        "error: {stuck} earlier scripts are still inside built-in calls that ran past the \
+         time limit; scripts run again when one returns or Eddie restarts"
+    ))
+}
+
+/// Kernel thread IDs and priorities, so an abandoned evaluation only gets
+/// processor time nothing else wants.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod idle {
+    extern "C" {
+        fn gettid() -> i32;
+        fn setpriority(which: i32, who: u32, priority: i32) -> i32;
+    }
+
+    pub fn this_thread() -> i32 {
+        // SAFETY: gettid has no preconditions.
+        unsafe { gettid() }
+    }
+
+    pub fn demote(thread: i32) {
+        // SAFETY: setpriority reads no memory. On Linux, PRIO_PROCESS (0)
+        // with a thread ID sets that one thread's nice value, and raising
+        // it to 19 needs no privilege.
+        unsafe {
+            setpriority(0, thread as u32, 19);
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+mod idle {
+    pub fn this_thread() -> i32 {
+        0
+    }
+
+    pub fn demote(_thread: i32) {}
+}
+
+enum Job {
+    Eval {
+        code: String,
+        state_json: String,
+    },
+    /// The caller stopped waiting. The thread drops this when it reaches it
+    /// or ends, and the evaluation no longer counts as stuck.
+    Abandoned(Stuck),
+}
+
+/// A VM on a thread of its own, so a caller can stop waiting for it.
+struct Worker {
+    jobs: Sender<Job>,
+    done: Receiver<Evaluated>,
+    thread: i32,
+}
+
+impl Worker {
+    fn spawn(next_handle: u64) -> Result<Self, String> {
+        let (jobs, inbox) = channel();
+        let (outbox, done) = channel();
+        let (started, ready) = channel();
+        std::thread::Builder::new()
+            .name("script".to_owned())
+            .spawn(move || {
+                let mut vm = match Vm::new(next_handle) {
+                    Ok(vm) => vm,
+                    Err(error) => {
+                        let _ = started.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = started.send(Ok(idle::this_thread()));
+                for job in inbox {
+                    let Job::Eval { code, state_json } = job else {
+                        break;
+                    };
+                    if outbox.send(vm.eval(&code, state_json)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("could not start a script thread: {error}"))?;
+        let thread = ready
+            .recv()
+            .map_err(|_| "the script thread stopped".to_owned())??;
+        Ok(Self { jobs, done, thread })
+    }
+
+    /// Evaluate and wait. After an error this worker is finished: the wait
+    /// ran out and its thread was left behind, or the thread is gone.
+    fn eval(&self, code: &str, state_json: &str) -> Result<Evaluated, String> {
+        let job = Job::Eval {
+            code: code.to_owned(),
+            state_json: state_json.to_owned(),
+        };
+        if self.jobs.send(job).is_ok() {
+            match self.done.recv_timeout(STALL_LIMIT) {
+                Ok(done) => return Ok(done),
+                Err(RecvTimeoutError::Timeout) => {
+                    idle::demote(self.thread);
+                    let _ = self.jobs.send(Job::Abandoned(Stuck::count()));
+                    return Err(format!(
+                        "error: evaluation time limit exceeded ({} ms) inside one built-in \
+                         call, which was left to finish; give it shorter strings",
+                        EVAL_TIMEOUT.as_millis()
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {}
+            }
+        }
+        Err("error: the script thread stopped".to_owned())
+    }
+}
+
+/// The console's VM and checked evaluations in fresh ones.
+pub struct ScriptEngine {
+    /// A line that had to be abandoned takes the console's VM with it; the
+    /// next line starts another, without the old variables.
+    console: Option<Worker>,
+    next_handle: u64,
+    read_audio: bool,
+}
+
+impl ScriptEngine {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            console: Some(Worker::spawn(CLIP_HANDLE_BASE)?),
+            next_handle: CLIP_HANDLE_BASE,
+            read_audio: false,
+        })
+    }
+
+    /// Whether the last evaluation looked at the measured mix
+    /// (`audioReport()`, `state().audio`). Measuring takes a moment, so a
+    /// caller that had no measurement yet can make one and evaluate again.
+    pub fn read_audio(&self) -> bool {
+        self.read_audio
+    }
+
+    /// Evaluate one REPL line. Returns display text and queued commands.
+    pub fn eval(&mut self, code: &str, state_json: &str) -> (String, Vec<ScriptCommand>) {
+        self.read_audio = false;
+        match self.eval_console(code, state_json) {
+            Ok(done) => {
+                self.next_handle = done.next_handle;
+                self.read_audio = done.read_audio;
+                (done.output, done.commands)
+            }
+            Err(error) => (error, Vec::new()),
+        }
+    }
+
+    fn eval_console(&mut self, code: &str, state_json: &str) -> Result<Evaluated, String> {
+        room_for_a_script()?;
+        let worker = match self.console.take() {
+            Some(worker) => worker,
+            None => Worker::spawn(self.next_handle).map_err(|error| format!("error: {error}"))?,
+        };
+        let done = worker
+            .eval(code, state_json)
+            .map_err(|error| format!("{error}; console variables were reset"))?;
+        self.console = Some(worker);
+        Ok(done)
+    }
+
+    /// Evaluate for `eddie run` in a fresh runtime and context. Global assignments
+    /// and prototype changes cannot affect the REPL or later requests.
+    /// Keep the function wrapper for top-level declarations and `return`.
+    /// On a JavaScript error the queued commands are discarded, so
+    /// a rejected script makes no edit at all.
+    pub fn eval_checked(
+        &mut self,
+        code: &str,
+        state_json: &str,
+    ) -> Result<(String, Vec<ScriptCommand>), String> {
+        self.read_audio = false;
+        room_for_a_script()?;
+        let worker = Worker::spawn(CLIP_HANDLE_BASE).map_err(|error| format!("error: {error}"))?;
+        let isolated = format!("(() => {{\n{code}\n}})()");
+        let done = worker.eval(&isolated, state_json)?;
+        self.read_audio = done.read_audio;
+        if !done.success {
+            return Err(done.output);
+        }
+        // Nothing runs a promise's continuation, so the commands after an
+        // `await` or inside a `then` would be dropped and the rest applied.
+        if done.asynchronous {
+            return Err(
+                "error: scripts run synchronously; remove async, await and promise callbacks"
+                    .to_owned(),
+            );
+        }
+        Ok((done.output, done.commands))
     }
 }
 
@@ -1712,6 +1919,30 @@ mod tests {
         let (output, commands) = engine.eval("seek(2); 42", "{}");
         assert_eq!(output, "42");
         assert_eq!(commands, vec![ScriptCommand::Seek(2.0)]);
+    }
+
+    #[test]
+    fn a_call_the_vm_cannot_interrupt_is_abandoned_and_scripts_go_on() {
+        let mut engine = ScriptEngine::new().expect("quickjs engine");
+        engine.eval("var kept = 1", "{}");
+
+        // Well past the wait, so only giving up on the call can answer.
+        let stuck = "seek(1); __test_stall(2500)";
+        let error = engine.eval_checked(stuck, "{}").unwrap_err();
+        assert!(error.contains("time limit"), "{error}");
+        assert!(error.contains("built-in call"), "{error}");
+        let (_, commands) = engine.eval_checked("seek(2)", "{}").unwrap();
+        assert_eq!(commands, vec![ScriptCommand::Seek(2.0)]);
+        let (output, _) = engine.eval("kept", "{}");
+        assert_eq!(output, "1", "a checked script leaves the console alone");
+
+        let (output, commands) = engine.eval(stuck, "{}");
+        assert!(output.contains("time limit"), "{output}");
+        assert!(output.contains("variables were reset"), "{output}");
+        assert!(commands.is_empty());
+        let (output, commands) = engine.eval("seek(3); typeof kept", "{}");
+        assert_eq!(output, "undefined");
+        assert_eq!(commands, vec![ScriptCommand::Seek(3.0)]);
     }
 
     fn sequential_title_snapshot(count: usize) -> String {
