@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use openreel_media::MediaInfo;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use super::{ends_sentence, TranscriptSegment, TranscriptWord};
+use super::{ends_sentence, TranscriptSegment, TranscriptWord, SAMPLE_RATE};
 
 /// Shorter turns rarely hold two sentences worth separating.
 const MIN_TURN_SECONDS: f64 = 2.0;
@@ -20,7 +20,6 @@ const PAD_SECONDS: f64 = 0.3;
 /// Below this share of matched words, the local hearing is a different
 /// transcript, not timing for this one.
 const MIN_MATCHED_SHARE: f64 = 0.5;
-const SAMPLE_RATE: usize = 16_000;
 /// Heard word edges are good to about ±0.2 s. A sentence break moves to the
 /// quietest 20 ms of audio within this distance.
 pub(super) const SNAP_SECONDS: f64 = 0.25;
