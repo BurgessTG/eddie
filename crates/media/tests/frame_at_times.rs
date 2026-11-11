@@ -8,14 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use openreel_media::{frame_at, scaled_height, MediaResult, RawFrame};
+use openreel_media::{scaled_height, MediaResult, RawFrame};
 
-// Compile the actual private native implementation, rather than the public
-// frame_at wrapper (which can hide native failures with a CLI fallback).
-// This keeps VideoDecoder out of the production public API.
-#[allow(dead_code)]
-#[path = "../src/decode.rs"]
-mod native;
+/// The native decoder itself, not the public `frame_at` wrapper, which can
+/// hide a native failure behind its command-line fallback.
+mod native {
+    pub use openreel_media::{filmstrip_stills, VideoDecoder};
+}
 
 const COLORS: [(&str, (f64, f64, f64)); 4] = [
     ("red", (255.0, 0.0, 0.0)),

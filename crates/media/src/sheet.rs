@@ -10,7 +10,7 @@ use std::thread;
 use openreel_engine::TitleStyle;
 
 use crate::export::{filter_value, font_file};
-use crate::{scaled_height, title_look, MediaResult, VideoDecoder};
+use crate::{scaled_height, title_look, MediaResult, RawFrame, VideoDecoder};
 
 /// Strip under each cell holding its label.
 const LABEL_H: usize = 26;
@@ -63,66 +63,81 @@ fn render(
     if cells.is_empty() {
         return Err("no cells".to_owned());
     }
-    let cell_h = scaled_height(canvas.0, canvas.1, cell_w as u32) as usize;
-    let columns = cells.len().min(per_row);
-    let rows = cells.len().div_ceil(per_row);
-    let width = columns * cell_w + (columns + 1) * GUTTER;
-    let height = rows * (cell_h + LABEL_H) + (rows + 1) * GUTTER;
-    let mut sheet = vec![0_u8; width * height * 4];
+    let grid = Grid::new(cells.len(), canvas, cell_w, per_row);
+    let mut sheet = vec![0_u8; grid.width * grid.height * 4];
     for pixel in sheet.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[38, 38, 42, 255]);
     }
-    let origin = |index: usize| {
-        let (column, row) = (index % per_row, index / per_row);
-        (
-            GUTTER + column * (cell_w + GUTTER),
-            GUTTER + row * (cell_h + LABEL_H + GUTTER),
-        )
-    };
 
     let mut labels: Vec<String> = cells.iter().map(|cell| cell.label.clone()).collect();
     let mut decoder: Option<(String, VideoDecoder)> = None;
     for (index, cell) in cells.iter().enumerate() {
-        let (x0, y0) = origin(index);
-        for row in 0..cell_h {
-            let start = ((y0 + row) * width + x0) * 4;
-            for pixel in sheet[start..start + cell_w * 4].as_chunks_mut::<4>().0 {
-                pixel.copy_from_slice(&[0, 0, 0, 255]);
-            }
-        }
+        grid.black(&mut sheet, index);
         let Some((path, time)) = &cell.picture else {
             continue;
         };
-        let picture = (|| {
-            if decoder.as_ref().is_none_or(|(open, _)| open != path) {
-                decoder = Some((
-                    path.clone(),
-                    VideoDecoder::open(path, cell_w as u32, false)?,
-                ));
+        match still(&mut decoder, path, *time, &grid) {
+            Ok(frame) => grid.paint(&mut sheet, index, &frame, cell.opacity),
+            Err(_) => labels[index].push_str(" (undecodable)"),
+        }
+    }
+    let filters = text_filters(cells, &labels, &grid, canvas);
+    encode(sheet, &grid, &filters, quality)
+}
+
+/// Where the cells sit on the sheet, in pixels.
+struct Grid {
+    cell_w: usize,
+    cell_h: usize,
+    per_row: usize,
+    width: usize,
+    height: usize,
+}
+
+impl Grid {
+    fn new(cells: usize, canvas: (u32, u32), cell_w: usize, per_row: usize) -> Self {
+        let cell_h = scaled_height(canvas.0, canvas.1, cell_w as u32) as usize;
+        let columns = cells.min(per_row);
+        let rows = cells.div_ceil(per_row);
+        Self {
+            cell_w,
+            cell_h,
+            per_row,
+            width: columns * cell_w + (columns + 1) * GUTTER,
+            height: rows * (cell_h + LABEL_H) + (rows + 1) * GUTTER,
+        }
+    }
+
+    /// The top-left corner of cell `index`.
+    fn origin(&self, index: usize) -> (usize, usize) {
+        let (column, row) = (index % self.per_row, index / self.per_row);
+        (
+            GUTTER + column * (self.cell_w + GUTTER),
+            GUTTER + row * (self.cell_h + LABEL_H + GUTTER),
+        )
+    }
+
+    /// Fill cell `index` with black, what a cell without a picture shows.
+    fn black(&self, sheet: &mut [u8], index: usize) {
+        let (x0, y0) = self.origin(index);
+        for row in 0..self.cell_h {
+            let start = ((y0 + row) * self.width + x0) * 4;
+            for pixel in sheet[start..start + self.cell_w * 4].as_chunks_mut::<4>().0 {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
             }
-            let decoder = &mut decoder.as_mut().unwrap().1;
-            decoder.set_output(cell_w as u32, false)?;
-            let (w, h) = decoder.output_size();
-            if h as usize > cell_h {
-                // Taller than the canvas: fit the height (pillarbox).
-                let fit = (w as usize * cell_h / h as usize) / 2 * 2;
-                decoder.set_output(fit.max(2) as u32, false)?;
-            }
-            decoder.still_at(*time)
-        })();
-        let frame = match picture {
-            Ok(frame) => frame,
-            Err(_) => {
-                labels[index].push_str(" (undecodable)");
-                continue;
-            }
-        };
+        }
+    }
+
+    /// Centre `frame` in cell `index`, faded against black by `opacity`.
+    fn paint(&self, sheet: &mut [u8], index: usize, frame: &RawFrame, opacity: f32) {
+        let (x0, y0) = self.origin(index);
+        let (cell_w, cell_h) = (self.cell_w, self.cell_h);
         let (w, h) = (frame.width as usize, frame.height as usize);
         let (dx, dy) = (x0 + (cell_w - w) / 2, y0 + (cell_h - h.min(cell_h)) / 2);
-        let gain = cell.opacity.clamp(0.0, 1.0);
+        let gain = opacity.clamp(0.0, 1.0);
         for row in 0..h.min(cell_h) {
             let src = &frame.rgba[row * w * 4..(row + 1) * w * 4];
-            let start = ((dy + row) * width + dx) * 4;
+            let start = ((dy + row) * self.width + dx) * 4;
             for (dst, src) in sheet[start..start + w * 4]
                 .as_chunks_mut::<4>()
                 .0
@@ -135,57 +150,86 @@ fn render(
             }
         }
     }
+}
 
-    // Labels and titles: export's drawtext table, scaled to the cell.
-    let mut filters = Vec::new();
-    if let Some(font) = font_file() {
-        let font = filter_value(&font);
-        let scale = cell_h as f32 / canvas.1.max(1) as f32;
-        for (index, cell) in cells.iter().enumerate() {
-            let (x0, y0) = origin(index);
-            filters.push(format!(
-                "drawtext=fontfile={font}:expansion=none:text={}:fontcolor=white:\
-                 fontsize=15:x={}:y={}",
-                filter_value(&labels[index]),
-                x0 + 6,
-                y0 + cell_h + 6,
-            ));
-            let Some((text, style, opacity)) = &cell.title else {
-                continue;
-            };
-            let look = title_look(*style);
-            let (r, g, b) = look.color;
-            let border = ((look.border as f32 * scale).round() as u32).max(1);
-            let box_options = match look.box_alpha {
-                Some(alpha) => format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={border}"),
-                None => format!("box=0:borderw={border}:bordercolor=black@0.8"),
-            };
-            let x = look.left.map_or_else(
-                || format!("{x0}+({cell_w}-text_w)/2"),
-                |left| format!("{}", x0 + (left as f32 * scale).round() as usize),
-            );
-            let y = y0 + cell_h - (look.bottom as f32 * scale).round() as usize;
-            filters.push(format!(
-                "drawtext=fontfile={font}:expansion=none:text={}:\
-                 fontcolor=0x{r:02X}{g:02X}{b:02X}@{:.2}:\
-                 fontsize={}:{box_options}:x={x}:y={y}",
-                // One line, as export draws it.
-                filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-                opacity.clamp(0.0, 1.0),
-                ((look.font_size as f32 * scale).round() as u32).max(6),
-            ));
-        }
+/// The picture of `path` at `time`, sized to fit a cell. `decoder` stays
+/// open across cells of one file.
+fn still(
+    decoder: &mut Option<(String, VideoDecoder)>,
+    path: &str,
+    time: f64,
+    grid: &Grid,
+) -> MediaResult<RawFrame> {
+    if decoder.as_ref().is_none_or(|(open, _)| open != path) {
+        *decoder = Some((
+            path.to_owned(),
+            VideoDecoder::open(path, grid.cell_w as u32, false)?,
+        ));
     }
-    let filters = if filters.is_empty() {
-        "null".to_owned()
-    } else {
-        filters.join(",")
-    };
+    let decoder = &mut decoder.as_mut().unwrap().1;
+    decoder.set_output(grid.cell_w as u32, false)?;
+    let (w, h) = decoder.output_size();
+    if h as usize > grid.cell_h {
+        // Taller than the canvas: fit the height (pillarbox).
+        let fit = (w as usize * grid.cell_h / h as usize) / 2 * 2;
+        decoder.set_output(fit.max(2) as u32, false)?;
+    }
+    decoder.still_at(time)
+}
 
+/// The drawtext chain for every label and title: export's title table,
+/// scaled to the cell. `null` without a font.
+fn text_filters(cells: &[SheetCell], labels: &[String], grid: &Grid, canvas: (u32, u32)) -> String {
+    let Some(font) = font_file() else {
+        return "null".to_owned();
+    };
+    let font = filter_value(&font);
+    let (cell_w, cell_h) = (grid.cell_w, grid.cell_h);
+    let scale = cell_h as f32 / canvas.1.max(1) as f32;
+    let mut filters = Vec::new();
+    for (index, cell) in cells.iter().enumerate() {
+        let (x0, y0) = grid.origin(index);
+        filters.push(format!(
+            "drawtext=fontfile={font}:expansion=none:text={}:fontcolor=white:\
+             fontsize=15:x={}:y={}",
+            filter_value(&labels[index]),
+            x0 + 6,
+            y0 + cell_h + 6,
+        ));
+        let Some((text, style, opacity)) = &cell.title else {
+            continue;
+        };
+        let look = title_look(*style);
+        let (r, g, b) = look.color;
+        let border = ((look.border as f32 * scale).round() as u32).max(1);
+        let box_options = match look.box_alpha {
+            Some(alpha) => format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={border}"),
+            None => format!("box=0:borderw={border}:bordercolor=black@0.8"),
+        };
+        let x = look.left.map_or_else(
+            || format!("{x0}+({cell_w}-text_w)/2"),
+            |left| format!("{}", x0 + (left as f32 * scale).round() as usize),
+        );
+        let y = y0 + cell_h - (look.bottom as f32 * scale).round() as usize;
+        filters.push(format!(
+            "drawtext=fontfile={font}:expansion=none:text={}:\
+             fontcolor=0x{r:02X}{g:02X}{b:02X}@{:.2}:\
+             fontsize={}:{box_options}:x={x}:y={y}",
+            // One line, as export draws it.
+            filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
+            opacity.clamp(0.0, 1.0),
+            ((look.font_size as f32 * scale).round() as u32).max(6),
+        ));
+    }
+    filters.join(",")
+}
+
+/// One ffmpeg run: draw `filters` over the RGBA `sheet` and return a JPEG.
+fn encode(sheet: Vec<u8>, grid: &Grid, filters: &str, quality: u32) -> MediaResult<Vec<u8>> {
     let mut child = Command::new("ffmpeg")
         .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
-        .arg(format!("{width}x{height}"))
-        .args(["-i", "pipe:0", "-vf", &filters, "-frames:v", "1"])
+        .arg(format!("{}x{}", grid.width, grid.height))
+        .args(["-i", "pipe:0", "-vf", filters, "-frames:v", "1"])
         .args([
             "-q:v",
             &quality.to_string(),
