@@ -141,22 +141,6 @@ pub fn status_bar(ui: &Ui) -> El {
         .exported
         .as_ref()
         .filter(|(_, message)| *message == editor.status);
-    let busy = editor.importing() || editor.exporting() || editor.curating();
-    let lamp = row().key("status-lamp").size(12.0, 12.0).center();
-    let lamp = if busy {
-        lamp.child(
-            el().size(14.0, 14.0)
-                .shape(icons::spinner(14.0, ui.turn(), c.muted_fg)),
-        )
-        .help("Working")
-    } else if let Some((shown, target)) = editor.playback_rate() {
-        lamp.child(dot(4.0, rate_health(shown as f64, target)))
-            .help(format!(
-                "Playback: {shown} of {target:.0} pictures per second"
-            ))
-    } else {
-        lamp.child(dot(3.0, c.subtle_fg))
-    };
     // The message truncates into what the readouts leave, so a long error
     // never runs under them.
     let status = text(editor.status.clone())
@@ -182,11 +166,10 @@ pub fn status_bar(ui: &Ui) -> El {
         .center_y()
         .fill(c.surface)
         .border_sides([1.0, 0.0, 0.0, 0.0], c.border)
-        .child(lamp)
+        .child(lamp(ui))
         .child(status)
         .child(el().w(4.0));
     if let Some(progress) = editor.export_progress {
-        let progress = progress.clamp(0.0, 1.0) as f32;
         return bar
             .child(
                 text("Exporting")
@@ -194,29 +177,7 @@ pub fn status_bar(ui: &Ui) -> El {
                     .color(c.muted_fg)
                     .single_line(),
             )
-            .child(
-                row()
-                    .key("export-progress")
-                    .size(180.0, 16.0)
-                    .radius(8.0)
-                    .fill(c.input)
-                    .clip_rounded(8.0)
-                    .help("Export progress")
-                    .child(
-                        el().absolute(0.0, 0.0)
-                            .size((180.0 * progress).max(16.0), 16.0)
-                            .radius(8.0)
-                            .fill(c.brand),
-                    )
-                    .child(
-                        row().size(180.0, 16.0).center().child(
-                            text(format!("{:.0}%", progress * 100.0))
-                                .font(theme::sized(11.0))
-                                .color(c.foreground)
-                                .single_line(),
-                        ),
-                    ),
-            );
+            .child(export_progress(progress.clamp(0.0, 1.0) as f32));
     }
     // Left to right: rate, length, UI frame time, memory.
     let segments = [
@@ -249,26 +210,78 @@ pub fn status_bar(ui: &Ui) -> El {
         );
     }
     if let Some((path, _)) = just_exported {
-        let dir = path.parent().map(Path::to_path_buf);
-        bar = bar.child(el().w(4.0)).child(
-            theme::button(
-                "open-export-folder",
-                "Open folder",
-                Variant::Secondary,
-                &format!("Show the exported file's folder\n{}", path.display()),
-                true,
-            )
-            .on_press(move |ui: &mut Ui| {
-                let Some(dir) = &dir else {
-                    return;
-                };
-                if let Err(error) = open_folder(dir) {
-                    ui.editor.status = format!("Could not open the folder: {error}");
-                }
-            }),
-        );
+        bar = bar.child(el().w(4.0)).child(open_folder_button(path));
     }
     bar
+}
+
+/// A spinner while the editor works, the playback-rate dot while it
+/// plays, a grey dot otherwise.
+fn lamp(ui: &Ui) -> El {
+    let c = c();
+    let editor = &ui.editor;
+    let busy = editor.importing() || editor.exporting() || editor.curating();
+    let lamp = row().key("status-lamp").size(12.0, 12.0).center();
+    if busy {
+        lamp.child(
+            el().size(14.0, 14.0)
+                .shape(icons::spinner(14.0, ui.turn(), c.muted_fg)),
+        )
+        .help("Working")
+    } else if let Some((shown, target)) = editor.playback_rate() {
+        lamp.child(dot(4.0, rate_health(shown as f64, target)))
+            .help(format!(
+                "Playback: {shown} of {target:.0} pictures per second"
+            ))
+    } else {
+        lamp.child(dot(3.0, c.subtle_fg))
+    }
+}
+
+/// The export's progress bar, `progress` from 0 to 1.
+fn export_progress(progress: f32) -> El {
+    let c = c();
+    row()
+        .key("export-progress")
+        .size(180.0, 16.0)
+        .radius(8.0)
+        .fill(c.input)
+        .clip_rounded(8.0)
+        .help("Export progress")
+        .child(
+            el().absolute(0.0, 0.0)
+                .size((180.0 * progress).max(16.0), 16.0)
+                .radius(8.0)
+                .fill(c.brand),
+        )
+        .child(
+            row().size(180.0, 16.0).center().child(
+                text(format!("{:.0}%", progress * 100.0))
+                    .font(theme::sized(11.0))
+                    .color(c.foreground)
+                    .single_line(),
+            ),
+        )
+}
+
+/// Shows the folder of the file an export just wrote.
+fn open_folder_button(path: &Path) -> El {
+    let dir = path.parent().map(Path::to_path_buf);
+    theme::button(
+        "open-export-folder",
+        "Open folder",
+        Variant::Secondary,
+        &format!("Show the exported file's folder\n{}", path.display()),
+        true,
+    )
+    .on_press(move |ui: &mut Ui| {
+        let Some(dir) = &dir else {
+            return;
+        };
+        if let Err(error) = open_folder(dir) {
+            ui.editor.status = format!("Could not open the folder: {error}");
+        }
+    })
 }
 
 #[cfg(test)]

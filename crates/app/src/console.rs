@@ -62,7 +62,42 @@ fn recall(ui: &mut Ui, older: bool) {
 
 pub fn panel(ui: &Ui) -> El {
     let c = c();
-    let header = row()
+    el().key("console")
+        .w_full()
+        .h(ui.console.height)
+        .fill(c.surface)
+        .child(
+            col()
+                .w_full()
+                .h_full()
+                .px(PAD_X)
+                .py(8.0)
+                .child(header())
+                .child(el().h(3.0))
+                .child(output(ui))
+                .child(el().h(5.0))
+                .child(prompt(ui)),
+        )
+        .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(c.border))
+        .child(
+            el().key("console-resize")
+                .absolute(0.0, -3.0)
+                .w_full()
+                .h(7.0)
+                .cursor(Cursor::ResizeRow)
+                .help("Drag to resize the console")
+                .on_drag(|ui: &mut Ui, drag, _| {
+                    if drag.phase == Phase::Down {
+                        drag.data = ui.console.height;
+                    } else {
+                        ui.console.height = (drag.data - drag.dy).round().clamp(MIN_H, MAX_H);
+                    }
+                }),
+        )
+}
+
+fn header() -> El {
+    row()
         .w_full()
         .h(28.0)
         .center_y()
@@ -77,8 +112,13 @@ pub fn panel(ui: &Ui) -> El {
                 true,
             )
             .on_press(|ui: &mut Ui| ui.editor.console_output.clear()),
-        );
-    let output = col()
+        )
+}
+
+/// What the scripts printed, newest at the bottom, where it stays.
+fn output(ui: &Ui) -> El {
+    let c = c();
+    col()
         .key("console-output")
         .w_full()
         .grow(1.0)
@@ -97,7 +137,13 @@ pub fn panel(ui: &Ui) -> El {
                         .selection_color(theme::selection())
                 })),
         )
-        .scroll_bar_styled(ScrollBarStyle::native(c.border_strong, c.subtle_fg).inside());
+        .scroll_bar_styled(ScrollBarStyle::native(c.border_strong, c.subtle_fg).inside())
+}
+
+/// The `>` line: Enter runs it, Up and Down recall history, Esc lets go
+/// of the keyboard.
+fn prompt(ui: &Ui) -> El {
+    let c = c();
     let input = rune::text_input(&ui.console.input, theme::MONO.lh(14.0))
         .selection_color(theme::selection())
         .key(INPUT_KEY)
@@ -131,7 +177,7 @@ pub fn panel(ui: &Ui) -> El {
             }
             _ => false,
         });
-    let prompt = row()
+    row()
         .w_full()
         .h(28.0)
         // Centres the 19-high input on whole pixels.
@@ -144,39 +190,7 @@ pub fn panel(ui: &Ui) -> El {
                 .color(c.foreground)
                 .single_line(),
         )
-        .child(input);
-    el().key("console")
-        .w_full()
-        .h(ui.console.height)
-        .fill(c.surface)
-        .child(
-            col()
-                .w_full()
-                .h_full()
-                .px(PAD_X)
-                .py(8.0)
-                .child(header)
-                .child(el().h(3.0))
-                .child(output)
-                .child(el().h(5.0))
-                .child(prompt),
-        )
-        .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(c.border))
-        .child(
-            el().key("console-resize")
-                .absolute(0.0, -3.0)
-                .w_full()
-                .h(7.0)
-                .cursor(Cursor::ResizeRow)
-                .help("Drag to resize the console")
-                .on_drag(|ui: &mut Ui, drag, _| {
-                    if drag.phase == Phase::Down {
-                        drag.data = ui.console.height;
-                    } else {
-                        ui.console.height = (drag.data - drag.dy).round().clamp(MIN_H, MAX_H);
-                    }
-                }),
-        )
+        .child(input)
 }
 
 #[cfg(test)]

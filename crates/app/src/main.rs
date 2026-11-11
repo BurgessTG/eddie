@@ -6,7 +6,6 @@ mod console;
 mod details;
 mod dialogs;
 mod gallery;
-mod gallery_thumbs;
 mod icons;
 mod keys;
 mod media;
