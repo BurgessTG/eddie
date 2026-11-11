@@ -370,6 +370,13 @@ fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
     let guide = String::from_utf8_lossy(&out.stdout);
     assert!(guide.starts_with("# Editing with Eddie from an agent"));
     assert!(guide.contains("## Rules that prevent the usual mistakes"));
+    for flag in ["--version", "-V"] {
+        let out = dir.command(".", &[flag]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let version = String::from_utf8_lossy(&out.stdout);
+        let expected = concat!("eddie ", env!("CARGO_PKG_VERSION"), " (");
+        assert!(version.starts_with(expected), "{version}");
+    }
 
     // A typo must answer in JSON, never open the window: without a display
     // a regression fails here instead of hanging.

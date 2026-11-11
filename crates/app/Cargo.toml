@@ -1,8 +1,9 @@
 [package]
 name = "openreel-app"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "Eddie's desktop window (Rune) and the eddie command"
 

@@ -1,4 +1,5 @@
 /target
+/target-*/
 /.amp/portals/
 /samples/
 /AGENTS.md

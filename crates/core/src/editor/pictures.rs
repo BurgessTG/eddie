@@ -679,8 +679,8 @@ mod tests {
         assert_eq!(times[0], (0.25, (0.0, 0.5)));
         assert_eq!(times[14], (9.25, (9.0, 10.0)));
         assert!(times.iter().all(|(t, (start, end))| start <= t && t < end));
-        // 47 one-second shots and a 5.3 s card at 31.18, as on honey's
-        // 0vSt expo cut: index picking skipped the card entirely.
+        // 47 one-second shots and a 5.3 s card at 31.18, as in a real
+        // expo cut: index picking skipped the card entirely.
         let mut many: Vec<(f64, f64)> = (0..31).map(|i| (i as f64, i as f64 + 1.0)).collect();
         many.push((31.0, 31.18));
         many.push((31.18, 36.49));
@@ -699,7 +699,7 @@ mod tests {
         );
     }
 
-    /// honey's 0vSt card (32.15-34.58) hard-cuts to black inside one
+    /// A real logo card (32.15-34.58) hard-cuts to black inside one
     /// detected shot; the black becomes its own shot, a dark blink does not.
     #[test]
     fn strip_shots_split_where_a_shot_cuts_to_black() {

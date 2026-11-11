@@ -11,6 +11,15 @@ use std::path::Path;
 /// Whether this build runs whisper on a GPU (`cuda` or `vulkan` feature).
 pub const BUILD: bool = cfg!(any(feature = "cuda", feature = "vulkan"));
 
+/// What this build runs local whisper on, for `eddie --version`.
+pub const BACKEND: &str = if cfg!(feature = "cuda") {
+    "cuda"
+} else if cfg!(feature = "vulkan") {
+    "vulkan"
+} else {
+    "cpu"
+};
+
 /// Bytes on the GPU whisper.cpp uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Memory {

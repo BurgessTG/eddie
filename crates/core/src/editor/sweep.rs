@@ -14,7 +14,7 @@ use super::media::AssetState;
 use super::Editor;
 
 mod align;
-mod gpu;
+pub(crate) mod gpu;
 mod speech;
 mod store;
 pub mod transcribe;

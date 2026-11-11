@@ -6,10 +6,12 @@ pkgrel=1
 pkgdesc="The editor that watches the footage for you: a native Rust video editor that AI agents can drive"
 arch=('x86_64')
 url="https://github.com/BurgessTG/eddie"
-license=('MIT' 'Apache-2.0')
-depends=('ffmpeg' 'gtk3' 'glib2' 'alsa-lib' 'fontconfig' 'gcc-libs' 'glibc'
-         'libxkbcommon' 'wayland' 'libx11' 'vulkan-icd-loader')
-makedepends=('git' 'cargo' 'clang' 'cmake' 'pkgconf')
+license=('MIT OR Apache-2.0')
+depends=('ffmpeg' 'gtk3' 'glib2' 'alsa-lib' 'fontconfig' 'libgcc' 'libstdc++'
+         'glibc' 'libxkbcommon' 'wayland' 'libx11' 'vulkan-icd-loader'
+         'hicolor-icon-theme')
+makedepends=('git' 'cargo' 'clang' 'cmake' 'pkgconf'
+             'vulkan-headers' 'shaderc')
 optdepends=('inter-font: the interface font Eddie is designed with'
             'ttf-liberation: a font for titles when fontconfig finds no other'
             'libva-nvidia-driver: hardware decode on NVIDIA (Settings, off by default)'
@@ -40,7 +42,9 @@ build() {
   # whisper.cpp and QuickJS embed __FILE__ paths.
   export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$srcdir=/build"
   export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$srcdir=/build"
-  cargo build --frozen --release -p openreel-app --bin eddie
+  # Local transcription on any Vulkan GPU; it runs on the CPU where there
+  # is none. whisper.cpp's shaders need glslc (shaderc) to build.
+  cargo build --frozen --release -p openreel-app --bin eddie --features vulkan
 }
 
 package() {

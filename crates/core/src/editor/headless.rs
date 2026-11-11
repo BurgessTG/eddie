@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::commands::{self, Job, Note, Outcome, Reply};
-use super::sweep::transcribe;
+use super::sweep::{gpu, transcribe};
 use super::{server, Editor, NoPreview, Settings, Wake};
 use crate::scripting::ScriptEngine;
 
@@ -66,6 +66,8 @@ Usage: eddie <command> <project.eddie> ...
   guide                              the guide for agents: the API, the time
                                      grammar and the rules that prevent the
                                      usual mistakes
+  --version                          the version, and what local transcription
+                                     runs on in this build (cpu, cuda, vulkan)
 
 Live editing. While a project is open in the Eddie window or in `serve`,
 every command above goes to that editor instead of the file: edits show in
@@ -116,7 +118,9 @@ const COMMANDS: &[&str] = &[
 /// agent waiting on JSON must not get a window.
 pub fn cli_main(args: &[OsString]) -> Option<i32> {
     let first = args.first()?;
-    let known = |word: &&str| COMMANDS.contains(word) || matches!(*word, "--help" | "-h");
+    let known = |word: &&str| {
+        COMMANDS.contains(word) || matches!(*word, "--help" | "-h" | "--version" | "-V")
+    };
     let Some(command) = first.to_str().filter(known) else {
         let word = first.to_string_lossy();
         if word.starts_with('-') || Path::new(first).exists() {
@@ -139,6 +143,10 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
         }
         "guide" => {
             print!("{GUIDE}");
+            return Some(0);
+        }
+        "--version" | "-V" => {
+            println!("eddie {} ({})", env!("CARGO_PKG_VERSION"), gpu::BACKEND);
             return Some(0);
         }
         "new" => new(&args),
