@@ -19,9 +19,9 @@ sandboxed JavaScript API, and you keep editing by hand in the window. See
 ![The Eddie window: media bin, program monitor, clip details and a three-lane timeline](docs/screenshot.png)
 
 Eddie runs on Linux (Wayland and X11) and on macOS on Apple Silicon. On
-macOS it starts from a terminal: there is no app bundle yet, and it has
-only been run in a virtual machine (macOS 27.2). Intel Macs and Windows
-are not tested.
+macOS it builds as `Eddie.app` (see [macOS app](#macos-app)); it has only
+been run in a virtual machine (macOS 27.2). Intel Macs and Windows are not
+tested.
 
 ## Features
 
@@ -83,10 +83,12 @@ results are saved per file. It runs on this computer:
   sound; GTK 3 for file dialogs; fontconfig (`fc-match`) and a font for
   titles; a Vulkan driver for the window. The tests also need `ffprobe`.
 - macOS: Xcode's command line tools and
-  `brew install pkgconf cmake ffmpeg ffmpeg-full`. The build links
-  Homebrew's `ffmpeg` libraries. Titles and contact sheets need the
-  `ffmpeg` command's `drawtext` filter, which Homebrew's `ffmpeg` lacks and
-  `ffmpeg-full` has; Eddie finds `ffmpeg-full` where Homebrew installs it.
+  `brew install pkgconf cmake ffmpeg ffmpeg-full`. The build links the
+  FFmpeg libraries Homebrew has linked, which after that command are
+  `ffmpeg-full`'s, and the built `eddie` loads them from there. Titles and
+  contact sheets need the `ffmpeg` command's `drawtext` filter, which
+  Homebrew's `ffmpeg` lacks and `ffmpeg-full` has; Eddie finds
+  `ffmpeg-full` where Homebrew installs it.
 - `EDDIE_FFMPEG=/path/to/ffmpeg` names the `ffmpeg` command to use, on any
   system.
 - Optional: a key for a cloud transcription provider (Meta Voice
@@ -127,6 +129,22 @@ container, which has FFmpeg 9.
 Open Settings with the gear beside Export (Ctrl+,) for hardware decode
 (VAAPI on Linux, VideoToolbox on macOS, off by default), the speech
 provider, its model and the project format.
+
+### macOS app
+
+```sh
+packaging/macos/bundle.sh            # builds target/release/Eddie.app
+open target/release/Eddie.app
+```
+
+`Eddie.app` opens from Finder and shows its own icon there and in the
+Dock. Double-clicking a `.eddie` project opens it in Eddie, and media
+opened with Eddie (Open With, `open -a Eddie clip.mp4`) is imported. The
+command line is inside the app: `Eddie.app/Contents/MacOS/eddie`.
+
+The app is for the Mac that built it. It loads Homebrew's FFmpeg from
+where it is installed, and it is signed ad hoc, not with a Developer ID,
+so a copy downloaded from elsewhere gets the Gatekeeper warning.
 
 ### GPU transcription
 

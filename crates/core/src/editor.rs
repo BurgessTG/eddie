@@ -621,12 +621,9 @@ impl Editor {
     /// Open what the command line named: the first `.eddie` file as the
     /// project, everything else as media.
     fn open_launch_paths(&mut self, paths: Vec<PathBuf>) {
-        let (projects, media): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case(project::EXTENSION))
-        });
-        if let Some(project) = projects.first() {
-            if let Err(error) = self.open_project(project) {
+        let (project, media) = project::split_opened(paths);
+        if let Some(project) = project {
+            if let Err(error) = self.open_project(&project) {
                 self.status = error;
             }
         }

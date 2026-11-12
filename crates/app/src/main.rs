@@ -5,6 +5,8 @@ mod app;
 mod console;
 mod details;
 mod dialogs;
+#[cfg(target_os = "macos")]
+mod finder;
 mod gallery;
 mod icons;
 mod keys;
@@ -55,5 +57,12 @@ fn main() {
         app = app.titlebar(shell::titlebar());
     }
     let handle = app.handle();
+    // Finder hands over files as events, not arguments. One that arrives
+    // before the window exists waits in the handle's queue for it.
+    #[cfg(target_os = "macos")]
+    {
+        let opened = handle.clone();
+        finder::listen(move |paths| opened.update(move |ui, _| ui.open_files(paths)));
+    }
     app.init(move || Ui::open(handle, imports)).run();
 }

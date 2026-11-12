@@ -20,6 +20,17 @@ use super::Editor;
 const VERSION: u64 = 1;
 pub const EXTENSION: &str = "eddie";
 
+/// Split the paths an editor is asked to open (the command line, files
+/// opened from Finder) into the project to open, which is the first
+/// `.eddie` file, and the media to import.
+pub fn split_opened(paths: Vec<PathBuf>) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let (projects, media): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(EXTENSION))
+    });
+    (projects.into_iter().next(), media)
+}
+
 /// Take the hold on a project's file that an editor keeps while it may save
 /// it, so two editors never write over each other's changes. Waits up to
 /// `wait` for whoever has it. `Ok(None)` means there is nothing to hold (no

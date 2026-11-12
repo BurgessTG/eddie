@@ -482,10 +482,10 @@ fn chord(event: &KeyEvent) -> Option<Chord> {
 }
 
 pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
-    if let Some(discard) = ui.pending_discard {
+    if ui.pending_discard.is_some() {
         // The "Save changes?" prompt owns the keyboard.
         match event.key {
-            Key::Enter => ui.answer_discard(discard, true),
+            Key::Enter => ui.answer_discard(true),
             Key::Escape => ui.pending_discard = None,
             _ => {}
         }

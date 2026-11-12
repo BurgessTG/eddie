@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Eddie's icon on the macOS grid: the 824 px rounded square with its
+       margin and shadow. The drawing inside is packaging/eddie-512.png's.
+       The shadow is its own shape: a filter on the square shifts its colour. -->
+  <defs>
+    <filter id="blur" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+  <rect x="100" y="110" width="824" height="824" rx="185" opacity="0.3" filter="url(#blur)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#101013"/>
+  <g transform="translate(100 100) scale(1.609375)">
+    <g fill="#ffeeef">
+      <rect x="122" y="146" width="286" height="71" rx="35.5"/>
+      <rect x="104" y="249" width="229" height="72" rx="36"/>
+      <rect x="122" y="353" width="286" height="72" rx="36"/>
+    </g>
+    <g fill="#8b5cf6">
+      <rect x="187" y="88" width="6.5" height="337"/>
+      <path d="M168 88h44l-19 20h-6z"/>
+    </g>
+  </g>
+</svg>

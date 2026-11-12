@@ -28,9 +28,12 @@ keep editing by hand in the window.
 - Music ducks under speech on a raised-cosine curve, the same in preview
   and export.
 - `eddie --version`.
-- macOS on Apple Silicon: Eddie builds and runs there, started from a
-  terminal. Shortcuts use Cmd, the menu bar is the window's titlebar,
-  hardware decode uses VideoToolbox and local transcription uses Metal.
+- macOS on Apple Silicon: Eddie builds and runs there. Shortcuts use Cmd,
+  the menu bar is the window's titlebar, hardware decode uses VideoToolbox
+  and local transcription uses Metal.
+- `packaging/macos/bundle.sh` builds `Eddie.app`, which opens from Finder
+  with its own icon. Double-clicking a `.eddie` project opens it in Eddie,
+  and media opened with Eddie is imported.
 - `EDDIE_FFMPEG` names the `ffmpeg` command to use.
 
 ### Changed
