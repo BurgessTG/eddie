@@ -142,9 +142,21 @@ Dock. Double-clicking a `.eddie` project opens it in Eddie, and media
 opened with Eddie (Open With, `open -a Eddie clip.mp4`) is imported. The
 command line is inside the app: `Eddie.app/Contents/MacOS/eddie`.
 
-The app is for the Mac that built it. It loads Homebrew's FFmpeg from
-where it is installed, and it is signed ad hoc, not with a Developer ID,
-so a copy downloaded from elsewhere gets the Gatekeeper warning.
+The app carries the FFmpeg it was built with: the `ffmpeg` command and
+every library it loads (100 libraries; the app is about 117 MB). It needs
+no Homebrew. It runs on Apple Silicon with the macOS those libraries were
+built for or newer, which the script writes into the app as its minimum
+(27.2 when built on macOS 27.2). This was checked on the Mac that built it
+with Homebrew moved away, not yet on a second Mac.
+
+Homebrew's `ffmpeg-full` includes GPL parts (x264, x265 and others), so
+the FFmpeg inside the app is under the GPL version 3, and passing the app
+on means meeting that licence. Every bundled library's licence is in
+`Eddie.app/Contents/Resources/licenses`. Eddie's own code stays MIT or
+Apache-2.0.
+
+The app is signed ad hoc, not with a Developer ID, so a copy downloaded
+from elsewhere gets the Gatekeeper warning.
 
 ### GPU transcription
 

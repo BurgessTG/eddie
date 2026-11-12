@@ -50,8 +50,23 @@ Homebrew packages the build needs (see the README).
   file's icons, 1024 px, rendered from the SVGs beside them with
   `rsvg-convert`. Render them again after changing an SVG; the script
   makes each `.icns` from the PNG.
-- Nothing is bundled: the binary loads Homebrew's FFmpeg libraries from
-  where they are installed and runs the `ffmpeg` command from there too.
+- FFmpeg is bundled. The script finds the FFmpeg the binary was linked
+  against, copies its `ffmpeg` command to `Contents/MacOS/ffmpeg` and every
+  library either program loads to `Contents/Frameworks`, and points each
+  load at `@executable_path/../Frameworks`. Eddie uses the `ffmpeg` beside
+  its own program before any other. With Homebrew's `ffmpeg-full` that is
+  100 libraries from 79 packages and an app of about 117 MB (27 MB
+  without them).
+- The script stops when a file in the app still loads a library from
+  outside it, or when a bundled package has no licence text. The texts go
+  to `Contents/Resources/licenses/<package>-<version>/`.
+- `LSMinimumSystemVersion` is the newest macOS any bundled file was built
+  for (27.2 on the build machine: Homebrew builds for the macOS it runs
+  on).
+- `ffmpeg-full` is built with `--enable-gpl --enable-version3`, so the
+  bundled FFmpeg is under the GPL version 3. Giving the app to someone
+  else means meeting that licence, which includes offering the source of
+  those libraries.
 - The signature is ad hoc. The app is not signed with a Developer ID or
   notarized, so a copy downloaded from elsewhere gets the Gatekeeper
   warning.

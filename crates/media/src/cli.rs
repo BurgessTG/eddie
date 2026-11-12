@@ -26,19 +26,41 @@ fn find() -> OsString {
 /// On macOS PATH is not enough. An app started from the Finder gets a PATH
 /// without Homebrew, and Homebrew's `ffmpeg` has no `drawtext` filter, which
 /// titles and contact sheets need; its `ffmpeg-full` has one and is not on
-/// PATH. So the first of these that draws text is used, else the first that
-/// runs at all.
+/// PATH. So the first of `places` that draws text is used, else the first
+/// that runs at all.
 #[cfg(target_os = "macos")]
 fn find() -> OsString {
-    const PLACES: [&str; 5] = [
+    let program = std::env::current_exe().ok();
+    first_drawing_text(&places(program.as_deref()))
+}
+
+/// Where an `ffmpeg` may be, best first. Eddie.app carries the FFmpeg it was
+/// built with beside its program, and that one comes before PATH's so the
+/// app works the same on every Mac. `program` may be a link to the app's.
+#[cfg(target_os = "macos")]
+fn places(program: Option<&std::path::Path>) -> Vec<OsString> {
+    let beside = program
+        .and_then(|program| program.canonicalize().ok())
+        .map(|program| program.with_file_name("ffmpeg"))
+        .filter(|tool| tool.is_file());
+    let elsewhere = [
         "ffmpeg",
         "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
         "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
     ];
+    beside
+        .into_iter()
+        .map(OsString::from)
+        .chain(elsewhere.map(OsString::from))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn first_drawing_text(places: &[OsString]) -> OsString {
     let mut runs = None;
-    for place in PLACES {
+    for place in places {
         let filters = Command::new(place)
             .args(["-v", "quiet", "-filters"])
             .output();
@@ -46,11 +68,11 @@ fn find() -> OsString {
             continue;
         };
         if String::from_utf8_lossy(&filters.stdout).contains(" drawtext ") {
-            return place.into();
+            return place.clone();
         }
         runs.get_or_insert(place);
     }
-    runs.unwrap_or(PLACES[0]).into()
+    runs.unwrap_or(&places[0]).clone()
 }
 
 /// What a failed run means when the tool itself is the problem: an FFmpeg
@@ -87,3 +109,6 @@ pub(crate) fn run(command: &mut Command) -> MediaResult<Output> {
         ))
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

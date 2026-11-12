@@ -33,7 +33,8 @@ keep editing by hand in the window.
   and local transcription uses Metal.
 - `packaging/macos/bundle.sh` builds `Eddie.app`, which opens from Finder
   with its own icon. Double-clicking a `.eddie` project opens it in Eddie,
-  and media opened with Eddie is imported.
+  and media opened with Eddie is imported. The app carries its own FFmpeg
+  and needs no Homebrew to run.
 - `EDDIE_FFMPEG` names the `ffmpeg` command to use.
 
 ### Changed
