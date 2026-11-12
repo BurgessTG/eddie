@@ -52,6 +52,7 @@ keep editing by hand in the window.
 - Titles are drawn as typed, including `:`, `%`, `\` and quotes.
 - A full GPU no longer crashes transcription.
 - A dry run no longer interrupts playback.
+- The File menu is wide enough for its longest shortcut.
 
 ## 0.1.0 (2026-11-06)
 

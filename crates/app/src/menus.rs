@@ -45,7 +45,7 @@ impl Menu {
 }
 
 /// Entries share one width so shortcut hints line up.
-const WIDTH: f32 = 210.0;
+const WIDTH: f32 = 236.0;
 const ROW_H: f32 = 26.0;
 
 fn row_frame(key: &str, tooltip: String, enabled: bool) -> El {
@@ -94,6 +94,7 @@ fn item(label: &str, tooltip: &str, enabled: bool, action: Action) -> El {
     if !shortcut.is_empty() {
         entry = entry.child(
             text(shortcut)
+                .key(format!("menu-hint-{action:?}"))
                 .font(theme::BODY)
                 .color(c.subtle_fg)
                 .single_line(),
@@ -360,4 +361,40 @@ pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
             .anchored(menu.anchor(), Side::Bottom, Align::Start, 4.0)
             .modal(true, close),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use eddie_core::shortcuts::BINDINGS;
+
+    use super::Menu;
+    use crate::app::Ui;
+    use crate::testing::{frames, window};
+
+    /// At 210 points wide the "Save project as..." shortcut ran into its
+    /// row's padding, further with "Cmd" than with "Ctrl".
+    #[test]
+    fn every_shortcut_hint_stays_inside_its_row() {
+        let mut rt = window(Ui::headless());
+        let mut hints = 0;
+        for menu in Menu::ALL {
+            rt.state.menu = Some(menu);
+            frames(&mut rt, 30);
+            for binding in BINDINGS {
+                let action = binding.action;
+                let row = rt.presented(&format!("menu-item-{action:?}"));
+                let hint = rt.presented(&format!("menu-hint-{action:?}"));
+                let (Some((row, _)), Some((hint, _))) = (row, hint) else {
+                    continue;
+                };
+                hints += 1;
+                let past = (hint[0] + hint[2]) - (row[0] + row[2] - 8.0);
+                assert!(
+                    past <= 0.0,
+                    "{action:?}: the shortcut runs {past} points into the row's padding"
+                );
+            }
+        }
+        assert!(hints >= 12, "only {hints} shortcut hints were measured");
+    }
 }
