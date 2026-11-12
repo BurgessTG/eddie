@@ -1,14 +1,23 @@
 #!/bin/sh
-# Builds Eddie.app: the release binary, the FFmpeg it was built with, its
-# icons and an Info.plist that lets Finder open .eddie projects and media
-# with it.
+# Builds Eddie.app: the release binary, an FFmpeg built from source for it
+# (ffmpeg.sh), its icons and an Info.plist that lets Finder open .eddie
+# projects and media with it.
 #
 #   packaging/macos/bundle.sh [output folder]
 #
 # The app lands in target/release unless a folder is given. Building it
 # needs Xcode's command line tools (sips, iconutil, plutil, otool,
-# install_name_tool, codesign) and the Homebrew packages the build needs.
-# The finished app needs neither: it runs on a Mac without Homebrew.
+# install_name_tool, codesign), Rust, and what ffmpeg.sh needs. The
+# finished app needs none of them: it runs on a Mac with macOS
+# MACOSX_DEPLOYMENT_TARGET (11.0 unless set) or later and nothing else
+# installed.
+#
+# Its signature is ad hoc unless EDDIE_SIGN_IDENTITY names one from the
+# keychain. An app for other people is signed with a Developer ID, then
+# notarized by notarize.sh:
+#
+#   EDDIE_SIGN_IDENTITY="Developer ID Application: Name (TEAM)" packaging/macos/bundle.sh
+#   packaging/macos/notarize.sh
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -60,24 +69,26 @@ in_rpath() {
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
 [ -n "$version" ] || die "No version in $root/Cargo.toml"
 
-(cd "$root" && cargo build --release --locked -p openreel-app)
+# The binary and its FFmpeg are built for the same macOS, and the binary
+# against that FFmpeg, whatever other FFmpeg this Mac has.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+ffmpeg_home=$("$here/ffmpeg.sh")
+(cd "$root" &&
+    PKG_CONFIG_PATH="$ffmpeg_home/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+        cargo build --release --locked -p openreel-app)
 
 rm -rf "$app"
 mkdir -p "$macos" "$frameworks" "$resources/licenses"
 cp "$target/release/eddie" "$macos/eddie"
 
 # Eddie runs the `ffmpeg` command for export, titles, sheets and strips, so
-# the one from the FFmpeg the binary was linked with goes beside it, where
-# Eddie looks first.
+# the one from the same FFmpeg goes beside it, where Eddie looks first.
 avcodec=$(loads "$macos/eddie" | grep '/libavcodec\.' || true)
 case $avcodec in
-    /*) ;;
-    *) die "Cannot tell which FFmpeg $target/release/eddie was built with (libavcodec: ${avcodec:-not loaded})" ;;
+    "$ffmpeg_home"/lib/*) ;;
+    *) die "$target/release/eddie was not built with the FFmpeg in $ffmpeg_home (libavcodec: ${avcodec:-not loaded})" ;;
 esac
-ffmpeg=$(dirname "$(dirname "$avcodec")")/bin/ffmpeg
-[ -x "$ffmpeg" ] || die "No ffmpeg command at $ffmpeg"
-"$ffmpeg" -v quiet -filters | grep -q ' drawtext ' ||
-    die "$ffmpeg has no drawtext filter, which titles need. Homebrew's ffmpeg-full has it: install it after ffmpeg, then build again."
+ffmpeg=$ffmpeg_home/bin/ffmpeg
 cp "$ffmpeg" "$macos/ffmpeg"
 chmod u+w "$macos/ffmpeg"
 
@@ -107,6 +118,11 @@ while entry=$(sed -n "${next}p" "$todo") && [ -n "$entry" ]; do
             *) from= ;;
         esac
         [ -n "$from" ] && [ -e "$from" ] || die "$original loads $library, which was not found"
+        # The app carries the licences of that FFmpeg and of nothing else.
+        case $from in
+            "$ffmpeg_home"/lib/*) ;;
+            *) die "$original loads $library, which is part of neither macOS nor the FFmpeg in $ffmpeg_home" ;;
+        esac
         real=$(realpath "$from")
         name=$(basename "$real")
         known=$(awk -F "$tab" -v name="$name" '$1 == name { print $2 }' "$copied")
@@ -151,40 +167,15 @@ EOF
 done
 
 # The app asks for the newest macOS any of its files was built for.
-# Homebrew builds its libraries for the macOS they are installed on, so
-# that is this Mac's.
 cp "$here/Info.plist" "$plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$plist"
 plutil -replace CFBundleVersion -string "$version" "$plist"
 plutil -replace LSMinimumSystemVersion -string "$minimum" "$plist"
 
-# The libraries' licences go with them. Homebrew keeps each package's
-# beside its lib folder, in a folder named for the package and its version.
+# The licences go with the app: Eddie's, and those of FFmpeg and the
+# libraries built into it, with the list of the sources they came from.
 cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$resources/licenses/"
-while IFS=$tab read -r name real; do
-    package=$(dirname "$(dirname "$real")")
-    texts=$resources/licenses/$(basename "$(dirname "$package")")-$(basename "$package")
-    for text in "$package"/*; do
-        [ -f "$text" ] || continue
-        case $(basename "$text" | tr '[:upper:]' '[:lower:]') in
-            copying* | licen[cs]e* | *gpl*)
-                mkdir -p "$texts"
-                cp "$text" "$texts/"
-                chmod u+w "$texts/$(basename "$text")"
-                ;;
-        esac
-    done
-    [ -d "$texts" ] && continue
-    # A package without such a file (leptonica) states its terms in the
-    # comment that opens its headers. No text at all stops the build: the
-    # app may not carry a library without its licence.
-    header=$(grep -rli --include='*.h' copyright "$package/include" 2>/dev/null | sort | head -n 1)
-    [ -n "$header" ] || die "No licence text for $name in $package"
-    mkdir -p "$texts"
-    sed '/\*\//q' "$header" >"$texts/$(basename "$header").txt"
-    grep -qi copyright "$texts/$(basename "$header").txt" ||
-        die "No licence text for $name in $package"
-done <"$copied"
+cp -R "$ffmpeg_home/licenses/." "$resources/licenses/"
 
 # icns <1024 px png> <name>: writes Resources/<name>.icns. iconutil wants
 # every size as a file with this exact name.
@@ -202,13 +193,24 @@ icns() {
 icns "$here/icon.png" eddie
 icns "$here/project.png" eddie-project
 
-# Ad-hoc signatures: Apple silicon runs nothing unsigned, changing a
-# library's names broke the signature it had, and this needs no Apple
-# account. A downloaded copy still gets the Gatekeeper warning.
+# Apple silicon runs nothing unsigned, and changing a library's names
+# broke the signature it had. An ad-hoc signature needs no Apple account:
+# the app runs, but a downloaded copy gets the Gatekeeper warning. With an
+# identity every program and library gets the hardened runtime and a
+# timestamp, which Apple's notary service requires. The libraries are
+# signed first: the app's signature covers theirs.
+identity=${EDDIE_SIGN_IDENTITY:--}
+sign() {
+    if [ "$identity" = - ]; then
+        quiet codesign --force --sign - "$1"
+    else
+        quiet codesign --force --options runtime --timestamp --sign "$identity" "$1"
+    fi
+}
 for file in "$frameworks"/*.dylib "$macos/ffmpeg"; do
-    quiet codesign --force --sign - "$file"
+    sign "$file"
 done
-codesign --force --sign - "$app"
+sign "$app"
 codesign --verify --deep --strict "$app"
 
 echo "$app"

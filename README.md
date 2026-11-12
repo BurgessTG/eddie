@@ -19,9 +19,9 @@ sandboxed JavaScript API, and you keep editing by hand in the window. See
 ![The Eddie window: media bin, program monitor, clip details and a three-lane timeline](docs/screenshot.png)
 
 Eddie runs on Linux (Wayland and X11) and on macOS on Apple Silicon. On
-macOS it builds as `Eddie.app` (see [macOS app](#macos-app)); it has only
-been run in a virtual machine (macOS 27.2). Intel Macs and Windows are not
-tested.
+macOS it builds as `Eddie.app` with FFmpeg inside (see
+[macOS app](#macos-app)); it has only been run in virtual machines (macOS
+15.7 and 27.2). Intel Macs and Windows are not tested.
 
 ## Features
 
@@ -82,13 +82,14 @@ results are saved per file. It runs on this computer:
 - Runtime: `ffmpeg` 9 on `PATH`; ALSA (or PipeWire/Pulse through ALSA) for
   sound; GTK 3 for file dialogs; fontconfig (`fc-match`) and a font for
   titles; a Vulkan driver for the window. The tests also need `ffprobe`.
-- macOS: Xcode's command line tools and
+- macOS, to build and run from a checkout: Xcode's command line tools and
   `brew install pkgconf cmake ffmpeg ffmpeg-full`. The build links the
   FFmpeg libraries Homebrew has linked, which after that command are
   `ffmpeg-full`'s, and the built `eddie` loads them from there. Titles and
   contact sheets need the `ffmpeg` command's `drawtext` filter, which
   Homebrew's `ffmpeg` lacks and `ffmpeg-full` has; Eddie finds
-  `ffmpeg-full` where Homebrew installs it.
+  `ffmpeg-full` where Homebrew installs it. `Eddie.app` needs none of
+  this to run: it carries its own FFmpeg.
 - `EDDIE_FFMPEG=/path/to/ffmpeg` names the `ffmpeg` command to use, on any
   system.
 - Optional: a key for a cloud transcription provider (Meta Voice
@@ -133,7 +134,8 @@ provider, its model and the project format.
 ### macOS app
 
 ```sh
-packaging/macos/bundle.sh            # builds target/release/Eddie.app
+brew install pkgconf cmake meson ninja   # once; Rust and Xcode's command line tools too
+packaging/macos/bundle.sh                # builds target/release/Eddie.app
 open target/release/Eddie.app
 ```
 
@@ -142,21 +144,38 @@ Dock. Double-clicking a `.eddie` project opens it in Eddie, and media
 opened with Eddie (Open With, `open -a Eddie clip.mp4`) is imported. The
 command line is inside the app: `Eddie.app/Contents/MacOS/eddie`.
 
-The app carries the FFmpeg it was built with: the `ffmpeg` command and
-every library it loads (100 libraries; the app is about 117 MB). It needs
-no Homebrew. It runs on Apple Silicon with the macOS those libraries were
-built for or newer, which the script writes into the app as its minimum
-(27.2 when built on macOS 27.2). This was checked on the Mac that built it
-with Homebrew moved away, not yet on a second Mac.
+FFmpeg is inside the app, so a Mac needs nothing else installed to run
+it: no Homebrew and no `ffmpeg`. The script builds FFmpeg 9.0.2 from
+source for it (`packaging/macos/ffmpeg.sh`; the first build downloads the
+sources) with x264, FreeType, HarfBuzz, dav1d and LAME. The app is about
+52 MB, carries seven libraries and asks for macOS 11.0 or later on Apple
+Silicon. It reads what FFmpeg decodes itself (H.264, HEVC, ProRes, VP9
+and the rest) and AV1 through dav1d, and exports H.264 with AAC.
 
-Homebrew's `ffmpeg-full` includes GPL parts (x264, x265 and others), so
-the FFmpeg inside the app is under the GPL version 3, and passing the app
-on means meeting that licence. Every bundled library's licence is in
-`Eddie.app/Contents/Resources/licenses`. Eddie's own code stays MIT or
-Apache-2.0.
+This was checked on the virtual machine that built it (macOS 15.7) with
+Homebrew and the checkout moved away: every command, an export and the
+window. It has not yet run on a second Mac, or on macOS 11 to 14.
 
-The app is signed ad hoc, not with a Developer ID, so a copy downloaded
-from elsewhere gets the Gatekeeper warning.
+That FFmpeg is built with `--enable-gpl` for x264, so it is under the GPL
+version 2 or later, and passing the app on means meeting that licence,
+which includes offering the source of FFmpeg and of those libraries.
+Their licences are in `Eddie.app/Contents/Resources/licenses`, with
+`SOURCES.txt` naming where each source came from. Eddie's own code stays
+MIT or Apache-2.0.
+
+Without a signing identity the app is signed ad hoc: it runs on the Mac
+that built it, and a copy downloaded from elsewhere gets the Gatekeeper
+warning. An app for other people is signed with a Developer ID and
+notarized by Apple:
+
+```sh
+EDDIE_SIGN_IDENTITY="Developer ID Application: Name (TEAM)" packaging/macos/bundle.sh
+packaging/macos/notarize.sh              # writes Eddie-<version>-macos-arm64.zip
+```
+
+`notarize.sh` reads Apple's credentials from the keychain profile
+`eddie-notary`; its first lines say how to store it. Signing with a
+Developer ID and notarizing have not been run yet.
 
 ### GPU transcription
 
