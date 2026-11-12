@@ -55,7 +55,10 @@ fn zoom_slider(ui: &Ui) -> El {
         )
         .instant_changes()
         .cursor(Cursor::Pointer)
-        .help("Timeline zoom. Ctrl+scroll over the timeline also zooms.")
+        .help(format!(
+            "Timeline zoom. {}+scroll over the timeline also zooms.",
+            eddie_core::shortcuts::COMMAND
+        ))
         .label("Timeline zoom")
         .range_value(f64::from(zoom), f64::from(min), f64::from(MAX_ZOOM))
         .on_step(|ui: &mut Ui, steps: i32, _| {

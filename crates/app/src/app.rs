@@ -541,7 +541,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .fill(c.background)
         // Files dropped anywhere on the window are imported.
         .on_drop_files(|ui: &mut Ui, files, _| ui.editor.spawn_import(files.to_vec()))
-        .child(shell::menu_bar(ui))
+        .child(shell::menu_bar(ui, cx))
         .child(middle)
         .child(timeline::panel(ui, cx));
     let body = if ui.show_console {
@@ -562,11 +562,26 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     rune_kit::root(body, overlays)
 }
 
+/// Resident memory in MiB for the status bar; 0 where it cannot be read.
+#[cfg(not(target_os = "macos"))]
 fn read_rss_mb() -> u64 {
     std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
         .map_or(0, |pages| pages * 4096 / (1024 * 1024))
+}
+
+#[cfg(target_os = "macos")]
+fn read_rss_mb() -> u64 {
+    unsafe extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
+    }
+    // `struct rusage_info_v0`: a 16-byte UUID, then ten 64-bit counts, of
+    // which the seventh is `ri_resident_size`.
+    let mut usage = [0u64; 12];
+    // SAFETY: flavor 0 (RUSAGE_INFO_V0) fills exactly those 96 bytes.
+    let read = unsafe { proc_pid_rusage(std::process::id() as i32, 0, usage.as_mut_ptr()) } == 0;
+    if read { usage[8] >> 20 } else { 0 }
 }
 
 #[cfg(test)]

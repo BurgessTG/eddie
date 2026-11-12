@@ -16,7 +16,7 @@ mod hardware;
 mod scaler;
 mod stills;
 
-use hardware::{attach_vaapi, download, sync_surface, HARDWARE_DECODE, INJECT_FAULT};
+use hardware::{attach, download, on_gpu, sync_surface, HARDWARE_DECODE, INJECT_FAULT};
 pub(crate) use hardware::{hardware_broken, hardware_failed};
 pub use hardware::{
     inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
@@ -97,12 +97,12 @@ pub struct VideoDecoder {
     /// Consecutive pictures just before `decoded` (references, not copies).
     recent: VecDeque<(f64, ffmpeg::frame::Video)>,
     recent_limit: usize,
-    /// Opened with a VAAPI device (or the test fault), and pictures decoded.
+    /// Opened with a hardware device (or the test fault), and pictures decoded.
     pub(crate) hardware: bool,
     hardware_pictures: u32,
     /// Damaged packets and pictures skipped since the last good picture.
     damage: u32,
-    /// The last downloaded VAAPI surface.
+    /// The last downloaded GPU surface.
     transfer: ffmpeg::frame::Video,
 }
 
@@ -182,7 +182,7 @@ impl VideoDecoder {
                 count: 0, // libavcodec chooses based on CPU cores.
             });
             let attached = hardware
-                && (attach_vaapi(&mut context)
+                && (attach(&mut context)
                     || (INJECT_FAULT.load(Ordering::Relaxed) && !hardware_broken()));
             if attached {
                 // The GPU decodes; threads only parse ahead. Each frame thread
@@ -540,7 +540,7 @@ impl VideoDecoder {
             None => &self.decoded,
         };
         // Surfaces stay on the GPU until shown, so seek preroll copies nothing.
-        if picture.format() == ffmpeg::format::Pixel::VAAPI {
+        if on_gpu(picture) {
             download(picture, &mut self.transfer)?;
             picture = &self.transfer;
         }

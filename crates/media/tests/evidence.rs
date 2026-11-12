@@ -1075,11 +1075,17 @@ fn video_reaps_encoder_and_removes_temporary_files_on_success_and_errors() {
         let pid_path = std::env::var("OPENREEL_EVIDENCE_ENCODER_PID").unwrap();
         if mode != "spawn" {
             let pid = std::fs::read_to_string(pid_path).unwrap();
-            #[cfg(target_os = "linux")]
-            assert!(
-                !Path::new("/proc").join(pid.trim()).exists(),
-                "encoder not reaped"
-            );
+            let pid = pid.trim();
+            // Without /proc, `ps -p` succeeds only for a process that exists.
+            let exists = if cfg!(target_os = "linux") {
+                Path::new("/proc").join(pid).exists()
+            } else {
+                Command::new("ps")
+                    .args(["-p", pid])
+                    .output()
+                    .is_ok_and(|ps| ps.status.success())
+            };
+            assert!(!exists, "encoder not reaped");
         }
         assert_eq!(sampler.frame_at(0.0).unwrap().time, 0.0);
         return;
@@ -1137,6 +1143,9 @@ esac
                 fixture.dir.join("encoder.pid"),
             )
             .env("OPENREEL_EVIDENCE_REAL_FFMPEG", &real_ffmpeg)
+            // The shim is found through PATH; macOS would otherwise go
+            // looking for an FFmpeg that draws text.
+            .env("EDDIE_FFMPEG", "ffmpeg")
             .env("TMPDIR", &temporary)
             .env(
                 "PATH",

@@ -15,9 +15,9 @@ pub struct Settings {
     /// applies it to the open project.
     pub format: Orientation,
     /// Preview playback of expensive files (HEVC, AV1, VP9, above 1440p)
-    /// decodes on the GPU through VAAPI when one is available. Off by
-    /// default: errors fall back to software, but a driver that hangs
-    /// cannot, and only one NVIDIA driver has been tested.
+    /// decodes on the GPU (VAAPI, or VideoToolbox on a Mac) when one is
+    /// available. Off by default: errors fall back to software, but a
+    /// driver that hangs cannot, and only one NVIDIA driver has been tested.
     pub hardware_decode: bool,
     /// Where speech becomes text: local whisper by default, or a cloud API.
     pub transcription: TranscribeSettings,

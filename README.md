@@ -18,8 +18,10 @@ sandboxed JavaScript API, and you keep editing by hand in the window. See
 
 ![The Eddie window: media bin, program monitor, clip details and a three-lane timeline](docs/screenshot.png)
 
-Eddie runs on Linux, on Wayland and X11. macOS and Windows are not tested
-yet.
+Eddie runs on Linux (Wayland and X11) and on macOS on Apple Silicon. On
+macOS it starts from a terminal: there is no app bundle yet, and it has
+only been run in a virtual machine (macOS 27.2). Intel Macs and Windows
+are not tested.
 
 ## Features
 
@@ -80,6 +82,13 @@ results are saved per file. It runs on this computer:
 - Runtime: `ffmpeg` 9 on `PATH`; ALSA (or PipeWire/Pulse through ALSA) for
   sound; GTK 3 for file dialogs; fontconfig (`fc-match`) and a font for
   titles; a Vulkan driver for the window. The tests also need `ffprobe`.
+- macOS: Xcode's command line tools and
+  `brew install pkgconf cmake ffmpeg ffmpeg-full`. The build links
+  Homebrew's `ffmpeg` libraries. Titles and contact sheets need the
+  `ffmpeg` command's `drawtext` filter, which Homebrew's `ffmpeg` lacks and
+  `ffmpeg-full` has; Eddie finds `ffmpeg-full` where Homebrew installs it.
+- `EDDIE_FFMPEG=/path/to/ffmpeg` names the `ffmpeg` command to use, on any
+  system.
 - Optional: a key for a cloud transcription provider (Meta Voice
   Transcribe or any OpenAI-compatible API). Local transcription needs none.
 - For transcription: a whisper.cpp model in `whisper/` beside the settings
@@ -115,13 +124,15 @@ The last command generates test media into `samples/`. CI checks
 formatting, then builds and tests the whole workspace in an Arch Linux
 container, which has FFmpeg 9.
 
-Open Settings with the gear beside Export (Ctrl+,) for hardware decode,
-the speech provider, its model and the project format.
+Open Settings with the gear beside Export (Ctrl+,) for hardware decode
+(VAAPI on Linux, VideoToolbox on macOS, off by default), the speech
+provider, its model and the project format.
 
 ### GPU transcription
 
-Local transcription runs on the CPU unless Eddie is built with a GPU
-feature. `eddie --version` says which build you have.
+On Linux, local transcription runs on the CPU unless Eddie is built with a
+GPU feature. On Apple Silicon every build uses Metal. `eddie --version`
+says which build you have.
 
 ```sh
 mise exec -- cargo build --release -p openreel-app --features vulkan   # any GPU with a Vulkan driver

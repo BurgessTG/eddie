@@ -5,8 +5,6 @@
 //! already-computed audio peaks. It returns edit-sized segments only; ranking
 //! and user-facing reasons live in the app layer.
 
-use std::process::Command;
-
 use crate::decode::VideoDecoder;
 use crate::{run, MediaInfo, MediaResult};
 use continuity::{OcclusionExcursion, SceneContinuity};
@@ -68,7 +66,7 @@ impl SweepSegment {
 /// request. This buffers one still only, never a video decode.
 pub fn frame_jpeg_at(path: &str, time: f64, max_width: u32) -> MediaResult<Vec<u8>> {
     let max_width = max_width.clamp(64, 1920);
-    let output = run(Command::new("ffmpeg").args([
+    let output = run(crate::cli::ffmpeg().args([
         "-v",
         "error",
         "-ss",

@@ -28,8 +28,8 @@ mod tests;
 
 pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use beats::{beat_grid, BeatGrid};
-pub use cli::ffmpeg_available;
 pub(crate) use cli::run;
+pub use cli::{ffmpeg, ffmpeg_available};
 /// The decoder itself and its filmstrip, for the tests in `tests/`.
 #[doc(hidden)]
 pub use decode::{filmstrip_stills, VideoDecoder};

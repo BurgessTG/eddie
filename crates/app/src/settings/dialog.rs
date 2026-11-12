@@ -110,7 +110,14 @@ fn hardware(settings: &Settings) -> El {
     theme::checkbox(
         "settings-hardware",
         "Hardware decode",
-        "Play HEVC, AV1, VP9 and footage above 1440p on the GPU (VAAPI) when available. Scrubbing stays on the CPU; a GPU error switches back to the CPU.",
+        &format!(
+            "Play HEVC, AV1, VP9 and footage above 1440p on the GPU ({}) when available. Scrubbing stays on the CPU; a GPU error switches back to the CPU.",
+            if cfg!(target_os = "macos") {
+                "VideoToolbox"
+            } else {
+                "VAAPI"
+            }
+        ),
         settings.hardware_decode,
     )
     .on_press(|ui: &mut Ui| edit(ui, |settings| settings.hardware_decode = !settings.hardware_decode))

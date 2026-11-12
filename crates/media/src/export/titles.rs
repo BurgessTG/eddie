@@ -247,7 +247,6 @@ mod title_text_tests {
     use super::super::argument_path;
     use super::{filter_value, font_file};
     use std::path::Path;
-    use std::process::Command;
 
     #[test]
     fn an_output_path_is_never_read_as_an_option() {
@@ -264,7 +263,7 @@ mod title_text_tests {
 
     /// One 640x80 white frame with `text` options drawn on it by drawtext.
     fn drawn(font: &str, text: &str) -> Vec<u8> {
-        let out = Command::new("ffmpeg")
+        let out = crate::cli::ffmpeg()
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg("color=c=white:s=640x80:r=1:d=1")
             .arg("-vf")

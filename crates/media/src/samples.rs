@@ -2,7 +2,6 @@
 //! install has something to chop up immediately.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::{run, MediaResult};
 
@@ -15,7 +14,7 @@ pub fn generate_samples(dir: &Path) -> MediaResult<Vec<PathBuf>> {
     let music = dir.join("sample_music.mp3");
 
     if !is_nonempty(&video) {
-        run(Command::new("ffmpeg")
+        run(crate::cli::ffmpeg()
             .args([
                 "-y",
                 "-v",
@@ -52,7 +51,7 @@ pub fn generate_samples(dir: &Path) -> MediaResult<Vec<PathBuf>> {
             261.63, 329.63, 392.00, 523.25, 392.00, 329.63, 293.66, 392.00,
         ];
         let sequence: Vec<f64> = notes.iter().chain(notes.iter()).copied().collect();
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = crate::cli::ffmpeg();
         cmd.args(["-y", "-v", "error"]);
         for freq in &sequence {
             cmd.args([

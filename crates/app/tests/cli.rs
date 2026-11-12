@@ -11,10 +11,30 @@ struct Dir(PathBuf);
 
 impl Dir {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("eddie-cli-{name}-{}", std::process::id()));
+        // macOS keeps its temp folder under /var, a link to /private/var,
+        // and so deep that a socket's name no longer fits. /private/tmp is
+        // short and has no link in it.
+        let temp = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = temp.join(format!("eddie-cli-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("config")).unwrap();
         Self(dir)
+    }
+
+    /// The settings folder eddie uses with this dir as its home, and the
+    /// one it had as OpenReel, where each system keeps them.
+    fn settings(&self) -> (PathBuf, PathBuf) {
+        if cfg!(target_os = "macos") {
+            let home = self.0.join("Library/Application Support");
+            (home.join("Eddie"), home.join("OpenReel"))
+        } else {
+            let home = self.0.join("config");
+            (home.join("eddie"), home.join("openreel"))
+        }
     }
 
     fn ffmpeg(&self, args: &[&str]) {
@@ -351,8 +371,9 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
 fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
     let dir = Dir::new("help");
     // Settings saved under the editor's old name move on the first start.
-    std::fs::create_dir_all(dir.0.join("config/openreel/whisper")).unwrap();
-    std::fs::write(dir.0.join("config/openreel/config.json"), "{}").unwrap();
+    let (settings, old) = dir.settings();
+    std::fs::create_dir_all(old.join("whisper")).unwrap();
+    std::fs::write(old.join("config.json"), "{}").unwrap();
     for flag in ["help", "--help", "-h"] {
         let out = dir.command(".", &[flag]).output().unwrap();
         assert_eq!(out.status.code(), Some(0));
@@ -362,9 +383,9 @@ fn help_lists_the_commands_and_a_mistyped_one_is_an_error() {
         }
         assert!(text.contains("addAssetRange("), "the script API follows");
     }
-    assert!(dir.0.join("config/eddie/config.json").exists());
-    assert!(dir.0.join("config/eddie/whisper").is_dir());
-    assert!(!dir.0.join("config/openreel").exists());
+    assert!(settings.join("config.json").exists());
+    assert!(settings.join("whisper").is_dir());
+    assert!(!old.exists());
     let out = dir.command(".", &["guide"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     let guide = String::from_utf8_lossy(&out.stdout);
@@ -690,9 +711,10 @@ fn transcripts_come_from_the_chosen_provider_once_and_reach_scripts() {
     dir.ffmpeg(&["-f", "lavfi", "-i", "sine=f=300:d=3", "voice.wav"]);
     let (base, requests) = fake_transcriber();
     // A loopback endpoint needs no key.
-    std::fs::create_dir_all(dir.0.join("config/eddie")).unwrap();
+    let (settings, _) = dir.settings();
+    std::fs::create_dir_all(&settings).unwrap();
     std::fs::write(
-        dir.0.join("config/eddie/config.json"),
+        settings.join("config.json"),
         serde_json::json!({"transcription": {"provider": "openai", "base_url": base}}).to_string(),
     )
     .unwrap();

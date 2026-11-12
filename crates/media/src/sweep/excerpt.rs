@@ -1,7 +1,6 @@
 //! Sound excerpts for speech models.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::{run, MediaResult};
 
@@ -15,7 +14,7 @@ const EXCERPT_ON_ITS_CLOCK: &str = "aresample=async=1:first_pts=0";
 /// Extract a mono 24 kHz PCM WAV chunk in the shape Meta's batch ASR accepts.
 /// Metadata is stripped so caller context does not ride along in the upload.
 pub fn write_wav_24k(path: &str, start: f64, duration: f64, output: &Path) -> MediaResult<()> {
-    run(Command::new("ffmpeg")
+    run(crate::cli::ffmpeg()
         .args([
             "-y",
             "-v",
@@ -47,7 +46,7 @@ pub fn write_wav_24k(path: &str, start: f64, duration: f64, output: &Path) -> Me
 /// Decode a mono 16 kHz float PCM excerpt, the input local speech models
 /// expect. Bounded by the caller's duration; never a whole-file decode.
 pub fn pcm_mono_16k(path: &str, start: f64, duration: f64) -> MediaResult<Vec<f32>> {
-    let output = run(Command::new("ffmpeg").args([
+    let output = run(crate::cli::ffmpeg().args([
         "-v",
         "error",
         "-ss",

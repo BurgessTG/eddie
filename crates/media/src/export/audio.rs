@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use openreel_engine::{Clip, ClipKind, Timeline};
 
@@ -204,7 +204,7 @@ fn branch(
 /// Encode the timeline's audio mix once, on the whole-timeline clock.
 pub(super) fn encode_audio(inputs: &[String], graph: &str, path: &Path) -> MediaResult<()> {
     let graph_file = FilterGraphFile::create(graph)?;
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::cli::ffmpeg();
     cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=d=0.01"]);
     for input in inputs {
         cmd.args(["-vn", "-i", input]);
@@ -235,7 +235,7 @@ fn measure_loudness(
         audio_filters.join(";")
     );
     let graph_file = FilterGraphFile::create(&graph)?;
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::cli::ffmpeg();
     // Input 0 stands in for the video pipe so audio input indices match.
     cmd.args([
         "-hide_banner",

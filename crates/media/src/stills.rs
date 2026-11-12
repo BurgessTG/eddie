@@ -1,7 +1,5 @@
 //! One-off pictures: a single still and an import's filmstrip.
 
-use std::process::Command;
-
 use crate::{decode, run, scaled_height, MediaResult, RawFrame};
 
 /// Decode one frame at `time` (seconds), scaled to `target_w`.
@@ -32,7 +30,7 @@ fn frame_at_cli(
 ) -> MediaResult<RawFrame> {
     let target_h = scaled_height(src_w, src_h, target_w);
     let flags = if fast { "fast_bilinear" } else { "bicubic" };
-    let output = run(Command::new("ffmpeg").args([
+    let output = run(crate::cli::ffmpeg().args([
         "-v",
         "error",
         "-ss",

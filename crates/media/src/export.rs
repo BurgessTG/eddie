@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs::{self};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStderr, Command, Stdio};
+use std::process::{ChildStderr, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -45,6 +45,9 @@ fn collect_stderr(stderr: Option<ChildStderr>) -> thread::JoinHandle<String> {
 }
 
 fn export_error(stderr: &str) -> String {
+    if let Some(reason) = crate::cli::cannot_draw_text(stderr) {
+        return reason;
+    }
     let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
     format!(
         "export failed: {}",
@@ -239,7 +242,7 @@ fn join(scratch: &Path, segments: usize, audio: &Path, output: &Path) -> MediaRe
         entries.push_str(&format!("file '{index:05}.mp4'\n"));
     }
     fs::write(&list, entries).map_err(|e| format!("write export segment list: {e}"))?;
-    let out = Command::new("ffmpeg")
+    let out = crate::cli::ffmpeg()
         .args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list)
         .arg("-i")

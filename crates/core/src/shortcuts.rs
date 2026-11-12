@@ -264,15 +264,19 @@ fn binding(action: Action) -> Option<&'static Binding> {
     BINDINGS.iter().find(|binding| binding.action == action)
 }
 
+/// The command modifier's name: Cmd on a Mac, Ctrl elsewhere.
+pub const COMMAND: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
 /// A chord as a menu or keycap shows it, such as `Ctrl+Shift+S`.
 pub fn format(chord: &Chord) -> String {
     let mut text = String::new();
     if chord.command {
-        text.push_str(if cfg!(target_os = "macos") {
-            "Cmd+"
-        } else {
-            "Ctrl+"
-        });
+        text.push_str(COMMAND);
+        text.push('+');
     }
     if chord.shift {
         text.push_str("Shift+");
@@ -378,12 +382,14 @@ mod tests {
                 assert_eq!(owner, Some(index), "{} shares a chord", binding.label);
             }
         }
-        assert_eq!(label(Action::SaveProjectAs), "Ctrl+Shift+S");
-        assert_eq!(tip("Zoom in", Action::ZoomIn), "Zoom in (Ctrl++)");
+        // Cmd on a Mac, Ctrl elsewhere.
+        let m = COMMAND;
+        assert_eq!(label(Action::SaveProjectAs), format!("{m}+Shift+S"));
+        assert_eq!(tip("Zoom in", Action::ZoomIn), format!("Zoom in ({m}++)"));
         assert_eq!(tip("Clear", Action::ClearTimeline), "Clear");
         let zoom_in = binding(Action::ZoomIn).expect("zoom in");
-        assert_eq!(keycaps(zoom_in), ["Ctrl++"]);
+        assert_eq!(keycaps(zoom_in), [format!("{m}++")]);
         let redo = binding(Action::Redo).expect("redo");
-        assert_eq!(keycaps(redo), ["Ctrl+Shift+Z", "Ctrl+Y"]);
+        assert_eq!(keycaps(redo), [format!("{m}+Shift+Z"), format!("{m}+Y")]);
     }
 }

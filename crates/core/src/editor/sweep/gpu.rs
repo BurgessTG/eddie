@@ -8,14 +8,21 @@
 
 use std::path::Path;
 
-/// Whether this build runs whisper on a GPU (`cuda` or `vulkan` feature).
-pub const BUILD: bool = cfg!(any(feature = "cuda", feature = "vulkan"));
+/// Apple Silicon builds use Metal without a feature: every such Mac has it
+/// and it needs no library the system lacks (see the crate's `Cargo.toml`).
+const METAL: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
+/// Whether this build runs whisper on a GPU (`cuda` or `vulkan` feature,
+/// or Metal).
+pub const BUILD: bool = cfg!(any(feature = "cuda", feature = "vulkan")) || METAL;
 
 /// What this build runs local whisper on, for `eddie --version`.
 pub const BACKEND: &str = if cfg!(feature = "cuda") {
     "cuda"
 } else if cfg!(feature = "vulkan") {
     "vulkan"
+} else if METAL {
+    "metal"
 } else {
     "cpu"
 };
@@ -54,7 +61,11 @@ pub fn gigabytes(bytes: u64) -> String {
 /// is how `whisper_backend_init_gpu` picks device 0. `None` on a CPU build
 /// and where no GPU is usable; whisper.cpp runs on the CPU then. Call it
 /// after `install_logging_hooks`, since listing devices logs.
-#[cfg(any(feature = "cuda", feature = "vulkan"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 pub fn memory() -> Option<Memory> {
     use whisper_rs::whisper_rs_sys as sys;
     // SAFETY: ggml owns its device list for the life of the process, the
@@ -78,7 +89,11 @@ pub fn memory() -> Option<Memory> {
     }
 }
 
-#[cfg(not(any(feature = "cuda", feature = "vulkan")))]
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 pub fn memory() -> Option<Memory> {
     None
 }

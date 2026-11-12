@@ -1,7 +1,7 @@
 //! Waveform peaks, and the silence and sound read from them.
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::MediaResult;
 
@@ -30,7 +30,7 @@ pub fn waveform_peaks(path: &str, duration: f64, peaks_per_sec: u32) -> MediaRes
     let sample_rate = 8000_u32;
     // Stream PCM in fixed chunks: peak memory stays constant regardless of
     // file length (the old version buffered the entire decode).
-    let mut child = Command::new("ffmpeg")
+    let mut child = crate::cli::ffmpeg()
         .args([
             "-v",
             "error",

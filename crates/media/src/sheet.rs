@@ -4,7 +4,7 @@
 //! export's own title table and writes the JPEG.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 
 use openreel_engine::TitleStyle;
@@ -226,7 +226,7 @@ fn text_filters(cells: &[SheetCell], labels: &[String], grid: &Grid, canvas: (u3
 
 /// One ffmpeg run: draw `filters` over the RGBA `sheet` and return a JPEG.
 fn encode(sheet: Vec<u8>, grid: &Grid, filters: &str, quality: u32) -> MediaResult<Vec<u8>> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = crate::cli::ffmpeg()
         .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
         .arg(format!("{}x{}", grid.width, grid.height))
         .args(["-i", "pipe:0", "-vf", filters, "-frames:v", "1"])
@@ -262,7 +262,8 @@ fn encode(sheet: Vec<u8>, grid: &Grid, filters: &str, quality: u32) -> MediaResu
     let status = child.wait().map_err(|e| format!("ffmpeg: {e}"))?;
     let written = writer.join().map_err(|_| "contact sheet writer panicked")?;
     if !status.success() || written.is_err() || !jpeg.starts_with(&[0xFF, 0xD8]) {
-        return Err(format!("contact sheet failed: {}", errors.trim()));
+        return Err(crate::cli::cannot_draw_text(&errors)
+            .unwrap_or_else(|| format!("contact sheet failed: {}", errors.trim())));
     }
     Ok(jpeg)
 }

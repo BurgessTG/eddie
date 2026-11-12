@@ -5,18 +5,32 @@ use std::path::Path;
 use eddie_core::Action;
 use eddie_core::shortcuts;
 use openreel_engine::format_timecode;
-use rune::{Color, Cursor, El, el, row, spacer, text};
+use rune::{Color, Cursor, Cx, El, Titlebar, el, row, spacer, text};
 
 use crate::app::Ui;
 use crate::icons::{self, Tool};
 use crate::menus::Menu;
 use crate::theme::{self, Variant, c};
 
-pub fn menu_bar(ui: &Ui) -> El {
+/// The menu bar's height: 30-point controls inside 8 points of padding.
+pub const BAR_H: f32 = 46.0;
+
+/// The menu bar as the window's titlebar, where the system lets an app draw
+/// one: macOS puts its traffic lights on the bar's 28-point line.
+pub fn titlebar() -> Titlebar {
+    Titlebar::new(BAR_H).traffic_lights(16.0, 15.0)
+}
+
+pub fn menu_bar(ui: &Ui, cx: &Cx<Ui>) -> El {
     let c = c();
+    // Where the window's own controls sit over the bar (the macOS traffic
+    // lights; nothing on Linux or in full screen), the bar starts past them.
+    let chrome = cx.chrome_insets();
+    let pad = |inset: f32| if inset > 0.0 { inset + 12.0 } else { 14.0 };
     // The mark, the name and the menus share a 28-point line at the top of
     // the bar; the 30-point settings button beside Export sets its height.
     let mut left = row()
+        .key("menu-bar-left")
         .h(28.0)
         .gap(8.0)
         .center_y()
@@ -62,10 +76,11 @@ pub fn menu_bar(ui: &Ui) -> El {
                 }),
         );
     }
-    row()
+    let bar = row()
         .key("menu-bar")
         .w_full()
-        .px(14.0)
+        .pl(pad(chrome.leading))
+        .pr(pad(chrome.trailing))
         .py(8.0)
         .gap(8.0)
         .center_y()
@@ -97,7 +112,13 @@ pub fn menu_bar(ui: &Ui) -> El {
             .h(27.0)
             .mb(1.0)
             .on_press(|ui: &mut Ui| ui.act(Action::Export)),
-        )
+        );
+    // As the titlebar, its empty parts move the window.
+    if chrome.height > 0.0 {
+        bar.window_drag()
+    } else {
+        bar
+    }
 }
 
 /// Green when playback shows at least 80% of the pictures it should, amber
@@ -313,5 +334,29 @@ mod tests {
             !shown(&rt, "open-export-folder"),
             "stale exports offer nothing"
         );
+    }
+
+    /// macOS draws its traffic lights over the bar's left end.
+    #[test]
+    fn the_bar_starts_past_the_windows_own_controls() {
+        let mut rt = window(Ui::headless());
+        let bar = |rt: &rune::Runtime<Ui>| rt.presented("menu-bar").unwrap().0;
+        let left = |rt: &rune::Runtime<Ui>| rt.presented("menu-bar-left").unwrap().0[0];
+        assert_eq!(bar(&rt)[3], super::BAR_H, "the titlebar is the bar");
+        assert_eq!(left(&rt), 14.0);
+
+        let mut lights = rune::ChromeInsets::default();
+        lights.leading = 76.0;
+        lights.height = super::BAR_H;
+        rt.set_chrome_insets(lights);
+        // The bar slides to its new place for about half a second.
+        frames(&mut rt, 60);
+        assert!(left(&rt) >= 84.0, "the mark is under the traffic lights");
+        assert_eq!(bar(&rt)[3], super::BAR_H);
+
+        // Full screen hides them.
+        rt.set_chrome_insets(rune::ChromeInsets::default());
+        frames(&mut rt, 60);
+        assert_eq!(left(&rt), 14.0);
     }
 }

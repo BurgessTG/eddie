@@ -1,5 +1,5 @@
-//! VAAPI hardware decode for playback lanes, and the switch back to
-//! software when a driver fails.
+//! Hardware decode for playback lanes (VAAPI on Linux, VideoToolbox on
+//! macOS), and the switch back to software when a driver fails.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -88,9 +88,9 @@ fn va_sync_surface() -> Option<SyncSurface> {
     None
 }
 
-/// One VAAPI device on the first DRM render node that opens, shared by
-/// every decoder: creating one costs 250-600 ms. Null when there is none.
-fn vaapi_device() -> *mut ffmpeg::ffi::AVBufferRef {
+/// One hardware device, shared by every decoder: creating a VAAPI one costs
+/// 250-600 ms. Null when there is none.
+fn device() -> *mut ffmpeg::ffi::AVBufferRef {
     struct Device(*mut ffmpeg::ffi::AVBufferRef);
     // SAFETY: the reference is created once, never freed, and only passed to
     // av_buffer_ref, which is thread-safe.
@@ -100,59 +100,87 @@ fn vaapi_device() -> *mut ffmpeg::ffi::AVBufferRef {
     DEVICE
         .get_or_init(|| {
             ensure_init();
-            if va_sync_surface().is_none() {
-                return Device(std::ptr::null_mut());
-            }
-            let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("renderD"))
-                })
-                .collect();
-            nodes.sort();
-            for node in nodes {
-                let Ok(node) = std::ffi::CString::new(node.as_os_str().as_encoded_bytes()) else {
-                    continue;
-                };
-                let mut device = std::ptr::null_mut();
-                // SAFETY: on failure the pointer stays null.
-                let result = unsafe {
-                    ffmpeg::ffi::av_hwdevice_ctx_create(
-                        &mut device,
-                        ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                        node.as_ptr(),
-                        std::ptr::null_mut(),
-                        0,
-                    )
-                };
-                if result >= 0 {
-                    return Device(device);
-                }
-            }
-            Device(std::ptr::null_mut())
+            Device(open_device())
         })
         .0
+}
+
+/// VAAPI on the first DRM render node that opens.
+#[cfg(target_os = "linux")]
+fn open_device() -> *mut ffmpeg::ffi::AVBufferRef {
+    if va_sync_surface().is_none() {
+        return std::ptr::null_mut();
+    }
+    let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("renderD"))
+        })
+        .collect();
+    nodes.sort();
+    for node in nodes {
+        let Ok(node) = std::ffi::CString::new(node.as_os_str().as_encoded_bytes()) else {
+            continue;
+        };
+        let mut device = std::ptr::null_mut();
+        // SAFETY: on failure the pointer stays null.
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                node.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return device;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// VideoToolbox, which every Mac has.
+#[cfg(target_os = "macos")]
+fn open_device() -> *mut ffmpeg::ffi::AVBufferRef {
+    let mut device = std::ptr::null_mut();
+    // SAFETY: on failure the pointer stays null.
+    unsafe {
+        ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut device,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+    device
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn open_device() -> *mut ffmpeg::ffi::AVBufferRef {
+    std::ptr::null_mut()
 }
 
 /// Open the shared device off the UI path, so the first play does not wait.
 pub fn warm_hardware_decode() {
     if HARDWARE_DECODE.load(Ordering::Relaxed) {
         thread::spawn(|| {
-            vaapi_device();
+            device();
         });
     }
 }
 
-/// Give a preview decoder the VAAPI device when hardware decode is on and
-/// the file is expensive in software. libavcodec decodes on the GPU when
+/// Give a preview decoder the hardware device when hardware decode is on
+/// and the file is expensive in software. libavcodec decodes on the GPU when
 /// the profile is supported (NVDEC has no 4:2:2) and silently falls back to
 /// software otherwise.
-pub(super) fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> bool {
+pub(super) fn attach(context: &mut ffmpeg::codec::context::Context) -> bool {
     if !HARDWARE_DECODE.load(Ordering::Relaxed) || hardware_broken() {
         return false;
     }
@@ -168,7 +196,7 @@ pub(super) fn attach_vaapi(context: &mut ffmpeg::codec::context::Context) -> boo
     if !wants_hardware(codec, width, height) {
         return false;
     }
-    let device = vaapi_device();
+    let device = device();
     if device.is_null() {
         return false;
     }
@@ -211,7 +239,15 @@ pub(super) fn sync_surface(picture: &ffmpeg::frame::Video) -> MediaResult<()> {
     Ok(())
 }
 
-/// Copy a VAAPI surface into `into` (NV12 or P010) with its timing and
+/// Whether a decoded picture is still on the GPU and needs `download`.
+pub(super) fn on_gpu(picture: &ffmpeg::frame::Video) -> bool {
+    matches!(
+        picture.format(),
+        ffmpeg::format::Pixel::VAAPI | ffmpeg::format::Pixel::VIDEOTOOLBOX
+    )
+}
+
+/// Copy a GPU surface into `into` (NV12 or P010) with its timing and
 /// colour. `into` keeps its buffers between pictures of the same size: a
 /// fresh 4K allocation per picture cost page faults on every frame.
 pub(super) fn download(

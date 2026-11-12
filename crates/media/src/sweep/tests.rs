@@ -11,7 +11,7 @@ fn excerpts_keep_late_starting_sound_at_its_own_time() {
     let dir = std::env::temp_dir().join(format!("openreel_late_audio_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("late.mp4");
-    let made = Command::new("ffmpeg")
+    let made = crate::cli::ffmpeg()
         .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
         .arg("color=c=blue:s=64x36:r=30:d=3")
         .args(["-itsoffset", "1.5", "-f", "lavfi", "-i", "sine=f=440:d=1.5"])
@@ -331,7 +331,7 @@ fn per_frame_detection_finds_known_hard_cuts() {
     let dir = std::env::temp_dir().join(format!("openreel_scene_cuts_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("known_cuts.mp4");
-    let output = Command::new("ffmpeg")
+    let output = crate::cli::ffmpeg()
         .args([
             "-y",
             "-v",
@@ -402,7 +402,7 @@ fn per_frame_detection_rejects_smooth_lighting_and_camera_pan() {
         ),
     ] {
         let path = dir.join(format!("{name}.mp4"));
-        let output = Command::new("ffmpeg")
+        let output = crate::cli::ffmpeg()
             .args([
                 "-y",
                 "-v",

@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ffmpeg_next as ffmpeg;
@@ -472,7 +472,7 @@ impl VideoEncoder {
         let stderr = File::create(encoder.directory.join("stderr"))
             .map_err(|error| format!("create evidence encoder log: {error}"))?;
         encoder.child = Some(
-            Command::new("ffmpeg")
+            crate::cli::ffmpeg()
                 .args([
                     "-v",
                     "error",

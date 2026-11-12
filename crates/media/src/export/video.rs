@@ -280,7 +280,7 @@ pub(super) fn batch_command(
          trim=end_frame={count}[base]"
     )];
     let mut current = "base".to_owned();
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::cli::ffmpeg();
     cmd.args([
         "-v",
         "error",
@@ -405,7 +405,7 @@ pub(super) fn encode_segment(
     let (width, height) = canvas;
     let (mut decoder, _decoder_graph) = decoder;
     let graph = FilterGraphFile::create(titles)?;
-    let mut encoder = Command::new("ffmpeg")
+    let mut encoder = crate::cli::ffmpeg()
         .args([
             "-y",
             "-v",
