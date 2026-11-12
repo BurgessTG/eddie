@@ -369,3 +369,80 @@ fn unequal_adjacent_center_drop_does_not_collide_with_unrelated_neighbors() {
         }
     }
 }
+
+/// A clip a little over a second long, as media lengths are, on lane 0
+/// at 2 s, and a neighbour at 6 s on the same lane.
+fn butting_fixture(magnet: bool) -> (Stage, ClipId, ClipId) {
+    let mut timeline = Timeline::empty_project();
+    let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 0, 2.0, 1.2345, 0.0, "a");
+    let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 6.0, 2.0, 0.0, "b");
+    let mut stage = Stage::new(timeline);
+    stage.port.magnet = magnet;
+    (stage, a, b)
+}
+
+#[test]
+fn the_magnet_butts_a_clip_against_its_neighbour_without_swapping() {
+    let (mut stage, a, b) = butting_fixture(true);
+    let from = stage.center(a);
+    // Its end let go 0.03 s short of the neighbour, inside the snap.
+    let shift = 6.0 - 0.03 - stage.timeline.clip(a).unwrap().end();
+    stage.drag(from, [stage.x(2.0 + 1.2345 / 2.0 + shift), from[1]]);
+    assert_eq!(
+        stage.timeline.clip(b).unwrap().start,
+        6.0,
+        "the neighbour stays"
+    );
+    assert!(
+        (stage.timeline.clip(a).unwrap().end() - 6.0).abs() < 1e-9,
+        "flush, not a frame in"
+    );
+}
+
+#[test]
+fn a_clip_dragged_a_little_into_its_neighbour_stops_against_it() {
+    for magnet in [false, true] {
+        let (mut stage, a, b) = butting_fixture(magnet);
+        let from = stage.center(a);
+        // 0.3 s into the neighbour: far less than half of either clip.
+        let shift = 6.3 - stage.timeline.clip(a).unwrap().end();
+        let to = [stage.x(2.0 + 1.2345 / 2.0 + shift), from[1]];
+        stage.drag_through(from, &[to]);
+        assert_eq!(
+            stage.timeline.clip(b).unwrap().start,
+            6.0,
+            "magnet={magnet}"
+        );
+        assert!(
+            (stage.timeline.clip(a).unwrap().end() - 6.0).abs() < 1e-9,
+            "magnet={magnet}"
+        );
+
+        // Carried well over it, they trade places.
+        let (mut stage, a, b) = butting_fixture(magnet);
+        let from = stage.center(a);
+        stage.drag(from, stage.point(7.0, 0));
+        assert_eq!(
+            stage.timeline.clip(b).unwrap().start,
+            2.0,
+            "magnet={magnet}"
+        );
+        assert!((stage.timeline.clip(a).unwrap().end() - 8.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn a_small_overlap_on_another_lane_also_stops_against_the_clip_there() {
+    let (mut stage, a, b) = butting_fixture(false);
+    stage.timeline.set_clip_track(b, 1);
+    let from = stage.center(a);
+    let shift = 6.3 - stage.timeline.clip(a).unwrap().end();
+    stage.drag(
+        from,
+        [stage.x(2.0 + 1.2345 / 2.0 + shift), stage.point(0.0, 1)[1]],
+    );
+    let clip = stage.timeline.clip(a).unwrap();
+    assert_eq!(clip.track, 1);
+    assert!((clip.end() - 6.0).abs() < 1e-9);
+    assert_eq!(stage.timeline.clip(b).unwrap().start, 6.0);
+}

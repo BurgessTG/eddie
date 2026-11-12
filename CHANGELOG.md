@@ -66,6 +66,10 @@ keep editing by hand in the window.
 - Closing the window with unsaved edits keeps it open under "Save
   changes?" instead of hiding it and showing it again. On macOS, Cmd+Q and
   the Dock's Quit ask too instead of dropping the edits.
+- With the magnet on, a clip let go next to its neighbour now meets it
+  exactly instead of trading places with it. A clip dragged a little way
+  into another stops against it; it takes the other's place only when it
+  covers at least half of the shorter clip.
 
 ## 0.1.0 (2026-11-06)
 

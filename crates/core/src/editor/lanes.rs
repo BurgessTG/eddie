@@ -363,6 +363,63 @@ fn linked_lane_clear(timeline: &Timeline, id: ClipId) -> bool {
         })
 }
 
+/// Put a clip's start exactly at `start` and move its linked partner by
+/// the same amount. A magnet target or a neighbour's edge is already where
+/// the clip must meet it: rounding the start to the frame grid would leave
+/// up to half a frame between them, or across the edge, which a drop then
+/// read as landing on the neighbour.
+fn place_exact(timeline: &mut Timeline, id: ClipId, start: f64) {
+    let Some(clip) = timeline.clip_mut(id) else {
+        return;
+    };
+    let delta = start - clip.start;
+    clip.start = start;
+    let linked = clip.linked_clip;
+    if let Some(partner) = linked.and_then(|linked| timeline.clip_mut(linked)) {
+        partner.start += delta;
+    }
+}
+
+/// Whether a dragged clip covers enough of `other` to mean "put me in
+/// its place": half the shorter of the two. Less is a collision.
+fn covers_for_swap(clip: &Clip, other: &Clip) -> bool {
+    let overlap = clip.end().min(other.end()) - clip.start.max(other.start);
+    overlap >= clip.duration.min(other.duration) / 2.0 - 1e-9
+}
+
+/// A dragged clip that runs a little way into one clip on its lane stops
+/// flush against it, on the side the clip came from. False, and nothing
+/// moved, when there is no such collision or the flush place is taken.
+fn stop_against(timeline: &mut Timeline, id: ClipId) -> bool {
+    let Some(clip) = timeline.clip(id).cloned() else {
+        return false;
+    };
+    let [other] = lane_overlaps(timeline, &clip)[..] else {
+        return false;
+    };
+    let Some(other) = timeline.clip(other).cloned() else {
+        return false;
+    };
+    if covers_for_swap(&clip, &other) {
+        return false;
+    }
+    let start = if clip.start + clip.duration / 2.0 < other.start + other.duration / 2.0 {
+        other.start - clip.duration
+    } else {
+        other.end()
+    };
+    if start < 0.0 {
+        return false;
+    }
+    place_exact(timeline, id, start);
+    let placed = timeline.clip(id).cloned();
+    if placed.is_some_and(|placed| lane_overlaps(timeline, &placed).is_empty()) {
+        return true;
+    }
+    place_exact(timeline, id, clip.start);
+    false
+}
+
 fn restore_move(
     timeline: &mut Timeline,
     id: ClipId,
@@ -398,6 +455,9 @@ fn resolve_move_drop(
     if overlaps.is_empty() && linked_lane_clear(timeline, id) {
         return;
     }
+    if stop_against(timeline, id) && linked_lane_clear(timeline, id) {
+        return;
+    }
     // Attempt a swap from the original positions, not the overlapping
     // drag preview. The engine validates all linked placements before
     // mutating anything; rejection leaves the restored home untouched.
@@ -405,8 +465,11 @@ fn resolve_move_drop(
     if clip.track != home_track {
         return;
     }
-    let partner = if overlaps.len() == 1 {
-        Some(overlaps[0])
+    let partner = if let [other] = overlaps[..] {
+        timeline
+            .clip(other)
+            .filter(|other| covers_for_swap(&clip, other))
+            .map(|other| other.id)
     } else {
         // Centering a long clip on a short neighbor can make the drag
         // preview extend over a third clip. The pointer disambiguates
@@ -606,9 +669,13 @@ impl Gesture {
                 let snapped = [by_start, by_end]
                     .into_iter()
                     .flatten()
-                    .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
-                    .unwrap_or(raw);
-                timeline.move_clip(id, snapped);
+                    .filter(|start| *start >= 0.0)
+                    .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()));
+                match snapped {
+                    Some(start) => place_exact(timeline, id, start),
+                    None => timeline.move_clip(id, raw),
+                }
+                stop_against(timeline, id);
             }
             DragMode::TrimLeft {
                 orig_start,
@@ -646,8 +713,9 @@ impl Gesture {
     /// gesture cancelled) returns a moved clip home. The magnet only
     /// snaps while dragging; gaps are never closed here. A Move dropped
     /// above the first lane or below the last grows a new lane there for
-    /// the clip. A Move dropped onto one neighbor on its home lane swaps
-    /// positions with it. A wider preview may overlap more clips when the
+    /// the clip. A Move that runs a little way into one clip stops flush
+    /// against it. One that covers at least half of the shorter of it and
+    /// a neighbour on its home lane swaps positions with it. A wider preview may overlap more clips when the
     /// pointer clearly targets an adjacent neighbor; only that pair
     /// reorders. Ambiguous or colliding drops return home without moving
     /// other clips.

@@ -222,3 +222,32 @@ fn the_zoom_slider_is_logarithmic_and_drags() {
     let span = 3600.0 * port.px_per_sec;
     assert!(span < width && span > width - 30.0, "{span} of {width}");
 }
+
+/// With the magnet on, a clip let go a few points short of its neighbour
+/// meets it exactly and the two keep their order; with it off the clip
+/// stays where it was let go.
+#[test]
+fn the_magnet_butts_clips_together_only_while_it_is_on() {
+    for magnet in [true, false] {
+        let (mut rt, title) = window();
+        let timeline = &mut rt.state.editor.timeline;
+        timeline.remove_clip(title);
+        let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 0, 2.0, 1.2345, 0.0, "/a.mp4");
+        let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 6.0, 2.0, 0.0, "/b.mp4");
+        rt.state.editor.viewport.magnet = magnet;
+        rt.frame(FRAME);
+        let from = at(&rt, 2.6, 0);
+        // Its end let go five points (about 0.1 s) short of the neighbour.
+        let to = at(&rt, 2.6 + (6.0 - 3.2345) - 5.0 / 48.0, 0);
+        press_drag_release(&mut rt, from, to);
+        let timeline = &rt.state.editor.timeline;
+        let (a, b) = (timeline.clip(a).unwrap(), timeline.clip(b).unwrap());
+        assert_eq!(b.start, 6.0, "magnet={magnet}: the neighbour stays");
+        let gap = b.start - a.end();
+        if magnet {
+            assert!(gap.abs() < 1e-9, "flush: {gap}");
+        } else {
+            assert!(gap > 0.08, "free: {gap}");
+        }
+    }
+}
