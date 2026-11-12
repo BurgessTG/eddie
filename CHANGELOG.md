@@ -35,7 +35,8 @@ keep editing by hand in the window.
   with its own icon. Double-clicking a `.eddie` project opens it in Eddie,
   and media opened with Eddie is imported. FFmpeg is inside the app, built
   from source for it, so it needs nothing else installed and runs on
-  macOS 11 or later.
+  macOS 11 or later. With `EDDIE_SIGN_IDENTITY` it is signed with a
+  Developer ID, and `packaging/macos/notarize.sh` has Apple notarize it.
 - `EDDIE_FFMPEG` names the `ffmpeg` command to use.
 
 ### Changed

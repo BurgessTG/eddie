@@ -152,9 +152,12 @@ sources) with x264, FreeType, HarfBuzz, dav1d and LAME. The app is about
 Silicon. It reads what FFmpeg decodes itself (H.264, HEVC, ProRes, VP9
 and the rest) and AV1 through dav1d, and exports H.264 with AAC.
 
-This was checked on the virtual machine that built it (macOS 15.7) with
-Homebrew and the checkout moved away: every command, an export and the
-window. It has not yet run on a second Mac, or on macOS 11 to 14.
+This was checked on two machines, each running the copy it built: a
+virtual machine on macOS 15.7 with Homebrew and the checkout moved away,
+and a MacBook Air M1 on macOS 26.6 from `/Applications`. Every command
+and an export worked on both, and the window opened and played with
+nothing loaded from Homebrew. A copy has not yet been carried to a Mac
+that did not build it, and it has not run on macOS 11 to 14.
 
 That FFmpeg is built with `--enable-gpl` for x264, so it is under the GPL
 version 2 or later, and passing the app on means meeting that licence,
@@ -174,8 +177,9 @@ packaging/macos/notarize.sh              # writes Eddie-<version>-macos-arm64.zi
 ```
 
 `notarize.sh` reads Apple's credentials from the keychain profile
-`eddie-notary`; its first lines say how to store it. Signing with a
-Developer ID and notarizing have not been run yet.
+`eddie-notary`; its first lines say how to store it. Both ran on macOS
+26.6 with Xcode 26.6: Apple accepted the app, which needs no
+entitlements, and Gatekeeper reports it as a notarized Developer ID app.
 
 ### GPU transcription
 

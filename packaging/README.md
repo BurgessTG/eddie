@@ -89,12 +89,23 @@ installed: it runs on Apple Silicon with macOS 11.0 or later.
   timestamp. `macos/notarize.sh` then sends the app to Apple with the
   keychain profile `eddie-notary` (its first lines say how to store it),
   staples Apple's ticket to the app and writes
-  `Eddie-<version>-macos-arm64.zip` beside it. Signing with a Developer
-  ID and notarizing have not been run yet.
+  `Eddie-<version>-macos-arm64.zip` beside it. Both ran on macOS 26.6
+  with Xcode 26.6 (2026-11-12): the hardened runtime needed no
+  entitlements, Apple accepted the app in under a minute, `stapler
+  validate` passed and `spctl -a -vv` answers `accepted`,
+  `source=Notarized Developer ID`.
+- When cargo cannot fetch Rune (`the SSL certificate is invalid`),
+  Homebrew's OpenSSL has no certificate file. Run the script with
+  `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo fetches with `git`.
 - Finder's icon view shows a preview of the project's text on `.eddie`
   files, not the project icon. Declaring the type as `public.data` instead
   of `public.json` did not change that.
 
-It has only been built and run in virtual machines on Apple Silicon. This
-app was built on macOS 15.7 and checked there with Homebrew and the
-checkout moved away. It has not run on a second Mac, or on macOS 11 to 14.
+It has been built and run on two machines, each running the copy it
+built. A virtual machine on macOS 15.7 checked it with Homebrew and the
+checkout moved away. A MacBook Air M1 on macOS 26.6 checked it from
+`/Applications`: every command, an export, `--snap`, a local
+transcription on Metal, the workspace tests, and the window, which loaded
+no library from Homebrew and played a 12 s timeline in time without a
+sound overrun. A copy has not been carried to a Mac that did not build
+it, and it has not run on macOS 11 to 14.
