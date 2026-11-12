@@ -3141,7 +3141,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3210,7 +3210,7 @@ dependencies = [
 [[package]]
 name = "rune-highlights"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 dependencies = [
  "unicode-ident",
  "wasmparser",
@@ -3219,7 +3219,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 dependencies = [
  "rune",
  "rune-highlights",
@@ -3230,12 +3230,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 dependencies = [
  "wgpu",
 ]
@@ -3243,7 +3243,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
+source = "git+https://github.com/BurgessTG/rune?rev=00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3#00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3"
 dependencies = [
  "taffy",
 ]

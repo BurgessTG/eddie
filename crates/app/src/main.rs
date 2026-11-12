@@ -50,7 +50,11 @@ fn main() {
         on_key: Some(app::on_key),
         ..AppSpec::new("Eddie", (1440.0, 900.0), Ui::unopened, app::view)
     };
-    let mut app = App::new(spec).keep_running().on_close(app::on_close);
+    let mut app = App::new(spec)
+        .keep_running()
+        .should_close(app::should_close)
+        .should_quit(app::should_close)
+        .on_close(app::on_close);
     // macOS draws no titlebar of its own over a Rune window, so the menu bar
     // is the titlebar there. Linux keeps its native frame.
     if cfg!(target_os = "macos") {

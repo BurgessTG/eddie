@@ -295,10 +295,10 @@ pub fn unsaved(ui: &Ui, overlays: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use eddie_core::Action;
-    use rune::{Key, Mods};
+    use rune::{Key, Mods, Runtime, Shell};
 
     use super::Discard;
-    use crate::app::Ui;
+    use crate::app::{Ui, should_close};
     use crate::testing::{chord, click, frames, press, shown, tooltip, window};
 
     #[test]
@@ -355,6 +355,39 @@ mod tests {
         click(&mut rt, "unsaved-drop");
         assert_eq!(rt.state.pending_discard, None);
         assert!(rt.state.editor.timeline.clips.is_empty());
+    }
+
+    #[test]
+    fn closing_the_window_with_unsaved_edits_asks_and_keeps_it_open() {
+        // What Rune asks when the window's close button is pressed.
+        fn close_pressed(rt: &mut Runtime<Ui>) -> bool {
+            let mut closes = false;
+            rt.update(|ui, tx| closes = should_close(ui, tx));
+            frames(rt, 2);
+            closes
+        }
+        let mut rt = window(Ui::headless());
+        assert!(close_pressed(&mut rt), "nothing to save: the window closes");
+        assert_eq!(rt.state.pending_discard, None);
+
+        rt.state
+            .editor
+            .run_console("addTitle('Booth', 3, 2);".to_owned());
+        frames(&mut rt, 2);
+        assert!(!close_pressed(&mut rt), "the window stays open");
+        assert_eq!(rt.state.pending_discard, Some(Discard::Close));
+        assert!(shown(&rt, "unsaved-changes"));
+        click(&mut rt, "unsaved-cancel");
+        assert_eq!(rt.shell_request, None, "Cancel keeps editing");
+
+        assert!(!close_pressed(&mut rt));
+        click(&mut rt, "unsaved-drop");
+        frames(&mut rt, 2);
+        assert_eq!(rt.shell_request, Some(Shell::Quit), "Don't save leaves");
+        assert!(
+            close_pressed(&mut rt),
+            "a close on the way out is not asked about again"
+        );
     }
 
     #[test]

@@ -93,7 +93,6 @@ pub struct Ui {
     /// The open file dialog, answered on a worker thread.
     pub file_dialog: Option<PendingFileDialog>,
     /// Set once the user chose to close without (or after) saving.
-    allow_close: bool,
     quit: bool,
     /// A pointer gesture that edits the timeline is held, so undo waits.
     pub pointer_held: bool,
@@ -184,7 +183,6 @@ impl Ui {
             lanes: timeline::LaneInput::default(),
             pending_discard: None,
             file_dialog: None,
-            allow_close: false,
             quit: false,
             pointer_held: false,
             last_input,
@@ -370,7 +368,6 @@ impl Ui {
 
     /// Leave once the frame in progress ends.
     pub fn close(&mut self) {
-        self.allow_close = true;
         self.quit = true;
     }
 }
@@ -509,17 +506,19 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-/// The window was closed. Rune cannot refuse a close, so with unsaved edits
-/// the window comes back showing "Save changes?".
-pub fn on_close(ui: &mut Ui, tx: &mut Tx) {
-    if ui.allow_close || !ui.editor.has_unsaved_changes() {
-        tx.quit();
-        return;
+/// Whether the window may close, or macOS quit Eddie (Cmd+Q, the Dock): with
+/// unsaved edits it stays open and shows "Save changes?", whose answer closes it.
+pub fn should_close(ui: &mut Ui, _: &mut Tx) -> bool {
+    if ui.quit || !ui.editor.has_unsaved_changes() {
+        return true;
     }
     ui.pending_discard = Some(Discard::Close);
-    if let Some(handle) = &ui.handle {
-        handle.show();
-    }
+    false
+}
+
+/// The window closed, and Eddie leaves with it.
+pub fn on_close(_: &mut Ui, tx: &mut Tx) {
+    tx.quit();
 }
 
 pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
