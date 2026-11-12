@@ -430,7 +430,7 @@ impl Editor {
                     .clips
                     .iter()
                     .filter(|c| c.contains(playhead))
-                    .min_by_key(|c| c.track)
+                    .min_by_key(|c| self.timeline.row(c.kind, c.track))
                     .map(|c| c.id)
             });
         let Some(id) = target else {
@@ -529,7 +529,9 @@ impl Editor {
                 }
             }
             Action::AddTitle => {
-                let track = self.first_free_track(self.playhead, 4.0);
+                let track =
+                    self.timeline
+                        .free_lane(ClipKind::Title, self.playhead, self.playhead + 4.0);
                 let id = self.timeline.add_clip(
                     "New title",
                     ClipKind::Title,

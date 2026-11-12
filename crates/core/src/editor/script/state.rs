@@ -1,7 +1,7 @@
 //! What a script reads: the timeline's clips and the whole editor state
 //! as JSON (`state()`).
 
-use openreel_engine::{ClipKind, Orientation};
+use openreel_engine::Orientation;
 
 use super::super::media::{AssetState, BinAsset};
 use super::super::{inspect, sweep};
@@ -17,11 +17,7 @@ impl Editor {
                 serde_json::json!({
                     "id": c.id,
                     "name": c.name,
-                    "kind": match c.kind {
-                        ClipKind::Video => "video",
-                        ClipKind::Audio => "audio",
-                        ClipKind::Title => "title",
-                    },
+                    "kind": c.kind.as_str(),
                     "track": c.track,
                     "start": c.start,
                     "duration": c.duration,

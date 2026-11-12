@@ -30,9 +30,10 @@ macOS it builds as `Eddie.app` with FFmpeg inside (see
 - Media bin: a grid of thumbnails and waveforms. Drag and drop, File →
   Import media, or pass file paths on the command line. Imports show a
   placeholder immediately.
-- Free-form timeline: lanes of any kind, gaps allowed; dragging above or
-  below the lanes creates new ones. Move, trim, split, swap adjacent clips
-  and move clips across lanes. The magnet snaps edges while dragging.
+- Timeline with separate lanes for titles, video and sound, gaps allowed;
+  dragging a clip past the first or last lane of its kind creates another.
+  Move, trim, split, swap adjacent clips and move clips between lanes of
+  their kind. The magnet snaps edges while dragging.
 - Landscape or portrait projects (Settings → Format). Video of the other
   orientation can't be placed.
 - Linked audio: detach a video's sound into a clip that moves, trims and

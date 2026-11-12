@@ -9,14 +9,6 @@ use rune::{Color, El, LineCap, Shape, el, row, text};
 use crate::icons;
 use crate::theme::{self, c};
 
-fn kind_index(kind: ClipKind) -> usize {
-    match kind {
-        ClipKind::Video => 0,
-        ClipKind::Audio => 1,
-        ClipKind::Title => 2,
-    }
-}
-
 /// The kind colour × 1.8, for a lane header's accent bar.
 fn kind_accent(kind: ClipKind) -> Color {
     theme::hex(match kind {
@@ -26,15 +18,14 @@ fn kind_accent(kind: ClipKind) -> Color {
     })
 }
 
-/// A lane header's glyph in a 16×16 box: film frame, level bars, a T, or
-/// an empty dot.
-fn kind_glyph(kind: Option<ClipKind>, fg: Color) -> El {
+/// A lane header's glyph in a 16×16 box: film frame, level bars or a T.
+fn kind_glyph(kind: ClipKind, fg: Color) -> El {
     let shape = Shape::new().view_box(16.0, 16.0);
     let shape =
         match kind {
-            Some(ClipKind::Video) => icons::outline(shape, 1.5, 3.0, 13.0, 10.0, 2.0, 1.4, fg)
+            ClipKind::Video => icons::outline(shape, 1.5, 3.0, 13.0, 10.0, 2.0, 1.4, fg)
                 .fill(vec![[6.5, 5.5], [10.5, 8.0], [6.5, 10.5]], fg),
-            Some(ClipKind::Audio) => [4.0_f32, 9.0, 12.0, 7.0, 3.0].into_iter().enumerate().fold(
+            ClipKind::Audio => [4.0_f32, 9.0, 12.0, 7.0, 3.0].into_iter().enumerate().fold(
                 shape,
                 |shape, (i, h)| {
                     let x = 2.0 + i as f32 * 3.0;
@@ -47,7 +38,7 @@ fn kind_glyph(kind: Option<ClipKind>, fg: Color) -> El {
                     )
                 },
             ),
-            Some(ClipKind::Title) => {
+            ClipKind::Title => {
                 return row().size(16.0, 16.0).center().child(
                     text("T".to_owned())
                         .font(theme::sized(13.0))
@@ -55,31 +46,32 @@ fn kind_glyph(kind: Option<ClipKind>, fg: Color) -> El {
                         .single_line(),
                 );
             }
-            None => icons::ring(shape, [8.0, 8.0], 3.5, 1.4, fg),
         };
     el().size(16.0, 16.0).shape(shape)
 }
 
-/// A lane's header card. Lanes take any kind, so it shows the kind that
-/// covers the most time there and stays neutral when the lane is empty.
-pub(super) fn header(timeline: &Timeline, track: usize, label: &str, top: f32) -> El {
+/// The header card of lane `track` of `kind`, drawn on row `line`: the kind's
+/// colour and glyph, and its name, dimmed while the lane is empty.
+pub(super) fn header(
+    timeline: &Timeline,
+    kind: ClipKind,
+    track: usize,
+    line: usize,
+    top: f32,
+) -> El {
     let c = c();
-    let mut cover = [0.0_f64; 3];
-    for clip in timeline.clips.iter().filter(|clip| clip.track == track) {
-        cover[kind_index(clip.kind)] += clip.duration;
-    }
-    let kind = cover.iter().any(|time| *time > 0.0).then(|| {
-        [ClipKind::Video, ClipKind::Audio, ClipKind::Title]
-            .into_iter()
-            .max_by(|a, b| cover[kind_index(*a)].total_cmp(&cover[kind_index(*b)]))
-            .unwrap_or(ClipKind::Video)
-    });
-    let (accent, glyph_fg, label_fg) = match kind {
-        Some(kind) => (kind_accent(kind), c.muted_fg, c.foreground),
-        None => (c.border_strong, c.subtle_fg, c.subtle_fg),
+    let used = timeline
+        .clips
+        .iter()
+        .any(|clip| clip.kind == kind && clip.track == track);
+    let (accent, glyph_fg, label_fg) = if used {
+        (kind_accent(kind), c.muted_fg, c.foreground)
+    } else {
+        (kind_accent(kind).alpha(0.45), c.subtle_fg, c.subtle_fg)
     };
+    let label = Timeline::lane_label(kind, track);
     let width = HEADER_W - 8.0;
-    el().key(format!("lane-header-{track}"))
+    el().key(format!("lane-header-{line}"))
         .absolute(0.0, top)
         .size(width, TRACK_H)
         .radius(theme::R_SM)
@@ -94,7 +86,7 @@ pub(super) fn header(timeline: &Timeline, track: usize, label: &str, top: f32) -
         .child(kind_glyph(kind, glyph_fg).absolute(14.0, (TRACK_H - 16.0) / 2.0))
         .child(
             row().absolute(38.0, 0.0).h(TRACK_H).center_y().child(
-                text(label.to_owned())
+                text(label)
                     .font(theme::sized(12.0))
                     .color(label_fg)
                     .single_line()

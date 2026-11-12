@@ -16,4 +16,4 @@ pub use clip::{Clip, ClipId, ClipKind, TitleStyle};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};
 pub use time_spec::format_timecode;
-pub use timeline::{Orientation, Timeline, MAX_TIMELINE_SECONDS};
+pub use timeline::{Lanes, Orientation, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS};

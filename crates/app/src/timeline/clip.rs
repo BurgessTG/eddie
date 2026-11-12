@@ -138,7 +138,7 @@ pub(super) fn clip_el(
 ) -> Option<El> {
     let c = c();
     let port = &ui.editor.viewport;
-    let rect = lanes::clip_rect(port, view, clip);
+    let rect = lanes::clip_rect(port, view, &ui.editor.timeline, clip);
     let (clip_left, clip_right) = (rect.left - HEADER_W, rect.right - HEADER_W);
     if clip_right < 0.0 || clip_left > lanes_w {
         return None;

@@ -123,7 +123,7 @@ impl Editor {
                     continue;
                 }
                 let duration = end - start;
-                let track = self.first_free_track(start, duration);
+                let track = self.timeline.free_lane(ClipKind::Title, start, end);
                 let caption = self.timeline.add_clip(
                     &chunk.text,
                     ClipKind::Title,

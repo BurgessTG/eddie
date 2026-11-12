@@ -3,7 +3,7 @@
 //! uses the engine's project frame grid; reorders and rollbacks retain
 //! exact existing intervals.
 
-use openreel_engine::{Clip, ClipId, Timeline};
+use openreel_engine::{Clip, ClipId, ClipKind, Timeline};
 
 use super::viewport::TimelineViewport;
 
@@ -187,9 +187,9 @@ pub fn time_at(port: &TimelineViewport, content_left: f32, x: f32) -> f64 {
     ((x - content_left + port.scroll_x) / port.px_per_sec) as f64
 }
 
-/// The lane at height `y`, counting on past the last one; `None` over the
-/// ruler.
-pub fn track_at(rect: ViewRect, y: f32) -> Option<usize> {
+/// The row at height `y`, counting on past the last one; `None` over the
+/// ruler. `Timeline::lane_at_row` says which lane a row shows.
+pub fn row_at(rect: ViewRect, y: f32) -> Option<usize> {
     let lanes_top = rect.lanes_top();
     if y < lanes_top {
         return None;
@@ -197,10 +197,9 @@ pub fn track_at(rect: ViewRect, y: f32) -> Option<usize> {
     Some(((y - lanes_top) / (TRACK_H + TRACK_GAP)) as usize)
 }
 
-/// A lane's box right of the headers. Works one past the last lane too,
-/// where a drop appends one.
-pub fn lane_rect(rect: ViewRect, track: usize) -> ViewRect {
-    let top = rect.lanes_top() + track as f32 * (TRACK_H + TRACK_GAP);
+/// A row's box right of the headers. Works one past the last row too.
+pub fn lane_rect(rect: ViewRect, row: usize) -> ViewRect {
+    let top = rect.lanes_top() + row as f32 * (TRACK_H + TRACK_GAP);
     ViewRect {
         left: rect.content_left(),
         top,
@@ -209,9 +208,14 @@ pub fn lane_rect(rect: ViewRect, track: usize) -> ViewRect {
     }
 }
 
-pub fn clip_rect(port: &TimelineViewport, rect: ViewRect, clip: &Clip) -> ViewRect {
+pub fn clip_rect(
+    port: &TimelineViewport,
+    rect: ViewRect,
+    timeline: &Timeline,
+    clip: &Clip,
+) -> ViewRect {
     let content_left = rect.content_left();
-    let top = rect.lanes_top() + clip.track as f32 * (TRACK_H + TRACK_GAP) + 3.0;
+    let top = lane_rect(rect, timeline.row(clip.kind, clip.track)).top + 3.0;
     ViewRect {
         left: x_at(port, content_left, clip.start),
         top,
@@ -220,15 +224,15 @@ pub fn clip_rect(port: &TimelineViewport, rect: ViewRect, clip: &Clip) -> ViewRe
     }
 }
 
-/// The lane and time under a point, for something dropped there from
+/// The row and time under a point, for something dropped there from
 /// outside. `None` outside the view, over the headers or over the ruler.
 pub fn drop_target(port: &TimelineViewport, rect: ViewRect, pos: Point) -> Option<(usize, f64)> {
     if !rect.contains(pos) || pos[0] < rect.content_left() {
         return None;
     }
-    let track = track_at(rect, pos[1])?;
+    let row = row_at(rect, pos[1])?;
     let time = time_at(port, rect.content_left(), pos[0]).max(0.0);
-    Some((track, time))
+    Some((row, time))
 }
 
 /// Paint, hover and press classification share the same geometry. Handles
@@ -241,10 +245,14 @@ pub fn hit_clip<'a>(
     pos: Point,
 ) -> Option<(&'a Clip, ClipHit)> {
     let [x, y] = pos;
-    let track = track_at(rect, y)?;
+    let (kind, track) = timeline.lane_at_row(row_at(rect, y)?)?;
     let mut outside_edge: Option<(f32, &Clip, ClipHit)> = None;
-    for clip in timeline.clips.iter().filter(|c| c.track == track) {
-        let bounds = clip_rect(port, rect, clip);
+    for clip in timeline
+        .clips
+        .iter()
+        .filter(|c| c.kind == kind && c.track == track)
+    {
+        let bounds = clip_rect(port, rect, timeline, clip);
         if !(bounds.top..=bounds.bottom).contains(&y) {
             continue;
         }
@@ -320,7 +328,7 @@ fn prev_end(timeline: &Timeline, clip: &Clip, orig_start: f64) -> f64 {
     timeline
         .clips
         .iter()
-        .filter(|c| c.id != clip.id && c.track == clip.track && c.end() <= orig_start + 1e-6)
+        .filter(|c| c.id != clip.id && c.same_lane(clip) && c.end() <= orig_start + 1e-6)
         .map(Clip::end)
         .fold(0.0, f64::max)
 }
@@ -330,7 +338,7 @@ fn next_start(timeline: &Timeline, clip: &Clip, from: f64) -> Option<f64> {
     timeline
         .clips
         .iter()
-        .filter(|c| c.id != clip.id && c.track == clip.track && c.start >= from - 1e-6)
+        .filter(|c| c.id != clip.id && c.same_lane(clip) && c.start >= from - 1e-6)
         .map(|c| c.start)
         .min_by(|a, b| a.total_cmp(b))
 }
@@ -341,7 +349,7 @@ fn lane_overlaps(timeline: &Timeline, clip: &Clip) -> Vec<ClipId> {
         .iter()
         .filter(|c| {
             c.id != clip.id
-                && c.track == clip.track
+                && c.same_lane(clip)
                 && c.start < clip.end() - 1e-9
                 && clip.start < c.end() - 1e-9
         })
@@ -488,6 +496,7 @@ fn resolve_move_drop(
             !timeline.clips.iter().any(|between| {
                 between.id != id
                     && between.id != partner.id
+                    && between.kind == clip.kind
                     && between.track == home_track
                     && between.start < right_start - 1e-9
                     && between.end() > left_end + 1e-9
@@ -655,10 +664,12 @@ impl Gesture {
                 // allowed mid-drag so the clip can be carried
                 // over a neighbor; finish swaps or
                 // returns it home, never leaving an overlap.
-                if let Some(target) =
-                    track_at(scene.rect, pos[1]).filter(|t| *t < timeline.track_labels.len())
+                // Only lanes of the clip's own kind take it; over another
+                // kind's lanes it stays where it last was.
+                if let Some((kind, target)) =
+                    row_at(scene.rect, pos[1]).and_then(|row| timeline.lane_at_row(row))
                 {
-                    if target != clip.track {
+                    if kind == clip.kind && target != clip.track {
                         timeline.set_clip_track(id, target);
                     }
                 }
@@ -713,7 +724,8 @@ impl Gesture {
     /// gesture cancelled) returns a moved clip home. The magnet only
     /// snaps while dragging; gaps are never closed here. A Move dropped
     /// above the first lane or below the last grows a new lane there for
-    /// the clip. A Move that runs a little way into one clip stops flush
+    /// the clip, and a lane the move leaves empty goes, keeping one of each
+    /// kind. A Move that runs a little way into one clip stops flush
     /// against it. One that covers at least half of the shorter of it and
     /// a neighbour on its home lane swaps positions with it. A wider preview may overlap more clips when the
     /// pointer clearly targets an adjacent neighbor; only that pair
@@ -732,33 +744,44 @@ impl Gesture {
             },
         )) = self.drag
         {
-            let lanes_top = rect.lanes_top();
-            let lanes_bottom =
-                lanes_top + timeline.track_labels.len() as f32 * (TRACK_H + TRACK_GAP) - TRACK_GAP;
-            // Well past the edge counts as aiming for a new lane, so
-            // slight pointer drift on a sideways drag of an edge-lane
-            // clip does not grow one by accident. The ruler strip is
-            // the only room above the first lane, hence the smaller
-            // top threshold.
-            let above = drop_pos.is_some_and(|pos| pos[1] < lanes_top - RULER_H * 0.5);
-            let below = drop_pos.is_some_and(|pos| pos[1] > lanes_bottom + TRACK_H * 0.5);
-            if drop_pos.is_none() || ((above || below) && !linked_lane_clear(timeline, id)) {
-                restore_move(timeline, id, home_start, home_track, home_linked);
-            } else if above {
-                timeline.insert_track_at(0);
-                timeline.set_clip_track(id, 0);
-            } else if below {
-                let track = timeline.append_track();
-                timeline.set_clip_track(id, track);
-            } else if let Some(pos) = drop_pos {
-                resolve_move_drop(
-                    timeline,
-                    id,
-                    home_start,
-                    home_track,
-                    home_linked,
-                    time_at(scene.port, rect.content_left(), pos[0]),
-                );
+            let kind = timeline.clip(id).map_or(ClipKind::Video, |clip| clip.kind);
+            let first_row = timeline.row(kind, 0);
+            let kind_top = lane_rect(rect, first_row).top;
+            let kind_bottom = lane_rect(rect, first_row + timeline.lanes.count(kind) - 1).bottom;
+            // Well past the first or last lane of the clip's kind counts as
+            // aiming for a new lane of that kind, so slight pointer drift
+            // on a sideways drag of an edge-lane clip does not grow one by
+            // accident. Above the first title lane only the ruler strip is
+            // left, hence the smaller threshold there.
+            let room_above = if first_row == 0 { RULER_H } else { TRACK_H };
+            let above = drop_pos.is_some_and(|pos| pos[1] < kind_top - room_above * 0.5);
+            let below = drop_pos.is_some_and(|pos| pos[1] > kind_bottom + TRACK_H * 0.5);
+            let changed_lane =
+                if drop_pos.is_none() || ((above || below) && !linked_lane_clear(timeline, id)) {
+                    restore_move(timeline, id, home_start, home_track, home_linked);
+                    false
+                } else if above || below {
+                    let track = timeline.add_lane(kind, above);
+                    timeline.set_clip_track(id, track);
+                    true
+                } else if let Some(pos) = drop_pos {
+                    resolve_move_drop(
+                        timeline,
+                        id,
+                        home_start,
+                        home_track,
+                        home_linked,
+                        time_at(scene.port, rect.content_left(), pos[0]),
+                    );
+                    timeline
+                        .clip(id)
+                        .is_some_and(|clip| clip.track != home_track)
+                } else {
+                    false
+                };
+            // Lanes hold clips: one a clip left empty goes.
+            if changed_lane {
+                timeline.drop_empty_lanes();
             }
         }
         self.drag = None;

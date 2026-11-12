@@ -48,10 +48,12 @@ impl Stage {
         )
     }
 
-    fn point(&self, time: f64, track: usize) -> Point {
+    /// The point at `time` on `row`, counted from the top. Without title
+    /// lanes, video lane n is row n.
+    fn point(&self, time: f64, row: usize) -> Point {
         [
             x_at(&self.port, VIEW.content_left(), time),
-            VIEW.lanes_top() + track as f32 * (TRACK_H + TRACK_GAP) + TRACK_H / 2.0,
+            VIEW.lanes_top() + row as f32 * (TRACK_H + TRACK_GAP) + TRACK_H / 2.0,
         ]
     }
 
@@ -61,7 +63,8 @@ impl Stage {
 
     fn center(&self, id: ClipId) -> Point {
         let clip = self.timeline.clip(id).unwrap();
-        self.point(clip.start + clip.duration / 2.0, clip.track)
+        let row = self.timeline.row(clip.kind, clip.track);
+        self.point(clip.start + clip.duration / 2.0, row)
     }
 
     /// A press at `from` released at `to`; the selection it leaves.
@@ -92,8 +95,9 @@ impl Stage {
 }
 
 /// One clip on the second lane, 2 s to 8 s, from 3 s into a 20 s source.
+/// A clip far right on each lane keeps the lanes in use when it moves.
 fn clip_fixture() -> (Stage, ClipId) {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip(
         "clip.mp4",
         ClipKind::Video,
@@ -103,12 +107,15 @@ fn clip_fixture() -> (Stage, ClipId) {
         3.0,
         "/media/full.mp4",
     );
+    for lane in [0, 1] {
+        timeline.add_media_clip("stays", ClipKind::Video, lane, 40.0, 1.0, 0.0, "s");
+    }
     (Stage::new(timeline), id)
 }
 
 /// Two clips on the second lane that meet at 8 s.
 fn touching_fixture() -> (Stage, ClipId, ClipId) {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 1, 2.0, 6.0, 0.0, "/media/a.mp4");
     let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 1, 8.0, 6.0, 0.0, "/media/a.mp4");
     let mut stage = Stage::new(timeline);

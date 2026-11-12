@@ -40,7 +40,7 @@ impl Timeline {
         let (Some(first), Some(second)) = (self.clip(first), self.clip(second)) else {
             return false;
         };
-        if first.id == second.id || first.track != second.track {
+        if first.id == second.id || !first.same_lane(second) {
             return false;
         }
         let (left, right) = if first.start <= second.start {
@@ -55,7 +55,7 @@ impl Timeline {
         let adjacent = !self.clips.iter().any(|clip| {
             clip.id != left.id
                 && clip.id != right.id
-                && clip.track == left.track
+                && clip.same_lane(left)
                 && clip.start < right.start
                 && clip.end() > left.end() + EPSILON
         });
@@ -85,7 +85,7 @@ impl Timeline {
             }
             let clip = self.clip(id).unwrap();
             let blocked = self.clips.iter().any(|other| {
-                if other.id == id || other.track != clip.track {
+                if other.id == id || !other.same_lane(clip) {
                     return false;
                 }
                 let other_start = placements
@@ -324,9 +324,9 @@ impl Timeline {
                 .sum();
             clip.start -= shift;
         }
-        // Media keeps its spacing, so only a title can now sit on a clip of
-        // its lane: one from a removed gap, or one overhanging it. The later
-        // title keeps its time and moves to a lane free there.
+        // Media keeps its spacing, so only a title can now sit on another
+        // title: one from a removed gap, or one overhanging it. The later
+        // title keeps its time and moves to a title lane free there.
         let mut titles: Vec<(f64, ClipId)> = self
             .clips
             .iter()
@@ -340,11 +340,12 @@ impl Timeline {
             };
             let covers = |c: &Clip, track: usize| {
                 c.id != id
+                    && c.kind == ClipKind::Title
                     && c.track == track
                     && c.start < title.end() - EDGE_EPSILON
                     && title.start < c.end() - EDGE_EPSILON
             };
-            let stays = |c: &Clip| c.kind != ClipKind::Title || (c.start, c.id) < (start, id);
+            let stays = |c: &Clip| (c.start, c.id) < (start, id);
             if !self
                 .clips
                 .iter()
@@ -352,9 +353,9 @@ impl Timeline {
             {
                 continue;
             }
-            let free = (0..self.track_labels.len())
-                .find(|&track| !self.clips.iter().any(|c| covers(c, track)));
-            let track = free.unwrap_or_else(|| self.append_track());
+            let free =
+                (0..self.lanes.titles).find(|&track| !self.clips.iter().any(|c| covers(c, track)));
+            let track = free.unwrap_or_else(|| self.add_lane(ClipKind::Title, false));
             if let Some(clip) = self.clip_mut(id) {
                 clip.track = track;
             }

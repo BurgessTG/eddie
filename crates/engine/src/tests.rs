@@ -165,7 +165,7 @@ fn adjacent_swaps_preserve_fractional_span_gap_and_linked_coverage() {
                     );
                     assert_eq!(tl.clip(prefix), before.clip(prefix));
                     assert_eq!(tl.clip(tail), before.clip(tail));
-                    assert_eq!(tl.track_labels, before.track_labels);
+                    assert_eq!(tl.lanes, before.lanes);
                     assert!(tl.swap_clips(first, second));
                     for clip in &tl.clips {
                         assert!(
@@ -187,8 +187,9 @@ fn swap_rejects_collisions_on_either_companion_lane_atomically() {
         let right = tl.add_media_clip("right", ClipKind::Video, 0, 2.4, 0.2, 1.237, "right");
         tl.detach_audio(left).unwrap();
         let right_audio = tl.detach_audio(right).unwrap();
-        tl.set_clip_track(right_audio, 2);
-        let (track, start) = if block_left { (1, 2.4) } else { (2, 2.0) };
+        tl.add_lane(ClipKind::Audio, false);
+        assert!(tl.set_clip_track(right_audio, 1));
+        let (track, start) = if block_left { (0, 2.4) } else { (1, 2.0) };
         tl.add_media_clip(
             "blocker",
             ClipKind::Audio,
@@ -238,19 +239,12 @@ fn swap_rejects_invalid_pairs_without_mutating() {
         assert!(!tl.swap_clips(first, second));
         assert_eq!(tl, before);
     }
-    // Even if a caller places linked members at distinct times on one
-    // lane, they cannot be swapped independently of their shared group.
-    tl.set_clip_track(audio, 0);
-    tl.clip_mut(audio).unwrap().start = 3.0;
-    let before = tl.clone();
-    assert!(!tl.swap_clips(video, audio));
-    assert_eq!(tl, before);
 }
 
 #[test]
 fn split_preserves_total_coverage() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     let id = tl.add_clip("a.mp4", ClipKind::Video, track, 2.0, 10.0, 5.0);
     let right = tl.split_at(id, 6.0).expect("split inside clip");
     let left = tl.clip(id).unwrap().clone();
@@ -264,7 +258,7 @@ fn split_preserves_total_coverage() {
 #[test]
 fn split_outside_clip_is_noop() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     let id = tl.add_clip("a.mp4", ClipKind::Video, track, 2.0, 4.0, 0.0);
     assert!(tl.split_at(id, 99.0).is_none());
     assert_eq!(tl.clips.len(), 1);
@@ -285,7 +279,7 @@ fn demo_ends_at_last_clip() {
 #[test]
 fn trim_left_moves_source_in_with_start() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     let id = tl.add_clip("a.mp4", ClipKind::Video, track, 2.0, 10.0, 5.0);
     tl.trim_left(id, 4.0);
     let clip = tl.clip(id).unwrap();
@@ -297,7 +291,7 @@ fn trim_left_moves_source_in_with_start() {
 #[test]
 fn trim_left_clamps_at_source_zero() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     let id = tl.add_clip("a.mp4", ClipKind::Video, track, 6.0, 4.0, 1.0);
     tl.trim_left(id, 0.0);
     let clip = tl.clip(id).unwrap();
@@ -310,7 +304,7 @@ fn trim_left_clamps_at_source_zero() {
 #[test]
 fn trim_right_changes_duration_only() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     let id = tl.add_clip("a.mp4", ClipKind::Video, track, 2.0, 10.0, 5.0);
     tl.trim_right(id, 8.0);
     let clip = tl.clip(id).unwrap();
@@ -321,9 +315,9 @@ fn trim_right_changes_duration_only() {
 #[test]
 fn close_gaps_removes_empty_time_on_every_lane_together() {
     let mut tl = Timeline::new(30.0);
-    let main = tl.add_track("V1");
-    let other = tl.add_track("A1");
-    let captions = tl.add_track("Captions");
+    let main = 0;
+    let other = 0;
+    let captions = 0;
     tl.add_clip("a.mp4", ClipKind::Video, main, 1.0, 2.0, 0.0);
     let b = tl.add_clip("b.mp4", ClipKind::Video, main, 5.0, 2.0, 0.0);
     let c = tl.add_clip("c.mp4", ClipKind::Video, main, 10.0, 1.0, 0.0);
@@ -347,8 +341,8 @@ fn close_gaps_removes_empty_time_on_every_lane_together() {
 #[test]
 fn close_gaps_never_stacks_titles_on_one_lane() {
     let mut tl = Timeline::new(30.0);
-    let main = tl.add_track("V1");
-    let captions = tl.add_track("Captions");
+    let main = 0;
+    let captions = 0;
     tl.add_clip("a.mp4", ClipKind::Video, main, 0.0, 5.0, 0.0);
     let b = tl.add_clip("b.mp4", ClipKind::Video, main, 7.0, 3.0, 0.0);
     // A caption overhanging a's end, one alone in the 5-7 gap and one
@@ -356,8 +350,8 @@ fn close_gaps_never_stacks_titles_on_one_lane() {
     let overhang = tl.add_clip("overhang", ClipKind::Title, captions, 4.5, 1.0, 0.0);
     let in_gap = tl.add_clip("in gap", ClipKind::Title, captions, 6.0, 0.5, 0.0);
     let over_b = tl.add_clip("over b", ClipKind::Title, captions, 7.0, 1.0, 0.0);
-    // A title on the picture lane inside the gap meets b itself.
-    let on_main = tl.add_clip("on main", ClipKind::Title, main, 5.5, 1.0, 0.0);
+    // A title on a second title lane inside the gap.
+    let on_main = tl.add_clip("on main", ClipKind::Title, 1, 5.5, 1.0, 0.0);
     tl.close_gaps();
     let clip = |id| tl.clip(id).unwrap();
     assert_eq!(clip(b).start, 5.0);
@@ -371,7 +365,7 @@ fn close_gaps_never_stacks_titles_on_one_lane() {
         for other in &tl.clips {
             let overlap = a.start < other.end() && other.start < a.end();
             assert!(
-                a.id == other.id || a.track != other.track || !overlap,
+                a.id == other.id || !a.same_lane(other) || !overlap,
                 "{} and {} share lane {}",
                 a.name,
                 other.name,
@@ -384,15 +378,18 @@ fn close_gaps_never_stacks_titles_on_one_lane() {
 #[test]
 fn lane_overlaps_lists_clips_sharing_a_lane_for_a_frame_or_more() {
     let mut tl = Timeline::new(30.0);
-    let lane = tl.add_track("V1");
-    let other = tl.add_track("V2");
+    let lane = 0;
+    let other = 1;
     let a = tl.add_clip("a", ClipKind::Video, lane, 0.0, 5.0, 0.0);
     // Half a frame over a's end: a grid edge against an off-grid one.
     tl.add_clip("abuts", ClipKind::Video, lane, 5.0 - 0.5 / 30.0, 2.0, 0.0);
     tl.add_clip("other lane", ClipKind::Video, other, 1.0, 2.0, 0.0);
     assert_eq!(tl.lane_overlaps(), vec![]);
-    let inside = tl.add_clip("inside", ClipKind::Title, lane, 1.0, 0.5, 0.0);
-    let late = tl.add_clip("late", ClipKind::Audio, lane, 4.0, 0.9, 0.0);
+    let inside = tl.add_clip("inside", ClipKind::Video, lane, 1.0, 0.5, 0.0);
+    let late = tl.add_clip("late", ClipKind::Video, lane, 4.0, 0.9, 0.0);
+    // A title and a sound numbered the same sit on lanes of their own.
+    tl.add_clip("title", ClipKind::Title, lane, 0.0, 5.0, 0.0);
+    tl.add_clip("sound", ClipKind::Audio, lane, 0.0, 5.0, 0.0);
     assert_eq!(tl.lane_overlaps(), vec![(a, inside), (a, late)]);
     assert!(tl.in_supported_range());
     tl.move_clip(a, 1e12);
@@ -404,7 +401,7 @@ fn lane_overlaps_lists_clips_sharing_a_lane_for_a_frame_or_more() {
 #[test]
 fn trims_never_pass_the_requested_edge() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("V1");
+    let track = 0;
     // Media adds keep exact, off-grid edges.
     let id = tl.add_media_clip("a", ClipKind::Video, track, 11.01, 5.0, 3.0, "a.mp4");
     // The caller clamped to media that ends at 16.05: the edge takes the
@@ -448,7 +445,7 @@ fn trims_never_pass_the_requested_edge() {
 #[test]
 fn a_title_extends_earlier_and_keeps_its_word_timing() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("Captions");
+    let track = 0;
     let id = tl.add_clip("two words", ClipKind::Title, track, 5.0, 2.0, 0.0);
     tl.clip_mut(id).unwrap().words = vec![0.25, 1.0];
     tl.trim_left(id, 4.0);
@@ -483,53 +480,106 @@ fn split_keeps_each_fade_on_its_own_edge() {
 }
 
 #[test]
-fn empty_project_starts_with_one_track() {
+fn an_empty_project_has_one_lane_of_each_kind() {
     let tl = Timeline::empty_project();
-    assert_eq!(tl.track_labels.len(), 1);
+    let one = Lanes {
+        titles: 1,
+        video: 1,
+        audio: 1,
+    };
+    assert_eq!(tl.lanes, one);
     assert!(tl.clips.is_empty());
+    // Titles on top, then video, then sound.
+    assert_eq!(
+        (0..3).map(|row| tl.lane_at_row(row)).collect::<Vec<_>>(),
+        [
+            Some((ClipKind::Title, 0)),
+            Some((ClipKind::Video, 0)),
+            Some((ClipKind::Audio, 0))
+        ]
+    );
 }
 
 #[test]
-fn add_clip_grows_tracks_to_cover_its_index() {
+fn add_clip_grows_its_kinds_lanes_to_cover_its_index() {
     let mut tl = Timeline::empty_project();
     tl.add_clip("a.mp4", ClipKind::Video, 2, 0.0, 2.0, 0.0);
-    assert_eq!(tl.track_labels.len(), 3);
+    assert_eq!(
+        tl.lanes,
+        Lanes {
+            titles: 1,
+            video: 3,
+            audio: 1
+        }
+    );
+    assert_eq!(tl.row(ClipKind::Audio, 0), 4);
 }
 
 #[test]
-fn insert_track_at_shifts_existing_clips_down() {
+fn a_lane_added_on_top_moves_only_its_kinds_clips_down() {
     let mut tl = Timeline::empty_project();
     let a = tl.add_clip("a.mp4", ClipKind::Video, 0, 0.0, 2.0, 0.0);
     let b = tl.add_clip("b.mp4", ClipKind::Audio, 0, 3.0, 2.0, 0.0);
-    let inserted = tl.insert_track_at(0);
-    assert_eq!(inserted, 0);
-    assert_eq!(tl.track_labels.len(), 2);
-    assert_eq!(tl.clip(a).unwrap().track, 1);
-    assert_eq!(tl.clip(b).unwrap().track, 1);
+    assert_eq!(tl.add_lane(ClipKind::Video, true), 0);
+    assert_eq!(tl.lanes.video, 2);
+    assert_eq!(
+        (tl.clip(a).unwrap().track, tl.clip(b).unwrap().track),
+        (1, 0)
+    );
     // The new top lane is free for the clip that asked for it.
-    tl.set_clip_track(a, 0);
+    assert!(tl.set_clip_track(a, 0));
     assert_eq!(tl.clip(a).unwrap().track, 0);
-    assert_eq!(tl.clip(b).unwrap().track, 1);
 }
 
 #[test]
-fn append_track_and_set_clip_track_grows() {
+fn a_clip_moves_only_to_a_lane_its_kind_has() {
     let mut tl = Timeline::empty_project();
     let a = tl.add_clip("a.mp4", ClipKind::Video, 0, 0.0, 2.0, 0.0);
-    let new_track = tl.append_track();
-    assert_eq!(new_track, 1);
-    tl.set_clip_track(a, new_track);
+    assert_eq!(tl.add_lane(ClipKind::Video, false), 1);
+    assert!(tl.set_clip_track(a, 1));
+    assert!(!tl.set_clip_track(a, 4), "no fifth video lane");
     assert_eq!(tl.clip(a).unwrap().track, 1);
-    // Setting beyond the end grows instead of losing the clip.
-    tl.set_clip_track(a, 4);
-    assert_eq!(tl.clip(a).unwrap().track, 4);
-    assert_eq!(tl.track_labels.len(), 5);
+    assert_eq!(tl.lanes.video, 2);
+}
+
+#[test]
+fn a_version_1_timeline_sorts_its_shared_lanes_by_kind_and_keeps_their_order() {
+    // Lanes as version 1 saved them: any kind on any lane, `track`
+    // counting all of them. Lane 0 shows over lane 2 where they overlap.
+    let mut tl = Timeline::new(30.0);
+    let mut put = |name: &str, kind, track, start| {
+        let id = tl.add_clip(name, kind, 0, start, 2.0, 0.0);
+        tl.clip_mut(id).unwrap().track = track;
+        id
+    };
+    let cutaway = put("cutaway", ClipKind::Video, 0, 1.0);
+    let caption = put("caption", ClipKind::Title, 0, 4.0);
+    let music = put("music", ClipKind::Audio, 1, 0.0);
+    let base = put("base", ClipKind::Video, 2, 0.0);
+    let lower = put("lower third", ClipKind::Title, 3, 1.0);
+    tl.lanes = Lanes::default();
+    tl.drop_empty_lanes();
+    tl.ensure_lanes();
+    let track = |id| tl.clip(id).unwrap().track;
+    assert_eq!([track(cutaway), track(base)], [0, 1]);
+    assert_eq!([track(caption), track(lower)], [0, 1]);
+    assert_eq!(track(music), 0);
+    assert_eq!(
+        tl.lanes,
+        Lanes {
+            titles: 2,
+            video: 2,
+            audio: 1
+        }
+    );
+    assert_eq!(tl.active_video(1.5).map(|clip| clip.id), Some(cutaway));
+    assert_eq!(tl.lane_overlaps(), vec![]);
 }
 
 #[test]
 fn split_preserves_source_and_levels() {
     let mut tl = Timeline::new(30.0);
-    let track = tl.add_track("A1");
+    let track = 0;
     let id = tl.add_media_clip(
         "song.mp3",
         ClipKind::Audio,
@@ -583,7 +633,7 @@ fn detach_audio_creates_linked_clip_and_silences_picture() {
     assert_eq!(sound.source_in, picture.source_in);
     assert_eq!(sound.source, picture.source);
     assert!((sound.volume - 0.6).abs() < f32::EPSILON);
-    assert_ne!(sound.track, picture.track);
+    assert!(!sound.same_lane(&picture));
 
     tl.move_clip(video, 5.0);
     assert_eq!(tl.clip(audio).unwrap().start, 5.0, "linked audio moves");

@@ -259,7 +259,7 @@ fn adding_all_scene_clips_reconstructs_the_source_in_order() {
                     _ => unreachable!(),
                 }
                 assert_eq!(app.timeline.clips.len(), (batch + 1) * count, "{route}");
-                assert_eq!(app.timeline.track_labels.len(), 1, "{route}: one free lane");
+                assert_eq!(app.timeline.lanes.video, 1, "{route}: one free lane");
                 let clips = &app.timeline.clips[batch * count..];
                 for (clip, pair) in clips.iter().zip(boundaries.windows(2)) {
                     assert_eq!(clip.track, 0, "{route}");
@@ -300,7 +300,8 @@ fn adding_all_scene_clips_reconstructs_the_source_in_order() {
         .try_add_asset_range_to_timeline(
             "/media/montage.mp4",
             "explicit lane",
-            Some(0),
+            // Row 1: the first video lane, under the title lane.
+            Some(1),
             3.045,
             0.2,
             0.01,

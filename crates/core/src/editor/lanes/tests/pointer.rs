@@ -52,7 +52,7 @@ fn does_not_snap_beyond_threshold() {
 
 #[test]
 fn a_click_parks_the_playhead_and_selects_what_is_under_it() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 3.0, 0.0, "a");
     let mut stage = Stage::new(timeline);
     let on_clip = stage.point(3.0, 0);
@@ -71,7 +71,7 @@ fn a_click_parks_the_playhead_and_selects_what_is_under_it() {
 
 #[test]
 fn a_ruler_drag_scrubs_and_leaves_clips_and_selection_alone() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("a", ClipKind::Video, 0, 0.0, 3.0, 0.0, "a");
     let mut stage = Stage::new(timeline);
     let before = stage.timeline.clone();

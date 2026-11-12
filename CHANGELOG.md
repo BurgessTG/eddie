@@ -41,6 +41,11 @@ keep editing by hand in the window.
 
 ### Changed
 
+- Titles, video and sound have lanes of their own, shown in that order
+  from the top, and a clip moves only between lanes of its kind. Scripts
+  count lanes within a kind (`track`, `setClipLane`). Projects are saved
+  as version 2; version 1 projects open with their lanes sorted by kind,
+  keeping which video shows where two overlap.
 - The window is drawn with [Rune](https://github.com/anomalyco/rune). egui
   is gone.
 - The built-in chat and model reviewer are removed. Curation is local:

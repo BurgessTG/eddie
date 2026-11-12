@@ -52,7 +52,7 @@ fn an_edit_that_leaves_clips_sharing_a_lane_is_refused() {
         format!("setClipLane({b}, 1); moveClip({b}, 2); setClipLane({b}, 0)"),
     ] {
         let error = run(&mut app, &code).unwrap_err();
-        assert!(error.contains("would overlap on lane 0"), "{error}");
+        assert!(error.contains("would overlap on video lane 0"), "{error}");
         assert!(
             error.contains("a.mp4") && error.contains("b.mp4"),
             "{error}"
@@ -391,5 +391,53 @@ fn undo_and_redo_step_through_console_edits() {
         app.timeline.clips.len(),
         3,
         "clearing the timeline is undoable"
+    );
+}
+
+#[test]
+fn titles_video_and_sound_keep_to_lanes_of_their_own_kind() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("a.mp4", 20.0, true));
+    app.assets.push(asset("music.wav", 20.0, false));
+    run(
+        &mut app,
+        "addAssetRange('a.mp4', 0, 0, 5); addAssetRange('music.wav', 0, 0, 5); \
+         addTitle('Over the picture', 1, 2);",
+    )
+    .unwrap();
+    let lane = |app: &Editor, name: &str| {
+        let clip = app.timeline.clips.iter().find(|c| c.name == name).unwrap();
+        (clip.kind, clip.track)
+    };
+    // Each is on lane 0 of its kind: a title over a picture needs no
+    // second lane.
+    assert_eq!(lane(&app, "a.mp4"), (ClipKind::Video, 0));
+    assert_eq!(lane(&app, "music.wav"), (ClipKind::Audio, 0));
+    assert_eq!(lane(&app, "Over the picture"), (ClipKind::Title, 0));
+    let id = |app: &Editor, name: &str| {
+        app.timeline
+            .clips
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .id
+    };
+
+    // A lane number counts within the clip's kind and grows its lanes.
+    let video = id(&app, "a.mp4");
+    run(&mut app, &format!("setClipLane({video}, 1)")).unwrap();
+    assert_eq!(lane(&app, "a.mp4"), (ClipKind::Video, 1));
+    assert_eq!(
+        (
+            app.timeline.lanes.titles,
+            app.timeline.lanes.video,
+            app.timeline.lanes.audio
+        ),
+        (1, 2, 1)
+    );
+    let tracks = run(&mut app, "return clips().map(c => c.kind + ' ' + c.track);").unwrap();
+    assert!(
+        tracks.contains("video 1") && tracks.contains("audio 0"),
+        "{tracks}"
     );
 }

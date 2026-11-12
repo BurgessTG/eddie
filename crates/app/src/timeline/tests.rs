@@ -24,10 +24,11 @@ fn window() -> (Runtime<Ui>, u64) {
     (rt, id)
 }
 
-/// The window point at `time` on lane `track`.
-fn at(rt: &Runtime<Ui>, time: f64, track: usize) -> (f32, f32) {
+/// The window point at `time` on `row`, counted from the top: the first
+/// title lane is row 0 and the first video lane row 1.
+fn at(rt: &Runtime<Ui>, time: f64, row: usize) -> (f32, f32) {
     let rect = window_rect(&rt.state).expect("the lanes are laid out");
-    let lane = lanes::lane_rect(rect, track);
+    let lane = lanes::lane_rect(rect, row);
     (
         lanes::x_at(&rt.state.editor.viewport, rect.content_left(), time),
         lane.top + TRACK_H / 2.0,
@@ -175,7 +176,7 @@ fn a_left_trim_with_the_magnet_on_survives_the_frames_after_it() {
     );
     // The whole window, editor pump included.
     let mut rt = crate::testing::window(ui);
-    let edge = at(&rt, 10.0, 0);
+    let edge = at(&rt, 10.0, 1);
     // Just inside B's left edge, three seconds to the right.
     press_drag_release(&mut rt, (edge.0 + 3.0, edge.1), (edge.0 + 147.0, edge.1));
     for _ in 0..10 {
@@ -236,9 +237,9 @@ fn the_magnet_butts_clips_together_only_while_it_is_on() {
         let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 6.0, 2.0, 0.0, "/b.mp4");
         rt.state.editor.viewport.magnet = magnet;
         rt.frame(FRAME);
-        let from = at(&rt, 2.6, 0);
+        let from = at(&rt, 2.6, 1);
         // Its end let go five points (about 0.1 s) short of the neighbour.
-        let to = at(&rt, 2.6 + (6.0 - 3.2345) - 5.0 / 48.0, 0);
+        let to = at(&rt, 2.6 + (6.0 - 3.2345) - 5.0 / 48.0, 1);
         press_drag_release(&mut rt, from, to);
         let timeline = &rt.state.editor.timeline;
         let (a, b) = (timeline.clip(a).unwrap(), timeline.clip(b).unwrap());

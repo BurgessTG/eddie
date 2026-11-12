@@ -225,9 +225,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   ID, `deleteClip` deletes the selected clip and fails when there is
   none.
 - **Place:** `addAsset(nameOrPath, at?)`, `addAssetRange(nameOrPath, at,
-  sourceIn, dur)`. A new clip lands on the first lane that is free for
-  its whole span. Read its lane as `track` in the next `state()`, or set
-  it with `setClipLane`.
+  sourceIn, dur)`. A new clip lands on the first lane of its kind that is
+  free for its whole span. Read its lane as `track` in the next `state()`,
+  or set it with `setClipLane`.
   - A name that two assets share is an error; pass the asset's `path`.
 - **Move and trim:** `moveClip(id, start)`, `setClipLane(id, lane)`,
   `insertTime(at, seconds)`, `closeGaps()`, `trimClip(id, left, right)`.
@@ -285,6 +285,10 @@ lane that is not a whole number, a negative time, a length of 0 or less.
 
 **Lanes and cutaways**
 
+- Titles, video and sound each have their own lanes. A clip's `track` and
+  `setClipLane` count only the lanes of its kind, from 0, so a title never
+  shares a lane with a picture. A lane number past the last one adds lanes
+  of that kind.
 - Where video overlaps, the lowest lane is the picture shown, and lane 0
   wins. A clip below full opacity fades to black; it never shows the lane
   underneath. There is no picture-in-picture.

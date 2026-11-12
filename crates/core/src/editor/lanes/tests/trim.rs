@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn a_body_drag_moves_and_an_edge_drag_trims_from_where_the_press_began() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 4.0, 1.0, "a");
     let mut stage = Stage::new(timeline);
     stage.port.magnet = false;
@@ -27,7 +27,7 @@ fn a_body_drag_moves_and_an_edge_drag_trims_from_where_the_press_began() {
 
 #[test]
 fn a_right_trim_stops_at_the_end_of_the_source() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("a", ClipKind::Video, 0, 0.0, 2.0, 1.0, "a.mp4");
     let mut stage = Stage::new(timeline);
     stage.port.magnet = false;
@@ -43,9 +43,9 @@ fn a_right_trim_stops_at_the_end_of_the_source() {
 
 #[test]
 fn a_short_clip_is_all_move_body_and_the_gap_between_lanes_is_nothing() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let short = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 0.2, 0.157, "scene");
-    timeline.append_track();
+    timeline.add_lane(ClipKind::Video, false);
     let mut stage = Stage::new(timeline);
     let before = stage.timeline.clone();
     let hover = |stage: &Stage, pos| {
@@ -69,7 +69,7 @@ fn a_short_clip_is_all_move_body_and_the_gap_between_lanes_is_nothing() {
 /// few points inside the header gutter, and that must still trim.
 #[test]
 fn a_clip_at_time_zero_trims_from_a_press_just_inside_the_header() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("full.mp4", ClipKind::Video, 1, 0.0, 20.0, 0.0, "full");
     let mut stage = Stage::new(timeline);
     let press = [VIEW.content_left() - 3.0, 99.0];
@@ -100,7 +100,7 @@ fn a_left_trim_moves_by_the_drag_and_keeps_the_end_fixed() {
 
     // After another clip, with the magnet on: the release once rippled
     // the trimmed clip back, taking the trim off its end as well.
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 1, 0.0, 10.0, 0.0, "a");
     let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 1, 12.0, 10.0, 0.0, "b");
     let mut stage = Stage::new(timeline);
@@ -145,7 +145,7 @@ fn touching_clips_each_trim_from_their_own_side_of_the_shared_edge() {
 #[test]
 fn short_clip_edges_still_trim_when_zoomed_in() {
     for left in [true, false] {
-        let mut timeline = Timeline::empty_project();
+        let mut timeline = Timeline::new(30.0);
         let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 1.0, 0.2, 0.157, "scene");
         let mut stage = Stage::new(timeline);
         stage.port = TimelineViewport {

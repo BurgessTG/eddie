@@ -330,21 +330,6 @@ impl Editor {
         self.status = format!("Removed {name} from the bin.");
     }
 
-    pub fn first_free_track(&mut self, at: f64, duration: f64) -> usize {
-        let end = at + duration;
-        for track in 0..self.timeline.track_labels.len() {
-            let blocked = self
-                .timeline
-                .clips
-                .iter()
-                .any(|c| c.track == track && c.start < end && at < c.end());
-            if !blocked {
-                return track;
-            }
-        }
-        self.timeline.append_track()
-    }
-
     /// Video of the other orientation never mixes into the project.
     /// Audio-only media fits any format.
     pub fn clashes_with_format(&self, info: &MediaInfo) -> bool {
@@ -370,25 +355,26 @@ impl Editor {
         clashing
     }
 
-    pub fn add_asset_to_timeline(&mut self, path: &str, track: Option<usize>, at: f64) {
+    /// Add a whole file at `at`. A drop passes the `row` it landed on.
+    pub fn add_asset_to_timeline(&mut self, path: &str, row: Option<usize>, at: f64) {
         let Some(asset) = self.asset(path) else {
             return;
         };
         let (name, duration) = (asset.info.name.clone(), asset.info.duration);
-        self.add_asset_range_to_timeline(path, &name, track, at, 0.0, duration);
+        self.add_asset_range_to_timeline(path, &name, row, at, 0.0, duration);
     }
 
     pub fn add_asset_range_to_timeline(
         &mut self,
         path: &str,
         title: &str,
-        track: Option<usize>,
+        row: Option<usize>,
         at: f64,
         source_in: f64,
         duration: f64,
     ) {
         if let Err(error) =
-            self.try_add_asset_range_to_timeline(path, title, track, at, source_in, duration)
+            self.try_add_asset_range_to_timeline(path, title, row, at, source_in, duration)
         {
             self.status = error;
         }
@@ -400,7 +386,7 @@ impl Editor {
         &mut self,
         path: &str,
         title: &str,
-        track: Option<usize>,
+        row: Option<usize>,
         at: f64,
         source_in: f64,
         duration: f64,
@@ -451,15 +437,12 @@ impl Editor {
         } else {
             ClipKind::Audio
         };
-        // An explicit drop lane wins (one past the end appends a
-        // lane); otherwise the first lane free at that span.
-        let track = match track {
-            Some(requested) => {
-                let track = requested.min(self.timeline.track_labels.len());
-                self.timeline.ensure_track(track);
-                track
-            }
-            None => self.first_free_track(at.max(0.0), duration),
+        // A drop on a lane of the clip's kind lands there; anything else
+        // goes to the first lane of its kind free at that span.
+        let (start, end) = (at.max(0.0), at.max(0.0) + duration);
+        let track = match row.and_then(|row| self.timeline.drop_lane(kind, row, start, end)) {
+            Some(track) => track,
+            None => self.timeline.free_lane(kind, start, end),
         };
         let id = self.timeline.add_media_clip(
             &name,

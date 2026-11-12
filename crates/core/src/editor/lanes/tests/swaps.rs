@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn a_drop_on_a_neighbour_swaps_places_and_a_drop_across_two_returns_home() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 0, 2.0, 6.0, 0.0, "a");
     let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 10.0, 6.0, 0.0, "b");
     let mut stage = Stage::new(timeline);
@@ -13,7 +13,7 @@ fn a_drop_on_a_neighbour_swaps_places_and_a_drop_across_two_returns_home() {
     assert!((stage.timeline.clip(a).unwrap().start - 10.0).abs() < 0.02);
     assert!((stage.timeline.clip(b).unwrap().start - 2.0).abs() < 0.02);
 
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 0, 2.0, 6.0, 0.0, "a");
     let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 10.0, 2.0, 0.0, "b");
     let c = timeline.add_media_clip("c.mp4", ClipKind::Video, 0, 12.0, 2.0, 0.0, "c");
@@ -33,7 +33,7 @@ fn move_drop_adjacent_unequal_clips_preserves_outer_span() {
         (0.4, 0.2, true),
         (0.4, 0.2, false),
     ] {
-        let mut timeline = Timeline::empty_project();
+        let mut timeline = Timeline::new(30.0);
         let left = timeline.add_media_clip(
             "left",
             ClipKind::Video,
@@ -95,7 +95,7 @@ fn move_drop_adjacent_unequal_clips_preserves_outer_span() {
 
 #[test]
 fn move_drop_adjacent_with_gap_preserves_gap_and_neighbors() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 0.4, 0.0, "a");
     let b = timeline.add_media_clip("b", ClipKind::Video, 0, 2.6, 0.2, 0.0, "b");
     let tail = timeline.add_media_clip("tail", ClipKind::Video, 0, 2.8, 1.0, 0.0, "tail");
@@ -122,7 +122,7 @@ fn move_drop_adjacent_with_gap_preserves_gap_and_neighbors() {
 #[test]
 fn move_drop_blocked_on_another_lane_reverts_exact_fractional_start() {
     for linked in [false, true] {
-        let mut timeline = Timeline::empty_project();
+        let mut timeline = Timeline::new(30.0);
         let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.157, 0.418, 0.157, "scene");
         if linked {
             timeline.detach_audio(id).unwrap();
@@ -147,10 +147,10 @@ fn move_drop_blocked_on_another_lane_reverts_exact_fractional_start() {
 
 #[test]
 fn move_drop_with_only_linked_audio_collision_reverts() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 1.0, 0.157, "scene");
     timeline.detach_audio(id).unwrap();
-    timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+    timeline.add_media_clip("blocker", ClipKind::Audio, 0, 4.0, 1.0, 0.0, "blocker");
     let before = timeline.clone();
     let mut stage = Stage::new(timeline);
     stage.port = TimelineViewport {
@@ -164,13 +164,14 @@ fn move_drop_with_only_linked_audio_collision_reverts() {
 
 #[test]
 fn move_drop_linked_swap_checks_both_linked_lanes_atomically() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 1.0, 0.157, "a");
     let b = timeline.add_media_clip("b", ClipKind::Video, 0, 4.0, 1.0, 1.237, "b");
     timeline.detach_audio(a).unwrap();
     let b_audio = timeline.detach_audio(b).unwrap();
-    timeline.set_clip_track(b_audio, 2);
-    timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+    timeline.add_lane(ClipKind::Audio, false);
+    assert!(timeline.set_clip_track(b_audio, 1));
+    timeline.add_media_clip("blocker", ClipKind::Audio, 0, 4.0, 1.0, 0.0, "blocker");
     let before = timeline.clone();
     let mut stage = Stage::new(timeline);
     stage.port = TimelineViewport {
@@ -187,7 +188,7 @@ fn move_drop_linked_swap_checks_both_linked_lanes_atomically() {
 
 #[test]
 fn move_drop_linked_swap_keeps_all_four_ranges() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a", ClipKind::Video, 0, 2.0, 0.2, 0.157, "a");
     let b = timeline.add_media_clip("b", ClipKind::Video, 0, 2.2, 0.4, 1.237, "b");
     let a_audio = timeline.detach_audio(a).unwrap();
@@ -220,10 +221,10 @@ fn move_drop_linked_swap_keeps_all_four_ranges() {
 
 #[test]
 fn move_drop_new_lane_with_linked_collision_reverts_without_growing() {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let id = timeline.add_media_clip("scene", ClipKind::Video, 0, 2.0, 1.0, 0.157, "scene");
     timeline.detach_audio(id).unwrap();
-    timeline.add_media_clip("blocker", ClipKind::Audio, 1, 4.0, 1.0, 0.0, "blocker");
+    timeline.add_media_clip("blocker", ClipKind::Audio, 0, 4.0, 1.0, 0.0, "blocker");
     let before = timeline.clone();
     let mut stage = Stage::new(timeline);
     stage.port = TimelineViewport {
@@ -241,7 +242,7 @@ fn dense_short_timeline_default_zoom_reorders_only_the_adjacent_pair() {
     for magnet in [false, true] {
         for drag_left in [false, true] {
             for (left_duration, right_duration) in [(0.2, 0.4), (0.4, 0.2)] {
-                let mut timeline = Timeline::empty_project();
+                let mut timeline = Timeline::new(30.0);
                 for i in 0..40 {
                     timeline.add_media_clip(
                         "prefix",
@@ -319,7 +320,7 @@ fn unequal_adjacent_center_drop_does_not_collide_with_unrelated_neighbors() {
     for magnet in [false, true] {
         for drag_left in [false, true] {
             let (left_duration, right_duration) = if drag_left { (0.6, 0.2) } else { (0.2, 0.6) };
-            let mut timeline = Timeline::empty_project();
+            let mut timeline = Timeline::new(30.0);
             timeline.add_media_clip("prefix", ClipKind::Video, 0, 1.5, 0.5, 0.0, "prefix");
             let left = timeline.add_media_clip(
                 "left",
@@ -373,7 +374,7 @@ fn unequal_adjacent_center_drop_does_not_collide_with_unrelated_neighbors() {
 /// A clip a little over a second long, as media lengths are, on lane 0
 /// at 2 s, and a neighbour at 6 s on the same lane.
 fn butting_fixture(magnet: bool) -> (Stage, ClipId, ClipId) {
-    let mut timeline = Timeline::empty_project();
+    let mut timeline = Timeline::new(30.0);
     let a = timeline.add_media_clip("a.mp4", ClipKind::Video, 0, 2.0, 1.2345, 0.0, "a");
     let b = timeline.add_media_clip("b.mp4", ClipKind::Video, 0, 6.0, 2.0, 0.0, "b");
     let mut stage = Stage::new(timeline);

@@ -113,6 +113,62 @@ fn a_second_import_reads_saved_waveform_peaks() {
 }
 
 #[test]
+fn a_version_1_project_opens_with_a_lane_per_kind_and_saves_as_version_2() {
+    let dir = std::env::temp_dir().join(format!("eddie-v1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // As version 1 wrote it: one list of lanes, shared by every kind. The
+    // title sat on the picture's lane, the music on the lane below.
+    let mut timeline = openreel_engine::Timeline::new(30.0);
+    for (name, kind, track) in [
+        ("Booth", ClipKind::Title, 0),
+        ("music", ClipKind::Audio, 1),
+        ("shot", ClipKind::Video, 0),
+    ] {
+        let id = timeline.add_clip(name, kind, 0, 0.0, 5.0, 0.0);
+        timeline.clip_mut(id).unwrap().track = track;
+    }
+    let mut old = serde_json::to_value(&timeline).unwrap();
+    old.as_object_mut().unwrap().remove("lanes");
+    old["track_labels"] = serde_json::json!(["Track 1", "Track 2"]);
+    let v1 = serde_json::json!({"version": 1, "media": [], "timeline": old}).to_string();
+    let path = dir.join("old.eddie");
+    std::fs::write(&path, v1).unwrap();
+    let mut app = Editor::headless();
+    app.open_project(&path).unwrap();
+    let lanes: Vec<_> = app
+        .timeline
+        .clips
+        .iter()
+        .map(|c| (c.kind, c.track))
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            (ClipKind::Title, 0),
+            (ClipKind::Audio, 0),
+            (ClipKind::Video, 0)
+        ]
+    );
+    assert_eq!(
+        app.timeline.lanes,
+        openreel_engine::Lanes {
+            titles: 1,
+            video: 1,
+            audio: 1
+        }
+    );
+    app.run_console("addTitle('Next', 0, 1);".to_owned());
+    app.save_project_to(&path).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    let mut reopened = Editor::headless();
+    reopened.open_project(&path).unwrap();
+    assert_eq!(reopened.timeline, app.timeline);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn saved_project_reopens_its_timeline_media_and_fresh_ids() {
     let dir = std::env::temp_dir().join(format!("eddie-project-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

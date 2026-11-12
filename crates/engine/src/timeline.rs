@@ -3,7 +3,10 @@
 use crate::{time_spec, Clip, ClipId, ClipKind, TitleStyle};
 
 mod edit;
+mod lanes;
 mod linked;
+
+pub use lanes::{Lanes, LANE_KINDS};
 
 /// Longest supported timeline, about 11.5 days. Loudness measurement and
 /// export planning walk the whole timeline, so a clip sent absurdly far out
@@ -51,7 +54,10 @@ impl Orientation {
 pub struct Timeline {
     pub fps: f64,
     pub orientation: Orientation,
-    pub track_labels: Vec<String>,
+    /// How many lanes titles, video and sound have (`lanes.rs`). A clip's
+    /// `track` counts within its kind's lanes.
+    #[serde(default)]
+    pub lanes: Lanes,
     pub clips: Vec<Clip>,
     next_id: ClipId,
 }
@@ -61,7 +67,7 @@ impl Timeline {
         Self {
             fps,
             orientation: Orientation::default(),
-            track_labels: Vec::new(),
+            lanes: Lanes::default(),
             clips: Vec::new(),
             next_id: 1,
         }
@@ -102,11 +108,14 @@ impl Timeline {
     pub fn lane_overlaps(&self) -> Vec<(ClipId, ClipId)> {
         let frame = 1.0 / self.fps;
         let mut by_lane: Vec<&Clip> = self.clips.iter().collect();
-        by_lane.sort_by(|a, b| a.track.cmp(&b.track).then(a.start.total_cmp(&b.start)));
+        by_lane.sort_by(|a, b| {
+            let row = |clip: &Clip| self.row(clip.kind, clip.track);
+            row(a).cmp(&row(b)).then(a.start.total_cmp(&b.start))
+        });
         let mut pairs = Vec::new();
         for (index, clip) in by_lane.iter().enumerate() {
             for other in &by_lane[index + 1..] {
-                if other.track != clip.track || other.start > clip.end() - frame + EDGE_EPSILON {
+                if !other.same_lane(clip) || other.start > clip.end() - frame + EDGE_EPSILON {
                     break;
                 }
                 if other.end() - other.start.max(clip.start) >= frame - EDGE_EPSILON {
@@ -146,58 +155,6 @@ impl Timeline {
             ((time * self.fps).round() - 1.0) / self.fps
         } else {
             snapped
-        }
-    }
-
-    pub fn add_track(&mut self, label: &str) -> usize {
-        self.track_labels.push(label.to_owned());
-        self.track_labels.len() - 1
-    }
-
-    fn relabel_tracks(&mut self) {
-        for (i, label) in self.track_labels.iter_mut().enumerate() {
-            *label = format!("Track {}", i + 1);
-        }
-    }
-
-    /// Grow the lane list until `track` exists. Lanes are
-    /// kind-agnostic and appear on demand (drops, drags, adds).
-    pub fn ensure_track(&mut self, track: usize) {
-        if self.track_labels.len() > track {
-            return;
-        }
-        while self.track_labels.len() <= track {
-            self.track_labels.push(String::new());
-        }
-        self.relabel_tracks();
-    }
-
-    /// Append one lane at the bottom. Returns its index.
-    pub fn append_track(&mut self) -> usize {
-        let index = self.track_labels.len();
-        self.ensure_track(index);
-        index
-    }
-
-    /// Insert a lane at `index`, shifting clips at or below it down
-    /// one lane. Returns the inserted index.
-    pub fn insert_track_at(&mut self, index: usize) -> usize {
-        let index = index.min(self.track_labels.len());
-        self.track_labels.insert(index, String::new());
-        for clip in &mut self.clips {
-            if clip.track >= index {
-                clip.track += 1;
-            }
-        }
-        self.relabel_tracks();
-        index
-    }
-
-    /// Move a clip to another lane, growing the lane list if needed.
-    pub fn set_clip_track(&mut self, id: ClipId, track: usize) {
-        self.ensure_track(track);
-        if let Some(clip) = self.clip_mut(id) {
-            clip.track = track;
         }
     }
 
@@ -251,7 +208,7 @@ impl Timeline {
         source_in: f64,
         source: Option<&str>,
     ) -> ClipId {
-        self.ensure_track(track);
+        self.grow_lanes(kind, track);
         let id = self.next_id;
         self.next_id += 1;
         self.clips.push(Clip {
@@ -321,19 +278,21 @@ impl Timeline {
         }
     }
 
-    /// Topmost video/title clip active at `time` (lowest track index wins).
+    /// Topmost video/title clip active at `time` (titles over video, then
+    /// the lowest lane).
     pub fn visible_clip_at(&self, time: f64) -> Option<&Clip> {
         self.clips
             .iter()
             .filter(|c| c.kind != ClipKind::Audio && c.contains(time))
-            .min_by_key(|c| c.track)
+            .min_by_key(|c| self.row(c.kind, c.track))
     }
 
-    /// Standard empty project: one lane. Lanes grow on demand as
-    /// clips are dropped or dragged above or below existing ones.
+    /// Standard empty project: one lane each for titles, video and
+    /// sound. More grow on demand as clips are added, dropped or dragged
+    /// past the first or last lane of their kind.
     pub fn empty_project() -> Self {
         let mut tl = Self::new(30.0);
-        tl.add_track("Track 1");
+        tl.ensure_lanes();
         tl
     }
 
@@ -344,10 +303,8 @@ impl Timeline {
 
     /// Fictional project kept for model tests.
     pub fn demo() -> Self {
-        let mut tl = Self::new(30.0);
-        let titles = tl.add_track("V2 · Titles");
-        let video = tl.add_track("V1 · Video");
-        let audio = tl.add_track("A1 · Audio");
+        let mut tl = Self::empty_project();
+        let (titles, video, audio) = (0, 0, 0);
         tl.add_clip(
             "A-Roll_Interview.mp4",
             ClipKind::Video,

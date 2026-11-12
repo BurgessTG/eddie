@@ -17,7 +17,9 @@ use super::media::AssetState;
 use super::sweep::{SweepData, SweepStatus};
 use super::Editor;
 
-const VERSION: u64 = 1;
+/// 2: titles, video and sound have lanes of their own (`Timeline::lanes`).
+/// Version 1 files open; their shared lanes are sorted by kind.
+const VERSION: u64 = 2;
 pub const EXTENSION: &str = "eddie";
 
 /// Split the paths an editor is asked to open (the command line, files
@@ -325,11 +327,16 @@ fn read_project(path: &Path) -> Result<(serde_json::Value, Timeline), String> {
     let unreadable = || format!("{name} is not an Eddie project.");
     let raw = std::fs::read(path).map_err(|error| format!("Couldn't open {name}: {error}"))?;
     let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| unreadable())?;
-    if value["version"].as_u64() != Some(VERSION) {
+    let version = value["version"].as_u64();
+    if !matches!(version, Some(1 | VERSION)) {
         return Err(unreadable());
     }
-    let timeline: Timeline =
+    let mut timeline: Timeline =
         serde_json::from_value(value["timeline"].take()).map_err(|_| unreadable())?;
+    if version == Some(1) {
+        timeline.drop_empty_lanes();
+    }
+    timeline.ensure_lanes();
     // A hand-edited or damaged file: a zero frame rate or a clip days
     // away would break every later calculation.
     if !timeline.in_supported_range() {

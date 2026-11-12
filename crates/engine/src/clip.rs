@@ -11,6 +11,17 @@ pub enum ClipKind {
     Title,
 }
 
+impl ClipKind {
+    /// The name scripts and project files use: `video`, `audio`, `title`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Title => "title",
+        }
+    }
+}
+
 /// Presentation style for title/caption clips. Preview and export
 /// interpret the same value so generated captions do not change
 /// appearance when rendered.

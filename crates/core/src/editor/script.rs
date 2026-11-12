@@ -70,9 +70,11 @@ impl Editor {
                     Some(clip) => format!("clip {id} ({})", clip.name),
                     None => format!("clip {id}"),
                 };
-                let lane = self.timeline.clip(a).map_or(0, |clip| clip.track);
+                let lane = self.timeline.clip(a).map_or(String::new(), |clip| {
+                    format!("{} lane {}", clip.kind.as_str(), clip.track)
+                });
                 return Err(format!(
-                    "{} and {} would overlap on lane {lane}; trim one, or move it in time or to another lane with setClipLane",
+                    "{} and {} would overlap on {lane}; trim one, or move it in time or to another lane with setClipLane",
                     describe(a),
                     describe(b)
                 ));

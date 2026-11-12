@@ -29,21 +29,7 @@ impl Timeline {
         if clip.kind != ClipKind::Video || !clip.embedded_audio || clip.linked_clip.is_some() {
             return None;
         }
-        let mut free_track = None;
-        for track in 0..self.track_labels.len() {
-            if track == clip.track {
-                continue;
-            }
-            let blocked = self
-                .clips
-                .iter()
-                .any(|c| c.track == track && c.start < clip.end() && clip.start < c.end());
-            if !blocked {
-                free_track = Some(track);
-                break;
-            }
-        }
-        let track = free_track.unwrap_or_else(|| self.append_track());
+        let track = self.free_lane(ClipKind::Audio, clip.start, clip.end());
         let audio_name = format!("{} (audio)", clip.name);
         let audio = self.add_clip_inner(
             &audio_name,

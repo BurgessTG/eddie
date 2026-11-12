@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use eddie_core::Editor;
 use eddie_core::editor::lanes::{
-    self, ClipHit, Gesture, HEADER_W, Point, Scene, TRACK_H, ViewRect,
+    self, ClipHit, Gesture, HEADER_W, Point, RULER_H, Scene, TRACK_GAP, TRACK_H, ViewRect,
 };
 use eddie_core::editor::media::BinAsset;
 use openreel_engine::format_timecode;
@@ -244,12 +244,23 @@ fn view(ui: &Ui) -> El {
         .size(lanes_w, height)
         .clip_soft(0.0)
         .inert();
-    for (track, label) in timeline.track_labels.iter().enumerate() {
-        let lane = lanes::lane_rect(rect, track);
+    for row in 0..timeline.lanes.len() {
+        let Some((kind, track)) = timeline.lane_at_row(row) else {
+            break;
+        };
+        let lane = lanes::lane_rect(rect, row);
         if lane.top > height {
             break;
         }
-        view = view.child(chrome::header(timeline, track, label, lane.top));
+        // A rule where one kind's lanes end and the next kind's begin.
+        if track == 0 && row > 0 {
+            view = view.child(
+                el().absolute(0.0, lane.top - TRACK_GAP / 2.0 - 0.5)
+                    .size(width, 1.0)
+                    .fill(c.border),
+            );
+        }
+        view = view.child(chrome::header(timeline, kind, track, row, lane.top));
         content = content.child(
             el().absolute(0.0, lane.top)
                 .size(lanes_w, TRACK_H)
@@ -332,13 +343,20 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
 
 /// The bottom dock. It takes 27% of the window, between 170 and 240
 /// points, and its least while the curator has the middle of the window.
+/// It grows to show every lane, up to 40% of the window: titles, video and
+/// sound always have one each.
 pub fn panel(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     let c = c();
     let window_h = cx.layout_size("kit-root").map_or(1080.0, |[_, h]| h);
     let height = if ui.editor.curator.open {
         170.0
     } else {
-        (window_h * 0.27).clamp(170.0, 240.0)
+        // Padding, the toolbar and the gap under it, the ruler, the lanes.
+        let rows = ui.editor.timeline.lanes.len() as f32;
+        let lanes = 20.0 + 30.0 + 14.0 + RULER_H + rows * (TRACK_H + TRACK_GAP);
+        (window_h * 0.27)
+            .clamp(170.0, 240.0)
+            .max(lanes.min(window_h * 0.4))
     };
     col()
         .key("timeline")

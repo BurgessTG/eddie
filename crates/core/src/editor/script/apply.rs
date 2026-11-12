@@ -141,9 +141,15 @@ impl Editor {
                 );
             }
             ScriptCommand::SetClipLane { clip, lane } => {
-                if self.timeline.clip(clip).is_none() || lane > 64 {
+                let Some(kind) = self.timeline.clip(clip).map(|clip| clip.kind) else {
+                    return Err(format!("cannot move clip {clip} to lane {lane}"));
+                };
+                if lane > 64 {
                     return Err(format!("cannot move clip {clip} to lane {lane}"));
                 }
+                // Lanes count within the clip's kind; a new number grows
+                // that kind's lanes.
+                self.timeline.grow_lanes(kind, lane as usize);
                 self.timeline.set_clip_track(clip, lane as usize);
             }
             ScriptCommand::UnlinkClip { clip } => {
@@ -187,7 +193,7 @@ impl Editor {
                     return Err(format!("addTitle needs a positive length, not {duration}"));
                 }
                 let style = title_style(&style)?;
-                let track = self.first_free_track(at, duration);
+                let track = self.timeline.free_lane(ClipKind::Title, at, at + duration);
                 let id = self
                     .timeline
                     .add_clip(&text, ClipKind::Title, track, at, duration, 0.0);

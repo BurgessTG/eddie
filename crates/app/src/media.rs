@@ -8,6 +8,7 @@ mod tile;
 
 use eddie_core::Action;
 use eddie_core::editor::media::{AssetState, BinAsset};
+use openreel_engine::ClipKind;
 use rune::{Color, Cursor, El, Phase, ScrollSpec, SurfaceFit, col, el, row, spacer, text};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
@@ -232,19 +233,29 @@ fn tiles(ui: &Ui, width: f32) -> El {
 pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
     let c = c();
     if let Some(drag) = &ui.bin_drag {
-        if let Some((track, _)) = timeline::drop_target(ui, drag.at) {
-            let lane = track.min(ui.editor.timeline.track_labels.len());
-            if let Some([x, y, w, h]) = timeline::lane_rect(ui, lane) {
-                overlays.push(
-                    el().key("bin-drop-lane")
-                        .absolute(x, y)
-                        .size(w, h)
-                        .radius(theme::R_MD)
-                        .fill(Color::WHITE.alpha(18.0 / 255.0))
-                        .border(1.5, c.ring)
-                        .inert(),
-                );
-            }
+        // The lane of the file's kind it would land on; none when it would
+        // get a new lane.
+        let lands = timeline::drop_target(ui, drag.at).and_then(|(row, at)| {
+            let info = &ui.editor.asset(&drag.path)?.info;
+            let kind = if info.has_video {
+                ClipKind::Video
+            } else {
+                ClipKind::Audio
+            };
+            let timeline = &ui.editor.timeline;
+            let track = timeline.drop_lane(kind, row, at, at + info.duration)?;
+            Some(timeline.row(kind, track))
+        });
+        if let Some([x, y, w, h]) = lands.and_then(|row| timeline::lane_rect(ui, row)) {
+            overlays.push(
+                el().key("bin-drop-lane")
+                    .absolute(x, y)
+                    .size(w, h)
+                    .radius(theme::R_MD)
+                    .fill(Color::WHITE.alpha(18.0 / 255.0))
+                    .border(1.5, c.ring)
+                    .inert(),
+            );
         }
         let [w, h] = drag.size;
         let mut ghost = el()
