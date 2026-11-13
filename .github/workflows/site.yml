@@ -1,0 +1,39 @@
+# Publishes site/ to GitHub Pages: Eddie's website. The page finds the
+# newest download itself, so a release or preview needs no new deploy.
+name: Site
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - site/**
+      - docs/screenshot.png
+      - packaging/macos/icon.png
+      - .github/workflows/site.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add the pictures
+        run: mkdir -p site/img && cp docs/screenshot.png packaging/macos/icon.png site/img/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

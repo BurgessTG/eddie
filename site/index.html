@@ -7,9 +7,9 @@
 <meta name="description" content="A fast native video editor for macOS and Linux. Import footage, let it find every shot and every word, and cut by hand or from any AI agent through the eddie command line.">
 <meta property="og:title" content="Eddie — the video editor your agent can drive">
 <meta property="og:description" content="A fast native video editor. Every shot found, every word transcribed, on your own computer. Cut by hand or from any agent.">
-<meta property="og:image" content="/img/screenshot.png">
+<meta property="og:image" content="img/screenshot.png">
 <meta name="theme-color" content="#09090B">
-<link rel="icon" type="image/png" href="/img/icon.png">
+<link rel="icon" type="image/png" href="img/icon.png">
 <style>
 :root {
   --bg: #09090B; --surface: #101013; --card: #18181B; --border: #27272A;
@@ -145,12 +145,12 @@ footer .right { margin-left: auto; }
 <body>
 <nav>
   <div class="wrap">
-    <a class="brand" href="/"><img src="/img/icon.png" alt="">Eddie</a>
+    <a class="brand" href="./"><img src="img/icon.png" alt="">Eddie</a>
     <div class="links">
       <a class="hide" href="#features" title="What Eddie does">Features</a>
       <a class="hide" href="#agents" title="Drive Eddie from an AI agent">Agents</a>
       <a href="#install" title="Install Eddie">Install</a>
-      <a href="{{repo}}" title="Eddie's source on GitHub">GitHub</a>
+      <a href="https://github.com/BurgessTG/eddie" title="Eddie's source on GitHub">GitHub</a>
     </div>
   </div>
 </nav>
@@ -161,18 +161,18 @@ footer .right { margin-left: auto; }
     <h1>The editor that <span class="grad">watches the footage</span> for you.</h1>
     <p class="lede">Eddie finds every shot and every spoken word in your footage, on your own computer. Cut it together by hand, or let any AI agent edit it while you watch.</p>
     <div class="cta">
-      {{download}}
+      <a class="btn primary" data-download href="https://github.com/BurgessTG/eddie/releases" title="Download Eddie for Apple Silicon Macs">Download for Mac</a>
       <a class="btn secondary" href="#install" title="Linux and other ways to install">Linux &amp; more</a>
     </div>
     <div class="meta">
-      <p>{{detail}}</p>
-      <p>{{preview}}</p>
+      <p data-detail>Apple Silicon · macOS 11 or later</p>
+      <p data-preview></p>
     </div>
 
     <div class="shot">
       <div class="frame">
         <div class="bar"><i></i><i></i><i></i></div>
-        <img src="/img/screenshot.png" width="1440" height="900" alt="The Eddie window: media bin, program monitor, clip details and a timeline with title, video and audio lanes">
+        <img src="img/screenshot.png" width="1440" height="900" alt="The Eddie window: media bin, program monitor, clip details and a timeline with title, video and audio lanes">
       </div>
     </div>
 
@@ -252,14 +252,14 @@ footer .right { margin-left: auto; }
       <div class="card">
         <h3>macOS</h3>
         <p>Apple Silicon, macOS 11 or later. Download, unzip and drag Eddie to Applications. Settings → Updates chooses releases or previews.</p>
-        {{download}}
-        <div class="meta" style="margin-top:12px">{{detail}}</div>
+        <a class="btn primary" data-download href="https://github.com/BurgessTG/eddie/releases" title="Download Eddie for Apple Silicon Macs">Download for Mac</a>
+        <div class="meta" style="margin-top:12px" data-detail>Apple Silicon · macOS 11 or later</div>
       </div>
       <div class="card">
         <h3>Linux</h3>
         <p>Wayland or X11. On Arch, this builds the latest master as a package with its desktop entry. AUR packages follow every release.</p>
-        <div class="copy"><code>mkdir eddie-pkg &amp;&amp; cd eddie-pkg &amp;&amp; curl -LO {{raw}}/packaging/aur-git/PKGBUILD &amp;&amp; makepkg -si</code><button type="button" title="Copy the command">Copy</button></div>
-        <p class="meta" style="margin:14px 0 0">Needs FFmpeg 9, ALSA, GTK 3, clang and cmake. See the <a href="{{repo}}#requirements">README</a>.</p>
+        <div class="copy"><code>mkdir eddie-pkg &amp;&amp; cd eddie-pkg &amp;&amp; curl -LO https://raw.githubusercontent.com/BurgessTG/eddie/master/packaging/aur-git/PKGBUILD &amp;&amp; makepkg -si</code><button type="button" title="Copy the command">Copy</button></div>
+        <p class="meta" style="margin:14px 0 0">Needs FFmpeg 9, ALSA, GTK 3, clang and cmake. See the <a href="https://github.com/BurgessTG/eddie#requirements">README</a>.</p>
       </div>
     </div>
   </section>
@@ -268,23 +268,69 @@ footer .right { margin-left: auto; }
     <h2>Cut faster. Check everything.</h2>
     <p class="sub" style="margin:0 auto 28px">Free and open source under MIT or Apache 2.0.</p>
     <div class="cta" style="margin-bottom:0">
-      {{download}}
-      <a class="btn secondary" href="{{repo}}" title="Eddie's source on GitHub">View on GitHub</a>
+      <a class="btn primary" data-download href="https://github.com/BurgessTG/eddie/releases" title="Download Eddie for Apple Silicon Macs">Download for Mac</a>
+      <a class="btn secondary" href="https://github.com/BurgessTG/eddie" title="Eddie's source on GitHub">View on GitHub</a>
     </div>
   </div>
 </main>
 
 <footer>
   <div class="wrap">
-    <a class="brand" href="/"><img src="/img/icon.png" alt="">Eddie</a>
-    <a href="{{releases}}" title="Every release and preview">Releases</a>
-    <a href="{{repo}}/blob/master/docs/agents.md" title="The guide agents follow">Agent guide</a>
-    <a href="{{repo}}/blob/master/CHANGELOG.md" title="What changed">Changelog</a>
+    <a class="brand" href="./"><img src="img/icon.png" alt="">Eddie</a>
+    <a href="https://github.com/BurgessTG/eddie/releases" title="Every release and preview">Releases</a>
+    <a href="https://github.com/BurgessTG/eddie/blob/master/docs/agents.md" title="The guide agents follow">Agent guide</a>
+    <a href="https://github.com/BurgessTG/eddie/blob/master/CHANGELOG.md" title="What changed">Changelog</a>
     <span class="right">MIT or Apache 2.0</span>
   </div>
 </footer>
 
 <script>
+// The newest Mac download, from GitHub's releases: the newest tagged
+// release, else the newest preview (each master commit CI passed). Without
+// an answer the buttons keep linking to the releases page.
+const REPO = "BurgessTG/eddie";
+const macZip = (release) =>
+  release?.assets.find((a) => a.name === "Eddie-macos-arm64.zip") ??
+  release?.assets.find((a) => a.name.endsWith("-macos-arm64.zip"));
+const megabytes = (bytes) => `${Math.round(bytes / 1e6)} MB`;
+
+function link(text, href) {
+  const a = document.createElement("a");
+  a.textContent = text;
+  a.href = href;
+  return a;
+}
+
+async function newest() {
+  const response = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`, {
+    headers: { accept: "application/vnd.github+json" },
+  });
+  if (!response.ok) return;
+  const list = await response.json();
+  const release = list.find((r) => !r.prerelease && !r.draft && macZip(r));
+  const preview = list.find((r) => r.tag_name === "preview" && macZip(r));
+  const main = release ?? preview;
+  if (!main) return;
+  const zip = macZip(main);
+  const name = release
+    ? `Eddie ${release.tag_name.replace(/^v/, "")}`
+    : preview.name.replace(/^Preview: /, "Preview ");
+  for (const a of document.querySelectorAll("[data-download]")) a.href = zip.browser_download_url;
+  for (const p of document.querySelectorAll("[data-detail]")) {
+    p.textContent = `${name} · Apple Silicon · macOS 11 or later · ${megabytes(zip.size)}`;
+  }
+  const line = document.querySelector("[data-preview]");
+  if (release && preview) {
+    line.append(link("The preview", macZip(preview).browser_download_url), " follows every change to master.");
+  } else if (!release) {
+    line.append(
+      "No tagged release yet: this is the newest master commit CI passed. ",
+      link("What changed", `https://github.com/${REPO}/commits/${preview.target_commitish}`),
+    );
+  }
+}
+newest().catch(() => {});
+
 for (const button of document.querySelectorAll(".copy button")) {
   button.addEventListener("click", async () => {
     await navigator.clipboard.writeText(button.previousElementSibling.textContent);

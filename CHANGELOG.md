@@ -45,8 +45,9 @@ keep editing by hand in the window.
   `master` commit that passed CI) or Off.
 - Download links that never change: each release and preview also carries
   `Eddie-macos-arm64.zip`, so `releases/latest/download/Eddie-macos-arm64.zip`
-  is always the newest release. `site/` is Eddie's website, which offers
-  the newest build.
+  is always the newest release.
+- Eddie's website, https://burgesstg.github.io/eddie/ (`site/`, published
+  to GitHub Pages), offers the newest Mac build.
 - `eddie editors` lists every running editor and the project it has open.
   A window whose project was never saved works on an untitled project in
   Eddie's settings folder, so agents reach it too; it used to have no

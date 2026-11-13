@@ -26,6 +26,9 @@ tested.
 
 ## Download
 
+[burgesstg.github.io/eddie](https://burgesstg.github.io/eddie/) always
+offers the newest build.
+
 - **Mac** (Apple Silicon, macOS 11 or later):
   [Eddie-macos-arm64.zip](https://github.com/BurgessTG/eddie/releases/latest/download/Eddie-macos-arm64.zip),
   the newest release, signed and notarized. Unzip it and move Eddie to

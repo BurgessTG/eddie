@@ -1,9 +1,0 @@
-# eddie's website (site/server.mjs). Deploy with `amp boxes deploy site`
-# from the checkout; it needs only Node, no packages.
-build: mkdir -p public/img && cp ../docs/screenshot.png ../packaging/macos/icon.png public/img/
-include: [../docs, ../packaging/macos]
-source: false
-artifacts: [server.mjs, public]
-services:
-  web:
-    command: node server.mjs
