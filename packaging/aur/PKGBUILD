@@ -2,6 +2,9 @@
 pkgname=eddie
 pkgver=0.2.0
 pkgrel=1
+# Commits on master at the tag, so Eddie can tell a newer build from this
+# one. The release workflow sets it.
+_build=
 pkgdesc="The editor that watches the footage for you: a native Rust video editor that AI agents can drive"
 arch=('x86_64')
 url="https://github.com/BurgessTG/eddie"
@@ -37,6 +40,7 @@ build() {
   # whisper.cpp and QuickJS embed __FILE__ paths.
   export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$srcdir=/build"
   export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$srcdir=/build"
+  export EDDIE_BUILD="$_build"
   # Local transcription on any Vulkan GPU; it runs on the CPU where there
   # is none. whisper.cpp's shaders need glslc (shaderc) to build.
   cargo build --frozen --release -p openreel-app --bin eddie --features vulkan

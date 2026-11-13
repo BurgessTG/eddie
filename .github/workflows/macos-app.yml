@@ -1,0 +1,134 @@
+# Builds Eddie.app on Apple Silicon, signed with the Developer ID and
+# notarized by Apple, for release.yml and preview.yml. It uploads the
+# `macos-app` artifact: the zip, and the FFmpeg sources the app is built
+# from (its GPL licence asks that they be offered with it).
+#
+# Repository secrets it needs (packaging/README.md says how to make them):
+#   MACOS_CERTIFICATE_P12       the Developer ID Application identity, a .p12, base64
+#   MACOS_CERTIFICATE_PASSWORD  its password
+#   APPSTORE_KEY_P8             an App Store Connect API key (.p8 text)
+#   APPSTORE_KEY_ID             its key ID
+#   APPSTORE_ISSUER_ID          its issuer ID
+name: Mac app
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit or tag to build
+        type: string
+        required: true
+    outputs:
+      build:
+        description: Commits on master at that ref; Eddie compares builds with it
+        value: ${{ jobs.app.outputs.build }}
+      version:
+        description: The workspace version
+        value: ${{ jobs.app.outputs.version }}
+
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      build: ${{ steps.build.outputs.build }}
+      version: ${{ steps.build.outputs.version }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: The signing secrets are set
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPSTORE_KEY_P8: ${{ secrets.APPSTORE_KEY_P8 }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+        run: |
+          missing=
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPSTORE_KEY_P8 APPSTORE_KEY_ID APPSTORE_ISSUER_ID; do
+            [ -n "$(printenv "$name")" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::These repository secrets are not set:$missing. packaging/README.md says how to make them."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          # The build number counts every commit.
+          fetch-depth: 0
+      - name: Build number
+        id: build
+        run: |
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+      - name: Build tools
+        run: brew install pkgconf cmake meson ninja
+      - name: Rust toolchain (the mise.toml pin)
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      - name: FFmpeg built before
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/ffmpeg-macos
+            target/ffmpeg-sources
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-11.0-${{ hashFiles('packaging/macos/ffmpeg.sh') }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-app
+      - name: Signing keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/eddie.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/identity.p12"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/identity.p12"
+          # codesign may use the key without asking.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            sed -n 's/^ *[0-9]*) [0-9A-F]* "\(Developer ID Application: .*\)"$/\1/p' | head -n 1)
+          [ -n "$identity" ] || { echo "::error::MACOS_CERTIFICATE_P12 holds no Developer ID Application identity"; exit 1; }
+          echo "EDDIE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+      - name: Build Eddie.app
+        env:
+          EDDIE_BUILD: ${{ steps.build.outputs.build }}
+        run: packaging/macos/bundle.sh
+      - name: The app says which build it is
+        run: |
+          target/release/Eddie.app/Contents/MacOS/eddie --version |
+            grep -F "eddie ${{ steps.build.outputs.version }} build ${{ steps.build.outputs.build }} (metal)"
+      - name: Notarize
+        env:
+          APPSTORE_KEY_P8: ${{ secrets.APPSTORE_KEY_P8 }}
+          EDDIE_NOTARY_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          EDDIE_NOTARY_ISSUER: ${{ secrets.APPSTORE_ISSUER_ID }}
+        run: |
+          export EDDIE_NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          printf '%s\n' "$APPSTORE_KEY_P8" > "$EDDIE_NOTARY_KEY"
+          zip=$(packaging/macos/notarize.sh)
+          rm -f "$EDDIE_NOTARY_KEY"
+          mkdir -p dist
+          mv "$zip" dist/
+      - name: FFmpeg's sources
+        run: |
+          cp target/release/Eddie.app/Contents/Resources/licenses/SOURCES.txt target/ffmpeg-sources/
+          tar -C target -cf "dist/Eddie-${{ steps.build.outputs.version }}-ffmpeg-sources.tar" ffmpeg-sources
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: dist/
+          if-no-files-found: error
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/eddie.keychain-db" 2>/dev/null || true

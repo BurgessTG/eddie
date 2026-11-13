@@ -4,6 +4,7 @@
 pub mod editor;
 pub mod scripting;
 pub mod shortcuts;
+pub mod update;
 
 pub use editor::{
     cli_main, Action, EditSnapshot, Editor, FrameEvents, NoPreview, PreviewSink, Wake,

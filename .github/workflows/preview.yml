@@ -1,0 +1,87 @@
+# Every master commit CI passes becomes the rolling `preview` pre-release:
+# the signed Mac app and an update.json. Eddie offers it only to those who
+# choose Updates → Previews in Settings; GitHub's "latest release", which
+# everyone else follows, stays the newest tag. Arch users get master through
+# eddie-git instead.
+#
+# Without the Mac signing secrets (macos-app.yml) it skips with a notice.
+name: Preview
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A newer commit replaces a preview still building.
+concurrency:
+  group: preview
+  cancel-in-progress: true
+
+jobs:
+  ready:
+    # Only a push to this repository's master that passed CI.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.secrets.outputs.ok }}
+      sha: ${{ steps.secrets.outputs.sha }}
+    steps:
+      - id: secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          APPSTORE_KEY_P8: ${{ secrets.APPSTORE_KEY_P8 }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if [ -n "$MACOS_CERTIFICATE_P12" ] && [ -n "$APPSTORE_KEY_P8" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No preview: the Mac signing secrets are not set (see packaging/README.md)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  app:
+    needs: ready
+    if: needs.ready.outputs.ok == 'true'
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      ref: ${{ needs.ready.outputs.sha }}
+    secrets: inherit
+
+  publish:
+    needs: [ready, app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ready.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-app
+          path: dist
+      - name: Replace the preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.ready.outputs.sha }}
+          BUILD: ${{ needs.app.outputs.build }}
+          VERSION: ${{ needs.app.outputs.version }}
+        run: |
+          zip="Eddie-$VERSION-build$BUILD-macos-arm64.zip"
+          mv "dist/Eddie-$VERSION-macos-arm64.zip" "dist/$zip"
+          base="https://github.com/$GITHUB_REPOSITORY"
+          packaging/release/manifest.sh "$VERSION" "$BUILD" "$SHA" \
+            "$base/commits/$SHA" "dist/$zip" "$base/releases/download/preview/$zip" > dist/update.json
+          gh release delete preview --cleanup-tag --yes 2>/dev/null || true
+          gh release create preview --target "$SHA" --prerelease --latest=false \
+            --title "Preview: $VERSION build $BUILD" \
+            --notes "Built from $SHA, a master commit CI passed. Less tried than a release. In Eddie, Settings → Updates → Previews installs these as they come." \
+            "dist/$zip" "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json

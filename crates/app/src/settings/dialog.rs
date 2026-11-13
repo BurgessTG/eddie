@@ -2,6 +2,7 @@
 
 use eddie_core::editor::settings::Settings;
 use eddie_core::editor::sweep::transcribe::Provider;
+use eddie_core::update::Channel;
 use openreel_engine::Orientation;
 use rune::{El, col, el, row, text};
 
@@ -104,6 +105,7 @@ fn rows(ui: &Ui) -> El {
         "A short, comma-separated list of names and terms, such as Eddie, Bothell. Local and OpenAI-compatible providers use it; it can also make other words worse.",
     ))
     .child(setting("Format", format(settings)))
+    .child(setting("Updates", updates(settings)))
 }
 
 fn hardware(settings: &Settings) -> El {
@@ -206,6 +208,35 @@ fn format(settings: &Settings) -> El {
                 Orientation::Portrait
             };
             segment.on_press(move |ui: &mut Ui| edit(ui, |settings| settings.format = format))
+        },
+    )
+}
+
+fn updates(settings: &Settings) -> El {
+    let help = |channel| match channel {
+        Channel::Releases => "Look for a new release once a day",
+        Channel::Previews => {
+            "Also offer each change to master that passed the tests: newer, and less tried"
+        }
+        Channel::Off => "Never look for updates",
+    };
+    let channels = Channel::ALL;
+    theme::segmented(
+        "settings-updates",
+        channels
+            .into_iter()
+            .map(|channel| {
+                (
+                    format!("settings-updates-{}", channel.as_str()),
+                    channel.label(),
+                    help(channel),
+                    settings.updates == channel,
+                )
+            })
+            .collect(),
+        move |index, segment| {
+            let channel = channels[index];
+            segment.on_press(move |ui: &mut Ui| edit(ui, |settings| settings.updates = channel))
         },
     )
 }

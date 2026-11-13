@@ -38,6 +38,13 @@ keep editing by hand in the window.
   macOS 11 or later. With `EDDIE_SIGN_IDENTITY` it is signed with a
   Developer ID, and `packaging/macos/notarize.sh` has Apple notarize it.
 - `EDDIE_FFMPEG` names the `ffmpeg` command to use.
+- Updates: the window looks for a newer Eddie at start and once a day, and
+  the status bar says when one is out. On a Mac it installs the signed,
+  notarized app in place and restarts into it; on Linux it points to the
+  package manager. Settings → Updates chooses Releases, Previews (each
+  `master` commit that passed CI) or Off.
+- Pushing a version tag publishes the release: the Mac app on GitHub and
+  both AUR packages (`.github/workflows/release.yml`).
 
 ### Changed
 

@@ -17,6 +17,7 @@ use crate::menus::Menu;
 use crate::theme::c;
 use crate::{
     console, details, dialogs, gallery, keys, media, menus, monitor, settings, shell, timeline,
+    updates,
 };
 
 /// The program monitor's picture. The editor copies each frame in; Rune
@@ -92,6 +93,8 @@ pub struct Ui {
     pub pending_discard: Option<Discard>,
     /// The open file dialog, answered on a worker thread.
     pub file_dialog: Option<PendingFileDialog>,
+    /// Newer releases, and an update being installed.
+    pub updates: updates::State,
     /// Set once the user chose to close without (or after) saving.
     quit: bool,
     /// A pointer gesture that edits the timeline is held, so undo waits.
@@ -125,6 +128,8 @@ impl Ui {
         });
         if headless_run() {
             ui.settle();
+        } else {
+            ui.updates = updates::State::published();
         }
         ui
     }
@@ -183,6 +188,7 @@ impl Ui {
             lanes: timeline::LaneInput::default(),
             pending_discard: None,
             file_dialog: None,
+            updates: updates::State::new(None),
             quit: false,
             pointer_held: false,
             last_input,
@@ -250,6 +256,7 @@ impl Ui {
             || self.editor.exporting()
             || self.editor.curating()
             || (self.editor.curator.open && self.gallery.busy())
+            || self.updates.busy()
     }
 
     /// Swap the playhead readout for a box holding it, selected, so typing
@@ -407,6 +414,8 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     gallery::sync(ui);
     settings::sync(ui);
     console::sync(ui);
+    let waker = ui.waker();
+    updates::sync(ui, waker);
     if ui.pump(clock)
         && asks_for_attention_only()
         && let Some(handle) = &ui.handle
@@ -415,6 +424,12 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         handle.focus();
     }
     if ui.quit {
+        if let Some(app) = ui.updates.take_relaunch()
+            && let Err(error) =
+                eddie_core::update::relaunch(&app, ui.editor.project_path.as_deref())
+        {
+            eprintln!("eddie: could not restart: {error}");
+        }
         tx.quit();
     }
     // Rune polls before it runs the frame's handlers, so what a key or the
@@ -426,6 +441,9 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         tx.wake_after(std::time::Duration::ZERO);
     }
     if let Some(after) = ui.editor.repaint_after() {
+        tx.wake_after(after);
+    }
+    if let Some(after) = updates::wake_in(ui) {
         tx.wake_after(after);
     }
     if ui.busy() {

@@ -1,0 +1,128 @@
+# Pushing a tag vX.Y.Z publishes Eddie X.Y.Z to everyone:
+#   1. check: the tag is the workspace version, and CHANGELOG.md has its notes.
+#   2. app: the signed, notarized Mac app (macos-app.yml).
+#   3. publish: a GitHub Release with the app, FFmpeg's sources and the
+#      update.json the app reads to find it.
+#   4. aur: the eddie and eddie-git AUR packages, after building eddie from
+#      the tag. Needs the AUR_SSH_KEY secret.
+# packaging/README.md lists the steps before the tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the workspace version, with notes
+        run: |
+          tag=${GITHUB_REF_NAME}
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::The tag is $tag but Cargo.toml says $version"
+            exit 1
+          fi
+          # The section under "## X.Y.Z", up to the next release.
+          awk -v heading="## $version" '
+            $0 == heading || index($0, heading " ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section headed \"## $version\""
+            exit 1
+          fi
+          if grep -q "^## $version (not released yet)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md still says $version is not released; date it"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  app:
+    needs: check
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      ref: ${{ github.ref }}
+    secrets: inherit
+
+  publish:
+    needs: app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ needs.app.outputs.build }}
+          VERSION: ${{ needs.app.outputs.version }}
+        run: |
+          tag=${GITHUB_REF_NAME}
+          zip="Eddie-$VERSION-macos-arm64.zip"
+          base="https://github.com/$GITHUB_REPOSITORY/releases"
+          packaging/release/manifest.sh "$VERSION" "$BUILD" "$GITHUB_SHA" \
+            "$base/tag/$tag" "dist/$zip" "$base/download/$tag/$zip" > dist/update.json
+          {
+            cat dist/notes.md
+            echo
+            echo "**Mac** (Apple Silicon, macOS 11 or later): download \`$zip\`, unzip it and move Eddie to Applications. Eddie updates itself after that."
+            echo
+            echo "**Arch Linux:** \`yay -S eddie\`, or \`eddie-git\` for every change to master."
+            echo
+            echo "\`Eddie-$VERSION-ffmpeg-sources.tar\` holds the sources of the FFmpeg built into the Mac app, which is under the GPL."
+          } > release-notes.md
+          gh release create "$tag" --verify-tag --title "Eddie $VERSION" \
+            --notes-file release-notes.md --latest \
+            "dist/$zip" "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json
+
+  aur:
+    needs: [app, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed base-devel git openssh pacman-contrib
+      - uses: actions/checkout@v4
+      - name: A user for makepkg, with the AUR key
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::error::The AUR_SSH_KEY secret is not set. packaging/README.md says how to make it."
+            exit 1
+          fi
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          ssh=/home/builder/.ssh
+          install -d -m 700 "$ssh"
+          printf '%s\n' "$AUR_SSH_KEY" > "$ssh/aur"
+          chmod 600 "$ssh/aur"
+          # aur.archlinux.org's ED25519 key, as the AUR's home page publishes
+          # it (SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4).
+          echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' > "$ssh/known_hosts"
+          printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/aur\n' > "$ssh/config"
+          chown -R builder:builder "$ssh"
+      - name: Publish
+        env:
+          BUILD: ${{ needs.app.outputs.build }}
+        run: |
+          sudo -u builder -H env AUR_BUILD=1 \
+            sh packaging/release/aur.sh "$GITHUB_REF_NAME" "$BUILD" /home/builder/aur

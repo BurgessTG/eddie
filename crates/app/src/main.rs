@@ -19,6 +19,7 @@ mod shell;
 mod testing;
 mod theme;
 mod timeline;
+mod updates;
 
 use std::path::PathBuf;
 

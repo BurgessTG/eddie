@@ -146,7 +146,14 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
             return Some(0);
         }
         "--version" | "-V" => {
-            println!("eddie {} ({})", env!("CARGO_PKG_VERSION"), gpu::BACKEND);
+            match crate::update::this_build().build {
+                Some(build) => println!(
+                    "eddie {} build {build} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    gpu::BACKEND
+                ),
+                None => println!("eddie {} ({})", env!("CARGO_PKG_VERSION"), gpu::BACKEND),
+            }
             return Some(0);
         }
         "new" => new(&args),

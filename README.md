@@ -216,6 +216,27 @@ from before the command line described below, and both packages wait for
 0.2.0 to be updated. Until then, build from this repository.
 [packaging/README.md](packaging/README.md) says how a release is cut.
 
+### Updates
+
+Pushing a version tag publishes a release: the signed Mac app on GitHub
+and both AUR packages. Every commit to `master` that passes CI also
+becomes the `preview` pre-release.
+
+The window looks for a newer Eddie when it starts and once a day after.
+Settings → Updates chooses which:
+
+- **Releases** (the default): tagged releases only.
+- **Previews**: releases, and each `master` commit that passed CI.
+- **Off**: never looks.
+
+When one is out, the status bar says so. On a Mac, its button downloads
+the app, checks that it was signed by the same Developer ID team and that
+macOS accepts it, then puts it in place of the running one; Restart opens
+it, asking to save changes first. On Linux the package manager owns the
+files, so the button opens the release notes: update with `yay -Syu` (add
+`--devel` for `eddie-git`). Builds made by hand from a checkout know their
+version but not their commit, so they are offered new versions only.
+
 ## Command line
 
 Agents and scripts drive Eddie from the command line. Each command does

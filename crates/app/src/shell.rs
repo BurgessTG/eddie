@@ -134,8 +134,9 @@ fn rate_health(shown: f64, target: f64) -> Color {
     }
 }
 
-/// Open `dir` in the desktop's file manager without blocking the UI.
-fn open_folder(dir: &Path) -> std::io::Result<()> {
+/// Open a folder or web address with the desktop's opener, without
+/// blocking the UI.
+pub fn open_externally(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -143,7 +144,7 @@ fn open_folder(dir: &Path) -> std::io::Result<()> {
     } else {
         "xdg-open"
     };
-    let mut child = std::process::Command::new(opener).arg(dir).spawn()?;
+    let mut child = std::process::Command::new(opener).arg(target).spawn()?;
     // Reap the launcher so it does not linger as a zombie.
     std::thread::spawn(move || child.wait());
     Ok(())
@@ -233,6 +234,9 @@ pub fn status_bar(ui: &Ui) -> El {
     if let Some((path, _)) = just_exported {
         bar = bar.child(el().w(4.0)).child(open_folder_button(path));
     }
+    if let Some(update) = crate::updates::control(ui) {
+        bar = bar.child(el().w(4.0)).child(update);
+    }
     bar
 }
 
@@ -299,7 +303,7 @@ fn open_folder_button(path: &Path) -> El {
         let Some(dir) = &dir else {
             return;
         };
-        if let Err(error) = open_folder(dir) {
+        if let Err(error) = open_externally(dir) {
             ui.editor.status = format!("Could not open the folder: {error}");
         }
     })

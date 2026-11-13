@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use openreel_engine::Orientation;
 
 use super::sweep::transcribe::{Provider, TranscribeSettings};
+use crate::update::Channel;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
@@ -21,6 +22,8 @@ pub struct Settings {
     pub hardware_decode: bool,
     /// Where speech becomes text: local whisper by default, or a cloud API.
     pub transcription: TranscribeSettings,
+    /// Which published updates the window looks for.
+    pub updates: Channel,
     /// The Meta key and endpoint the removed built-in AI saved at the top
     /// level (`api_key`, `base_url`). Kept so Meta transcription without its
     /// own key still works; there is no field for them any more.
@@ -106,6 +109,10 @@ impl Settings {
                 .unwrap_or_default(),
             hardware_decode: value["hardware_decode"].as_bool().unwrap_or(false),
             transcription: TranscribeSettings::from_json(&value["transcription"]),
+            updates: value["updates"]
+                .as_str()
+                .and_then(Channel::from_name)
+                .unwrap_or_default(),
             meta_api_key: text("api_key"),
             meta_base_url: text("base_url"),
         }
@@ -120,6 +127,7 @@ impl Settings {
             "format": self.format.as_str(),
             "hardware_decode": self.hardware_decode,
             "transcription": self.transcription.to_json(),
+            "updates": self.updates.as_str(),
         });
         if !self.meta_api_key.is_empty() {
             body["api_key"] = self.meta_api_key.clone().into();
@@ -357,12 +365,14 @@ mod tests {
                     settings.transcription(None).base_url,
                     "https://api.meta.ai/v1"
                 );
-                for (format, hardware) in [
-                    (Orientation::Landscape, false),
-                    (Orientation::Portrait, true),
+                assert_eq!(settings.updates, Channel::Releases, "the default");
+                for (format, hardware, updates) in [
+                    (Orientation::Landscape, false, Channel::Previews),
+                    (Orientation::Portrait, true, Channel::Off),
                 ] {
                     settings.format = format;
                     settings.hardware_decode = hardware;
+                    settings.updates = updates;
                     settings.save().unwrap();
                     assert_eq!(Settings::load(), settings, "settings round-trip");
                     let value: serde_json::Value =
@@ -376,7 +386,8 @@ mod tests {
                             "base_url",
                             "format",
                             "hardware_decode",
-                            "transcription"
+                            "transcription",
+                            "updates"
                         ],
                         "the removed model settings are dropped, the Meta key is kept"
                     );

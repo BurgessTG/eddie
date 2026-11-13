@@ -25,12 +25,48 @@ makepkg -si
 ## Cut a release
 
 1. Set `version` in the root `Cargo.toml`, run `cargo check` so
-   `Cargo.lock` follows, and date the release in `CHANGELOG.md`. Commit.
-2. Tag the commit `vX.Y.Z` and push the tag.
-3. In `aur/PKGBUILD` set `pkgver`, reset `pkgrel` to 1 and run `updpkgsums`.
-   Build it with `makepkg -s` and install the result.
-4. Copy the PKGBUILD to the AUR repository, run
-   `makepkg --printsrcinfo > .SRCINFO` there, commit both and push.
+   `Cargo.lock` follows, and date the release in `CHANGELOG.md`: its
+   heading becomes `## X.Y.Z (YYYY-MM-DD)`. Commit and push.
+2. Tag the commit `vX.Y.Z` and push the tag. `.github/workflows/release.yml`
+   does the rest:
+   - checks that the tag is the `Cargo.toml` version and that
+     `CHANGELOG.md` has its dated section, whose text becomes the notes;
+   - builds, signs and notarizes the Mac app (`macos-app.yml`);
+   - publishes the GitHub Release with the app, the FFmpeg sources and
+     `update.json`, and marks it latest, so every Eddie on Releases is
+     offered it within a day;
+   - builds `eddie` from the tag in an Arch container, then pushes both
+     AUR packages (`release/aur.sh`).
+
+Every `master` commit CI passes is published by `preview.yml` as the
+`preview` pre-release, replacing the one before. Only Eddies set to
+Updates → Previews look at it.
+
+`release/manifest.sh` writes `update.json`: the version, the build (the
+number of commits on `master`, which the app also carries as
+`EDDIE_BUILD`), the commit, the notes page, and the Mac zip's address,
+size and sha256. `release/aur.sh` can be run by hand; `DRY_RUN=1` shows
+what it would push.
+
+### Secrets
+
+The workflows need these repository secrets (Settings → Secrets and
+variables → Actions). Without the Mac ones `preview.yml` skips with a
+notice and a release fails before publishing anything.
+
+- `MACOS_CERTIFICATE_P12` and `MACOS_CERTIFICATE_PASSWORD`: the
+  Developer ID Application identity exported from Keychain Access as a
+  `.p12` with a password, then `base64 -i identity.p12 | pbcopy`.
+- `APPSTORE_KEY_P8`, `APPSTORE_KEY_ID` and `APPSTORE_ISSUER_ID`: an App
+  Store Connect API key with the Developer role (App Store Connect →
+  Users and Access → Integrations → App Store Connect API). The secret is
+  the text of the downloaded `.p8`. `notarytool` uses it in place of the
+  `eddie-notary` keychain profile.
+- `AUR_SSH_KEY`: a private SSH key without a passphrase whose public half
+  is on the AUR account that maintains `eddie` and `eddie-git` (My Account
+  → SSH Public Key). Make a new key for this only.
+
+`gh secret set NAME < file` sets one from a file without showing it.
 
 ## macOS
 

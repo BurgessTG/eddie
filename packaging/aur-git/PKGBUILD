@@ -42,6 +42,8 @@ build() {
   # whisper.cpp and QuickJS embed __FILE__ paths.
   export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$srcdir=/build"
   export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$srcdir=/build"
+  # Commits on master, so Eddie can tell a newer preview from this one.
+  export EDDIE_BUILD="$(git rev-list --count HEAD)"
   # Local transcription on any Vulkan GPU; it runs on the CPU where there
   # is none. whisper.cpp's shaders need glslc (shaderc) to build.
   cargo build --frozen --release -p openreel-app --bin eddie --features vulkan

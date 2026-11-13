@@ -35,6 +35,8 @@ pub enum Discard {
     /// Open this project: the system handed it over (Finder on macOS).
     OpenFile(PathBuf),
     New,
+    /// Leave, then start the updated app at this path.
+    Restart(PathBuf),
 }
 
 impl Ui {
@@ -190,6 +192,10 @@ impl Ui {
             Discard::Open => self.pick_and_open_project(),
             Discard::OpenFile(path) => self.open_project_at(&path),
             Discard::New => self.editor.new_project(),
+            Discard::Restart(app) => {
+                self.updates.relaunch = Some(app);
+                self.close();
+            }
         }
     }
 
