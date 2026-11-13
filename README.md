@@ -226,9 +226,8 @@ mkdir -p /tmp/eddie-pkg && cp packaging/aur-git/PKGBUILD /tmp/eddie-pkg/ && cd /
 makepkg -si
 ```
 
-The AUR has `eddie` and `eddie-git`. `eddie` is release 0.1.0, the editor
-from before the command line described below, and both packages wait for
-0.2.0 to be updated. Until then, build from this repository.
+Or from the AUR: `yay -S eddie` installs the newest release, and
+`eddie-git` builds `master`. Each release updates both.
 [packaging/README.md](packaging/README.md) says how a release is cut.
 
 ### Updates

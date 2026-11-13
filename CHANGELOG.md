@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (not released yet)
+## 0.2.0 (2026-11-13)
 
 Eddie no longer has an AI inside. It is an editor that any agent drives
 from outside, through a command line and a sandboxed script API, while you
