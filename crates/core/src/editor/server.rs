@@ -35,7 +35,9 @@ mod events;
 mod host;
 
 pub(super) use client::connect_in;
-pub use client::{connect, Connection};
+#[cfg(test)]
+pub(super) use client::editors_in;
+pub use client::{connect, editors, Connection};
 use events::Seen;
 
 /// One request line. Scripts are far smaller; this only bounds a bad client.
@@ -128,8 +130,14 @@ pub struct Server {
 
 impl Server {
     /// Listen in `dir` for `project`. Fails when another editor already
-    /// does.
-    pub fn bind(dir: &Path, project: &Path, window: bool, wake: Wake) -> Result<Self, String> {
+    /// does. `untitled` says the project is a window's untitled one.
+    pub fn bind(
+        dir: &Path,
+        project: &Path,
+        window: bool,
+        untitled: bool,
+        wake: Wake,
+    ) -> Result<Self, String> {
         let socket = socket_in(dir, project)?;
         let failed = |error: std::io::Error| format!("Couldn't listen for agents: {error}");
         std::fs::DirBuilder::new()
@@ -157,6 +165,8 @@ impl Server {
                 "event": "hello",
                 "project": canonical(project).to_string_lossy(),
                 "window": window,
+                "untitled": untitled,
+                "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
             })
         );

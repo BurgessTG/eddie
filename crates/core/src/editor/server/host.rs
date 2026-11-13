@@ -17,6 +17,7 @@ impl Editor {
     /// Keep a window's socket on its open project and answer requests.
     pub(crate) fn serve_requests(&mut self) {
         if self.listen {
+            self.keep_untitled();
             let bound = self.server.as_ref().map(Server::project);
             if bound != self.project_path.as_deref() {
                 self.server = None;
@@ -61,8 +62,9 @@ impl Editor {
         // The file first, then the socket: of two editors that start on a
         // socket a killed one left, only the file's holder replaces it.
         let bound = if self.hold_project() {
+            let untitled = self.is_untitled();
             self.socket_dir()
-                .and_then(|dir| Server::bind(dir, &project, true, self.wake.clone()))
+                .and_then(|dir| Server::bind(dir, &project, true, untitled, self.wake.clone()))
         } else {
             Err(held_elsewhere(&project))
         };
@@ -92,7 +94,13 @@ impl Editor {
         if !self.hold_project() {
             return Err(held_elsewhere(&project));
         }
-        let mut server = Server::bind(self.socket_dir()?, &project, false, self.wake.clone())?;
+        let mut server = Server::bind(
+            self.socket_dir()?,
+            &project,
+            false,
+            false,
+            self.wake.clone(),
+        )?;
         server.settle(self);
         let socket = server.socket().to_path_buf();
         self.server = Some(server);

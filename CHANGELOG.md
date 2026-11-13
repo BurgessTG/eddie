@@ -43,6 +43,10 @@ keep editing by hand in the window.
   notarized app in place and restarts into it; on Linux it points to the
   package manager. Settings → Updates chooses Releases, Previews (each
   `master` commit that passed CI) or Off.
+- `eddie editors` lists every running editor and the project it has open.
+  A window whose project was never saved works on an untitled project in
+  Eddie's settings folder, so agents reach it too; it used to have no
+  socket until the user saved.
 - Pushing a version tag publishes the release: the Mac app on GitHub and
   both AUR packages (`.github/workflows/release.yml`).
 

@@ -582,3 +582,86 @@ fn a_window_takes_a_served_project_over() {
     frames_until_listening(&mut late);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A window that was never saved is still reachable by agents: it works on
+/// an untitled project in Eddie's folder, which `eddie editors` lists and
+/// every command can name. Leaving it empty deletes the file; one an agent
+/// saved clips into stays.
+#[cfg(unix)]
+#[test]
+fn a_window_without_a_project_listens_on_an_untitled_one() {
+    let dir = std::env::temp_dir().join(format!("eddie-untitled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sockets = dir.join("run");
+    let untitled = dir.join("untitled");
+    // What a crash left: an empty untitled project, and one with work in it.
+    std::fs::create_dir_all(&untitled).unwrap();
+    let stale = untitled.join("Untitled 7.eddie");
+    Editor::headless().save_project_to(&stale).unwrap();
+    let mut worked = Editor::headless();
+    worked.run_console("addTitle('Kept', 0, 2);".to_owned());
+    let kept = untitled.join("Untitled 8.eddie");
+    worked.save_project_to(&kept).unwrap();
+    drop(worked);
+
+    let mut window = Editor::headless();
+    window.listen = true;
+    window.socket_dir = Some(sockets.clone());
+    window.untitled_dir = Some(untitled.clone());
+    frames_until_listening(&mut window);
+    let first = untitled.join("Untitled.eddie");
+    assert_eq!(window.project_path.as_deref(), Some(first.as_path()));
+    assert!(window.is_untitled());
+    assert!(!window.has_unsaved_changes(), "nothing to ask about yet");
+    assert_eq!(window.status, "Ready.", "making the file is not news");
+    assert!(!stale.exists(), "an empty leftover is cleared");
+    assert!(kept.exists(), "a leftover with clips stays");
+
+    let listed = server::editors_in(&sockets);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["project"], first.to_string_lossy().as_ref());
+    assert_eq!(listed[0]["window"], true);
+    assert_eq!(listed[0]["untitled"], true);
+    assert_eq!(listed[0]["pid"], std::process::id());
+    assert!(
+        server::connect_in(&sockets, &first).is_some(),
+        "commands reach it by the untitled path"
+    );
+
+    // Save as: the empty untitled file goes and the socket follows.
+    window.run_console("addTitle('Booth', 0, 2);".to_owned());
+    let named = dir.join("booth.eddie");
+    window.save_project_to(&named).unwrap();
+    frames_until_listening(&mut window);
+    assert!(!window.is_untitled());
+    assert!(!first.exists(), "it never held clips");
+    let listed = server::editors_in(&sockets);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["project"], named.to_string_lossy().as_ref());
+    assert_eq!(listed[0]["untitled"], false);
+
+    // New project: a fresh untitled one, under the first free name.
+    window.new_project();
+    frames_until_listening(&mut window);
+    assert_eq!(window.project_path.as_deref(), Some(first.as_path()));
+    assert!(server::connect_in(&sockets, &named).is_none());
+
+    // An agent's `save` writes clips into it: that file outlives the window.
+    window.run_console("addTitle('Agent cut', 0, 2);".to_owned());
+    window.save_project_to(&first).unwrap();
+    drop(window);
+    assert!(first.exists(), "work an agent saved is kept");
+    assert!(server::editors_in(&sockets).is_empty());
+
+    // An empty one goes with its window.
+    let mut empty = Editor::headless();
+    empty.listen = true;
+    empty.socket_dir = Some(sockets.clone());
+    empty.untitled_dir = Some(untitled.clone());
+    frames_until_listening(&mut empty);
+    let second = empty.project_path.clone().unwrap();
+    assert_eq!(second, untitled.join("Untitled 2.eddie"));
+    drop(empty);
+    assert!(!second.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

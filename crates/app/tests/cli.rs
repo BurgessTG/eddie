@@ -850,6 +850,12 @@ fn a_served_project_takes_every_command_live() {
     let clips = |dir: &Dir| dir.project()["timeline"]["clips"].as_array().unwrap().len();
 
     // These need an editor that stays open.
+    let (code, none) = dir.eddie(&["editors"]);
+    assert_eq!(
+        (code, &none["editors"]),
+        (0, &serde_json::json!([])),
+        "{none}"
+    );
     for command in ["undo", "redo", "save", "stop", "events"] {
         let (code, refused) = dir.eddie(&[command, "p.eddie"]);
         assert_eq!(code, 1, "{refused}");
@@ -871,6 +877,25 @@ fn a_served_project_takes_every_command_live() {
     let mode = |path: &Path| path.metadata().unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&socket), 0o600);
     assert_eq!(mode(socket.parent().unwrap()), 0o700);
+
+    // Agents find it without knowing the project.
+    let (code, listed) = dir.eddie(&["editors"]);
+    assert_eq!(code, 0, "{listed}");
+    let editors = listed["editors"].as_array().unwrap();
+    assert_eq!(editors.len(), 1, "{listed}");
+    assert_eq!(editors[0]["socket"], ready["socket"], "{listed}");
+    assert_eq!(
+        (&editors[0]["window"], &editors[0]["untitled"]),
+        (&false.into(), &false.into()),
+        "{listed}"
+    );
+    assert!(
+        editors[0]["project"]
+            .as_str()
+            .unwrap()
+            .ends_with("/p.eddie"),
+        "{listed}"
+    );
 
     // One editor per project.
     let (code, second) = dir.eddie(&["serve", "p.eddie"]);

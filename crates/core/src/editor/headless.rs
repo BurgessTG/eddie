@@ -62,6 +62,10 @@ Usage: eddie <command> <project.eddie> ...
                                      source times; clip:7 is the source range
                                      clip 7 shows
   export <project> <out.mp4>         render the timeline
+  editors                            every running Eddie (windows and serve)
+                                     with the project it has open; a window
+                                     not saved yet has an untitled project
+                                     in Eddie's folder, used like any other
   help                               this text and the script API
   guide                              the guide for agents: the API, the time
                                      grammar and the rules that prevent the
@@ -108,6 +112,7 @@ const COMMANDS: &[&str] = &[
     "redo",
     "save",
     "events",
+    "editors",
     "help",
     "guide",
 ];
@@ -159,6 +164,7 @@ pub fn cli_main(args: &[OsString]) -> Option<i32> {
         "new" => new(&args),
         "serve" => serve(&args),
         "events" => events(&args),
+        "editors" => editors(&args),
         _ => request(command, &args),
     };
     let (code, value) = match result {
@@ -503,6 +509,13 @@ fn serve(args: &[String]) -> Result<Value, String> {
     // Dropping the editor sends the answer to `stop` before this exits.
     drop(session);
     Ok(json!({ "ok": true, "stopped": project }))
+}
+
+fn editors(args: &[String]) -> Result<Value, String> {
+    if let Some(extra) = args.first() {
+        return Err(format!("editors takes no arguments, not {extra}"));
+    }
+    Ok(json!({ "ok": true, "editors": server::editors() }))
 }
 
 fn events(args: &[String]) -> Result<Value, String> {

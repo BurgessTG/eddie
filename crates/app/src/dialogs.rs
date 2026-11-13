@@ -56,9 +56,15 @@ impl Ui {
     }
 
     /// Save to the current project file, asking for one when there is none
-    /// (or always, for Save as). `then` runs once the save succeeds.
+    /// or it is the untitled one Eddie made (or always, for Save as).
+    /// `then` runs once the save succeeds.
     pub fn save_project(&mut self, ask: bool, then: Option<Discard>) {
-        match (&self.editor.project_path, ask) {
+        let named = self
+            .editor
+            .project_path
+            .as_ref()
+            .filter(|_| !self.editor.is_untitled());
+        match (named, ask) {
             (Some(path), false) => {
                 let path = path.clone();
                 self.save_project_at(&path, then);
@@ -232,6 +238,7 @@ pub fn unsaved(ui: &Ui, overlays: &mut Vec<El>) {
         .editor
         .project_path
         .as_deref()
+        .filter(|_| !ui.editor.is_untitled())
         .map_or_else(|| "this project".to_owned(), file_name);
     let cancel = |ui: &mut Ui| ui.pending_discard = None;
     let buttons = row()

@@ -51,6 +51,14 @@ While a project is open in the Eddie window or in `eddie serve`, every
 command goes to that editor instead of the project file. You call it the
 same way; replies add `"live":true`.
 
+- `eddie editors` lists every running editor: `{project, window,
+  untitled, pid, version, socket}`. Start there when the user says Eddie
+  is open: use its `project` as the project argument of every command.
+- A window whose project was never saved works on an untitled project in
+  Eddie's settings folder (`"untitled": true`). It takes every command
+  like any other. Only the user picks where it is saved: their Save asks
+  for a name. `eddie save` writes the untitled file, and a file with clips
+  is kept there after the window closes.
 - `eddie serve talk.eddie &` keeps a project open without a window. Start
   it when you will send more than a few commands: media stays loaded, so a
   command takes about 50 ms instead of about a second. It prints one line

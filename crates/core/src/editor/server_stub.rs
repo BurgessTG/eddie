@@ -21,6 +21,10 @@ pub fn connect(_project: &Path) -> Option<Connection> {
     None
 }
 
+pub fn editors() -> Vec<Value> {
+    Vec::new()
+}
+
 impl Connection {
     pub fn request(
         &mut self,

@@ -31,6 +31,42 @@ pub fn connect(project: &Path) -> Option<Connection> {
     connect_in(&socket_dir()?, project)
 }
 
+/// Every running editor this user can reach: each one's greeting
+/// (`project`, `window`, `untitled`, `pid`, `version`) and its `socket`.
+pub fn editors() -> Vec<Value> {
+    socket_dir().map_or_else(Vec::new, |dir| editors_in(&dir))
+}
+
+pub(crate) fn editors_in(dir: &Path) -> Vec<Value> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut editors: Vec<Value> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
+        .filter_map(|socket| {
+            // A socket a killed editor left does not answer.
+            let stream = UnixStream::connect(&socket).ok()?;
+            stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+            let mut hello = String::new();
+            BufReader::new(stream.take(LINE_LIMIT))
+                .read_line(&mut hello)
+                .ok()?;
+            let mut greeting: Value = serde_json::from_str(&hello).ok()?;
+            if greeting["event"] != "hello" {
+                return None;
+            }
+            let greeting = greeting.as_object_mut()?;
+            greeting.remove("event");
+            greeting.insert("socket".to_owned(), socket.to_string_lossy().into());
+            Some(Value::Object(greeting.clone()))
+        })
+        .collect();
+    editors.sort_by(|a, b| a["project"].as_str().cmp(&b["project"].as_str()));
+    editors
+}
+
 pub(crate) fn connect_in(dir: &Path, project: &Path) -> Option<Connection> {
     let stream = UnixStream::connect(socket_in(dir, project).ok()?).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;

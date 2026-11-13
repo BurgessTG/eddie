@@ -38,6 +38,7 @@ pub mod settings;
 mod silence;
 mod stills;
 pub mod sweep;
+mod untitled;
 pub mod viewport;
 
 pub use headless::cli_main;
@@ -278,6 +279,10 @@ pub struct Editor {
     pointer_held: bool,
     /// Where editors listen; tests use a folder of their own.
     socket_dir: Option<PathBuf>,
+    /// Where a window without a project makes an untitled one (`untitled`).
+    untitled_dir: Option<PathBuf>,
+    /// The untitled project this editor made, while it has it.
+    untitled: Option<PathBuf>,
 
     wake: Wake,
     /// The soonest a job in progress wants another frame without a wake.
@@ -305,6 +310,7 @@ impl Editor {
         editor.model_dir = sweep::transcribe::installed_model_dir();
         editor.manual_audio = false;
         editor.listen = true;
+        editor.untitled_dir = untitled::default_dir();
         editor
     }
 
@@ -406,6 +412,8 @@ impl Editor {
             listen_notice: None,
             pointer_held: false,
             socket_dir: server::socket_dir(),
+            untitled_dir: None,
+            untitled: None,
             wake,
             repaint_after: None,
         }
