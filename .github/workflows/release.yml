@@ -87,9 +87,13 @@ jobs:
             echo
             echo "\`Eddie-$VERSION-ffmpeg-sources.tar\` holds the sources of the FFmpeg built into the Mac app, which is under the GPL."
           } > release-notes.md
+          # The same zip under a name that never changes, so
+          # releases/latest/download/Eddie-macos-arm64.zip always works.
+          cp "dist/$zip" dist/Eddie-macos-arm64.zip
           gh release create "$tag" --verify-tag --title "Eddie $VERSION" \
             --notes-file release-notes.md --latest \
-            "dist/$zip" "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json
+            "dist/$zip" dist/Eddie-macos-arm64.zip \
+            "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json
 
   aur:
     needs: [app, publish]

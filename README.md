@@ -16,12 +16,24 @@ Codex, Amp, your own script) edits through the `eddie` command line and a
 sandboxed JavaScript API, and you keep editing by hand in the window. See
 [docs/agents.md](docs/agents.md).
 
-![The Eddie window: media bin, program monitor, clip details and a three-lane timeline](docs/screenshot.png)
+![The Eddie window: media bin, program monitor, clip details and a timeline with title, video and audio lanes](docs/screenshot.png)
 
 Eddie runs on Linux (Wayland and X11) and on macOS on Apple Silicon. On
 macOS it builds as `Eddie.app` with FFmpeg inside (see
-[macOS app](#macos-app)); it has only been run in virtual machines (macOS
-15.7 and 27.2). Intel Macs and Windows are not tested.
+[macOS app](#macos-app)); it has run on a MacBook Air M1 (macOS 26.6) and
+in virtual machines (macOS 15.7 and 27.2). Intel Macs and Windows are not
+tested.
+
+## Download
+
+- **Mac** (Apple Silicon, macOS 11 or later):
+  [Eddie-macos-arm64.zip](https://github.com/BurgessTG/eddie/releases/latest/download/Eddie-macos-arm64.zip),
+  the newest release, signed and notarized. Unzip it and move Eddie to
+  Applications; it updates itself after that.
+  [The preview](https://github.com/BurgessTG/eddie/releases/download/preview/Eddie-macos-arm64.zip)
+  is the newest `master` commit CI passed. Until the first release is
+  tagged, only the preview link works.
+- **Arch Linux:** see [Install on Arch](#install-on-arch).
 
 ## Features
 

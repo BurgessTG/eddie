@@ -80,8 +80,10 @@ jobs:
           base="https://github.com/$GITHUB_REPOSITORY"
           packaging/release/manifest.sh "$VERSION" "$BUILD" "$SHA" \
             "$base/commits/$SHA" "dist/$zip" "$base/releases/download/preview/$zip" > dist/update.json
+          cp "dist/$zip" dist/Eddie-macos-arm64.zip  # a link that never changes
           gh release delete preview --cleanup-tag --yes 2>/dev/null || true
           gh release create preview --target "$SHA" --prerelease --latest=false \
             --title "Preview: $VERSION build $BUILD" \
             --notes "Built from $SHA, a master commit CI passed. Less tried than a release. In Eddie, Settings → Updates → Previews installs these as they come." \
-            "dist/$zip" "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json
+            "dist/$zip" dist/Eddie-macos-arm64.zip \
+            "dist/Eddie-$VERSION-ffmpeg-sources.tar" dist/update.json
