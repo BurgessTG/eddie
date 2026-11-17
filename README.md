@@ -270,6 +270,7 @@ eddie sheet talk.eddie sheet.jpg                # the edit as labelled pictures
 eddie strip talk.eddie a.mp4 a.jpg              # 16 pictures through a source
 eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
 eddie export talk.eddie out.mp4
+eddie editors                                   # every running Eddie and its project
 eddie help                                      # commands and the script API
 eddie guide                                     # the guide for agents
 eddie --version                                 # the version and its transcription backend
@@ -297,7 +298,9 @@ talk.eddie` keeps a project open without a window, so media stays loaded
 between commands (about 50 ms each instead of about a second) and every
 change is saved; `eddie stop` ends it. `eddie undo` and `eddie redo` step
 the running editor's history, and `eddie events` prints one JSON line per
-change. The editor listens on a Unix socket only your user can open, under
+change. `eddie editors` lists every running editor; a window whose
+project was never saved works on an untitled project in Eddie's settings
+folder, so agents reach it too. The editor listens on a Unix socket only your user can open, under
 `$XDG_RUNTIME_DIR/eddie` (or `run/` beside the settings file); the
 protocol is in [docs/agents.md](docs/agents.md).
 
@@ -338,7 +341,7 @@ macOS.
 | `crates/engine` (`openreel-engine`) | UI-independent timeline model: lanes, linked clips, edits, titles, timecode. |
 | `crates/media` (`openreel-media`) | FFmpeg: probe, native decode and preview, audio mixer, scene detection, waveforms, thumbnails, export. |
 | `crates/core` (`eddie-core`) | The editor without a window: media bin, project, playback, undo, curation, transcription, the QuickJS scripting API and the `eddie` command line. |
-| `crates/app` (`openreel-app`, binary `eddie`) | The window over `eddie-core`, drawn with [Rune](https://github.com/anomalyco/rune): media bin, timeline, monitor, gallery, curator, settings. |
+| `crates/app` (`openreel-app`, binary `eddie`) | The window over `eddie-core`, drawn with [Rune](https://github.com/anomalyco/rune) (pinned to the fork [BurgessTG/rune](https://github.com/BurgessTG/rune), branch `eddie`, which adds the close and quit prompts): media bin, timeline, monitor, gallery, curator, settings. |
 
 ## Limitations
 
