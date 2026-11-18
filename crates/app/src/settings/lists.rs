@@ -1,7 +1,9 @@
-//! The Settings pick lists: speech providers and installed local models.
+//! The Settings pick lists: speech providers, installed local models and
+//! project formats.
 //! Each drops under its select and shuts on a pick, Esc or a press outside.
 
 use eddie_core::editor::sweep::transcribe::{self, Provider};
+use openreel_engine::Format;
 use rune::{Align, El, ScrollSpec, Side, col};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
@@ -32,6 +34,43 @@ pub(super) fn providers(ui: &Ui, overlays: &mut Vec<El>) {
             .anchored("settings-provider", Side::Bottom, Align::Start, 0.0)
             .modal(true, shut),
     );
+}
+
+pub(super) fn formats(ui: &Ui, overlays: &mut Vec<El>) {
+    let current = ui.editor.settings.format;
+    let shut = |ui: &mut Ui| ui.settings.formats_open = false;
+    overlays.push(rune_kit::scrim("settings-formats-scrim", shut));
+    overlays.push(
+        theme::popup("settings-formats")
+            .w(CONTROL_W)
+            .gap(6.0)
+            .children(Format::ALL.into_iter().map(|format| {
+                theme::option(
+                    format!("settings-format-{}", format.as_str()),
+                    format.label(),
+                    format_help(format),
+                    format == current,
+                )
+                .on_press(move |ui: &mut Ui| {
+                    ui.settings.formats_open = false;
+                    edit(ui, |settings| settings.format = format);
+                })
+            }))
+            .anchored("settings-format", Side::Bottom, Align::Start, 0.0)
+            .modal(true, shut),
+    );
+}
+
+pub(super) fn format_help(format: Format) -> &'static str {
+    match format {
+        Format::Original => "The shape of the first video on the timeline",
+        Format::Landscape => "Wide, for YouTube and screens",
+        Format::Portrait => "Tall, for TikTok, Reels and Shorts",
+        Format::Square => "Square, for feeds",
+        Format::Vertical => "Slightly tall, for Instagram and Facebook feeds",
+        Format::Classic => "Old TV and slide shape",
+        Format::Cinema => "Extra wide, for a film look",
+    }
 }
 
 pub(super) fn provider_key(provider: Provider) -> String {

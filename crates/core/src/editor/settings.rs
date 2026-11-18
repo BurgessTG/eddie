@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use openreel_engine::Orientation;
+use openreel_engine::Format;
 
 use super::sweep::transcribe::{Provider, TranscribeSettings};
 use crate::update::Channel;
@@ -14,7 +14,7 @@ use crate::update::Channel;
 pub struct Settings {
     /// Picture format for new and cleared projects; Settings also
     /// applies it to the open project.
-    pub format: Orientation,
+    pub format: Format,
     /// Preview playback of expensive files (HEVC, AV1, VP9, above 1440p)
     /// decodes on the GPU (VAAPI, or VideoToolbox on a Mac) when one is
     /// available. Off by default: errors fall back to software, but a
@@ -105,7 +105,7 @@ impl Settings {
         Self {
             format: value["format"]
                 .as_str()
-                .and_then(Orientation::from_name)
+                .and_then(Format::from_name)
                 .unwrap_or_default(),
             hardware_decode: value["hardware_decode"].as_bool().unwrap_or(false),
             transcription: TranscribeSettings::from_json(&value["transcription"]),
@@ -208,17 +208,14 @@ impl super::Editor {
         if self.settings == *before {
             return;
         }
-        let mut clashing = 0;
         if self.settings.format != before.format {
-            clashing = self.set_format(self.settings.format);
+            self.set_format(self.settings.format);
         }
         if self.settings.hardware_decode != before.hardware_decode {
             openreel_media::set_hardware_decode(self.settings.hardware_decode);
         }
         match self.settings.save() {
             Err(error) => self.status = error,
-            // Clips the new format leaves out of place are what to read.
-            Ok(()) if clashing > 0 => {}
             Ok(()) => self.status = "Settings saved.".to_owned(),
         }
     }
@@ -297,12 +294,12 @@ mod tests {
                 save_old("portrait");
                 // Read where it is until something moves it.
                 assert_eq!(config_path().unwrap(), old.join("config.json"));
-                assert_eq!(Settings::load().format, Orientation::Portrait);
+                assert_eq!(Settings::load().format, Format::Portrait);
 
                 adopt_old_config();
                 assert!(!old.exists(), "the whole folder moved");
                 assert_eq!(config_path().unwrap(), new.join("config.json"));
-                assert_eq!(Settings::load().format, Orientation::Portrait);
+                assert_eq!(Settings::load().format, Format::Portrait);
                 assert_eq!(
                     std::fs::read_to_string(new.join("whisper/model.bin")).unwrap(),
                     "model"
@@ -312,7 +309,7 @@ mod tests {
                 save_old("landscape");
                 adopt_old_config();
                 assert!(old.exists());
-                assert_eq!(Settings::load().format, Orientation::Portrait);
+                assert_eq!(Settings::load().format, Format::Portrait);
             },
         );
     }
@@ -328,7 +325,7 @@ mod tests {
                 let previous = path.with_file_name("previous.json");
                 std::fs::hard_link(&path, &previous).unwrap();
                 Settings::default().save().unwrap();
-                assert_eq!(Settings::load().format, Orientation::Landscape);
+                assert_eq!(Settings::load().format, Format::Original);
                 assert_eq!(
                     std::fs::read_to_string(previous).unwrap(),
                     original,
@@ -367,8 +364,8 @@ mod tests {
                 );
                 assert_eq!(settings.updates, Channel::Releases, "the default");
                 for (format, hardware, updates) in [
-                    (Orientation::Landscape, false, Channel::Previews),
-                    (Orientation::Portrait, true, Channel::Off),
+                    (Format::Landscape, false, Channel::Previews),
+                    (Format::Portrait, true, Channel::Off),
                 ] {
                     settings.format = format;
                     settings.hardware_decode = hardware;
@@ -432,9 +429,9 @@ mod tests {
     }
 
     #[test]
-    fn a_format_change_is_saved_and_reports_clips_it_leaves_out_of_place() {
+    fn a_format_change_is_saved_and_undoes_with_the_project() {
         with_isolated_config(
-            "editor::settings::tests::a_format_change_is_saved_and_reports_clips_it_leaves_out_of_place",
+            "editor::settings::tests::a_format_change_is_saved_and_undoes_with_the_project",
             |_| {
                 use crate::editor::media::{AssetState, BinAsset};
                 let mut editor = crate::Editor::headless();
@@ -468,20 +465,20 @@ mod tests {
                     .try_add_asset_range_to_timeline("/media/wide.mp4", "", None, 0.0, 0.0, 1.0)
                     .expect("landscape video fits the default project");
                 let before = editor.settings.clone();
-                editor.settings.format = Orientation::Portrait;
+                editor.settings.format = Format::Portrait;
                 editor.settings_changed(&before);
-                assert_eq!(editor.timeline.orientation, Orientation::Portrait);
-                assert_eq!(Settings::load().format, Orientation::Portrait);
-                assert_eq!(editor.status, "1 clip doesn't match the new format.");
+                assert_eq!(editor.timeline.format, Format::Portrait);
+                assert_eq!(Settings::load().format, Format::Portrait);
+                assert_eq!(editor.status, "Settings saved.");
 
                 // Undo takes the project back, and the setting shown with it.
                 editor.commit_history();
                 editor.perform(crate::Action::Undo);
-                assert_eq!(editor.timeline.orientation, Orientation::Landscape);
-                assert_eq!(editor.settings.format, Orientation::Landscape);
+                assert_eq!(editor.timeline.format, Format::Original);
+                assert_eq!(editor.settings.format, Format::Original);
                 editor.perform(crate::Action::Redo);
-                assert_eq!(editor.timeline.orientation, Orientation::Portrait);
-                assert_eq!(editor.settings.format, Orientation::Portrait);
+                assert_eq!(editor.timeline.format, Format::Portrait);
+                assert_eq!(editor.settings.format, Format::Portrait);
 
                 // An unchanged settings value writes and says nothing.
                 editor.status = "untouched".to_owned();

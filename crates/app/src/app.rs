@@ -1,7 +1,7 @@
 //! The window's state and its per-frame work around the editor: the editor
 //! pump, keys, actions, thumbnails and the root view.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use eddie_core::shortcuts::{self, Chord, KeyName};
 use eddie_core::{Action, Editor, PreviewSink, Wake};
-use openreel_media::RawFrame;
+use openreel_engine::{ClipId, Transform};
 use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 
 use crate::dialogs::{Discard, PendingFileDialog};
@@ -19,25 +19,6 @@ use crate::{
     console, details, dialogs, gallery, keys, media, menus, monitor, settings, shell, timeline,
     updates,
 };
-
-/// The program monitor's picture. The editor copies each frame in; Rune
-/// uploads it and wakes the window.
-struct MonitorSink {
-    pixels: Pixels,
-    size: Rc<Cell<Option<(u32, u32)>>>,
-}
-
-impl PreviewSink for MonitorSink {
-    fn show(&mut self, frame: &RawFrame) {
-        self.pixels
-            .set(frame.width, frame.height, frame.rgba.clone());
-        self.size.set(Some((frame.width, frame.height)));
-    }
-
-    fn clear(&mut self) {
-        self.size.set(None);
-    }
-}
 
 /// One filmstrip still of a bin asset: its source time and picture.
 pub struct Thumb {
@@ -54,6 +35,10 @@ pub struct Ui {
     pub monitor: Pixels,
     /// The size of the picture the monitor holds, while it holds one.
     pub monitor_size: Rc<Cell<Option<(u32, u32)>>>,
+    /// The monitor's last frame, upright, and the flips it shows.
+    pub monitor_picture: Rc<RefCell<monitor::Picture>>,
+    /// The clip whose picture a drag on the monitor moves, and where it was.
+    pub monitor_drag: Option<(ClipId, Transform)>,
     /// Filmstrip pictures by media path, taken from each finished import.
     pub thumbs: HashMap<String, Vec<Thumb>>,
 
@@ -150,21 +135,25 @@ impl Ui {
     ) -> Self {
         let monitor = Pixels::new();
         let monitor_size = Rc::new(Cell::new(None));
+        let monitor_picture = Rc::new(RefCell::new(monitor::Picture::default()));
         let wake = handle.clone();
         let gallery = gallery::State::new(move || {
             if let Some(handle) = &wake {
                 handle.wake();
             }
         });
-        let editor = editor(Box::new(MonitorSink {
+        let editor = editor(Box::new(monitor::Sink {
             pixels: monitor.clone(),
             size: Rc::clone(&monitor_size),
+            picture: Rc::clone(&monitor_picture),
         }));
         Self {
             editor,
             handle,
             monitor,
             monitor_size,
+            monitor_picture,
+            monitor_drag: None,
             thumbs: HashMap::new(),
             menu: None,
             show_media: true,
@@ -230,6 +219,9 @@ impl Ui {
         // A held slider is one edit, as a held clip is.
         self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
+        // A frame shown this pump with the last clip's flips is redrawn.
+        let flips = monitor::flips(self.editor.timeline.active_video(self.editor.playhead));
+        self.monitor_picture.borrow_mut().want(flips, &self.monitor);
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported

@@ -1,6 +1,7 @@
 //! A clip: one placed piece of video, audio or title text.
 
 use crate::fit_fades;
+use crate::place::{Background, Transform};
 
 pub type ClipId = u64;
 
@@ -118,6 +119,16 @@ pub struct Clip {
     /// `start + word - source_in`, so trims and splits keep them aligned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<f64>,
+    /// Video only: where the picture sits on the canvas (`place`).
+    #[serde(default, skip_serializing_if = "Transform::is_identity")]
+    pub transform: Transform,
+    /// Video only: what fills the canvas around the picture.
+    #[serde(default, skip_serializing_if = "is_black")]
+    pub background: Background,
+}
+
+fn is_black(background: &Background) -> bool {
+    *background == Background::Black
 }
 
 impl Clip {

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::thread;
 
-use openreel_engine::Orientation;
+use openreel_engine::Format;
 use openreel_media::MediaInfo;
 
 use super::export::ExportMsg;

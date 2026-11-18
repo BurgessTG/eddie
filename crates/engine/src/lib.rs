@@ -6,6 +6,7 @@
 mod clip;
 mod duck;
 mod fade;
+mod place;
 pub mod time_spec;
 mod timeline;
 
@@ -15,5 +16,8 @@ mod tests;
 pub use clip::{Clip, ClipId, ClipKind, TitleStyle};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};
+pub use place::{
+    fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
+};
 pub use time_spec::format_timecode;
-pub use timeline::{Lanes, Orientation, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS};
+pub use timeline::{orientation_name, Format, Lanes, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS};

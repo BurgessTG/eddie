@@ -3,7 +3,6 @@
 use eddie_core::editor::settings::Settings;
 use eddie_core::editor::sweep::transcribe::Provider;
 use eddie_core::update::Channel;
-use openreel_engine::Orientation;
 use rune::{El, col, el, row, text};
 
 use super::{
@@ -104,7 +103,7 @@ fn rows(ui: &Ui) -> El {
         "Names to spell right",
         "A short, comma-separated list of names and terms, such as Eddie, Bothell. Local and OpenAI-compatible providers use it; it can also make other words worse.",
     ))
-    .child(setting("Format", format(settings)))
+    .child(setting("Format", format(ui)))
     .child(setting("Updates", updates(settings)))
 }
 
@@ -183,33 +182,22 @@ fn model(ui: &Ui) -> El {
     }
 }
 
-fn format(settings: &Settings) -> El {
-    let landscape = settings.format == Orientation::Landscape;
-    theme::segmented(
+/// The project format; a press opens its list.
+fn format(ui: &Ui) -> El {
+    let format = ui.editor.settings.format;
+    theme::select(
         "settings-format",
-        vec![
-            (
-                "settings-landscape".to_owned(),
-                "Landscape",
-                "Wide project; portrait video is not added",
-                landscape,
-            ),
-            (
-                "settings-portrait".to_owned(),
-                "Portrait",
-                "Tall project; landscape video is not added",
-                !landscape,
-            ),
-        ],
-        |index, segment| {
-            let format = if index == 0 {
-                Orientation::Landscape
-            } else {
-                Orientation::Portrait
-            };
-            segment.on_press(move |ui: &mut Ui| edit(ui, |settings| settings.format = format))
-        },
+        format.label(),
+        &format!(
+            "The canvas shape for this project and new ones: {}. Video of any shape fits it; move and scale it in Details.",
+            super::lists::format_help(format).to_lowercase()
+        ),
+        theme::field_fill(),
+        ui.settings.formats_open,
+        true,
     )
+    .w(CONTROL_W)
+    .on_press(|ui: &mut Ui| ui.settings.formats_open = !ui.settings.formats_open)
 }
 
 fn updates(settings: &Settings) -> El {

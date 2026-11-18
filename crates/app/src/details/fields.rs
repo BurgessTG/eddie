@@ -18,10 +18,18 @@ pub enum Field {
     Volume,
     FadeIn,
     FadeOut,
+    Scale,
+    X,
+    Y,
+    Rotation,
+    CropLeft,
+    CropTop,
+    CropRight,
+    CropBottom,
 }
 
 impl Field {
-    const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 15] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -29,6 +37,14 @@ impl Field {
         Self::Volume,
         Self::FadeIn,
         Self::FadeOut,
+        Self::Scale,
+        Self::X,
+        Self::Y,
+        Self::Rotation,
+        Self::CropLeft,
+        Self::CropTop,
+        Self::CropRight,
+        Self::CropBottom,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -40,11 +56,27 @@ impl Field {
             Self::Volume => "details-volume",
             Self::FadeIn => "details-fade-in",
             Self::FadeOut => "details-fade-out",
+            Self::Scale => "details-scale",
+            Self::X => "details-x",
+            Self::Y => "details-y",
+            Self::Rotation => "details-rotation",
+            Self::CropLeft => "details-crop-left",
+            Self::CropTop => "details-crop-top",
+            Self::CropRight => "details-crop-right",
+            Self::CropBottom => "details-crop-bottom",
         }
     }
 
     fn percent(self) -> bool {
-        matches!(self, Self::Opacity | Self::Volume)
+        !matches!(
+            self,
+            Self::Start
+                | Self::Duration
+                | Self::SourceIn
+                | Self::FadeIn
+                | Self::FadeOut
+                | Self::Rotation
+        )
     }
 
     /// The clip's value in the unit the field shows: seconds or percent.
@@ -57,13 +89,25 @@ impl Field {
             Self::Volume => f64::from(clip.volume) * 100.0,
             Self::FadeIn => clip.fade_in,
             Self::FadeOut => clip.fade_out,
+            Self::Scale => clip.transform.scale * 100.0,
+            Self::X => clip.transform.x * 100.0,
+            Self::Y => clip.transform.y * 100.0,
+            Self::Rotation => clip.transform.rotation,
+            Self::CropLeft => clip.transform.crop_left * 100.0,
+            Self::CropTop => clip.transform.crop_top * 100.0,
+            Self::CropRight => clip.transform.crop_right * 100.0,
+            Self::CropBottom => clip.transform.crop_bottom * 100.0,
         }
     }
 
     fn show(self, clip: &Clip) -> String {
         let value = self.value(clip);
+        // Whole numbers, and no "-0%" from a hair left of centre.
+        let whole = || if value.abs() < 0.5 { 0.0 } else { value };
         if self.percent() {
-            format!("{value:.0}%")
+            format!("{:.0}%", whole())
+        } else if self == Self::Rotation {
+            format!("{:.0}°", whole())
         } else {
             format!("{value:.2} s")
         }
@@ -74,6 +118,8 @@ impl Field {
         let typed = typed.trim();
         let number = if self.percent() {
             typed.strip_suffix('%').unwrap_or(typed)
+        } else if self == Self::Rotation {
+            typed.strip_suffix('°').unwrap_or(typed)
         } else {
             typed.strip_suffix('s').unwrap_or(typed)
         };
@@ -93,6 +139,14 @@ impl Field {
             Self::Volume => editor.set_clip_volume(id, (value / 100.0) as f32),
             Self::FadeIn => editor.set_clip_fades(id, Some(value), None),
             Self::FadeOut => editor.set_clip_fades(id, None, Some(value)),
+            Self::Scale => editor.edit_clip_transform(id, |t| t.scale = value / 100.0),
+            Self::X => editor.edit_clip_transform(id, |t| t.x = value / 100.0),
+            Self::Y => editor.edit_clip_transform(id, |t| t.y = value / 100.0),
+            Self::Rotation => editor.edit_clip_transform(id, |t| t.rotation = value),
+            Self::CropLeft => editor.edit_clip_transform(id, |t| t.crop_left = value / 100.0),
+            Self::CropTop => editor.edit_clip_transform(id, |t| t.crop_top = value / 100.0),
+            Self::CropRight => editor.edit_clip_transform(id, |t| t.crop_right = value / 100.0),
+            Self::CropBottom => editor.edit_clip_transform(id, |t| t.crop_bottom = value / 100.0),
         }
     }
 }

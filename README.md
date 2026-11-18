@@ -49,8 +49,10 @@ offers the newest build.
   dragging a clip past the first or last lane of its kind creates another.
   Move, trim, split, swap adjacent clips and move clips between lanes of
   their kind. The magnet snaps edges while dragging.
-- Landscape or portrait projects (Settings → Format). Video of the other
-  orientation can't be placed.
+- Any video on any canvas: the first video's shape, 16:9, 9:16, 1:1,
+  4:5, 4:3 or 21:9 (Settings → Format). Scale, move, rotate, flip and crop
+  each picture in Details or by dragging it on the monitor, over black or
+  a blurred copy of itself.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
   can duck under speech.

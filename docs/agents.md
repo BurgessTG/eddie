@@ -172,14 +172,16 @@ fails, the project is left exactly as it was.
 ### Reading the project
 
 `state()` returns `{playhead, playing, selected, duration, fps, magnet,
-musicBedMuted, format, clips, assets, sweepCandidates, sceneClips,
-transcriptSegments, inspection, audio}`. The shortcuts `clips()`,
+musicBedMuted, format, formats, canvas, clips, assets, sweepCandidates,
+sceneClips, transcriptSegments, inspection, audio}`. `canvas` is the
+picture size export renders, `[width, height]`. The shortcuts `clips()`,
 `assets()`, `sweepCandidates()`, `sceneClips()`, `transcriptSegments()`,
 `inspect()` and `audioReport()` return its parts.
 
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
-  smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle`.
+  smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
+  transform, background`.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -255,6 +257,21 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   bool)`, `detachAudio(id)`, `unlinkClip(id)`.
   - `gain` is linear, from 0 to 2: 1 leaves the clip as recorded, 0.5 is
     about 6 dB quieter, 0.25 about 12 dB.
+- **Canvas and framing:** video of any shape goes on any canvas. Each
+  picture fits inside the canvas, centred, until you move it.
+  - `setFormat(name)` sets the canvas shape: `original` (the shape of the
+    picture that starts first; the default), `landscape` (16:9),
+    `portrait` (9:16), `square`, `vertical` (4:5), `classic` (4:3),
+    `cinema` (21:9), or a ratio such as `'9:16'`.
+  - `setTransform(id, {...})` places a video clip's picture. It changes
+    only the fields you give; `null` resets them all. `scale`: 1 fits,
+    `'fill'` covers the canvas and cuts off the overflow. `x`, `y`: the
+    centre's offset in canvas widths and heights, right and down
+    positive. `rotation`: clockwise degrees. `flipH`, `flipV`. `cropLeft`,
+    `cropTop`, `cropRight`, `cropBottom`: the share of the source cut
+    from each edge, before any flip.
+  - `setBackground(id, 'blur')` fills the canvas around the picture with
+    a blurred, enlarged copy of it; `'black'` is the default.
 - **Pauses:** `tightenSilence(id, threshold?, minSilence?, padding?)`
   removes each pause of `minSilence` seconds or more (0.35 by default)
   and keeps `padding` seconds (0.08) at each cut. Leave `threshold` out
@@ -298,7 +315,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   shares a lane with a picture. A lane number past the last one adds lanes
   of that kind.
 - Where video overlaps, the lowest lane is the picture shown, and lane 0
-  wins. A clip below full opacity fades to black; it never shows the lane
+  wins. A clip below full opacity fades to black, and a picture smaller
+  than the canvas has its background around it; neither shows the lane
   underneath. There is no picture-in-picture.
 - To cut away from a long take and keep its sound:
   1. `setClipLane(base, 1)`.
@@ -344,8 +362,6 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   news bars from an earlier edit. Don't place them unless that text is
   wanted. Local curation does not detect burned-in text; only curations
   saved by the old reviewer carry this tag.
-- Video whose orientation differs from the project `format` can't be
-  added.
 
 **Sound**
 
@@ -371,7 +387,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
 
 - `inspect()` findings are facts, not taste. A deliberate gap or flash
   can stay. The kinds are:
-  - missing media and orientation clashes;
+  - missing media;
+  - pictures moved entirely off the canvas;
   - source ranges outside their source;
   - fades longer than the clip;
   - placed on-screen text;

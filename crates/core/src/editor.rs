@@ -332,7 +332,7 @@ impl Editor {
             Ok(engine) => (Some(engine), vec!["Eddie JS. help()".to_owned()]),
             Err(e) => (None, vec![format!("Scripting unavailable: {e}")]),
         };
-        let timeline = Timeline::empty_project().with_orientation(settings.format);
+        let timeline = Timeline::empty_project().with_format(settings.format);
         Self {
             history: history::History::new(&timeline),
             saved_timeline: timeline.clone(),
@@ -495,7 +495,7 @@ impl Editor {
         self.set_playing(false);
         self.playhead = self.playhead.min(self.timeline.end());
         // A format change is a step too; Settings shows the project's format.
-        self.settings.format = self.timeline.orientation;
+        self.settings.format = self.timeline.format;
         self.forget_stills();
         self.status = if redo {
             "Redid the edit."
@@ -600,7 +600,7 @@ impl Editor {
     /// Empty the timeline and keep the bin and the project's format.
     pub fn clear_timeline(&mut self) {
         self.set_playing(false);
-        self.timeline = Timeline::empty_project().with_orientation(self.timeline.orientation);
+        self.timeline = Timeline::empty_project().with_format(self.timeline.format);
         self.selected = None;
         self.playhead = 0.0;
         self.forget_stills();

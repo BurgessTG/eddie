@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use openreel_engine::{Clip, ClipKind, Orientation, Timeline};
+use openreel_engine::{Clip, ClipKind, Timeline};
 
-use crate::{scaled_height, MediaInfo, MediaResult};
+use crate::{MediaInfo, MediaResult};
 use audio::encode_audio;
 use scratch::ScratchDir;
 use titles::Titles;
@@ -55,31 +55,27 @@ fn export_error(stderr: &str) -> String {
     )
 }
 
-/// Canvas for the project format: the largest source of that orientation
-/// (width capped at 1920), or 1280×720 / 720×1280 without one. Sources of
-/// the other orientation never set the size. The program monitor uses the
-/// same canvas, so titles and pillarboxing preview as exported.
-pub fn export_canvas(
-    orientation: Orientation,
-    sources: impl Iterator<Item = (u32, u32)>,
-) -> (u32, u32) {
-    sources
-        .filter(|&(w, h)| Orientation::of(w, h) == orientation)
-        .fold(None, |best: Option<(u32, u32)>, s| {
-            let area = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
-            match best {
-                Some(b) if area(b) >= area(s) => Some(b),
-                _ => Some(s),
-            }
-        })
-        .map(|(width, height)| {
-            let w = width.min(1920) / 2 * 2;
-            (w, scaled_height(width, height, w))
-        })
-        .unwrap_or(match orientation {
-            Orientation::Landscape => (1280, 720),
-            Orientation::Portrait => (720, 1280),
-        })
+/// Canvas for the project format: its shape, with a short side as long as
+/// the largest video source's (at most 1080), or 720 without one.
+/// `Format::Original` takes the shape of the picture that starts first
+/// (the lower lane on a tie), or 16:9. `size` gives a source's displayed
+/// size. Every clip fits this canvas by its transform; the program monitor
+/// uses the same canvas, so pictures and titles preview as exported.
+pub fn export_canvas(timeline: &Timeline, size: impl Fn(&str) -> Option<(u32, u32)>) -> (u32, u32) {
+    let mut pictures: Vec<(&Clip, (u32, u32))> = timeline
+        .clips
+        .iter()
+        .filter(|clip| clip.kind == ClipKind::Video)
+        .filter_map(|clip| Some((clip, size(clip.source.as_deref()?)?)))
+        .collect();
+    pictures.sort_by(|(a, _), (b, _)| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+    let short = pictures
+        .iter()
+        .map(|(_, (w, h))| *w.min(h))
+        .max()
+        .map_or(720, |short| short.min(1080));
+    let first = pictures.first().map_or((1280, 720), |(_, size)| *size);
+    timeline.format.canvas(short, first)
 }
 
 /// How export treats the audio mix.
@@ -132,13 +128,9 @@ pub fn export_timeline(
         .filter(|c| c.kind == ClipKind::Title)
         .collect();
 
-    let (canvas_w, canvas_h) = export_canvas(
-        timeline.orientation,
-        video_clips
-            .iter()
-            .filter_map(|c| infos.get(c.source.as_ref()?))
-            .map(|i| (i.width, i.height)),
-    );
+    let (canvas_w, canvas_h) = export_canvas(timeline, |path| {
+        infos.get(path).map(|i| (i.width, i.height))
+    });
 
     let font = font_file();
     let titles = Titles {
@@ -281,39 +273,50 @@ fn argument_path(path: &Path) -> std::borrow::Cow<'_, Path> {
 #[cfg(test)]
 mod canvas_tests {
     use super::export_canvas;
-    use openreel_engine::Orientation::{Landscape, Portrait};
+    use openreel_engine::{ClipKind, Format, Timeline};
 
-    const LANDSCAPE_4K: (u32, u32) = (3840, 2160);
-    const PORTRAIT_4K: (u32, u32) = (2160, 3840);
-
-    #[test]
-    fn the_project_format_sets_the_canvas_not_the_clip_count() {
-        // A portrait majority does not turn a landscape project portrait.
-        let canvas = export_canvas(
-            Landscape,
-            [PORTRAIT_4K, PORTRAIT_4K, (1280, 720)].into_iter(),
-        );
-        assert_eq!(canvas, (1280, 720));
-        // The largest source of the format sets the size, in any order.
-        let canvas = export_canvas(
-            Landscape,
-            [(1280, 720), PORTRAIT_4K, LANDSCAPE_4K].into_iter(),
-        );
-        assert_eq!(canvas, (1920, 1080));
-        let canvas = export_canvas(Portrait, [LANDSCAPE_4K, (1080, 1920)].into_iter());
-        assert_eq!(canvas, (1080, 1920));
+    /// A timeline whose pictures start one after another in this order.
+    fn canvas(format: Format, sources: &[(u32, u32)]) -> (u32, u32) {
+        let mut timeline = Timeline::new(30.0).with_format(format);
+        for (index, _) in sources.iter().enumerate() {
+            let path = index.to_string();
+            timeline.add_media_clip("v", ClipKind::Video, 0, index as f64, 1.0, 0.0, &path);
+        }
+        export_canvas(&timeline, |path| {
+            sources.get(path.parse::<usize>().ok()?).copied()
+        })
     }
 
     #[test]
-    fn a_format_without_matching_sources_uses_its_default_size() {
+    fn the_format_sets_the_shape_and_the_sources_its_size() {
+        // The largest source's short side, whatever its shape.
+        let sources = [(1080, 1920), (1280, 720)];
+        assert_eq!(canvas(Format::Landscape, &sources), (1920, 1080));
+        assert_eq!(canvas(Format::Portrait, &sources), (1080, 1920));
+        assert_eq!(canvas(Format::Square, &sources), (1080, 1080));
+        assert_eq!(canvas(Format::Vertical, &sources), (1080, 1350));
+        assert_eq!(canvas(Format::Classic, &[(1280, 720)]), (960, 720));
+        // 4K is held to a 1080 short side; 21:9 rounds up to an even width.
+        assert_eq!(canvas(Format::Cinema, &[(3840, 2160)]), (2520, 1080));
+        assert_eq!(canvas(Format::Landscape, &[]), (1280, 720));
+        assert_eq!(canvas(Format::Portrait, &[]), (720, 1280));
+    }
+
+    #[test]
+    fn original_takes_the_first_pictures_shape() {
+        // The phone clip starts first, so the canvas is tall; the 4K clip
+        // after it sets the size.
         assert_eq!(
-            export_canvas(Landscape, [PORTRAIT_4K].into_iter()),
-            (1280, 720)
+            canvas(Format::Original, &[(1080, 1920), (3840, 2160)]),
+            (1080, 1920)
         );
         assert_eq!(
-            export_canvas(Portrait, [LANDSCAPE_4K].into_iter()),
-            (720, 1280)
+            canvas(Format::Original, &[(3840, 2160), (1080, 1920)]),
+            (1920, 1080)
         );
-        assert_eq!(export_canvas(Landscape, std::iter::empty()), (1280, 720));
+        // Odd shapes keep theirs, as export always did.
+        assert_eq!(canvas(Format::Original, &[(80, 48)]), (80, 48));
+        assert_eq!(canvas(Format::Original, &[(1440, 1080)]), (1440, 1080));
+        assert_eq!(canvas(Format::Original, &[]), (1280, 720));
     }
 }

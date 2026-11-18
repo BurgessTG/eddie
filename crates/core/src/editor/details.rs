@@ -2,7 +2,9 @@
 //! and buttons; the clamps, a linked partner's share of each edit and the
 //! status line live here, so every front end behaves alike.
 
-use openreel_engine::{ClipId, ClipKind};
+use openreel_engine::{
+    fill_scale, Background, ClipId, ClipKind, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
+};
 
 use super::Editor;
 
@@ -113,6 +115,69 @@ impl Editor {
         }
         if let Some(seconds) = fade_out.filter(|seconds| seconds.is_finite()) {
             clip.fade_out = seconds.clamp(0.0, MAX_SECONDS);
+        }
+    }
+
+    /// The Transform card: change a video clip's place on the canvas, kept
+    /// inside what preview and export draw. Scale stays 5-2000%, position
+    /// within ten canvases, rotation 0-360 and each crop leaves 5% of the
+    /// picture.
+    pub fn edit_clip_transform(&mut self, id: ClipId, edit: impl FnOnce(&mut Transform)) {
+        let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        else {
+            return;
+        };
+        let mut t = clip.transform;
+        edit(&mut t);
+        t.scale = t.scale.clamp(MIN_SCALE, MAX_SCALE);
+        t.x = t.x.clamp(-10.0, 10.0);
+        t.y = t.y.clamp(-10.0, 10.0);
+        t.rotation = t.rotation.rem_euclid(360.0);
+        // A hair under the limit, so the sum stays inside it after rounding.
+        let most = |other: f64| (1.0 - MIN_CROP_KEEP - other - 1e-9).max(0.0);
+        t.crop_left = t.crop_left.clamp(0.0, most(t.crop_right));
+        t.crop_right = t.crop_right.clamp(0.0, most(t.crop_left));
+        t.crop_top = t.crop_top.clamp(0.0, most(t.crop_bottom));
+        t.crop_bottom = t.crop_bottom.clamp(0.0, most(t.crop_top));
+        if t.is_valid() {
+            clip.transform = t;
+        }
+    }
+
+    /// Fit and Fill: centre the picture, whole inside the canvas or
+    /// covering all of it.
+    pub fn fit_clip(&mut self, id: ClipId, fill: bool) {
+        let (w, h) = self.canvas();
+        let canvas = (f64::from(w), f64::from(h));
+        let source = self
+            .timeline
+            .clip(id)
+            .and_then(|clip| self.asset(clip.source.as_deref()?))
+            .map_or(canvas, |asset| {
+                (f64::from(asset.info.width), f64::from(asset.info.height))
+            });
+        self.edit_clip_transform(id, |t| {
+            t.scale = if fill {
+                fill_scale(canvas, source, t)
+            } else {
+                1.0
+            };
+            t.x = 0.0;
+            t.y = 0.0;
+        });
+    }
+
+    /// What fills the canvas around a video clip's picture.
+    pub fn set_clip_background(&mut self, id: ClipId, background: Background) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            clip.background = background;
         }
     }
 
@@ -261,6 +326,50 @@ mod tests {
     fn timing(editor: &Editor, id: ClipId) -> (f64, f64) {
         let clip = editor.timeline.clip(id).unwrap();
         (clip.duration, clip.source_in)
+    }
+
+    #[test]
+    fn transform_edits_stay_drawable_and_fill_covers_the_canvas() {
+        let (mut editor, video) = editor_with_video();
+        let transform = |editor: &Editor| editor.timeline.clip(video).unwrap().transform;
+        editor.edit_clip_transform(video, |t| {
+            t.scale = 0.0;
+            t.rotation = -90.0;
+            t.crop_right = 0.1;
+            t.crop_left = 0.9;
+        });
+        let t = transform(&editor);
+        assert_eq!((t.scale, t.rotation), (MIN_SCALE, 270.0));
+        assert!((t.crop_right - 0.1).abs() < 1e-6, "{t:?}");
+        assert!((t.crop_left - 0.85).abs() < 1e-6 && t.is_valid(), "{t:?}");
+
+        // A square canvas from 320x180: 180x180. Fill covers it; Fit
+        // brings back the whole (cropped) picture, centred.
+        editor.edit_clip_transform(video, |t| {
+            *t = Transform {
+                x: 0.3,
+                ..Transform::default()
+            }
+        });
+        editor.set_format(openreel_engine::Format::Square);
+        assert_eq!(editor.canvas(), (180, 180));
+        editor.fit_clip(video, true);
+        let t = transform(&editor);
+        assert!(
+            (t.scale - 320.0 / 180.0).abs() < 1e-9 && t.x == 0.0,
+            "{t:?}"
+        );
+        let placed = openreel_engine::place((180.0, 180.0), (320.0, 180.0), &t);
+        assert!(placed.covers((180.0, 180.0)));
+        editor.fit_clip(video, false);
+        assert!(transform(&editor).is_identity());
+
+        // Only pictures move.
+        let audio = editor.timeline.detach_audio(video).unwrap();
+        editor.edit_clip_transform(audio, |t| t.scale = 2.0);
+        editor.set_clip_background(audio, Background::Blur);
+        let audio = editor.timeline.clip(audio).unwrap();
+        assert!(audio.transform.is_identity() && audio.background == Background::Black);
     }
 
     #[test]

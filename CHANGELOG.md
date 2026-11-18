@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 (not released yet)
+
+### Added
+
+- Any video on any canvas. Settings → Format offers Original (the first
+  video's shape, the default), 16:9, 9:16, 1:1, 4:5, 4:3 and 21:9; footage
+  of another shape fits inside with bars instead of being refused.
+- A Transform card in Details for video clips: scale, position, rotation,
+  crop, horizontal and vertical flip, Fit, Fill and Reset. Drag the picture
+  on the monitor to move it; it snaps to the centre.
+- A blurred background: the picture, enlarged and blurred, fills the canvas
+  around it instead of black.
+- Scripts: `setFormat`, `setTransform` and `setBackground`; `state()` adds
+  `canvas`, `formats` and each clip's `transform` and `background`.
+  `inspect()` reports a picture moved off the canvas.
+
+### Changed
+
+- Projects saved as Landscape or Portrait now render at exactly 16:9 or
+  9:16. They took the shape of their largest video of that orientation
+  before.
+
 ## 0.2.0 (2026-11-13)
 
 Eddie no longer has an AI inside. It is an editor that any agent drives

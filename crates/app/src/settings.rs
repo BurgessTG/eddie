@@ -90,6 +90,8 @@ pub struct State {
     typed: [bool; 5],
     /// The speech provider list is open.
     pub providers_open: bool,
+    /// The project format list is open.
+    pub formats_open: bool,
     /// The local model list, while it is open.
     pub models: Option<Models>,
 }
@@ -107,6 +109,7 @@ impl Default for State {
             }),
             typed: [false; 5],
             providers_open: false,
+            formats_open: false,
             models: None,
         }
     }
@@ -123,6 +126,7 @@ impl State {
 pub fn close(ui: &mut Ui) {
     ui.show_settings = false;
     ui.settings.providers_open = false;
+    ui.settings.formats_open = false;
     ui.settings.models = None;
 }
 
@@ -186,6 +190,9 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
     overlays.push(dialog::centred(ui));
     if ui.settings.providers_open {
         lists::providers(ui, overlays);
+    }
+    if ui.settings.formats_open {
+        lists::formats(ui, overlays);
     }
     if let Some(models) = &ui.settings.models {
         lists::models(ui, models, overlays);

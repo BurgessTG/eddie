@@ -1,7 +1,7 @@
 //! Timeline checks scripts and agents read (`inspect()`, `eddie inspect`):
 //! measured facts about the timeline, not taste.
 
-use openreel_engine::{Clip, ClipId, ClipKind, Orientation, Timeline};
+use openreel_engine::{place, Clip, ClipId, ClipKind, Timeline};
 use serde::Serialize;
 
 use super::media::BinAsset;
@@ -62,10 +62,15 @@ pub fn program_segments(timeline: &Timeline) -> Vec<Segment> {
 type Run = (f64, f64, Option<ClipId>);
 
 pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
+    let canvas = openreel_media::export_canvas(timeline, |path| {
+        let asset = assets.iter().find(|asset| asset.info.path == path)?;
+        Some((asset.info.width, asset.info.height))
+    });
     let mut inspection = Inspection {
         timeline,
         assets,
         frame: 1.0 / timeline.fps.max(1.0),
+        canvas: (f64::from(canvas.0), f64::from(canvas.1)),
         findings: Vec::new(),
     };
     for clip in &timeline.clips {
@@ -91,6 +96,8 @@ struct Inspection<'a> {
     assets: &'a [BinAsset],
     /// One project frame, in seconds.
     frame: f64,
+    /// The canvas preview and export draw on, in pixels.
+    canvas: (f64, f64),
     findings: Vec<Finding>,
 }
 
@@ -118,10 +125,10 @@ impl<'a> Inspection<'a> {
         });
     }
 
-    /// A clip against the file it plays: in the bin, the project's
-    /// orientation, inside the file, fades that fit, no burned-in text.
+    /// A clip against the file it plays: in the bin, its picture on the
+    /// canvas, inside the file, fades that fit, no burned-in text.
     fn media(&mut self, clip: &Clip) {
-        let (timeline, frame) = (self.timeline, self.frame);
+        let frame = self.frame;
         let Some(source) = clip.source.as_deref() else {
             return;
         };
@@ -138,18 +145,15 @@ impl<'a> Inspection<'a> {
             return;
         };
         let info = &asset.info;
+        let source = (f64::from(info.width), f64::from(info.height));
         if clip.kind == ClipKind::Video
             && info.has_video
-            && Orientation::of(info.width, info.height) != timeline.orientation
+            && !place(self.canvas, source, &clip.transform).on_canvas(self.canvas)
         {
             self.report(
-                "orientation",
-                "error",
-                format!(
-                    "Clip {id} is {} video in a {} project.",
-                    Orientation::of(info.width, info.height).as_str(),
-                    timeline.orientation.as_str()
-                ),
+                "off-canvas",
+                "warning",
+                format!("Clip {id}'s picture is moved off the canvas, so it shows black."),
                 vec![id],
                 start,
                 end,

@@ -1,7 +1,7 @@
 //! What a script reads: the timeline's clips and the whole editor state
 //! as JSON (`state()`).
 
-use openreel_engine::Orientation;
+use openreel_engine::{orientation_name, Format};
 
 use super::super::media::{AssetState, BinAsset};
 use super::super::{inspect, sweep};
@@ -33,6 +33,8 @@ impl Editor {
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
+                    "transform": c.transform,
+                    "background": c.background.as_str(),
                 })
             })
             .collect()
@@ -68,7 +70,9 @@ impl Editor {
             "fps": self.timeline.fps,
             "magnet": self.viewport.magnet,
             "musicBedMuted": self.mute_music_beds,
-            "format": self.timeline.orientation.as_str(),
+            "format": self.timeline.format.as_str(),
+            "formats": Format::ALL.map(Format::as_str),
+            "canvas": self.canvas(),
             "clips": self.script_clips(),
             "assets": self.assets.iter().map(asset_json).collect::<Vec<_>>(),
             "sweepCandidates": sweep_candidates,
@@ -110,7 +114,7 @@ fn asset_json(a: &BinAsset) -> serde_json::Value {
         "height": a.info.height,
         "hasVideo": a.info.has_video,
         "hasAudio": a.info.has_audio,
-        "orientation": Orientation::of(a.info.width, a.info.height).as_str(),
+        "orientation": orientation_name(a.info.width, a.info.height),
         "ready": a.state == AssetState::Ready,
         "waveformPeaksPerSec": peaks_per_sec,
         "silenceRanges": silence_ranges,

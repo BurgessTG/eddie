@@ -76,7 +76,7 @@ pub(super) fn tile(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
     let drag_path = asset.info.path.clone();
     let menu_path = drag_path.clone();
     picture(ui, asset, w, h)
-        .help(hover(ui, asset))
+        .help(hover(asset))
         .on_drag(move |ui: &mut Ui, drag, _| match drag.phase {
             Phase::Down => {}
             Phase::Move => {
@@ -123,7 +123,6 @@ fn picture(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
     let c = c();
     let path = &asset.info.path;
     let ready = asset.state == AssetState::Ready;
-    let clashes = ui.editor.clashes_with_format(&asset.info);
     let selected = ui.editor.selected_asset.as_deref() == Some(path.as_str());
     let thumb = ui.thumbs(path).first();
     let has_preview = thumb.is_some() || !asset.peaks.is_empty();
@@ -137,8 +136,8 @@ fn picture(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
         .cursor(Cursor::Pointer)
         .hover_group();
     tile = preview(tile, thumb, asset, w, h, theme::R_MD);
-    if thumb.is_some() && (!ready || clashes) {
-        // Dimmed: importing, or the other format.
+    if thumb.is_some() && !ready {
+        // Dimmed while importing.
         tile = tile.child(layer(w, h, theme::R_MD).fill(Color::BLACK.alpha(150.0 / 255.0)));
     }
     if !has_preview && ready && asset.info.has_video {
@@ -183,16 +182,11 @@ fn picture(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
 }
 
 /// The tile's tooltip: its name, metadata and path, then what it does.
-fn hover(ui: &Ui, asset: &BinAsset) -> String {
+fn hover(asset: &BinAsset) -> String {
     let meta = asset_meta(asset);
     let name = &asset.info.name;
     let path = &asset.info.path;
-    let hover = if ui.editor.clashes_with_format(&asset.info) {
-        format!(
-            "{name}\n{meta}\n{path}\nIts orientation doesn't match the {} project, so it isn't added.",
-            ui.editor.timeline.orientation.as_str()
-        )
-    } else if asset.state == AssetState::Ready {
+    let hover = if asset.state == AssetState::Ready {
         format!("{name}\n{meta}\n{path}\nDouble-click or drag onto the timeline to add.")
     } else {
         format!("{name}\n{meta}\nImporting…")

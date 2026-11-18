@@ -12,6 +12,7 @@ use super::rows::{
     value_field,
 };
 use super::styles::{Select, select};
+use super::transform;
 use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
@@ -48,6 +49,11 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
             ClipKind::Title => "Look",
         };
         body = body.child(el().h(14.0)).child(section(title, look));
+    }
+    if clip.kind == ClipKind::Video && info.has_source {
+        body = body
+            .child(el().h(14.0))
+            .child(transform::card(ui, id, clip, value_w, card_inner));
     }
     body.child(el().h(20.0)).child(actions(id, inner))
 }

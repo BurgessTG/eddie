@@ -1,6 +1,6 @@
 use eddie_core::editor::settings::Settings;
 use eddie_core::editor::sweep::transcribe::Provider;
-use openreel_engine::Orientation;
+use openreel_engine::Format;
 use rune::{Key, Mods, Runtime};
 
 use super::lists::provider_key;
@@ -56,9 +56,12 @@ fn a_change_applies_at_once_and_is_saved() {
         "settings::tests::a_change_applies_at_once_and_is_saved",
         |_| {
             let mut rt = settings();
-            click(&mut rt, "settings-portrait");
-            assert_eq!(rt.state.editor.timeline.orientation, Orientation::Portrait);
-            assert_eq!(Settings::load().format, Orientation::Portrait);
+            click(&mut rt, "settings-format");
+            assert!(shown(&rt, "settings-formats"), "the format list opens");
+            click(&mut rt, "settings-format-portrait");
+            assert!(!shown(&rt, "settings-formats"), "a pick shuts it");
+            assert_eq!(rt.state.editor.timeline.format, Format::Portrait);
+            assert_eq!(Settings::load().format, Format::Portrait);
             assert_eq!(rt.state.editor.status, "Settings saved.");
 
             click(&mut rt, "settings-language");
@@ -271,8 +274,7 @@ fn every_setting_explains_itself() {
             "settings-key",
             "settings-language",
             "settings-vocabulary",
-            "settings-landscape",
-            "settings-portrait",
+            "settings-format",
             "settings-done",
         ] {
             assert!(
@@ -283,6 +285,15 @@ fn every_setting_explains_itself() {
         click(&mut rt, "settings-provider");
         for provider in Provider::ALL {
             let key = provider_key(provider);
+            assert!(
+                tooltip(&mut rt, &key).is_some_and(|words| !words.is_empty()),
+                "{key} has no tooltip"
+            );
+        }
+        press(&mut rt, Key::Escape);
+        click(&mut rt, "settings-format");
+        for format in Format::ALL {
+            let key = format!("settings-format-{}", format.as_str());
             assert!(
                 tooltip(&mut rt, &key).is_some_and(|words| !words.is_empty()),
                 "{key} has no tooltip"

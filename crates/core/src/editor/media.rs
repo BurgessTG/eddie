@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, TryRecvError};
 use std::thread;
 
-use openreel_engine::{format_timecode, ClipKind, Orientation};
+use openreel_engine::{format_timecode, ClipKind, Format};
 use openreel_media::{BeatGrid, MediaInfo, RawFrame};
 
 use super::sweep::{load_curation, SweepData, SweepStatus};
@@ -73,18 +73,12 @@ impl Editor {
         }
     }
 
-    /// The picture size preview and export share: the largest source of the
-    /// project's orientation on the timeline.
+    /// The picture size preview and export share (`export_canvas`).
     pub fn canvas(&self) -> (u32, u32) {
-        openreel_media::export_canvas(
-            self.timeline.orientation,
-            self.timeline
-                .clips
-                .iter()
-                .filter(|clip| clip.kind == openreel_engine::ClipKind::Video)
-                .filter_map(|clip| self.asset(clip.source.as_deref()?))
-                .map(|asset| (asset.info.width, asset.info.height)),
-        )
+        openreel_media::export_canvas(&self.timeline, |path| {
+            self.asset(path)
+                .map(|asset| (asset.info.width, asset.info.height))
+        })
     }
 
     // -- import pipeline ------------------------------------------------------
@@ -330,29 +324,11 @@ impl Editor {
         self.status = format!("Removed {name} from the bin.");
     }
 
-    /// Video of the other orientation never mixes into the project.
-    /// Audio-only media fits any format.
-    pub fn clashes_with_format(&self, info: &MediaInfo) -> bool {
-        info.has_video && Orientation::of(info.width, info.height) != self.timeline.orientation
-    }
-
-    /// Returns how many placed clips the new format leaves out of place.
-    pub fn set_format(&mut self, format: Orientation) -> usize {
-        self.timeline.orientation = format;
-        let clashing = self
-            .timeline
-            .clips
-            .iter()
-            .filter(|clip| clip.kind == ClipKind::Video)
-            .filter_map(|clip| self.asset(clip.source.as_deref()?))
-            .filter(|asset| self.clashes_with_format(&asset.info))
-            .count();
-        self.status = match clashing {
-            0 => format!("Format set to {}.", format.as_str()),
-            1 => "1 clip doesn't match the new format.".to_owned(),
-            n => format!("{n} clips don't match the new format."),
-        };
-        clashing
+    /// Change the canvas shape. Placed clips keep their transforms and fit
+    /// the new canvas the same way.
+    pub fn set_format(&mut self, format: Format) {
+        self.timeline.format = format;
+        self.status = format!("Format set to {}.", format.label());
     }
 
     /// Add a whole file at `at`. A drop passes the `row` it landed on.
@@ -396,15 +372,6 @@ impl Editor {
         };
         if asset.state != AssetState::Ready {
             return Err(format!("Still importing {}", asset.info.name));
-        }
-        if self.clashes_with_format(&asset.info) {
-            let other = Orientation::of(asset.info.width, asset.info.height);
-            return Err(format!(
-                "{} is {}; the project is {}.",
-                asset.info.name,
-                other.as_str(),
-                self.timeline.orientation.as_str()
-            ));
         }
         let asset_name = asset.info.name.clone();
         let source_duration = asset.info.duration;

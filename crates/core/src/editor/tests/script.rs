@@ -441,3 +441,100 @@ fn titles_video_and_sound_keep_to_lanes_of_their_own_kind() {
         "{tracks}"
     );
 }
+
+#[test]
+fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("wide.mp4", 20.0, true));
+    app.assets.push(asset("song.wav", 20.0, false));
+    run(
+        &mut app,
+        "addAssetRange('wide.mp4', 0, 0, 5); addAssetRange('song.wav', 0, 0, 5)",
+    )
+    .unwrap();
+    let video = app.timeline.clips[0].id;
+    let song = app.timeline.clips[1].id;
+    let transform = |app: &Editor| app.timeline.clip(video).unwrap().transform;
+
+    // Each call changes the fields it names and keeps the rest.
+    run(
+        &mut app,
+        &format!("setTransform({video}, {{x: 0.25, flipH: true}})"),
+    )
+    .unwrap();
+    run(
+        &mut app,
+        &format!("setTransform({video}, {{rotation: 90}})"),
+    )
+    .unwrap();
+    let t = transform(&app);
+    assert_eq!(
+        (t.x, t.flip_h, t.rotation, t.scale),
+        (0.25, true, 90.0, 1.0)
+    );
+    let read = run(&mut app, "return clips()[0].transform").unwrap();
+    let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(
+        (read["x"].as_f64(), read["flipH"].as_bool()),
+        (Some(0.25), Some(true))
+    );
+    run(&mut app, &format!("setTransform({video}, null)")).unwrap();
+    assert!(transform(&app).is_identity());
+
+    // On a 9:16 canvas (180x320) the 320x180 picture fits 180 wide; Fill
+    // scales it until it is 320 tall: 320 / (180 * 180 / 320).
+    run(&mut app, "setFormat('9:16')").unwrap();
+    assert_eq!(app.timeline.format, openreel_engine::Format::Portrait);
+    assert_eq!(app.settings.format, openreel_engine::Format::Portrait);
+    assert_eq!(app.canvas(), (180, 320));
+    run(
+        &mut app,
+        &format!("setTransform({video}, {{scale: 'fill'}})"),
+    )
+    .unwrap();
+    let fill = 320.0 / (180.0 * 180.0 / 320.0);
+    assert!(
+        (transform(&app).scale - fill).abs() < 1e-9,
+        "{:?}",
+        transform(&app)
+    );
+    run(&mut app, &format!("setBackground({video}, 'blur')")).unwrap();
+    assert_eq!(
+        app.timeline.clip(video).unwrap().background,
+        openreel_engine::Background::Blur
+    );
+
+    // Refused whole: nothing before the failing command stays applied,
+    // the format included.
+    let before = app.timeline.clone();
+    for (code, says) in [
+        (
+            format!("setFormat('square'); setTransform({video}, {{zoom: 2}})"),
+            "no 'zoom'",
+        ),
+        (
+            format!("setTransform({video}, {{cropLeft: 0.5, cropRight: 0.5}})"),
+            "keep 5%",
+        ),
+        (format!("setTransform({video}, {{scale: NaN}})"), "finite"),
+        (
+            format!("setTransform({video}, {{scale: 'huge'}})"),
+            "'fit' or 'fill'",
+        ),
+        (
+            format!("setTransform({song}, {{scale: 2}})"),
+            "needs a video clip",
+        ),
+        (format!("setBackground({video}, 'pink')"), "black or blur"),
+        ("setFormat('3:2')".to_owned(), "unknown format"),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(says), "{code}: {error}");
+        assert_eq!(app.timeline, before, "{code}");
+        assert_eq!(
+            app.settings.format,
+            openreel_engine::Format::Portrait,
+            "{code}"
+        );
+    }
+}

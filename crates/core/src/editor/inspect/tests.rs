@@ -44,7 +44,9 @@ fn inspect_reports_broken_and_suspicious_clips() {
     let end_b = 4.0 + 1.0 / fps;
     let c = timeline.add_media_clip("C", ClipKind::Video, 0, end_b + 1.0, 1.0, 9.5, "a.mp4");
     let card = timeline.add_clip("Day two", ClipKind::Title, 3, end_b + 2.0, 1.0, 0.0);
+    // Portrait on a landscape canvas is fine; moved off it, it shows black.
     let d = timeline.add_media_clip("D", ClipKind::Video, 0, end_b + 3.0, 1.0, 0.0, "tall.mp4");
+    timeline.clip_mut(d).unwrap().transform.x = -0.7;
     // Under clip A on a higher lane: never visible, and silent.
     let hidden = timeline.add_media_clip("H", ClipKind::Video, 1, 0.5, 1.0, 0.0, "a.mp4");
     timeline.clip_mut(hidden).unwrap().embedded_audio = false;
@@ -95,7 +97,7 @@ fn inspect_reports_broken_and_suspicious_clips() {
         ("fade-too-long", vec![b]),
         ("on-screen-text", vec![b]),
         ("source-range", vec![c]),
-        ("orientation", vec![d]),
+        ("off-canvas", vec![d]),
         ("missing-media", vec![missing]),
         ("flash-frame", vec![flash]),
         ("picture-gap", vec![]),

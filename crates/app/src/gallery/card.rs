@@ -42,7 +42,7 @@ pub(super) fn card(
     let picture = picture(ui, asset, clip, w, h - CARD_TEXT_H, &mut details);
     let heading = heading(clip, &details);
     let origin = origin(clip, &details);
-    let buttons = buttons(ui, asset, clip, scenes);
+    let buttons = buttons(clip, scenes);
 
     let outline = |color: Color| {
         el().absolute(0.0, 0.0)
@@ -219,21 +219,16 @@ fn origin(clip: &SweepCandidate, details: &str) -> El {
 }
 
 /// Add, and Dismiss for a suggestion.
-fn buttons(ui: &Ui, asset: &BinAsset, clip: &SweepCandidate, scenes: bool) -> El {
+fn buttons(clip: &SweepCandidate, scenes: bool) -> El {
     let id = &clip.id;
-    let clashes = ui.editor.clashes_with_format(&asset.info);
     let add_id = id.clone();
     let mut buttons = row().w_full().h(28.0).px(10.0).gap(4.0).center_y().child(
         theme::button(
             &format!("gallery-add:{id}"),
             "Add",
             Variant::Secondary,
-            if clashes {
-                "This video's orientation doesn't match the project format"
-            } else {
-                "Append this exact source range to the timeline"
-            },
-            !clashes,
+            "Append this exact source range to the timeline",
+            true,
         )
         .on_press(move |ui: &mut Ui| ui.editor.add_sweep_candidate(&add_id)),
     );

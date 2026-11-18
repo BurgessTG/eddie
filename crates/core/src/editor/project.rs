@@ -191,7 +191,7 @@ impl Editor {
         if !held {
             self.project_lock = None;
         }
-        self.settings.format = timeline.orientation;
+        self.settings.format = timeline.format;
         self.timeline = timeline;
         self.selected = None;
         self.playhead = 0.0;
@@ -291,7 +291,7 @@ impl Editor {
     /// importing or being curated stay so their work is not lost.
     pub fn new_project(&mut self) {
         self.set_playing(false);
-        self.timeline = Timeline::empty_project().with_orientation(self.timeline.orientation);
+        self.timeline = Timeline::empty_project().with_format(self.timeline.format);
         self.history.reset(&self.timeline);
         self.saved_timeline = self.timeline.clone();
         self.saved_mute_music_beds = self.mute_music_beds;

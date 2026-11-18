@@ -6,7 +6,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use openreel_engine::{Clip, ClipId, Timeline};
+use openreel_engine::{place, Background, Clip, ClipId, Timeline, Transform};
 
 use super::scratch::FilterGraphFile;
 use super::{collect_stderr, export_error};
@@ -95,6 +95,8 @@ pub(super) struct VideoLayer<'a> {
     /// A cheaper exact matrix/range conversion, applied after resizing.
     convert: Option<&'a str>,
     opacity: f32,
+    transform: Transform,
+    background: Background,
     source_offset: i64,
     ranges: Vec<(i64, i64)>,
 }
@@ -143,6 +145,8 @@ pub(super) fn plan_video<'a>(
             layer.source == source
                 && layer.source_offset == source_offset
                 && layer.opacity == clip.opacity
+                && layer.transform == clip.transform
+                && layer.background == clip.background
         }) {
             layer.ranges.extend_from_slice(ranges);
         } else {
@@ -150,6 +154,8 @@ pub(super) fn plan_video<'a>(
                 source,
                 convert,
                 opacity: clip.opacity,
+                transform: clip.transform,
+                background: clip.background,
                 source_offset,
                 ranges: ranges.clone(),
             });
@@ -257,6 +263,89 @@ pub(super) fn colorspace_filter(path: &str) -> Option<String> {
     })
 }
 
+/// Even and at least 2, as yuv420p and the colorspace filter need.
+fn even(value: f64) -> u32 {
+    ((value / 2.0).round() as u32).max(1) * 2
+}
+
+/// The filters that turn one layer's frames into its picture on the canvas,
+/// ending in `[seg{index}]`, and where that picture overlays the canvas.
+/// [`place`] decides the geometry, as it does for the preview. An untouched
+/// clip on black keeps the resize-and-pad chain export always had.
+fn picture(
+    index: usize,
+    layer: &VideoLayer<'_>,
+    canvas: (u32, u32),
+    source: (u32, u32),
+    (resize, convert, alpha): (&str, &str, &str),
+) -> (String, i64, i64) {
+    let (width, height) = canvas;
+    if layer.transform.is_identity() && layer.background == Background::Black {
+        return (
+            format!(
+                ",scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
+                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}[seg{index}]"
+            ),
+            0,
+            0,
+        );
+    }
+    let canvas_f = (f64::from(width), f64::from(height));
+    let t = &layer.transform;
+    let p = place(canvas_f, (f64::from(source.0), f64::from(source.1)), t);
+    let mut chain = String::new();
+    if t.has_crop() {
+        let [x, y, w, h] = p.crop.map(|v| v.round() as i64);
+        chain.push_str(&format!("crop={}:{}:{x}:{y},", w.max(2), h.max(2)));
+    }
+    let (pw, ph) = (even(p.size[0]), even(p.size[1]));
+    chain.push_str(&format!("scale={pw}:{ph}:flags={resize}{convert},setsar=1"));
+    if t.flip_h {
+        chain.push_str(",hflip");
+    }
+    if t.flip_v {
+        chain.push_str(",vflip");
+    }
+    let (mut out_w, mut out_h) = (f64::from(pw), f64::from(ph));
+    if t.rotation.rem_euclid(360.0) != 0.0 {
+        let [rw, rh] = p.turned_size();
+        let (rw, rh) = (rw.round().max(1.0), rh.round().max(1.0));
+        chain.push_str(&format!(
+            ",format=rgba,rotate=a={:.9}:ow={rw}:oh={rh}:c=none",
+            t.rotation.to_radians()
+        ));
+        (out_w, out_h) = (rw, rh);
+    }
+    let x = (p.center[0] - out_w / 2.0).round() as i64;
+    let y = (p.center[1] - out_h / 2.0).round() as i64;
+    if layer.background == Background::Blur && !p.covers(canvas_f) {
+        // The same frames, filling the canvas and blurred: scaled to an
+        // eighth first, so the blur costs little at any canvas size. They
+        // flip with the picture, as the preview's do.
+        let (bw, bh) = (even(canvas_f.0 / 8.0).max(8), even(canvas_f.1 / 8.0).max(8));
+        let radius = ((f64::from(bw) * 0.025).round() as u32).clamp(1, (bw.min(bh) / 4).max(1));
+        let flips = match (t.flip_h, t.flip_v) {
+            (true, true) => ",hflip,vflip",
+            (true, false) => ",hflip",
+            (false, true) => ",vflip",
+            (false, false) => "",
+        };
+        return (
+            format!(
+                ",split[pic{index}][bgin{index}];\
+                 [bgin{index}]scale={bw}:{bh}:force_original_aspect_ratio=increase:flags={resize},\
+                 crop={bw}:{bh}{convert}{flips},boxblur={radius}:2,scale={width}:{height}:flags=bilinear,\
+                 setsar=1[bg{index}];\
+                 [pic{index}]{chain}[fg{index}];\
+                 [bg{index}][fg{index}]overlay={x}:{y}{alpha}[seg{index}]"
+            ),
+            0,
+            0,
+        );
+    }
+    (format!(",{chain}{alpha}[seg{index}]"), x, y)
+}
+
 /// The FFmpeg command that renders one batch as raw yuv420p on `pipe:1`.
 pub(super) fn batch_command(
     timeline: &Timeline,
@@ -346,6 +435,16 @@ pub(super) fn batch_command(
         } else {
             String::new()
         };
+        let source_size = infos
+            .get(layer.source)
+            .map_or((width, height), |info| (info.width, info.height));
+        let (picture, x, y) = picture(
+            index,
+            layer,
+            canvas,
+            source_size,
+            (&resize, &convert, &alpha),
+        );
         // Input seeking retains keyframe preroll with timestamps relative
         // to the requested seek. Preserve that phase for VFR frame holds.
         // Start at this input's first visible frame: padding back to zero
@@ -354,18 +453,13 @@ pub(super) fn batch_command(
         // and would change sampling phase at fractional-frame boundaries.
         // Pad before fps so EOF holds the final source frame even if it
         // falls between output samples.
-        // Accurate rounding avoids darkening during matrix conversion.
-        // Full chroma interpolation avoids a green shift when the matrix
-        // changes (BT.601 phone footage to BT.709) on textured pictures.
         filters.push(format!(
             "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
              tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
-             trim=end_frame={layer_frames},setpts=PTS+{first},\
-             scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
-             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}[seg{index}]"
+             trim=end_frame={layer_frames},setpts=PTS+{first}{picture}"
         ));
         filters.push(format!(
-            "[{current}][seg{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
+            "[{current}][seg{index}]overlay={x}:{y}:eof_action=repeat:ts_sync_mode=default:\
              enable='{}'[v{index}]",
             enabled_frames(&ranges),
         ));

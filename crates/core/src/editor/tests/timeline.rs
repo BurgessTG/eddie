@@ -70,7 +70,7 @@ fn split_at_playhead_cuts_clip_under_playhead_without_selection() {
 }
 
 #[test]
-fn video_of_the_other_orientation_is_never_added_to_the_project() {
+fn video_of_any_shape_goes_on_any_canvas() {
     let mut app = Editor::headless();
     // Displayed sizes: a rotated phone clip probes as portrait.
     for (name, width, height) in [("wide.mp4", 1920, 1080), ("phone.mov", 1080, 1920)] {
@@ -122,7 +122,7 @@ fn video_of_the_other_orientation_is_never_added_to_the_project() {
         });
     }
 
-    // Bulk adds skip the clashing source instead of leaving its slot.
+    // Bulk adds take every source; each picture fits the canvas.
     app.add_all_scene_clips();
     let sources: Vec<_> = app
         .timeline
@@ -130,29 +130,26 @@ fn video_of_the_other_orientation_is_never_added_to_the_project() {
         .iter()
         .map(|c| c.source.clone())
         .collect();
-    assert_eq!(sources, vec![Some("/media/wide.mp4".to_owned())]);
-    assert_eq!(app.timeline.end(), 2.0);
-    assert!(app.status.contains("skipped 1"), "{}", app.status);
-
-    // Every single-add path, scripts included, shares the refusal.
-    let refused = app.try_add_asset_range_to_timeline("/media/phone.mov", "", None, 5.0, 0.0, 1.0);
     assert_eq!(
-        refused,
-        Err("phone.mov is portrait; the project is landscape.".to_owned())
+        sources,
+        vec![
+            Some("/media/wide.mp4".to_owned()),
+            Some("/media/phone.mov".to_owned())
+        ]
     );
-    assert_eq!(app.timeline.clips.len(), 1);
+    assert_eq!(app.timeline.end(), 4.0);
+    assert_eq!(app.status, "Added 2 scene clips.");
+    assert_eq!(app.canvas(), (1920, 1080));
 
-    // A portrait project accepts it, and the canvas stays portrait.
-    app.set_format(Orientation::Portrait);
-    assert!(
-        app.status.contains("1 clip doesn't match"),
-        "{}",
-        app.status
-    );
-    app.try_add_asset_range_to_timeline("/media/phone.mov", "", None, 5.0, 0.0, 1.0)
-        .expect("portrait video fits a portrait project");
+    // The format sets the canvas shape; the largest short side its size.
+    app.set_format(Format::Portrait);
+    assert_eq!(app.status, "Format set to 9:16 Portrait.");
+    assert_eq!(app.canvas(), (1080, 1920));
+    app.set_format(Format::Square);
+    assert_eq!(app.canvas(), (1080, 1080));
     app.perform(Action::ClearTimeline);
-    assert_eq!(app.timeline.orientation, Orientation::Portrait);
+    assert_eq!(app.timeline.format, Format::Square);
+    assert_eq!(app.canvas(), (720, 720));
 }
 
 #[test]

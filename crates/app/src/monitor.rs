@@ -5,12 +5,15 @@
 use eddie_core::Action;
 use eddie_core::shortcuts;
 use openreel_engine::{Clip, ClipKind, format_timecode};
-use rune::{Color, Cursor, Cx, El, Phase, Shape, Span, SurfaceFit, col, el, rich, row, text};
+use rune::{Color, Cursor, Cx, El, Phase, Shape, Span, col, el, rich, row, text};
 
 use crate::app::Ui;
 use crate::gallery;
 use crate::icons::{self, Transport};
 use crate::theme::{self, c};
+
+mod picture;
+pub use picture::{Picture, Sink, flips};
 
 /// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
 const TRANSPORT_H: f32 = 62.0;
@@ -108,16 +111,9 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
         .get()
         .filter(|_| editor.preview_is_current());
     match (timeline.active_video(playhead), picture) {
-        (Some(clip), Some((pw, ph))) => {
-            let scale = (w / pw as f32).min(h / ph as f32);
-            let (pw, ph) = (pw as f32 * scale, ph as f32 * scale);
-            frame = frame.child(
-                el().key("monitor-picture")
-                    .absolute((w - pw) / 2.0, (h - ph) / 2.0)
-                    .size(pw, ph)
-                    .pixels_fit(&ui.monitor, SurfaceFit::Fill)
-                    .opacity(clip.opacity.clamp(0.0, 1.0)),
-            );
+        (Some(clip), Some(decoded)) => {
+            frame =
+                picture::draggable(frame).child(picture::placed(ui, clip, canvas, (w, h), decoded));
         }
         (Some(_), None) => frame = frame.child(message("Loading frame…")),
         (None, _) => {

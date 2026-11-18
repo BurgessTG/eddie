@@ -116,3 +116,133 @@ fn a_press_on_the_scrubber_seeks_in_proportion() {
         "release ends the scrub"
     );
 }
+
+#[test]
+fn flips_mirror_rows_and_columns() {
+    use super::picture::flipped;
+    // a b / c d, each pixel's four bytes standing for its letter.
+    let image: Vec<u8> = [1, 2, 3, 4].into_iter().flat_map(|v: u8| [v; 4]).collect();
+    let order = |rgba: Vec<u8>| {
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(flipped(&image, 2, (false, false))), [1, 2, 3, 4]);
+    assert_eq!(order(flipped(&image, 2, (true, false))), [2, 1, 4, 3]);
+    assert_eq!(order(flipped(&image, 2, (false, true))), [3, 4, 1, 2]);
+    assert_eq!(order(flipped(&image, 2, (true, true))), [4, 3, 2, 1]);
+}
+
+/// A 2 s 320x180 clip made with FFmpeg, removed with its folder.
+struct Footage(std::path::PathBuf);
+
+impl Footage {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "eddie-monitor-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=red:s=320x180:r=30:d=2")
+            .args(["-c:v", "libx264", "-threads:v", "1", "-pix_fmt", "yuv420p"])
+            .arg(dir.join("wide.mp4"))
+            .output()
+            .expect("generate footage");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Self(dir)
+    }
+
+    fn path(&self) -> String {
+        self.0.join("wide.mp4").to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for Footage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run frames until `done` holds, for at most 30 s.
+fn until(rt: &mut Runtime<Ui>, what: &str, done: impl Fn(&Ui) -> bool) {
+    let started = std::time::Instant::now();
+    while !done(&rt.state) {
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "timed out waiting for {what}"
+        );
+        rt.frame(FRAME);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    frames(rt, 2);
+}
+
+#[test]
+fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
+    let footage = Footage::new();
+    let path = footage.path();
+    let mut ui = Ui::headless();
+    ui.editor.spawn_import(vec![path.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the import", |ui| {
+        ui.editor.asset(&path).is_some() && !ui.editor.importing()
+    });
+    let editor = &mut rt.state.editor;
+    editor.add_asset_to_timeline(&path, None, 0.0);
+    let id = editor.timeline.clips[0].id;
+    // Half size, its centre a quarter right and a quarter up: on the 320x180
+    // canvas that is x 160-320 and y 0-90, the top-right quarter.
+    editor.edit_clip_transform(id, |t| {
+        t.scale = 0.5;
+        t.x = 0.25;
+        t.y = -0.25;
+    });
+    editor.playhead = 0.5;
+    until(&mut rt, "the picture", |ui| ui.editor.preview_is_current());
+
+    let share = |rt: &Runtime<Ui>, key: &str| {
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let ([x, y, w, h], _) = rt.presented(key).unwrap();
+        [(x - fx) / fw, (y - fy) / fh, w / fw, h / fh]
+    };
+    let close =
+        |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01);
+    let placed = share(&rt, "monitor-placed");
+    assert!(close(placed, [0.5, 0.0, 0.5, 0.5]), "{placed:?}");
+
+    // A quarter turn about the same centre stands the box on end: 90x160
+    // canvas pixels around (240, 45).
+    rt.state
+        .editor
+        .edit_clip_transform(id, |t| t.rotation = 90.0);
+    frames(&mut rt, 2);
+    let turned = share(&rt, "monitor-placed");
+    let want = [
+        (240.0 - 45.0) / 320.0,
+        (45.0 - 80.0) / 180.0,
+        90.0 / 320.0,
+        160.0 / 180.0,
+    ];
+    assert!(close(turned, want), "{turned:?} against {want:?}");
+
+    // Cropping the left half keeps the right half, fitted: the box is
+    // 80x90 and the whole picture inside it starts one box width left.
+    rt.state.editor.edit_clip_transform(id, |t| {
+        t.rotation = 0.0;
+        t.crop_left = 0.5;
+    });
+    frames(&mut rt, 2);
+    let boxed = share(&rt, "monitor-placed");
+    let whole = share(&rt, "monitor-picture");
+    assert!(close(boxed, [0.625, 0.0, 0.25, 0.5]), "{boxed:?}");
+    assert!(close(whole, [0.375, 0.0, 0.5, 0.5]), "{whole:?}");
+}

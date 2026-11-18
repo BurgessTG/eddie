@@ -3,13 +3,15 @@
 //! the fields and turns typing, drags and presses into those calls.
 //!
 //! `fields` is the typed values and when typing reaches the clip, `body`
-//! the cards for one clip, `rows` the controls those cards are made of and
-//! `styles` the two title-style lists.
+//! the cards for one clip, `transform` the card that places a picture,
+//! `rows` the controls those cards are made of and `styles` the two
+//! title-style lists.
 
 mod body;
 mod fields;
 mod rows;
 mod styles;
+mod transform;
 
 use openreel_engine::ClipId;
 use rune::{Cursor, El, Phase, ScrollSpec, TextEdit, col, el, row, text};
@@ -37,7 +39,7 @@ pub struct State {
     /// The clip the fields were last filled from.
     pub shown: Option<ClipId>,
     pub name: TextEdit,
-    entries: [Entry; 7],
+    entries: [Entry; Field::ALL.len()],
     /// The value field that had the keyboard at the last poll.
     focused: Option<Field>,
     pub select: Option<Select>,

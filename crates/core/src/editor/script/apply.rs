@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use openreel_engine::{ClipId, ClipKind, TitleStyle};
+use openreel_engine::{fill_scale, Background, ClipId, ClipKind, Format, TitleStyle, Transform};
 
 use super::super::details;
 use crate::scripting::ScriptCommand;
@@ -27,6 +27,65 @@ fn title_style(name: &str) -> Result<TitleStyle, String> {
         let known: Vec<&str> = TitleStyle::ALL.iter().map(|style| style.as_str()).collect();
         format!("unknown title style '{name}'; use {}", known.join(", "))
     })
+}
+
+/// `current` with the fields of the JSON object `changes`, or the identity
+/// for `null`. A `scale` of `"fit"` is 1 and `"fill"` covers `canvas`
+/// with a `source`-sized picture after the new crop.
+fn changed_transform(
+    current: Transform,
+    changes: &str,
+    canvas: (f64, f64),
+    source: (f64, f64),
+) -> Result<Transform, String> {
+    let changes: Option<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(changes)
+        .map_err(|_| {
+            "setTransform needs an object such as {scale: 1.5, x: 0.25}, or null".to_owned()
+        })?;
+    let Some(mut changes) = changes else {
+        return Ok(Transform::default());
+    };
+    let mut value = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let fields = value.as_object_mut().expect("a transform is an object");
+    let scale = match changes.get("scale") {
+        Some(serde_json::Value::String(word)) => {
+            let word = word.clone();
+            changes.remove("scale");
+            Some(word)
+        }
+        _ => None,
+    };
+    for (key, change) in changes {
+        if !fields.contains_key(&key) {
+            let known: Vec<&str> = fields.keys().map(String::as_str).collect();
+            return Err(format!(
+                "setTransform has no '{key}'; use {}",
+                known.join(", ")
+            ));
+        }
+        fields.insert(key, change);
+    }
+    let mut transform: Transform = serde_json::from_value(value)
+        .map_err(|error| format!("setTransform: {error}; numbers must be finite"))?;
+    match scale.as_deref() {
+        None => {}
+        Some("fit") => transform.scale = 1.0,
+        Some("fill") => transform.scale = fill_scale(canvas, source, &transform),
+        Some(other) => {
+            return Err(format!(
+                "setTransform scale is a number, 'fit' or 'fill', not '{other}'"
+            ));
+        }
+    }
+    if !transform.is_valid() {
+        return Err(format!(
+            "setTransform needs a scale of {}-{}, x and y within 10 canvases, and crops of 0 or more that keep {}% of each side",
+            openreel_engine::MIN_SCALE,
+            openreel_engine::MAX_SCALE,
+            openreel_engine::MIN_CROP_KEEP * 100.0
+        ));
+    }
+    Ok(transform)
 }
 
 impl Editor {
@@ -106,6 +165,30 @@ impl Editor {
             ScriptCommand::SetOpacity { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.opacity = value.clamp(0.0, 1.0);
+                }
+            }
+            ScriptCommand::SetTransform { clip, changes } => {
+                let canvas = self.canvas();
+                let canvas = (f64::from(canvas.0), f64::from(canvas.1));
+                let target = self.video_clip(clip, "setTransform")?;
+                let source = target
+                    .source
+                    .as_deref()
+                    .and_then(|path| self.asset(path))
+                    .map_or(canvas, |asset| {
+                        (f64::from(asset.info.width), f64::from(asset.info.height))
+                    });
+                let transform = changed_transform(target.transform, &changes, canvas, source)?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.transform = transform;
+                }
+            }
+            ScriptCommand::SetBackground { clip, name } => {
+                let background = Background::from_name(&name)
+                    .ok_or_else(|| format!("unknown background '{name}'; use black or blur"))?;
+                self.video_clip(clip, "setBackground")?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.background = background;
                 }
             }
             ScriptCommand::SetVolume { clip, value } => {
@@ -251,6 +334,15 @@ impl Editor {
             ScriptCommand::ClearTimeline => self.clear_timeline(),
             ScriptCommand::SetMagnet(on) => self.viewport.magnet = on,
             ScriptCommand::SetMusicBedMuted(on) => self.mute_music_beds = on,
+            ScriptCommand::SetFormat(name) => {
+                let format = Format::from_name(&name).ok_or_else(|| {
+                    let known: Vec<&str> = Format::ALL.iter().map(|f| f.as_str()).collect();
+                    format!("unknown format '{name}'; use {}", known.join(", "))
+                })?;
+                self.set_format(format);
+                // Settings shows the project's format, as after undo.
+                self.settings.format = format;
+            }
             ScriptCommand::SetZoom(px) => self.viewport.set_zoom(px, self.timeline.end()),
             ScriptCommand::CloseGaps => {
                 self.timeline.close_gaps();
@@ -279,5 +371,16 @@ impl Editor {
             }
         }
         Ok(None)
+    }
+
+    /// The video clip a picture command targets.
+    fn video_clip(&self, clip: ClipId, command: &str) -> Result<&openreel_engine::Clip, String> {
+        match self.timeline.clip(clip) {
+            Some(target) if target.kind == ClipKind::Video => Ok(target),
+            Some(_) => Err(format!(
+                "{command} needs a video clip; clip {clip} is not one"
+            )),
+            None => Err(format!("{command}: there is no clip {clip}")),
+        }
     }
 }

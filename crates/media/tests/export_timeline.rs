@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
-use openreel_engine::{ClipKind, Timeline, TitleStyle};
+use openreel_engine::{Background, ClipKind, Format, Timeline, TitleStyle, Transform};
 use openreel_media::{export_timeline, probe, ExportOptions};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
@@ -906,6 +906,162 @@ fn zero_opacity_video_does_not_reveal_another_lane() {
 #[test]
 fn partial_opacity_video_fades_against_black() {
     opacity_over_black(0.5);
+}
+
+/// Yellow, green, red and dark blue quadrants (top-left, top-right,
+/// bottom-left, bottom-right), so a flip, turn or crop shows which corner
+/// went where.
+const TL: [u8; 3] = [255, 255, 64];
+const TR: [u8; 3] = [0, 255, 64];
+const BL: [u8; 3] = [255, 0, 64];
+const BR: [u8; 3] = [0, 0, 64];
+const BLACK: [u8; 3] = [0, 0, 0];
+
+/// Export `quadrants.mp4` (320x180) under `transform` for 0.3 s and read
+/// the middle frame's colour at each `(x, y)`.
+fn placed(
+    format: Format,
+    transform: Transform,
+    background: Background,
+    points: &[(usize, usize)],
+) -> ((u32, u32), Vec<[u8; 3]>) {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=10:d=1",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        None,
+    );
+    let mut timeline = Timeline::new(10.0).with_format(format);
+    let id = video(&mut timeline, &source, 0, 0.0, 0.3, 0.0);
+    let clip = timeline.clip_mut(id).unwrap();
+    clip.transform = transform;
+    clip.background = background;
+    let exported = fixture.export("placed.mp4", &timeline);
+    let info = probe(exported.to_str().unwrap()).unwrap();
+    let frame = &frames(&exported)[1];
+    let colors = points
+        .iter()
+        .map(|&(x, y)| {
+            let at = (y * info.width as usize + x) * 3;
+            [frame[at], frame[at + 1], frame[at + 2]]
+        })
+        .collect();
+    ((info.width, info.height), colors)
+}
+
+fn assert_colors(label: &str, actual: &[[u8; 3]], expected: &[[u8; 3]]) {
+    for (index, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            a.iter().zip(e).all(|(a, e)| a.abs_diff(*e) <= 24),
+            "{label}: point {index} is {a:?}, expected {e:?} (all: {actual:?})"
+        );
+    }
+}
+
+#[test]
+fn landscape_video_on_a_portrait_canvas_is_letterboxed() {
+    // 320x180 fits 180 wide: 102 tall, centred at y 160.
+    let (canvas, colors) = placed(
+        Format::Portrait,
+        Transform::default(),
+        Background::Black,
+        &[(45, 135), (135, 185), (90, 40), (90, 280)],
+    );
+    assert_eq!(canvas, (180, 320));
+    assert_colors("letterbox", &colors, &[TL, BR, BLACK, BLACK]);
+}
+
+#[test]
+fn scale_and_position_move_the_picture() {
+    // Half size, centred a quarter right and a quarter up: x 160-320, y 0-90.
+    let t = Transform {
+        scale: 0.5,
+        x: 0.25,
+        y: -0.25,
+        ..Transform::default()
+    };
+    let (canvas, colors) = placed(
+        Format::Landscape,
+        t,
+        Background::Black,
+        &[(200, 22), (280, 67), (80, 135), (200, 130), (80, 45)],
+    );
+    assert_eq!(canvas, (320, 180));
+    assert_colors("scale", &colors, &[TL, BR, BLACK, BLACK, BLACK]);
+}
+
+#[test]
+fn crop_keeps_its_part_and_fits_it() {
+    // The right half (160x180) fits by height, centred: x 80-240.
+    let t = Transform {
+        crop_left: 0.5,
+        ..Transform::default()
+    };
+    let (_, colors) = placed(
+        Format::Landscape,
+        t,
+        Background::Black,
+        &[(160, 45), (160, 135), (40, 90), (280, 90)],
+    );
+    assert_colors("crop", &colors, &[TR, BR, BLACK, BLACK]);
+}
+
+#[test]
+fn flips_mirror_the_picture() {
+    let points = [(80, 45), (240, 45), (80, 135), (240, 135)];
+    let flip_h = Transform {
+        flip_h: true,
+        ..Transform::default()
+    };
+    let (_, colors) = placed(Format::Landscape, flip_h, Background::Black, &points);
+    assert_colors("flip_h", &colors, &[TR, TL, BR, BL]);
+    let both = Transform {
+        flip_v: true,
+        ..flip_h
+    };
+    let (_, colors) = placed(Format::Landscape, both, Background::Black, &points);
+    assert_colors("flip_h + flip_v", &colors, &[BR, BL, TR, TL]);
+}
+
+#[test]
+fn rotation_turns_the_picture_clockwise() {
+    // A quarter turn clockwise: the top edge goes right, the left edge up.
+    // The 180x320 box is centred, x 70-250.
+    let t = Transform {
+        rotation: 90.0,
+        ..Transform::default()
+    };
+    let (_, colors) = placed(
+        Format::Landscape,
+        t,
+        Background::Black,
+        &[
+            (205, 45),
+            (115, 45),
+            (205, 135),
+            (115, 135),
+            (30, 90),
+            (290, 90),
+        ],
+    );
+    assert_colors("rotate 90", &colors, &[TL, BL, TR, BR, BLACK, BLACK]);
+}
+
+#[test]
+fn blurred_background_fills_the_bars_with_the_picture() {
+    let (_, colors) = placed(
+        Format::Portrait,
+        Transform::default(),
+        Background::Blur,
+        &[(45, 135), (135, 185), (90, 30), (90, 290)],
+    );
+    assert_colors("picture", &colors[..2], &[TL, BR]);
+    // Above: the picture's green top half, enlarged and blurred; below:
+    // its bottom, which has no green.
+    let [above, below] = [colors[2], colors[3]];
+    assert!(above[1] > 150 && above[2] > 30, "above {above:?}");
+    assert!(below[1] < 100 && below[2] > 30, "below {below:?}");
 }
 
 #[test]

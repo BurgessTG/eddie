@@ -131,6 +131,28 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
             .push(0, || ScriptCommand::SetOpacity { clip, value })
     })?;
     let q = api.queue();
+    api.set(
+        "__set_transform",
+        move |Whole(clip): Whole, changes: CString<'_>| {
+            q.borrow_mut()
+                .push(changes.len(), || ScriptCommand::SetTransform {
+                    clip,
+                    changes: changes.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
+        "__set_background",
+        move |Whole(clip): Whole, name: CString<'_>| {
+            q.borrow_mut()
+                .push(name.len(), || ScriptCommand::SetBackground {
+                    clip,
+                    name: name.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
     api.set("setVolume", move |Whole(clip): Whole, value: f32| {
         q.borrow_mut()
             .push(0, || ScriptCommand::SetVolume { clip, value })
@@ -297,6 +319,12 @@ fn project(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     let q = api.queue();
     api.set("setMagnet", move |on: bool| {
         q.borrow_mut().push(0, || ScriptCommand::SetMagnet(on))
+    })?;
+    let q = api.queue();
+    api.set("__set_format", move |name: CString<'_>| {
+        q.borrow_mut().push(name.len(), || {
+            ScriptCommand::SetFormat(name.as_str().to_owned())
+        })
     })?;
     let q = api.queue();
     api.set("setMusicBedMuted", move |on: bool| {

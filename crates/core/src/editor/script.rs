@@ -133,6 +133,7 @@ impl Editor {
         self.viewport.magnet = before.magnet;
         self.viewport.px_per_sec = before.zoom;
         self.mute_music_beds = before.mute_music_beds;
+        self.settings.format = self.timeline.format;
         if disturbed && !self.rehearsing {
             self.stop_sources();
             self.last_now = None;

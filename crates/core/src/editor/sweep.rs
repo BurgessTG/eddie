@@ -413,63 +413,39 @@ impl Editor {
     }
 
     pub fn add_all_sweep_candidates(&mut self) {
-        let (candidates, skipped): (Vec<SweepCandidate>, usize) =
-            self.fitting_format(self.curator_candidate_refs(false).into_iter().map(
-                |(asset, candidate)| (asset, &self.assets[asset].sweep.candidates[candidate]),
-            ));
+        let candidates: Vec<SweepCandidate> = self
+            .curator_candidate_refs(false)
+            .into_iter()
+            .map(|(asset, candidate)| self.assets[asset].sweep.candidates[candidate].clone())
+            .collect();
         if candidates.is_empty() {
-            self.status = if skipped > 0 {
-                "No shown clips match the project format.".to_owned()
-            } else {
-                "No sweep clips to add.".to_owned()
-            };
+            self.status = "No sweep clips to add.".to_owned();
             return;
         }
-        let mut cursor = self.timeline.end();
-        for candidate in &candidates {
-            self.add_candidate_at(candidate, cursor);
-            cursor += candidate.duration;
-        }
-        self.status = added_message(candidates.len(), "sweep clip", skipped);
+        self.add_candidates_at_end(&candidates);
+        self.status = added_message(candidates.len(), "sweep clip");
     }
 
     pub fn add_all_scene_clips(&mut self) {
-        let (clips, skipped): (Vec<SweepCandidate>, usize) =
-            self.fitting_format(self.curator_candidate_refs(true).into_iter().map(
-                |(asset, candidate)| (asset, &self.assets[asset].sweep.scene_clips[candidate]),
-            ));
+        let clips: Vec<SweepCandidate> = self
+            .curator_candidate_refs(true)
+            .into_iter()
+            .map(|(asset, candidate)| self.assets[asset].sweep.scene_clips[candidate].clone())
+            .collect();
         if clips.is_empty() {
-            self.status = if skipped > 0 {
-                "No scenes match the project format.".to_owned()
-            } else {
-                "No scene clips to add.".to_owned()
-            };
+            self.status = "No scene clips to add.".to_owned();
             return;
         }
+        self.add_candidates_at_end(&clips);
+        self.status = added_message(clips.len(), "scene clip");
+    }
+
+    fn add_candidates_at_end(&mut self, candidates: &[SweepCandidate]) {
         let mut cursor = self.timeline.end();
-        for candidate in &clips {
+        for candidate in candidates {
             self.add_candidate_at(candidate, cursor);
             cursor += candidate.duration;
         }
-        self.status = added_message(clips.len(), "scene clip", skipped);
-    }
-
-    /// Bulk adds skip sources whose orientation clashes with the
-    /// project instead of failing or pillarboxing them.
-    fn fitting_format<'a>(
-        &self,
-        clips: impl Iterator<Item = (usize, &'a SweepCandidate)>,
-    ) -> (Vec<SweepCandidate>, usize) {
-        let mut skipped = 0;
-        let fitting = clips
-            .filter(|(asset, _)| {
-                let clashes = self.clashes_with_format(&self.assets[*asset].info);
-                skipped += usize::from(clashes);
-                !clashes
-            })
-            .map(|(_, clip)| clip.clone())
-            .collect();
-        (fitting, skipped)
     }
 
     fn add_candidate_at(&mut self, candidate: &SweepCandidate, at: f64) {
@@ -484,14 +460,8 @@ impl Editor {
     }
 }
 
-fn added_message(count: usize, noun: &str, skipped: usize) -> String {
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let added = format!("Added {count} {noun}{}", plural(count));
-    if skipped == 0 {
-        format!("{added}.")
-    } else {
-        format!("{added}; skipped {skipped} in the other format.")
-    }
+fn added_message(count: usize, noun: &str) -> String {
+    format!("Added {count} {noun}{}.", if count == 1 { "" } else { "s" })
 }
 
 fn run_sweep(

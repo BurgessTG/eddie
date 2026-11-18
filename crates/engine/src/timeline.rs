@@ -17,43 +17,124 @@ pub const MAX_TIMELINE_SECONDS: f64 = 1_000_000.0;
 /// above the noise of adding and subtracting timeline seconds.
 const EDGE_EPSILON: f64 = 1e-9;
 
-/// Project picture format. The canvas never follows the footage: video
-/// of the other orientation is not added rather than pillarboxed.
+/// Project picture format: the canvas shape. Media of any shape goes on
+/// any canvas; each clip's [`Transform`](crate::Transform) fits it, with
+/// bars by default. Projects saved before 0.3 say `Landscape` or `Portrait`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Orientation {
+pub enum Format {
+    /// The first picture's own shape, as export always made it.
     #[default]
+    Original,
+    /// 16:9.
     Landscape,
+    /// 9:16.
     Portrait,
+    /// 1:1.
+    Square,
+    /// 4:5.
+    Vertical,
+    /// 4:3.
+    Classic,
+    /// 21:9.
+    Cinema,
 }
 
-impl Orientation {
-    /// Displayed (rotation-applied) size; square counts as landscape.
-    pub fn of(width: u32, height: u32) -> Self {
-        if height > width {
-            Self::Portrait
-        } else {
-            Self::Landscape
+impl Format {
+    pub const ALL: [Self; 7] = [
+        Self::Original,
+        Self::Landscape,
+        Self::Portrait,
+        Self::Square,
+        Self::Vertical,
+        Self::Classic,
+        Self::Cinema,
+    ];
+
+    /// Width to height; `None` for [`Format::Original`], which takes the
+    /// first picture's.
+    pub fn ratio(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Original => None,
+            Self::Landscape => Some((16, 9)),
+            Self::Portrait => Some((9, 16)),
+            Self::Square => Some((1, 1)),
+            Self::Vertical => Some((4, 5)),
+            Self::Classic => Some((4, 3)),
+            Self::Cinema => Some((21, 9)),
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Original => "original",
             Self::Landscape => "landscape",
             Self::Portrait => "portrait",
+            Self::Square => "square",
+            Self::Vertical => "vertical",
+            Self::Classic => "classic",
+            Self::Cinema => "cinema",
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original",
+            Self::Landscape => "16:9 Landscape",
+            Self::Portrait => "9:16 Portrait",
+            Self::Square => "1:1 Square",
+            Self::Vertical => "4:5 Vertical",
+            Self::Classic => "4:3 Classic",
+            Self::Cinema => "21:9 Cinema",
+        }
+    }
+
+    /// A name (`square`) or a ratio (`1:1`).
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::Landscape, Self::Portrait]
-            .into_iter()
-            .find(|orientation| orientation.as_str() == name)
+        let name = name.trim().to_lowercase();
+        Self::ALL.into_iter().find(|format| {
+            format.as_str() == name
+                || format
+                    .ratio()
+                    .is_some_and(|(w, h)| format!("{w}:{h}") == name)
+        })
+    }
+
+    /// The canvas for this format whose short side is `short` pixels, both
+    /// sides even. `original` is the first picture's size, which
+    /// [`Format::Original`] takes its shape from.
+    pub fn canvas(self, short: u32, original: (u32, u32)) -> (u32, u32) {
+        let (w, h) = self
+            .ratio()
+            .unwrap_or((original.0.max(1), original.1.max(1)));
+        let short = short.max(2) / 2 * 2;
+        let long = |a: u32, b: u32| {
+            ((u64::from(short) * u64::from(a)).div_ceil(u64::from(b)) as u32).div_ceil(2) * 2
+        };
+        if w >= h {
+            (long(w, h), short)
+        } else {
+            (short, long(h, w))
+        }
+    }
+}
+
+/// `landscape` or `portrait` for a displayed picture size; square counts
+/// as landscape.
+pub fn orientation_name(width: u32, height: u32) -> &'static str {
+    if height > width {
+        "portrait"
+    } else {
+        "landscape"
     }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Timeline {
     pub fps: f64,
-    pub orientation: Orientation,
+    /// Saved as `orientation`, its name before formats other than 16:9
+    /// and 9:16 existed.
+    #[serde(rename = "orientation")]
+    pub format: Format,
     /// How many lanes titles, video and sound have (`lanes.rs`). A clip's
     /// `track` counts within its kind's lanes.
     #[serde(default)]
@@ -66,7 +147,7 @@ impl Timeline {
     pub fn new(fps: f64) -> Self {
         Self {
             fps,
-            orientation: Orientation::default(),
+            format: Format::default(),
             lanes: Lanes::default(),
             clips: Vec::new(),
             next_id: 1,
@@ -87,7 +168,8 @@ impl Timeline {
     }
 
     /// Whether every number is one the editor can work with: a real frame
-    /// rate, and finite clip times inside [`MAX_TIMELINE_SECONDS`]. A project
+    /// rate, finite clip times inside [`MAX_TIMELINE_SECONDS`] and transforms
+    /// the renderers take ([`Transform::is_valid`](crate::Transform)). A project
     /// file or a script can otherwise carry values that divide by zero or
     /// keep offline work running for hours.
     pub fn in_supported_range(&self) -> bool {
@@ -98,6 +180,7 @@ impl Timeline {
                     && (0.0..=MAX_TIMELINE_SECONDS).contains(&clip.duration)
                     && clip.start.abs() <= MAX_TIMELINE_SECONDS
                     && clip.end() <= MAX_TIMELINE_SECONDS
+                    && clip.transform.is_valid()
             })
     }
 
@@ -235,6 +318,8 @@ impl Timeline {
             clean_voice: false,
             smooth_fades: false,
             words: Vec::new(),
+            transform: crate::Transform::default(),
+            background: crate::Background::default(),
         });
         id
     }
@@ -296,8 +381,8 @@ impl Timeline {
         tl
     }
 
-    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
-        self.orientation = orientation;
+    pub fn with_format(mut self, format: Format) -> Self {
+        self.format = format;
         self
     }
 

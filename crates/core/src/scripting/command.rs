@@ -37,6 +37,16 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    /// `changes` is a JSON object of `Transform` fields to change, or
+    /// `null` to reset; `scale` may be `"fit"` or `"fill"`.
+    SetTransform {
+        clip: u64,
+        changes: String,
+    },
+    SetBackground {
+        clip: u64,
+        name: String,
+    },
     SetVolume {
         clip: u64,
         value: f32,
@@ -115,6 +125,7 @@ pub enum ScriptCommand {
     ClearTimeline,
     SetMagnet(bool),
     SetMusicBedMuted(bool),
+    SetFormat(String),
     SetZoom(f32),
     CloseGaps,
     Log(String),
@@ -135,6 +146,8 @@ impl ScriptCommand {
             | Self::TrimClip { clip, .. }
             | Self::RenameClip { clip, .. }
             | Self::SetOpacity { clip, .. }
+            | Self::SetTransform { clip, .. }
+            | Self::SetBackground { clip, .. }
             | Self::SetVolume { clip, .. }
             | Self::SetFade { clip, .. }
             | Self::SetCleanVoice { clip, .. }
@@ -226,6 +239,9 @@ impl ScriptCommand {
             | Self::ClearTimeline
             | Self::SetMagnet(_)
             | Self::SetMusicBedMuted(_)
+            | Self::SetTransform { .. }
+            | Self::SetBackground { .. }
+            | Self::SetFormat(_)
             | Self::CloseGaps
             | Self::Log(_) => true,
         };
