@@ -26,10 +26,17 @@ pub enum Field {
     CropTop,
     CropRight,
     CropBottom,
+    Brightness,
+    Contrast,
+    Saturation,
+    Exposure,
+    Temperature,
+    Tint,
+    Strength,
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 15] = [
+    pub(super) const ALL: [Self; 22] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -45,6 +52,13 @@ impl Field {
         Self::CropTop,
         Self::CropRight,
         Self::CropBottom,
+        Self::Brightness,
+        Self::Contrast,
+        Self::Saturation,
+        Self::Exposure,
+        Self::Temperature,
+        Self::Tint,
+        Self::Strength,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -64,6 +78,13 @@ impl Field {
             Self::CropTop => "details-crop-top",
             Self::CropRight => "details-crop-right",
             Self::CropBottom => "details-crop-bottom",
+            Self::Brightness => "details-brightness",
+            Self::Contrast => "details-contrast",
+            Self::Saturation => "details-saturation",
+            Self::Exposure => "details-exposure",
+            Self::Temperature => "details-temperature",
+            Self::Tint => "details-tint",
+            Self::Strength => "details-strength",
         }
     }
 
@@ -76,10 +97,12 @@ impl Field {
                 | Self::FadeIn
                 | Self::FadeOut
                 | Self::Rotation
+                | Self::Exposure
         )
     }
 
-    /// The clip's value in the unit the field shows: seconds or percent.
+    /// The clip's value in the unit the field shows: seconds, percent,
+    /// degrees or stops.
     pub(super) fn value(self, clip: &Clip) -> f64 {
         match self {
             Self::Start => clip.start,
@@ -97,6 +120,13 @@ impl Field {
             Self::CropTop => clip.transform.crop_top * 100.0,
             Self::CropRight => clip.transform.crop_right * 100.0,
             Self::CropBottom => clip.transform.crop_bottom * 100.0,
+            Self::Brightness => clip.color.brightness * 100.0,
+            Self::Contrast => clip.color.contrast * 100.0,
+            Self::Saturation => clip.color.saturation * 100.0,
+            Self::Exposure => clip.color.exposure,
+            Self::Temperature => clip.color.temperature * 100.0,
+            Self::Tint => clip.color.tint * 100.0,
+            Self::Strength => clip.color.strength * 100.0,
         }
     }
 
@@ -108,6 +138,9 @@ impl Field {
             format!("{:.0}%", whole())
         } else if self == Self::Rotation {
             format!("{:.0}°", whole())
+        } else if self == Self::Exposure {
+            let value = if value.abs() < 0.05 { 0.0 } else { value };
+            format!("{value:.1} EV")
         } else {
             format!("{value:.2} s")
         }
@@ -120,6 +153,12 @@ impl Field {
             typed.strip_suffix('%').unwrap_or(typed)
         } else if self == Self::Rotation {
             typed.strip_suffix('°').unwrap_or(typed)
+        } else if self == Self::Exposure {
+            let unit = typed
+                .len()
+                .checked_sub(2)
+                .filter(|&at| typed.is_char_boundary(at) && typed[at..].eq_ignore_ascii_case("ev"));
+            unit.map_or(typed, |at| &typed[..at])
         } else {
             typed.strip_suffix('s').unwrap_or(typed)
         };
@@ -147,6 +186,13 @@ impl Field {
             Self::CropTop => editor.edit_clip_transform(id, |t| t.crop_top = value / 100.0),
             Self::CropRight => editor.edit_clip_transform(id, |t| t.crop_right = value / 100.0),
             Self::CropBottom => editor.edit_clip_transform(id, |t| t.crop_bottom = value / 100.0),
+            Self::Brightness => editor.edit_clip_color(id, |c| c.brightness = value / 100.0),
+            Self::Contrast => editor.edit_clip_color(id, |c| c.contrast = value / 100.0),
+            Self::Saturation => editor.edit_clip_color(id, |c| c.saturation = value / 100.0),
+            Self::Exposure => editor.edit_clip_color(id, |c| c.exposure = value),
+            Self::Temperature => editor.edit_clip_color(id, |c| c.temperature = value / 100.0),
+            Self::Tint => editor.edit_clip_color(id, |c| c.tint = value / 100.0),
+            Self::Strength => editor.edit_clip_color(id, |c| c.strength = value / 100.0),
         }
     }
 }

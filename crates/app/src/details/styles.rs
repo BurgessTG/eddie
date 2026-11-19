@@ -1,22 +1,25 @@
-//! The title-style lists: the selected title's own, and the one generated
-//! captions get. Each is a closed field that opens a list under itself.
+//! The pick lists in Details: the selected title's style, the style
+//! generated captions get, and a video clip's colour filter. Each is a
+//! closed field that opens a list under itself.
 
-use openreel_engine::{ClipId, TitleStyle};
+use openreel_engine::{ClipId, Filter, TitleStyle};
 use rune::{Align, Cx, El, Side};
 
 use crate::app::Ui;
 use crate::theme;
 
-/// The style list that is open.
+/// The pick list that is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Select {
     /// The selected title's own style.
     Title,
     /// The style generated captions get.
     Captions,
+    /// The selected video clip's colour filter.
+    Filter,
 }
 
-/// The closed style list: its choice and a down arrow.
+/// A closed pick list: its choice and a down arrow.
 pub(super) fn select(key: &'static str, choice: &str, help: &str, which: Select, open: bool) -> El {
     theme::select(key, choice, help, theme::field_fill(), open, true).on_press(
         move |ui: &mut Ui| {
@@ -52,12 +55,31 @@ fn option(which: Select, id: ClipId, style: TitleStyle, current: bool) -> El {
                 }
             }
             Select::Captions => ui.editor.caption_style = style,
+            Select::Filter => {}
         }
         ui.details.select = None;
     })
 }
 
-/// The open style list, hung under its field. A press outside closes it.
+/// One colour filter in the open list.
+fn filter_option(id: ClipId, filter: Filter, current: bool) -> El {
+    let help = match filter {
+        Filter::None => "No filter".to_owned(),
+        _ => format!("Use the {} filter", filter.label()),
+    };
+    theme::option(
+        format!("details-filter-{}", filter.as_str()),
+        filter.label(),
+        &help,
+        current,
+    )
+    .on_press(move |ui: &mut Ui| {
+        ui.editor.edit_clip_color(id, |c| c.filter = filter);
+        ui.details.select = None;
+    })
+}
+
+/// The open list, hung under its field. A press outside closes it.
 pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
     let Some(which) = ui.details.select else {
         return;
@@ -69,23 +91,36 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
     else {
         return;
     };
-    let (anchor, current) = match which {
-        Select::Title => ("details-style", clip.title_style),
-        Select::Captions => ("details-caption-style", ui.editor.caption_style),
+    let (anchor, options): (_, Vec<El>) = match which {
+        Select::Title | Select::Captions => {
+            let (anchor, current) = if which == Select::Title {
+                ("details-style", clip.title_style)
+            } else {
+                ("details-caption-style", ui.editor.caption_style)
+            };
+            let options = TitleStyle::ALL
+                .into_iter()
+                .map(|style| option(which, id, style, style == current))
+                .collect();
+            (anchor, options)
+        }
+        Select::Filter => {
+            let options = Filter::ALL
+                .into_iter()
+                .map(|filter| filter_option(id, filter, filter == clip.color.filter))
+                .collect();
+            ("details-filter", options)
+        }
     };
     let close = |ui: &mut Ui| ui.details.select = None;
     overlays.push(rune_kit::scrim("details-select-scrim", close));
-    // As wide as its field, wider only when a style's name needs it.
+    // As wide as its field, wider only when a choice's name needs it.
     let width = cx.layout_size(anchor).map_or(0.0, |size| size[0]);
     overlays.push(
         theme::popup("details-select")
             .min_w(width)
             .gap(6.0)
-            .children(
-                TitleStyle::ALL
-                    .into_iter()
-                    .map(|style| option(which, id, style, style == current)),
-            )
+            .children(options)
             .anchored(anchor, Side::Bottom, Align::Start, 0.0)
             .modal(true, close),
     );

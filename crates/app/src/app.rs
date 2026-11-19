@@ -35,7 +35,7 @@ pub struct Ui {
     pub monitor: Pixels,
     /// The size of the picture the monitor holds, while it holds one.
     pub monitor_size: Rc<Cell<Option<(u32, u32)>>>,
-    /// The monitor's last frame, upright, and the flips it shows.
+    /// The monitor's last frame, upright, and the look it shows.
     pub monitor_picture: Rc<RefCell<monitor::Picture>>,
     /// The clip whose picture a drag on the monitor moves, and where it was.
     pub monitor_drag: Option<(ClipId, Transform)>,
@@ -219,9 +219,9 @@ impl Ui {
         // A held slider is one edit, as a held clip is.
         self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
-        // A frame shown this pump with the last clip's flips is redrawn.
-        let flips = monitor::flips(self.editor.timeline.active_video(self.editor.playhead));
-        self.monitor_picture.borrow_mut().want(flips, &self.monitor);
+        // A frame shown this pump with the last clip's look is redrawn.
+        let look = monitor::look(self.editor.timeline.active_video(self.editor.playhead));
+        self.monitor_picture.borrow_mut().want(look, &self.monitor);
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported

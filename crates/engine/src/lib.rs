@@ -4,6 +4,7 @@
 //! generated clips and explicit move/trim/split edits use the project frame grid.
 
 mod clip;
+mod color;
 mod duck;
 mod fade;
 mod place;
@@ -14,6 +15,7 @@ mod timeline;
 mod tests;
 
 pub use clip::{Clip, ClipId, ClipKind, TitleStyle};
+pub use color::{ColorAdjust, Filter, MAX_EXPOSURE};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};
 pub use place::{

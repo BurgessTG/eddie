@@ -12,8 +12,8 @@ use super::rows::{
     value_field,
 };
 use super::styles::{Select, select};
-use super::transform;
 use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
+use super::{color, transform};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
 
@@ -53,7 +53,9 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
     if clip.kind == ClipKind::Video && info.has_source {
         body = body
             .child(el().h(14.0))
-            .child(transform::card(ui, id, clip, value_w, card_inner));
+            .child(transform::card(ui, id, clip, value_w, card_inner))
+            .child(el().h(14.0))
+            .child(color::card(ui, id, clip, value_w, card_inner));
     }
     body.child(el().h(20.0)).child(actions(id, inner))
 }
@@ -98,7 +100,8 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             id,
             "Opacity",
             Field::Opacity,
-            (clip.opacity, 1.0),
+            clip.opacity,
+            0.0..=1.0,
             value_w,
             Editor::set_clip_opacity,
             "Fades the picture against black",
@@ -111,7 +114,8 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             id,
             "Volume",
             Field::Volume,
-            (clip.volume, MAX_VOLUME),
+            clip.volume,
+            0.0..=MAX_VOLUME,
             value_w,
             Editor::set_clip_volume,
             "Clip gain; 100% is unity",

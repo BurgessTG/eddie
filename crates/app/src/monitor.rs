@@ -13,7 +13,7 @@ use crate::icons::{self, Transport};
 use crate::theme::{self, c};
 
 mod picture;
-pub use picture::{Picture, Sink, flips};
+pub use picture::{Picture, Sink, look};
 
 /// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
 const TRANSPORT_H: f32 = 62.0;

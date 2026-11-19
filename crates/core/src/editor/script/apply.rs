@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use openreel_engine::{fill_scale, Background, ClipId, ClipKind, Format, TitleStyle, Transform};
+use openreel_engine::{
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TitleStyle, Transform,
+};
 
 use super::super::details;
 use crate::scripting::ScriptCommand;
@@ -29,6 +31,39 @@ fn title_style(name: &str) -> Result<TitleStyle, String> {
     })
 }
 
+/// A script's JSON object of fields to change, or `None` for `null`.
+fn changes_object(
+    command: &str,
+    example: &str,
+    changes: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    serde_json::from_str(changes)
+        .map_err(|_| format!("{command} needs an object such as {example}, or null"))
+}
+
+/// `current` with the fields in `changes`; a name it does not have is an
+/// error that lists the ones it does.
+fn merged<T: serde::Serialize + serde::de::DeserializeOwned>(
+    command: &str,
+    current: T,
+    changes: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, String> {
+    let mut value = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let fields = value.as_object_mut().expect("settings are an object");
+    for (key, change) in changes {
+        if !fields.contains_key(&key) {
+            let known: Vec<&str> = fields.keys().map(String::as_str).collect();
+            return Err(format!(
+                "{command} has no '{key}'; use {}",
+                known.join(", ")
+            ));
+        }
+        fields.insert(key, change);
+    }
+    serde_json::from_value(value)
+        .map_err(|error| format!("{command}: {error}; numbers must be finite"))
+}
+
 /// `current` with the fields of the JSON object `changes`, or the identity
 /// for `null`. A `scale` of `"fit"` is 1 and `"fill"` covers `canvas`
 /// with a `source`-sized picture after the new crop.
@@ -38,15 +73,10 @@ fn changed_transform(
     canvas: (f64, f64),
     source: (f64, f64),
 ) -> Result<Transform, String> {
-    let changes: Option<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(changes)
-        .map_err(|_| {
-            "setTransform needs an object such as {scale: 1.5, x: 0.25}, or null".to_owned()
-        })?;
-    let Some(mut changes) = changes else {
+    let Some(mut changes) = changes_object("setTransform", "{scale: 1.5, x: 0.25}", changes)?
+    else {
         return Ok(Transform::default());
     };
-    let mut value = serde_json::to_value(current).map_err(|error| error.to_string())?;
-    let fields = value.as_object_mut().expect("a transform is an object");
     let scale = match changes.get("scale") {
         Some(serde_json::Value::String(word)) => {
             let word = word.clone();
@@ -55,18 +85,7 @@ fn changed_transform(
         }
         _ => None,
     };
-    for (key, change) in changes {
-        if !fields.contains_key(&key) {
-            let known: Vec<&str> = fields.keys().map(String::as_str).collect();
-            return Err(format!(
-                "setTransform has no '{key}'; use {}",
-                known.join(", ")
-            ));
-        }
-        fields.insert(key, change);
-    }
-    let mut transform: Transform = serde_json::from_value(value)
-        .map_err(|error| format!("setTransform: {error}; numbers must be finite"))?;
+    let mut transform = merged("setTransform", current, changes)?;
     match scale.as_deref() {
         None => {}
         Some("fit") => transform.scale = 1.0,
@@ -86,6 +105,37 @@ fn changed_transform(
         ));
     }
     Ok(transform)
+}
+
+/// `current` with the fields of the JSON object `changes`, or no grade for
+/// `null`. A filter is named; an unknown one lists those that exist.
+fn changed_color(current: ColorAdjust, changes: &str) -> Result<ColorAdjust, String> {
+    let Some(changes) = changes_object("setColor", "{saturation: 0.2, filter: 'warm'}", changes)?
+    else {
+        return Ok(ColorAdjust::default());
+    };
+    if let Some(name) = changes.get("filter") {
+        if name.as_str().and_then(Filter::from_name).is_none() {
+            let known: Vec<&str> = Filter::ALL.iter().map(|f| f.as_str()).collect();
+            return Err(format!("unknown filter {name}; use {}", known.join(", ")));
+        }
+    }
+    let mut changes = changes;
+    if let Some(name) = changes.get_mut("filter") {
+        let filter = name
+            .as_str()
+            .and_then(Filter::from_name)
+            .unwrap_or_default();
+        *name = serde_json::Value::from(filter.as_str());
+    }
+    let color = merged("setColor", current, changes)?;
+    if !color.is_valid() {
+        return Err(format!(
+            "setColor takes brightness, contrast, saturation, temperature and tint from -1 to 1, exposure from -{0} to {0} stops and strength from 0 to 1",
+            openreel_engine::MAX_EXPOSURE
+        ));
+    }
+    Ok(color)
 }
 
 impl Editor {
@@ -181,6 +231,12 @@ impl Editor {
                 let transform = changed_transform(target.transform, &changes, canvas, source)?;
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.transform = transform;
+                }
+            }
+            ScriptCommand::SetColor { clip, changes } => {
+                let color = changed_color(self.video_clip(clip, "setColor")?.color, &changes)?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.color = color;
                 }
             }
             ScriptCommand::SetBackground { clip, name } => {

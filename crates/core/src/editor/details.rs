@@ -3,7 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Transform, MAX_SCALE, MIN_CROP_KEEP,
+    MIN_SCALE,
 };
 
 use super::Editor;
@@ -178,6 +179,20 @@ impl Editor {
             .filter(|clip| clip.kind == ClipKind::Video)
         {
             clip.background = background;
+        }
+    }
+
+    /// The Colour card: change a video clip's adjustments and filter, each
+    /// moved into its range.
+    pub fn edit_clip_color(&mut self, id: ClipId, edit: impl FnOnce(&mut ColorAdjust)) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            let mut color = clip.color;
+            edit(&mut color);
+            clip.color = color.clamped();
         }
     }
 

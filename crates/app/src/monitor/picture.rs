@@ -1,13 +1,13 @@
 //! The program monitor's picture: the decoded frame, where
 //! `openreel_engine::place` puts it on the canvas (as export does), and a
-//! drag that moves it. Rune draws images upright only, so flips happen to
-//! the pixels here.
+//! drag that moves it. Rune draws images upright only and has no colour
+//! filter for them, so flips and colour happen to the pixels here.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use eddie_core::PreviewSink;
-use openreel_engine::{Background, Clip, Transform, place};
+use openreel_engine::{Background, Clip, ColorAdjust, Transform, place};
 use openreel_media::RawFrame;
 use rune::{Cursor, El, Phase, Pixels, SurfaceFit, el};
 
@@ -21,22 +21,42 @@ const BLUR_SHARE: f32 = 0.021;
 /// A drag that ends this close to the canvas centre, in points, lands on it.
 const CENTRE_SNAP: f32 = 6.0;
 
-/// The last decoded frame, upright, and the flips it is shown with.
+/// How the clip at the playhead wants its frame drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Look {
+    /// Horizontal and vertical flips.
+    pub flips: (bool, bool),
+    pub color: ColorAdjust,
+}
+
+/// The look of the video clip at the playhead, for [`Picture::want`].
+pub fn look(clip: Option<&Clip>) -> Look {
+    clip.map_or_else(Look::default, |clip| {
+        let Transform { flip_h, flip_v, .. } = clip.transform;
+        Look {
+            flips: (flip_h, flip_v),
+            color: clip.color,
+        }
+    })
+}
+
+/// The last decoded frame, upright and ungraded, and the look it is shown
+/// with.
 #[derive(Default)]
 pub struct Picture {
-    /// Horizontal and vertical flips the clip at the playhead wants.
-    want: (bool, bool),
-    shown: (bool, bool),
+    want: Look,
+    shown: Look,
     width: u32,
     rgba: Vec<u8>,
 }
 
 impl Picture {
-    /// Show the clip at the playhead's flips, redrawing the held frame
-    /// when they changed (a flip toggled while paused).
-    pub fn want(&mut self, flips: (bool, bool), pixels: &Pixels) {
-        self.want = flips;
-        if self.shown != flips && !self.rgba.is_empty() {
+    /// Show frames with the clip at the playhead's look, redrawing the held
+    /// frame when it changed (a flip toggled or a slider moved while
+    /// paused).
+    pub fn want(&mut self, look: Look, pixels: &Pixels) {
+        self.want = look;
+        if self.shown != look && !self.rgba.is_empty() {
             self.show(pixels);
         }
     }
@@ -44,11 +64,9 @@ impl Picture {
     fn show(&mut self, pixels: &Pixels) {
         self.shown = self.want;
         let height = (self.rgba.len() / (self.width as usize * 4).max(1)) as u32;
-        pixels.set(
-            self.width,
-            height,
-            flipped(&self.rgba, self.width, self.want),
-        );
+        let mut shown = flipped(&self.rgba, self.width, self.want.flips);
+        self.want.color.apply_rgba(&mut shown);
+        pixels.set(self.width, height, shown);
     }
 }
 
@@ -213,13 +231,5 @@ pub fn draggable(frame: El) -> El {
                 });
             }
         }
-    })
-}
-
-/// The flips the clip at the playhead wants, for [`Picture::want`].
-pub fn flips(clip: Option<&Clip>) -> (bool, bool) {
-    clip.map_or((false, false), |clip| {
-        let Transform { flip_h, flip_v, .. } = clip.transform;
-        (flip_h, flip_v)
     })
 }

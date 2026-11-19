@@ -67,6 +67,20 @@ fn click(rt: &mut Runtime<Ui>, key: &str) {
     rt.frame(FRAME);
 }
 
+/// Scroll Details until `key` is inside its visible part.
+fn reveal(rt: &mut Runtime<Ui>, key: &str) {
+    let (Some(([x, top, w, height], _)), Some((_, y))) =
+        (rt.presented("details-scroll"), rt.find(key))
+    else {
+        return;
+    };
+    if y < top + 20.0 || y > top + height - 20.0 {
+        rt.wheel(x + w / 2.0, top + height / 2.0, top + height / 2.0 - y);
+        rt.frame(FRAME);
+        rt.frame(FRAME);
+    }
+}
+
 fn press(rt: &mut Runtime<Ui>, key: Key) {
     rt.key(KeyEvent {
         key,
@@ -279,6 +293,7 @@ fn every_control_has_a_tooltip() {
         let (mut rt, _) = window(kind);
         rt.help_delay = 0.0;
         for key in keys {
+            reveal(&mut rt, key);
             let (x, y) = rt
                 .find(key)
                 .unwrap_or_else(|| panic!("{key} is not shown for {kind:?}"));
@@ -295,4 +310,86 @@ fn every_control_has_a_tooltip() {
             );
         }
     }
+}
+
+#[test]
+fn the_colour_card_grades_the_clip_from_its_list_sliders_and_fields() {
+    use openreel_engine::{ColorAdjust, Filter};
+    let (mut rt, id) = window(ClipKind::Video);
+    // The card sits below Transform.
+    reveal(&mut rt, "details-color-reset");
+    let color = |rt: &Runtime<Ui>| clip(rt, id).color;
+
+    // Strength shows once there is a filter to weaken.
+    assert!(rt.find("details-strength").is_none());
+    click(&mut rt, "details-filter");
+    assert_eq!(rt.state.details.select, Some(Select::Filter));
+    click(&mut rt, "details-filter-vintage");
+    assert_eq!(color(&rt).filter, Filter::Vintage);
+    assert_eq!(rt.state.details.select, None);
+    assert!(rt.find("details-strength").is_some());
+
+    // Exposure is typed in stops, with or without its unit; other values
+    // in percent, moved into range.
+    click(&mut rt, "details-exposure");
+    rt.paste("1.5 ev");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    assert_eq!(color(&rt).exposure, 1.5);
+    assert_eq!(typed(&rt, Field::Exposure), "1.5 EV");
+    click(&mut rt, "details-saturation");
+    rt.paste("-250");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    assert_eq!(color(&rt).saturation, -1.0);
+    assert_eq!(typed(&rt, Field::Saturation), "-100%");
+
+    // A slider over -100% to 100%: its ends are the range's ends.
+    let ([x, y, w, h], _) = rt
+        .presented("details-brightness-slider")
+        .expect("the brightness slider");
+    let y = y + h / 2.0;
+    rt.pointer_move(x + w / 2.0, y);
+    rt.frame(FRAME);
+    rt.pointer_down(x + w / 2.0, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x + w, y);
+    rt.frame(FRAME);
+    assert!(rt.state.details.slider_held);
+    assert_eq!(color(&rt).brightness, 1.0);
+    rt.pointer_move(x, y);
+    rt.frame(FRAME);
+    rt.pointer_up(x, y);
+    rt.frame(FRAME);
+    assert_eq!(color(&rt).brightness, -1.0);
+    assert!(!rt.state.details.slider_held);
+
+    rt.help_delay = 0.0;
+    for key in [
+        "details-filter",
+        "details-strength-slider",
+        "details-strength",
+        "details-brightness-slider",
+        "details-contrast",
+        "details-exposure",
+        "details-temperature-slider",
+        "details-tint",
+        "details-color-reset",
+    ] {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is not shown"));
+        rt.pointer_move(700.0, 300.0);
+        rt.frame(FRAME);
+        rt.pointer_move(x, y);
+        rt.frame(FRAME);
+        rt.frame(FRAME);
+        let shown = rt.help_tooltip().map(|(words, _)| words.to_owned());
+        assert!(
+            shown.as_deref().is_some_and(|words| !words.is_empty()),
+            "{key} has no tooltip"
+        );
+    }
+
+    click(&mut rt, "details-color-reset");
+    assert_eq!(color(&rt), ColorAdjust::default());
+    assert!(rt.find("details-strength").is_none());
 }

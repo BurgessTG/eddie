@@ -1,5 +1,6 @@
 //! A clip: one placed piece of video, audio or title text.
 
+use crate::color::ColorAdjust;
 use crate::fit_fades;
 use crate::place::{Background, Transform};
 
@@ -125,6 +126,9 @@ pub struct Clip {
     /// Video only: what fills the canvas around the picture.
     #[serde(default, skip_serializing_if = "is_black")]
     pub background: Background,
+    /// Video only: colour adjustments and filter (`ColorAdjust`).
+    #[serde(default, skip_serializing_if = "ColorAdjust::is_identity")]
+    pub color: ColorAdjust,
 }
 
 fn is_black(background: &Background) -> bool {

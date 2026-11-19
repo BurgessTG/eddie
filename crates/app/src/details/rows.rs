@@ -1,6 +1,8 @@
 //! The controls Details' cards are made of: a card, a labelled row, a typed
 //! value, a slider, a switch and a row of buttons.
 
+use std::ops::RangeInclusive;
+
 use eddie_core::Editor;
 use openreel_engine::{Clip, ClipId};
 use rune::{Align, Cursor, El, Key, Phase, el, row, text};
@@ -116,23 +118,27 @@ pub(super) fn value_field(ui: &Ui, field: Field, help: String) -> El {
         })
 }
 
-/// A 0-to-`max` slider with the same value as a typed percentage beside it.
+/// A slider over `range` with the same value typed beside it. Its blue
+/// runs from zero (the left end when the range starts there) to the handle.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn slider_row(
     ui: &Ui,
     id: ClipId,
     label: &'static str,
     field: Field,
-    (value, max): (f32, f32),
+    value: f32,
+    range: RangeInclusive<f32>,
     value_w: f32,
     set: fn(&mut Editor, ClipId, f32),
     help: &'static str,
 ) -> El {
     let c = c();
+    let (min, max) = (*range.start(), *range.end());
     let width = value_w - BUTTON_GAP - PERCENT_W;
-    let fraction = (value / max).clamp(0.0, 1.0);
     let (low, high) = handle_range(width);
-    let x = low + fraction * (high - low);
+    let at = |v: f32| low + ((v - min) / (max - min)).clamp(0.0, 1.0) * (high - low);
+    let x = at(value);
+    let zero = if min >= 0.0 { RAIL_INSET } else { at(0.0) };
     let rail = (HANDLE - 8.0) / 2.0;
     let slider = el()
         .key(format!("{}-slider", field.key()))
@@ -146,8 +152,8 @@ pub(super) fn slider_row(
         )
         .child(
             // BRAND at 27% over the rail.
-            el().absolute(RAIL_INSET, rail)
-                .size((x - RAIL_INSET).max(0.0), 8.0)
+            el().absolute(zero.min(x), rail)
+                .size((x - zero).abs(), 8.0)
                 .radius(4.0)
                 .fill(theme::hex("#2C4062")),
         )
@@ -162,7 +168,7 @@ pub(super) fn slider_row(
         .cursor(Cursor::Pointer)
         .help(help)
         .label(label)
-        .range_value(f64::from(value), 0.0, f64::from(max))
+        .range_value(f64::from(value), f64::from(min), f64::from(max))
         .on_step(move |ui: &mut Ui, steps: i32, _| {
             set(&mut ui.editor, id, value + steps as f32 * 0.01);
         })
@@ -173,8 +179,12 @@ pub(super) fn slider_row(
                 return;
             }
             let fraction = ((drag.x - low) / (high - low)).clamp(0.0, 1.0);
-            // Whole percents, as the field beside it shows.
-            set(&mut ui.editor, id, (fraction * max * 100.0).round() / 100.0);
+            // Hundredths, as the field beside it shows.
+            set(
+                &mut ui.editor,
+                id,
+                ((min + fraction * (max - min)) * 100.0).round() / 100.0,
+            );
         });
     prop_row(
         label,

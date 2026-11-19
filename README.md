@@ -53,6 +53,9 @@ offers the newest build.
   4:5, 4:3 or 21:9 (Settings → Format). Scale, move, rotate, flip and crop
   each picture in Details or by dragging it on the monitor, over black or
   a blurred copy of itself.
+- Colour per clip: brightness, contrast, saturation, exposure, temperature
+  and tint, and nine filters with a strength. The monitor shows the grade
+  export renders.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
   can duck under speech.

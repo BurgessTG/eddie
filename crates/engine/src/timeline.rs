@@ -168,8 +168,9 @@ impl Timeline {
     }
 
     /// Whether every number is one the editor can work with: a real frame
-    /// rate, finite clip times inside [`MAX_TIMELINE_SECONDS`] and transforms
-    /// the renderers take ([`Transform::is_valid`](crate::Transform)). A project
+    /// rate, finite clip times inside [`MAX_TIMELINE_SECONDS`], and transforms
+    /// and colour the renderers take ([`Transform::is_valid`](crate::Transform),
+    /// [`ColorAdjust::is_valid`](crate::ColorAdjust)). A project
     /// file or a script can otherwise carry values that divide by zero or
     /// keep offline work running for hours.
     pub fn in_supported_range(&self) -> bool {
@@ -181,6 +182,7 @@ impl Timeline {
                     && clip.start.abs() <= MAX_TIMELINE_SECONDS
                     && clip.end() <= MAX_TIMELINE_SECONDS
                     && clip.transform.is_valid()
+                    && clip.color.is_valid()
             })
     }
 
@@ -320,6 +322,7 @@ impl Timeline {
             words: Vec::new(),
             transform: crate::Transform::default(),
             background: crate::Background::default(),
+            color: crate::ColorAdjust::default(),
         });
         id
     }

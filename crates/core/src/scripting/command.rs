@@ -47,6 +47,12 @@ pub enum ScriptCommand {
         clip: u64,
         name: String,
     },
+    /// `changes` is a JSON object of `ColorAdjust` fields to change, or
+    /// `null` to reset.
+    SetColor {
+        clip: u64,
+        changes: String,
+    },
     SetVolume {
         clip: u64,
         value: f32,
@@ -148,6 +154,7 @@ impl ScriptCommand {
             | Self::SetOpacity { clip, .. }
             | Self::SetTransform { clip, .. }
             | Self::SetBackground { clip, .. }
+            | Self::SetColor { clip, .. }
             | Self::SetVolume { clip, .. }
             | Self::SetFade { clip, .. }
             | Self::SetCleanVoice { clip, .. }
@@ -241,6 +248,7 @@ impl ScriptCommand {
             | Self::SetMusicBedMuted(_)
             | Self::SetTransform { .. }
             | Self::SetBackground { .. }
+            | Self::SetColor { .. }
             | Self::SetFormat(_)
             | Self::CloseGaps
             | Self::Log(_) => true,

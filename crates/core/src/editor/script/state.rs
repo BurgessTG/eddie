@@ -35,6 +35,7 @@ impl Editor {
                     "titleStyle": c.title_style.as_str(),
                     "transform": c.transform,
                     "background": c.background.as_str(),
+                    "color": c.color,
                 })
             })
             .collect()

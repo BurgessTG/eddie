@@ -272,6 +272,15 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     from each edge, before any flip.
   - `setBackground(id, 'blur')` fills the canvas around the picture with
     a blurred, enlarged copy of it; `'black'` is the default.
+- **Colour:** `setColor(id, {...})` grades a video clip. It changes only
+  the fields you give; `null` resets them all. `brightness`, `contrast`,
+  `saturation`, `temperature` (warm is positive) and `tint` (magenta is
+  positive) run from -1 to 1, 0 leaving the picture as it is;
+  `saturation: -1` is black and white. `exposure` is in stops, -2 to 2.
+  `filter` is `none`, `vivid`, `dramatic`, `warm`, `cool`, `fade`,
+  `vintage`, `sepia`, `mono` or `noir`, at `strength` 0 to 1 (1). The
+  filter applies first, then the adjustments. Contact sheets, strips and
+  frames show the source as shot, so check a grade by exporting.
 - **Pauses:** `tightenSilence(id, threshold?, minSilence?, padding?)`
   removes each pause of `minSilence` seconds or more (0.35 by default)
   and keeps `padding` seconds (0.08) at each cut. Leave `threshold` out

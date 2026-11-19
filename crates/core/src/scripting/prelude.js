@@ -51,6 +51,7 @@ function help() {
     "renameClip(id, name) setOpacity(id, 0..1) setVolume(id, gain)  // linear gain 0..2; 0.5 is about 6 dB quieter",
     "setTransform(id, {scale, x, y, rotation, flipH, flipV, cropLeft, cropTop, cropRight, cropBottom})  // video only; changes just the fields given, null resets. scale 1 fits the canvas, 'fill' covers it; x and y move by canvas widths and heights (right and down); rotation is clockwise degrees; crops are shares of the source",
     "setBackground(id, 'black' | 'blur')  // what fills the canvas around a video picture",
+    "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
     "setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
@@ -99,6 +100,12 @@ function setTransform(id, changes) {
   __set_transform(id, JSON.stringify(changes));
 }
 function setBackground(id, name) { __set_background(id, String(name)); }
+function setColor(id, changes) {
+  if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
+    throw new Error("setColor needs an object such as {saturation: 0.2, filter: 'warm'}, or null to reset");
+  }
+  __set_color(id, JSON.stringify(changes));
+}
 function setFormat(name) { __set_format(String(name)); }
 function addTitle(text, at, dur, style) {
   return __add_title(String(text), at === undefined ? state().playhead : __t(at), dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));

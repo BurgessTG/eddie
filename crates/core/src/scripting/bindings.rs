@@ -143,6 +143,17 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     )?;
     let q = api.queue();
     api.set(
+        "__set_color",
+        move |Whole(clip): Whole, changes: CString<'_>| {
+            q.borrow_mut()
+                .push(changes.len(), || ScriptCommand::SetColor {
+                    clip,
+                    changes: changes.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
         "__set_background",
         move |Whole(clip): Whole, name: CString<'_>| {
             q.borrow_mut()

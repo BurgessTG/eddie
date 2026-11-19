@@ -4,10 +4,11 @@
 //!
 //! `fields` is the typed values and when typing reaches the clip, `body`
 //! the cards for one clip, `transform` the card that places a picture,
-//! `rows` the controls those cards are made of and `styles` the two
-//! title-style lists.
+//! `color` the one that grades it, `rows` the controls those cards are made
+//! of and `styles` the pick lists.
 
 mod body;
+mod color;
 mod fields;
 mod rows;
 mod styles;

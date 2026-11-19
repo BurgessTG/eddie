@@ -1064,6 +1064,137 @@ fn blurred_background_fills_the_bars_with_the_picture() {
     assert!(below[1] < 100 && below[2] > 30, "below {below:?}");
 }
 
+/// Eight flat patches, four across and two down, on a 320x180 source:
+/// darks, greys, light, saturated primaries, skin and yellow.
+const PATCHES: [[u8; 3]; 8] = [
+    [30, 30, 30],
+    [128, 128, 128],
+    [225, 225, 225],
+    [200, 60, 30],
+    [60, 170, 80],
+    [40, 70, 190],
+    [230, 180, 150],
+    [250, 240, 90],
+];
+
+fn patch_source(fixture: &Fixture) -> String {
+    let pick = |c: usize| {
+        let at = |i: usize| format!("if(eq(floor(X/80)+4*floor(Y/90),{i}),{},", PATCHES[i][c]);
+        let mut e: String = (0..8).map(at).collect();
+        e.push('0');
+        e.push_str(&")".repeat(8));
+        e
+    };
+    let filter = format!(
+        "format=gbrp,geq=r='{}':g='{}':b='{}'",
+        pick(0),
+        pick(1),
+        pick(2)
+    );
+    fixture.video("patches.mp4", "nullsrc=s=320x180:r=10:d=1", &filter, None)
+}
+
+#[test]
+fn graded_clips_export_as_the_preview_grades_them() {
+    use openreel_engine::{ColorAdjust, Filter};
+    let fixture = Fixture::new();
+    let source = patch_source(&fixture);
+    let decoded = &frames(Path::new(&source))[1];
+    let centre = |frame: &[u8], i: usize| {
+        let (x, y) = (40 + 80 * (i % 4), 45 + 90 * (i / 4));
+        let at = (y * 320 + x) * 3;
+        [frame[at], frame[at + 1], frame[at + 2]]
+    };
+    let none = ColorAdjust::default();
+    let grades = [
+        // A matrix past colorchannelmixer's ±2, run halved and doubled.
+        ColorAdjust {
+            exposure: 2.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            ..none
+        },
+        ColorAdjust {
+            filter: Filter::Sepia,
+            strength: 0.6,
+            temperature: -0.7,
+            tint: 0.4,
+            ..none
+        },
+        ColorAdjust {
+            brightness: 0.6,
+            filter: Filter::Vivid,
+            ..none
+        },
+        ColorAdjust {
+            brightness: -0.8,
+            exposure: -1.5,
+            saturation: -0.5,
+            ..none
+        },
+        ColorAdjust {
+            filter: Filter::Noir,
+            ..none
+        },
+        ColorAdjust {
+            filter: Filter::Fade,
+            contrast: -1.0,
+            ..none
+        },
+    ];
+    let mut timeline = Timeline::new(10.0);
+    for (index, grade) in grades.iter().enumerate() {
+        let id = video(&mut timeline, &source, 0, index as f64 * 0.3, 0.3, 0.0);
+        timeline.clip_mut(id).unwrap().color = *grade;
+    }
+    let exported = frames(&fixture.export("graded.mp4", &timeline));
+    let mut worst = 0;
+    for (index, grade) in grades.iter().enumerate() {
+        // Decoding and encoding differ by a level or two; a strong grade
+        // multiplies that by its largest row gain (about 11 for the first).
+        let gain = grade
+            .matrix()
+            .iter()
+            .map(|row| row[..3].iter().map(|v| v.abs()).sum::<f64>())
+            .fold(0.0, f64::max);
+        let limit = (3.0 + 0.5 * gain).ceil() as u8;
+        for patch in 0..PATCHES.len() {
+            let [r, g, b] = centre(decoded, patch);
+            let mut preview = [r, g, b, 255];
+            grade.apply_rgba(&mut preview);
+            let got = centre(&exported[index * 3 + 1], patch);
+            let error = (0..3).map(|c| got[c].abs_diff(preview[c])).max().unwrap();
+            worst = worst.max(error);
+            assert!(
+                error <= limit,
+                "grade {index} {grade:?}, patch {patch}: export {got:?}, preview {:?}",
+                &preview[..3]
+            );
+        }
+    }
+    eprintln!("graded patches: worst channel difference {worst}");
+
+    // The blurred background is graded with the picture: mono bars are grey.
+    let mut timeline = Timeline::new(10.0).with_format(Format::Portrait);
+    let id = video(&mut timeline, &source, 0, 0.0, 0.3, 0.0);
+    let clip = timeline.clip_mut(id).unwrap();
+    clip.background = Background::Blur;
+    clip.color = ColorAdjust {
+        filter: Filter::Mono,
+        ..none
+    };
+    let frame = &frames(&fixture.export("graded-blur.mp4", &timeline))[1];
+    for y in [20, 300] {
+        let at = (y * 180 + 90) * 3;
+        let [r, g, b] = [frame[at], frame[at + 1], frame[at + 2]];
+        assert!(
+            r.abs_diff(g) <= 3 && g.abs_diff(b) <= 3 && r > 40,
+            "bar at y {y}: {:?}",
+            [r, g, b]
+        );
+    }
+}
+
 #[test]
 fn occluded_video_resumes_at_advanced_source_time() {
     let fixture = Fixture::new();

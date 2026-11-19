@@ -538,3 +538,70 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
         );
     }
 }
+
+#[test]
+fn color_changes_only_what_is_asked_and_refuses_what_renderers_cannot_draw() {
+    use openreel_engine::{ColorAdjust, Filter};
+    let mut app = Editor::headless();
+    app.assets.push(asset("wide.mp4", 20.0, true));
+    app.assets.push(asset("song.wav", 20.0, false));
+    run(
+        &mut app,
+        "addAssetRange('wide.mp4', 0, 0, 5); addAssetRange('song.wav', 0, 0, 5)",
+    )
+    .unwrap();
+    let video = app.timeline.clips[0].id;
+    let song = app.timeline.clips[1].id;
+    let color = |app: &Editor| app.timeline.clip(video).unwrap().color;
+
+    run(
+        &mut app,
+        &format!("setColor({video}, {{saturation: -0.5, filter: 'Warm'}})"),
+    )
+    .unwrap();
+    run(
+        &mut app,
+        &format!("setColor({video}, {{exposure: 1.5, strength: 0.4}})"),
+    )
+    .unwrap();
+    let c = color(&app);
+    assert_eq!(
+        (c.saturation, c.filter, c.exposure, c.strength, c.contrast),
+        (-0.5, Filter::Warm, 1.5, 0.4, 0.0)
+    );
+    let read = run(&mut app, "return clips()[0].color").unwrap();
+    let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(
+        (read["filter"].as_str(), read["exposure"].as_f64()),
+        (Some("warm"), Some(1.5))
+    );
+    // A graded clip saves its colour; an ungraded one saves nothing.
+    let saved = serde_json::to_value(app.timeline.clip(video).unwrap()).unwrap();
+    assert_eq!(saved["color"]["filter"], "warm");
+    let plain = serde_json::to_value(app.timeline.clip(song).unwrap()).unwrap();
+    assert!(plain.get("color").is_none(), "{plain}");
+
+    let before = app.timeline.clone();
+    for (code, says) in [
+        (format!("setColor({video}, {{hue: 0.2}})"), "no 'hue'"),
+        (format!("setColor({video}, {{contrast: 1.5}})"), "-1 to 1"),
+        (
+            format!("setColor({video}, {{exposure: -3}})"),
+            "-2 to 2 stops",
+        ),
+        (format!("setColor({video}, {{tint: NaN}})"), "finite"),
+        (format!("setColor({video}, {{filter: 'lut'}})"), "vintage"),
+        (format!("setColor({video}, 'warm')"), "needs an object"),
+        (
+            format!("setColor({song}, {{contrast: 0.2}})"),
+            "needs a video clip",
+        ),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(says), "{code}: {error}");
+        assert_eq!(app.timeline, before, "{code}");
+    }
+
+    run(&mut app, &format!("setColor({video}, null)")).unwrap();
+    assert_eq!(color(&app), ColorAdjust::default());
+}
