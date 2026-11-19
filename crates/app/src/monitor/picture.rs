@@ -48,6 +48,8 @@ pub struct Picture {
     shown: Look,
     width: u32,
     rgba: Vec<u8>,
+    /// Counts decoded frames, so a reader can tell a new one arrived.
+    frame: u64,
 }
 
 impl Picture {
@@ -59,6 +61,12 @@ impl Picture {
         if self.shown != look && !self.rgba.is_empty() {
             self.show(pixels);
         }
+    }
+
+    /// The held frame as decoded, unflipped and ungraded: its width,
+    /// pixels and number.
+    pub fn upright(&self) -> (u32, &[u8], u64) {
+        (self.width, &self.rgba, self.frame)
     }
 
     fn show(&mut self, pixels: &Pixels) {
@@ -108,6 +116,7 @@ impl PreviewSink for Sink {
         picture.width = frame.width;
         picture.rgba.clear();
         picture.rgba.extend_from_slice(&frame.rgba);
+        picture.frame += 1;
         picture.show(&self.pixels);
         self.size.set(Some((frame.width, frame.height)));
     }

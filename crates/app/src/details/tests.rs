@@ -320,14 +320,20 @@ fn the_colour_card_grades_the_clip_from_its_list_sliders_and_fields() {
     reveal(&mut rt, "details-color-reset");
     let color = |rt: &Runtime<Ui>| clip(rt, id).color;
 
-    // Strength shows once there is a filter to weaken.
+    // Strength shows once there is a filter to weaken. A tile picks its
+    // filter at full strength; the current one keeps its strength.
     assert!(rt.find("details-strength").is_none());
-    click(&mut rt, "details-filter");
-    assert_eq!(rt.state.details.select, Some(Select::Filter));
     click(&mut rt, "details-filter-vintage");
     assert_eq!(color(&rt).filter, Filter::Vintage);
-    assert_eq!(rt.state.details.select, None);
     assert!(rt.find("details-strength").is_some());
+    rt.state.editor.edit_clip_color(id, |c| c.strength = 0.4);
+    click(&mut rt, "details-filter-vintage");
+    assert_eq!(color(&rt).strength, 0.4);
+    click(&mut rt, "details-filter-warm");
+    assert_eq!(
+        (color(&rt).filter, color(&rt).strength),
+        (Filter::Warm, 1.0)
+    );
 
     // Exposure is typed in stops, with or without its unit; other values
     // in percent, moved into range.
@@ -366,7 +372,8 @@ fn the_colour_card_grades_the_clip_from_its_list_sliders_and_fields() {
 
     rt.help_delay = 0.0;
     for key in [
-        "details-filter",
+        "details-filter-none",
+        "details-filter-noir",
         "details-strength-slider",
         "details-strength",
         "details-brightness-slider",

@@ -1,4 +1,4 @@
-//! The Colour card: a video clip's filter and adjustments. The clamps are
+//! The Colour card: a video clip's filter tiles and adjustments. The clamps are
 //! `Editor::edit_clip_color`'s; the preview grades its frames and export
 //! builds FFmpeg filters from the same `openreel_engine::ColorAdjust`.
 
@@ -7,10 +7,10 @@ use openreel_engine::{Clip, ClipId, ColorAdjust, Filter, MAX_EXPOSURE};
 use rune::El;
 
 use super::fields::Field;
-use super::rows::{button_row, prop_row, section, slider_row};
-use super::styles::{Select, select};
+use super::filters;
+use super::rows::{button_row, section, slider_row};
 use crate::app::Ui;
-use crate::theme::{self, FIELD_H, Variant};
+use crate::theme::{self, Variant};
 
 pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f32) -> El {
     let color = clip.color;
@@ -27,7 +27,7 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
             help,
         )
     };
-    let mut rows = vec![filter(ui, color.filter)];
+    let mut rows = vec![filters::grid(ui, id, color.filter, card_inner)];
     if color.filter != Filter::None {
         rows.push(slider_row(
             ui,
@@ -95,25 +95,6 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
 
 fn set_exposure(editor: &mut Editor, id: ClipId, stops: f32) {
     editor.edit_clip_color(id, |c| c.exposure = f64::from(stops));
-}
-
-fn filter(ui: &Ui, current: Filter) -> El {
-    let help = "A preset look, applied before the adjustments below";
-    prop_row(
-        "Filter",
-        help,
-        select(
-            "details-filter",
-            current.label(),
-            help,
-            Select::Filter,
-            ui.details.select == Some(Select::Filter),
-        )
-        .grow(1.0)
-        .min_w(0.0),
-    )
-    .h(FIELD_H + 1.0)
-    .pb(1.0)
 }
 
 fn reset(id: ClipId, card_inner: f32) -> El {

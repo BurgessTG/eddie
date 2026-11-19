@@ -17,8 +17,9 @@
   `inspect()` reports a picture moved off the canvas.
 - A Colour card in Details for video clips: brightness, contrast,
   saturation, exposure, temperature and tint, plus nine filters (Vivid,
-  Dramatic, Warm, Cool, Fade, Vintage, Sepia, Mono, Noir) with a strength.
-  The monitor shows the grade as export renders it. Scripts use
+  Dramatic, Warm, Cool, Fade, Vintage, Sepia, Mono, Noir) with a strength,
+  picked from tiles that show each filter on the clip's own frame. The
+  monitor shows the grade as export renders it. Scripts use
   `setColor`, and `state()` gives each clip's `color`.
 
 ### Changed

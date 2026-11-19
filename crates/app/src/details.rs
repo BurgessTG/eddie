@@ -4,12 +4,13 @@
 //!
 //! `fields` is the typed values and when typing reaches the clip, `body`
 //! the cards for one clip, `transform` the card that places a picture,
-//! `color` the one that grades it, `rows` the controls those cards are made
-//! of and `styles` the pick lists.
+//! `color` the one that grades it and `filters` its filter tiles, `rows`
+//! the controls those cards are made of and `styles` the title-style lists.
 
 mod body;
 mod color;
 mod fields;
+mod filters;
 mod rows;
 mod styles;
 mod transform;
@@ -18,7 +19,6 @@ use openreel_engine::ClipId;
 use rune::{Cursor, El, Phase, ScrollSpec, TextEdit, col, el, row, text};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
-pub use fields::sync;
 use fields::{Entry, Field};
 pub use styles::{Select, overlays};
 
@@ -47,6 +47,7 @@ pub struct State {
     /// A slider is held, so undo waits for the release.
     pub slider_held: bool,
     pub width: f32,
+    filters: filters::Previews,
 }
 
 impl Default for State {
@@ -62,6 +63,7 @@ impl Default for State {
             select: None,
             slider_held: false,
             width: DEFAULT_W,
+            filters: filters::Previews::default(),
         }
     }
 }
@@ -86,6 +88,13 @@ impl State {
             entry.edit.focused = false;
         }
     }
+}
+
+/// Once per frame, before the editor's own: the typed values, then the
+/// filter tiles' picture.
+pub fn sync(ui: &mut Ui) {
+    fields::sync(ui);
+    filters::sync(ui);
 }
 
 /// Export draws a title on one line.
