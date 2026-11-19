@@ -1064,6 +1064,119 @@ fn blurred_background_fills_the_bars_with_the_picture() {
     assert!(below[1] < 100 && below[2] > 30, "below {below:?}");
 }
 
+/// The quadrants as one 320x180 picture, written by FFmpeg as `name`.
+fn quadrant_photo(fixture: &Fixture, name: &str) -> PathBuf {
+    let path = fixture.0.join(name);
+    run(Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("nullsrc=s=320x180")
+        .args([
+            "-vf",
+            "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        ])
+        .args(["-frames:v", "1", "-q:v", "2"])
+        .arg(&path));
+    path
+}
+
+/// A photo clip at `start` for `duration`, as the editor adds one.
+fn photo(timeline: &mut Timeline, path: &Path, start: f64, duration: f64) -> u64 {
+    let id = video(timeline, path.to_str().unwrap(), 0, start, duration, 0.0);
+    timeline.clip_mut(id).unwrap().photo = true;
+    id
+}
+
+/// Read `(x, y)` from each of `frame`'s pixels in a `width`-wide RGB frame.
+fn colors_at(frame: &[u8], width: u32, points: &[(usize, usize)]) -> Vec<[u8; 3]> {
+    points
+        .iter()
+        .map(|&(x, y)| {
+            let at = (y * width as usize + x) * 3;
+            [frame[at], frame[at + 1], frame[at + 2]]
+        })
+        .collect()
+}
+
+#[test]
+fn a_photo_is_held_for_its_whole_clip_and_letterboxed() {
+    let fixture = Fixture::new();
+    let png = quadrant_photo(&fixture, "quadrants.png");
+    let info = probe(png.to_str().unwrap()).unwrap();
+    assert!(info.photo && info.has_video, "{info:?}");
+    assert_eq!((info.width, info.height, info.duration), (320, 180, 0.0));
+    // Black for 0.2 s, then the photo for 0.5 s: frames 2 to 6.
+    let mut timeline = Timeline::new(10.0).with_format(Format::Portrait);
+    photo(&mut timeline, &png, 0.2, 0.5);
+    let exported = fixture.export("photo.mp4", &timeline);
+    let frames = frames(&exported);
+    assert_eq!(frames.len(), 7, "every frame of the timeline");
+    let points = [(45, 135), (135, 185), (90, 40), (90, 280)];
+    for (index, frame) in frames.iter().enumerate() {
+        let expected = if index < 2 {
+            [BLACK; 4]
+        } else {
+            [TL, BR, BLACK, BLACK]
+        };
+        assert_colors(
+            &format!("frame {index}"),
+            &colors_at(frame, 180, &points),
+            &expected,
+        );
+    }
+}
+
+/// `jpeg` with an EXIF block saying how to turn it for display.
+fn with_orientation(jpeg: &[u8], orientation: u8) -> Vec<u8> {
+    let mut exif = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
+    // Tag 0x0112 (Orientation), SHORT, one value; then no next IFD.
+    exif.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, orientation, 0, 0]);
+    exif.extend([0, 0, 0, 0]);
+    let length = (exif.len() + 2) as u16;
+    let mut out = jpeg[..2].to_vec();
+    out.extend([0xff, 0xe1]);
+    out.extend(length.to_be_bytes());
+    out.extend(exif);
+    out.extend(&jpeg[2..]);
+    out
+}
+
+#[test]
+fn a_phone_photo_exports_upright_from_its_exif_orientation() {
+    let fixture = Fixture::new();
+    let stored = quadrant_photo(&fixture, "stored.jpg");
+    let turned = fixture.0.join("turned.jpg");
+    // 6: the camera was turned; show the picture a quarter turn clockwise.
+    std::fs::write(
+        &turned,
+        with_orientation(&std::fs::read(&stored).unwrap(), 6),
+    )
+    .unwrap();
+    let info = probe(turned.to_str().unwrap()).unwrap();
+    assert_eq!((info.width, info.height), (180, 320), "displayed size");
+    let mut timeline = Timeline::new(10.0).with_format(Format::Landscape);
+    photo(&mut timeline, &turned, 0.0, 0.3);
+    let exported = fixture.export("turned.mp4", &timeline);
+    let frames = frames(&exported);
+    assert_eq!(frames.len(), 3);
+    // 180x320 fits 101x180, centred: x 110-210. A quarter turn clockwise
+    // puts the stored bottom-left at the top-left.
+    let points = [
+        (135, 45),
+        (185, 45),
+        (135, 135),
+        (185, 135),
+        (30, 90),
+        (290, 90),
+    ];
+    for (index, frame) in frames.iter().enumerate() {
+        assert_colors(
+            &format!("frame {index}"),
+            &colors_at(frame, 320, &points),
+            &[BL, TL, BR, TR, BLACK, BLACK],
+        );
+    }
+}
+
 /// Eight flat patches, four across and two down, on a 320x180 source:
 /// darks, greys, light, saturated primaries, skin and yellow.
 const PATCHES: [[u8; 3]; 8] = [

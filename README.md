@@ -57,6 +57,8 @@ offers the newest build.
   and tint, and nine filters with a strength. The monitor shows the grade
   export renders.
 - Speed per clip from 0.25× to 4×, with the sound kept at its pitch.
+- Photos (PNG, JPEG, WebP) as clips: 3 seconds when added, any length
+  after a trim, upright from their EXIF orientation.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
   can duck under speech.

@@ -201,7 +201,8 @@ impl Editor {
                 if let Some(right) = right {
                     let mut end = self.timeline.snap(right);
                     if let Some(c) = self.timeline.clip(clip) {
-                        if let Some(asset) = c.source.as_ref().and_then(|s| self.asset(s)) {
+                        let source = c.source.as_ref().filter(|_| !c.photo);
+                        if let Some(asset) = source.and_then(|s| self.asset(s)) {
                             end = end.min(c.time_at(asset.info.duration).max(c.start));
                         }
                     }
@@ -266,6 +267,11 @@ impl Editor {
                 if target.kind == ClipKind::Title || target.source.is_none() {
                     return Err(format!(
                         "setSpeed needs a video or audio clip; clip {clip} is not one"
+                    ));
+                }
+                if target.photo {
+                    return Err(format!(
+                        "setSpeed: clip {clip} is a photo; trim it to change how long it shows"
                     ));
                 }
                 self.timeline.set_speed(clip, speed);
@@ -377,7 +383,7 @@ impl Editor {
                 from_zero("addAsset", "time", at)?;
                 let (path, name, duration) = self
                     .asset_named(&asset)
-                    .map(|a| (a.info.path.clone(), a.info.name.clone(), a.info.duration))?;
+                    .map(|a| (a.info.path.clone(), a.info.name.clone(), a.clip_length()))?;
                 let id =
                     self.try_add_asset_range_to_timeline(&path, &name, None, at, 0.0, duration)?;
                 created.extend(handle.map(|handle| (handle, id)));

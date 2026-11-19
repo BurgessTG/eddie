@@ -50,6 +50,7 @@ fn finished_import_keeps_the_users_selection() {
             fps: 30.0,
             has_video: true,
             has_audio: false,
+            photo: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

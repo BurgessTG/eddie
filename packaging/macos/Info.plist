@@ -57,6 +57,9 @@
 			<array>
 				<string>public.movie</string>
 				<string>public.audio</string>
+				<string>public.png</string>
+				<string>public.jpeg</string>
+				<string>org.webmproject.webp</string>
 			</array>
 		</dict>
 	</array>

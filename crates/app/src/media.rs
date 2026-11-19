@@ -236,14 +236,14 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
         // The lane of the file's kind it would land on; none when it would
         // get a new lane.
         let lands = timeline::drop_target(ui, drag.at).and_then(|(row, at)| {
-            let info = &ui.editor.asset(&drag.path)?.info;
-            let kind = if info.has_video {
+            let asset = ui.editor.asset(&drag.path)?;
+            let kind = if asset.info.has_video {
                 ClipKind::Video
             } else {
                 ClipKind::Audio
             };
             let timeline = &ui.editor.timeline;
-            let track = timeline.drop_lane(kind, row, at, at + info.duration)?;
+            let track = timeline.drop_lane(kind, row, at, at + asset.clip_length())?;
             Some(timeline.row(kind, track))
         });
         if let Some([x, y, w, h]) = lands.and_then(|row| timeline::lane_rect(ui, row)) {

@@ -445,6 +445,7 @@ mod tests {
                         fps: 30.0,
                         has_video: true,
                         has_audio: true,
+                        photo: false,
                     },
                     size_bytes: 0,
                     state: AssetState::Ready,

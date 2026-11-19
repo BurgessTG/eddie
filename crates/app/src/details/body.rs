@@ -25,7 +25,7 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
     let card_inner = inner - 2.0 * CARD_PAD;
     let value_w = card_inner - LABEL_W - GAP;
 
-    let mut look = levels(ui, id, clip, info.has_source, value_w);
+    let mut look = levels(ui, id, clip, info.has_sound, value_w);
     if clip.kind == ClipKind::Audio && info.has_source {
         look.extend(sound(ui, id, clip, value_w));
     }
@@ -81,7 +81,9 @@ fn timing(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             "How long the clip plays",
         ),
     ];
-    if has_source {
+    // A photo has no source range and no speed: its length is all there is.
+    let ranged = has_source && !clip.photo;
+    if ranged {
         timing.push(seconds_row(
             ui,
             "Source in",
@@ -90,7 +92,7 @@ fn timing(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             "Where playback starts inside the source file",
         ));
     }
-    if has_source && clip.kind != ClipKind::Title {
+    if ranged && clip.kind != ClipKind::Title {
         // Doubling and halving are equal steps, so 1x sits in the middle.
         timing.push(last_slider(slider_row(
             ui,
@@ -123,7 +125,7 @@ fn speed_at(editor: &mut Editor, id: ClipId, position: f32) {
 }
 
 /// The Opacity and Volume sliders, for a clip that has a picture or sound.
-fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> Vec<El> {
+fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Vec<El> {
     let is_audio = clip.kind == ClipKind::Audio;
     let mut look = Vec::new();
     if !is_audio {
@@ -138,9 +140,9 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             Editor::set_clip_opacity,
             "Fades the picture against black",
         );
-        look.push(if has_source { row } else { last_slider(row) });
+        look.push(if has_sound { row } else { last_slider(row) });
     }
-    if has_source {
+    if has_sound {
         let row = slider_row(
             ui,
             id,

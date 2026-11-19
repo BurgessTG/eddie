@@ -242,6 +242,12 @@ fn video_asset<'a>(app: &'a Editor, name: &str) -> Result<&'a BinAsset, String> 
     if asset.state != AssetState::Ready {
         return Err(format!("{} is not imported yet", asset.info.name));
     }
+    if asset.info.photo {
+        return Err(format!(
+            "{} is a photo: its one picture is the file itself",
+            asset.info.name
+        ));
+    }
     if !asset.info.has_video || asset.info.duration <= 0.0 {
         return Err(format!("{} has no picture", asset.info.name));
     }

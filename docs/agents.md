@@ -181,11 +181,15 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed`. A clip shows source `sourceIn` to
-  `sourceIn + duration * speed`.
+  transform, background, color, speed, photo`. A clip shows source
+  `sourceIn` to `sourceIn + duration * speed`; a photo clip (`photo`)
+  shows its one picture for its whole length.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
-  orientation, ready, silenceRanges [{start,end}], utterances
+  photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
+  - `photo: true` marks a photo (PNG, JPEG or WebP): one picture, with
+    `duration` 0. `curate`, `strip` and `frames` refuse it; open the file
+    itself to see it.
   - `silenceRanges` are stretches of 0.35 s or more below the recording's
     own quiet level.
   - `tempo` (BPM) and `beats` (source seconds) are set only for
@@ -239,6 +243,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   sourceIn, dur)`. A new clip lands on the first lane of its kind that is
   free for its whole span. Read its lane as `track` in the next `state()`,
   or set it with `setClipLane`.
+  - A photo added with `addAsset` lasts 3 seconds. `addAssetRange` places
+    it for `dur` and ignores `sourceIn`.
   - A name that two assets share is an error; pass the asset's `path`.
 - **Move and trim:** `moveClip(id, start)`, `setClipLane(id, lane)`,
   `insertTime(at, seconds)`, `closeGaps()`, `trimClip(id, left, right)`.
@@ -246,7 +252,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     times. `null` or -1 keeps that edge. An end at or before the start
     is an error.
   - A new start moves the source in-point by the same amount, times the
-    clip's speed. A new end stops at the end of the source.
+    clip's speed. A new end stops at the end of the source. A photo has
+    no source range, so either edge of it goes anywhere.
   - Two clips can't overlap on one lane. This is checked once, after the
     whole script: clips may cross on the way, but a script that ends with
     a new overlap is refused with an error naming both clips. Trim one,
@@ -265,7 +272,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   that would run into the next one on its lane is refused like any
   overlap, so make room in the same script first (`insertTime` or
   `moveClip`). `tightenSilence` refuses a clip that is not at speed 1:
-  remove pauses first, then change the speed.
+  remove pauses first, then change the speed. A photo has no speed; trim
+  it to change how long it shows.
 - **Canvas and framing:** video of any shape goes on any canvas. Each
   picture fits inside the canvas, centred, until you move it.
   - `setFormat(name)` sets the canvas shape: `original` (the shape of the

@@ -24,6 +24,7 @@ fn window(kind: ClipKind) -> (Runtime<Ui>, ClipId) {
             fps: 30.0,
             has_video: true,
             has_audio: true,
+            photo: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,
@@ -458,4 +459,32 @@ fn speed_changes_the_length_and_slows_only_as_far_as_the_lane_has_room() {
     let normal = clip(&rt, id);
     assert!((normal.duration - 4.0).abs() < 1e-9, "{}", normal.duration);
     assert!((normal.source_end() - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_photo_has_a_length_but_no_source_range_speed_or_sound() {
+    let (mut rt, id) = window(ClipKind::Video);
+    let info = &mut rt.state.editor.assets[0].info;
+    (info.photo, info.has_audio, info.duration, info.fps) = (true, false, 0.0, 0.0);
+    let photo = rt.state.editor.timeline.clip_mut(id).unwrap();
+    (photo.photo, photo.source_in) = (true, 0.0);
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    for key in ["details-start", "details-duration", "details-opacity"] {
+        assert!(rt.find(key).is_some(), "{key} is not shown");
+    }
+    for key in [
+        "details-source-in",
+        "details-speed",
+        "details-volume",
+        "details-detach",
+    ] {
+        assert!(rt.find(key).is_none(), "{key} is shown for a photo");
+    }
+    // No source runs out: it lasts as long as it is told to.
+    click(&mut rt, "details-duration");
+    rt.paste("60 s");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    assert_eq!(clip(&rt, id).duration, 60.0);
 }

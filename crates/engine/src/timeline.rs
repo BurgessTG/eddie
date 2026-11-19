@@ -326,6 +326,7 @@ impl Timeline {
             background: crate::Background::default(),
             color: crate::ColorAdjust::default(),
             speed: 1.0,
+            photo: false,
         });
         id
     }

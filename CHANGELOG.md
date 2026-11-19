@@ -26,6 +26,10 @@
   so its length follows the speed; slowing stops where the next clip on the
   lane starts. Scripts use `setSpeed`, and `state()` gives each clip's
   `speed`.
+- Photos (PNG, JPEG and WebP) as clips. One added whole lasts 3 seconds;
+  trim either edge to any length. A phone photo shows upright from its
+  EXIF orientation, and photos take the same transform, background and
+  colour as video. `state()` marks photo assets and clips `photo`.
 
 ### Changed
 

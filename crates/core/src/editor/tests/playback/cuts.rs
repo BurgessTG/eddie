@@ -491,3 +491,44 @@ fn run_short_clip_diagnostics(transport_clock: bool) {
         }
     }
 }
+
+/// A photo's one picture shows at once and holds while the playhead runs
+/// on through the clip; the next cut shows its own picture.
+#[test]
+fn a_photo_holds_its_picture_while_playback_runs_through_it() {
+    let fixture = Fixture::new();
+    let photo = fixture.dir.join("green.png");
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "color=lime:s=64x36"])
+        .args(["-frames:v", "1"])
+        .arg(&photo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let photo = photo.to_string_lossy().into_owned();
+    let (mut app, monitor) = watched_editor();
+    add_asset(&mut app, &photo);
+    add_asset(&mut app, &fixture.path);
+    let id = app
+        .timeline
+        .add_media_clip("Photo", ClipKind::Video, 0, 0.0, 0.3, 0.0, &photo);
+    app.timeline.clip_mut(id).unwrap().photo = true;
+    app.timeline
+        .add_media_clip("Red", ClipKind::Video, 0, 0.3, 0.2, 0.0, &fixture.path);
+    app.last_now = Some(0.0);
+    app.set_playing(true);
+    let first = await_picture(&mut app, &monitor);
+    assert!(first.0[1] > 240 && first.r() < 10, "photo: {first:?}");
+
+    for now in [0.1, 0.2, 0.29] {
+        app.advance_playback(now);
+        app.poll_frames();
+        app.sync_playback();
+        assert!((app.playhead - now).abs() < 1e-9, "{}", app.playhead);
+        assert!(app.playing && monitor.on(), "{}", app.status);
+    }
+    app.advance_playback(0.35);
+    let next = await_picture(&mut app, &monitor);
+    assert!(next.r() > 240 && next.b() < 10, "next: {next:?}");
+    app.set_playing(false);
+}

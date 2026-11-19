@@ -13,6 +13,7 @@ use ffmpeg_next as ffmpeg;
 use crate::{MediaResult, RawFrame};
 
 mod hardware;
+mod photo;
 mod scaler;
 mod stills;
 
@@ -21,6 +22,7 @@ pub(crate) use hardware::{hardware_broken, hardware_failed};
 pub use hardware::{
     inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
 };
+pub(crate) use photo::is_photo;
 use scaler::Scaler;
 pub(crate) use stills::frame_at;
 pub use stills::{filmstrip_stills, StillDecoder};
@@ -83,8 +85,12 @@ pub struct VideoDecoder {
     target_w: u32,
     target_h: u32,
     fast: bool,
-    /// Clockwise quarter turns from the stream's display matrix.
-    turns: u8,
+    /// Clockwise quarter turns from the stream's display matrix, or for a
+    /// photo, its picture's (where FFmpeg puts EXIF orientation).
+    pub(crate) turns: u8,
+    /// One picture (`is_photo`): seeks re-queue it instead of moving the
+    /// demuxer, since `image2` returns nothing after any seek.
+    photo: bool,
     decoded: ffmpeg::frame::Video,
     /// Presentation time of `decoded` once it was returned.
     decoded_pts: Option<f64>,
@@ -149,6 +155,9 @@ impl VideoDecoder {
     ) -> MediaResult<Self> {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
+        let photo = is_photo(&input);
+        // The GPU has nothing to gain on one picture.
+        let hardware = hardware && !photo;
         let (stream_index, time_base, stream_start, parameters, turns) = {
             let stream = input
                 .streams()
@@ -219,7 +228,7 @@ impl VideoDecoder {
             target_w,
             fast,
         )?;
-        Ok(Self {
+        let mut this = Self {
             input,
             decoder,
             scaler,
@@ -243,7 +252,12 @@ impl VideoDecoder {
             hardware_pictures: 0,
             damage: 0,
             transfer: ffmpeg::frame::Video::empty(),
-        })
+            photo,
+        };
+        if photo {
+            this.queue_photo()?;
+        }
+        Ok(this)
     }
 
     pub fn output_size(&self) -> (u32, u32) {
@@ -265,6 +279,11 @@ impl VideoDecoder {
     /// the demuxer's keyframe preroll. Selection happens on the next decode.
     pub fn seek(&mut self, time: f64) -> MediaResult<()> {
         let time = time.max(0.0);
+        if self.photo {
+            self.rewind_photo();
+            self.seek_target = Some(time);
+            return Ok(());
+        }
         let ts = self
             .source_origin
             .rescale(self.time_base, ffmpeg::rescale::TIME_BASE)
@@ -288,6 +307,9 @@ impl VideoDecoder {
     /// after every picture already returned; the next frame is returned as-is
     /// if it already starts after `time`.
     pub(crate) fn skip_to(&mut self, time: f64) {
+        if self.photo {
+            self.rewind_photo();
+        }
         self.seek_target = Some(time.max(0.0));
     }
 

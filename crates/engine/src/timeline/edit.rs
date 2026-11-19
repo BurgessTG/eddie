@@ -115,9 +115,9 @@ impl Timeline {
         }
         // Generated clips have no media to run out of: a title's edge can
         // move earlier, and its source clock goes negative so word timings
-        // stay where they were.
+        // stay where they were. A photo has no source range to run out of.
         let generated = clip.kind == ClipKind::Title;
-        let min_start = if generated {
+        let min_start = if generated || clip.photo {
             0.0
         } else {
             clip.time_at(0.0).max(0.0)
@@ -135,7 +135,9 @@ impl Timeline {
         let delta = desired - clip.start;
         if let Some(clip) = self.clip_mut(id) {
             clip.start = desired;
-            clip.source_in += delta * clip.speed;
+            if !clip.photo {
+                clip.source_in += delta * clip.speed;
+            }
             if !generated {
                 clip.source_in = clip.source_in.max(0.0);
             }
@@ -246,12 +248,12 @@ impl Timeline {
     /// Play a media clip at `speed` source seconds per second. It keeps its
     /// source range, so its length becomes that range at the new speed; a
     /// linked partner changes with it. False, and nothing changes, for a
-    /// title, a clip without a source or a speed outside
+    /// title, a photo, a clip without a source or a speed outside
     /// [`MIN_SPEED`]..=[`MAX_SPEED`].
     pub fn set_speed(&mut self, id: ClipId, speed: f64) -> bool {
-        let media = self
-            .clip(id)
-            .is_some_and(|clip| clip.kind != ClipKind::Title && clip.source.is_some());
+        let media = self.clip(id).is_some_and(|clip| {
+            clip.kind != ClipKind::Title && clip.source.is_some() && !clip.photo
+        });
         if !media || !(MIN_SPEED..=MAX_SPEED).contains(&speed) {
             return false;
         }

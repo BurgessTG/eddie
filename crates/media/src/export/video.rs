@@ -102,6 +102,8 @@ pub(super) struct VideoLayer<'a> {
     /// `speed * timeline + source_offset`.
     source_offset: i64,
     speed: f64,
+    /// A photo: one picture, held.
+    photo: bool,
     ranges: Vec<(i64, i64)>,
 }
 
@@ -142,7 +144,9 @@ pub(super) fn plan_video<'a>(
         let convert = conversions
             .get(source)
             .and_then(|convert| convert.as_deref());
-        let source_offset = if clip.speed == 1.0 {
+        let source_offset = if clip.photo {
+            0
+        } else if clip.speed == 1.0 {
             // In whole ticks from the clip's first frame, so a source frame
             // on a timeline frame stays on it.
             let start = clock.boundary(clip.start);
@@ -171,6 +175,7 @@ pub(super) fn plan_video<'a>(
                 color: clip.color,
                 source_offset,
                 speed: clip.speed,
+                photo: clip.photo,
                 ranges: ranges.clone(),
             });
         }
@@ -461,18 +466,13 @@ pub(super) fn batch_command(
         let seek = source_time.min(last_seek).max(0.0).floor() as i64;
         // Slice threads split each picture: frame threading on four 4K
         // inputs pushed export to about 2.8 GB RSS.
-        cmd.args([
-            "-thread_type:v",
-            "slice",
-            "-threads:v",
-            "0",
-            "-an",
-            "-ss",
-            &seek.to_string(),
-            "-noaccurate_seek",
-            "-i",
-            layer.source,
-        ]);
+        cmd.args(["-thread_type:v", "slice", "-threads:v", "0", "-an"]);
+        // A photo is read from the top: `image2` returns no picture at all
+        // after a seek, even to 0.
+        if !layer.photo {
+            cmd.args(["-ss", &seek.to_string(), "-noaccurate_seek"]);
+        }
+        cmd.args(["-i", layer.source]);
         // Input timestamps (source ticks after the seek) onto output ticks
         // from this input's first frame.
         let timestamps = if layer.speed == 1.0 {
@@ -529,11 +529,25 @@ pub(super) fn batch_command(
         // and would change sampling phase at fractional-frame boundaries.
         // Pad before fps so EOF holds the final source frame even if it
         // falls between output samples.
-        filters.push(format!(
-            "[{index}:v]settb=1/{tick_rate},setpts={timestamps},\
-             tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
-             trim=end_frame={layer_frames},setpts=PTS+{first}{picture}"
-        ));
+        let hold = format!(
+            "tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
+             trim=end_frame={layer_frames},setpts=PTS+{first}"
+        );
+        if layer.photo {
+            // Lay the photo out once and hold the result, rather than scale
+            // the same picture again for every output frame.
+            let picture = picture
+                .strip_suffix(&format!("[seg{index}]"))
+                .expect("a picture chain ends at its segment");
+            filters.push(format!(
+                "[{index}:v]settb=1/{tick_rate},setpts=PTS-STARTPTS{picture}[photo{index}]"
+            ));
+            filters.push(format!("[photo{index}]{hold}[seg{index}]"));
+        } else {
+            filters.push(format!(
+                "[{index}:v]settb=1/{tick_rate},setpts={timestamps},{hold}{picture}"
+            ));
+        }
         filters.push(format!(
             "[{current}][seg{index}]overlay={x}:{y}:eof_action=repeat:ts_sync_mode=default:\
              enable='{}'[v{index}]",

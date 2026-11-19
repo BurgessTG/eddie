@@ -57,6 +57,7 @@ fn gallery(candidates: Vec<SweepCandidate>, size: (f32, f32)) -> Runtime<Ui> {
             fps: 0.0,
             has_video: false,
             has_audio: true,
+            photo: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

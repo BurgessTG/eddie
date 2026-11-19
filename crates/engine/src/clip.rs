@@ -134,6 +134,11 @@ pub struct Clip {
     /// [`Clip::time_at`] to move between the two clocks.
     #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
     pub speed: f64,
+    /// Video only: the source is one picture, a photo, shown for the
+    /// clip's whole length. It has no source range (`source_in` stays 0),
+    /// so either edge trims as far as it likes, and it has no speed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub photo: bool,
 }
 
 /// The slowest and fastest a clip plays.
@@ -161,8 +166,12 @@ impl Clip {
         time >= self.start && time < self.end()
     }
 
-    /// The source time shown or heard at timeline `time`.
+    /// The source time shown or heard at timeline `time`. A photo shows
+    /// its one picture throughout.
     pub fn source_at(&self, time: f64) -> f64 {
+        if self.photo {
+            return self.source_in;
+        }
         self.source_in + (time - self.start) * self.speed
     }
 

@@ -14,6 +14,9 @@ pub struct MediaInfo {
     pub fps: f64,
     pub has_video: bool,
     pub has_audio: bool,
+    /// One picture, such as a PNG, JPEG or WebP photo. It has no length
+    /// (`duration` and `fps` are 0): a clip shows it for as long as it lasts.
+    pub photo: bool,
 }
 
 /// Probe a media file in process: what it holds, how long it runs and the
@@ -41,6 +44,7 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         fps: 0.0,
         has_video: false,
         has_audio: false,
+        photo: false,
     };
     for stream in input.streams() {
         let parameters = stream.parameters();
@@ -74,6 +78,16 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
     }
     if !info.has_video && !info.has_audio {
         return Err(format!("no audio or video stream in {path}"));
+    }
+    if info.has_video && decode::is_photo(&input) {
+        info.photo = true;
+        // Image demuxers give a picture a nominal 25 fps and one frame.
+        (info.duration, info.fps) = (0.0, 0.0);
+        // A photo's EXIF orientation reaches its decoded picture, not the
+        // stream, so the decoder reads it from the picture.
+        if decode::VideoDecoder::open(path, 16, true)?.turns % 2 == 1 {
+            std::mem::swap(&mut info.width, &mut info.height);
+        }
     }
     Ok(info)
 }

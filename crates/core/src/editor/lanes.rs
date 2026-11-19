@@ -529,7 +529,9 @@ impl Gesture {
             } => {
                 let desired = orig_end + (time - press_time);
                 let mut new_end = timeline.snap(snap_to(desired, &candidates, threshold));
-                if let Some(duration) = clip.source.as_deref().and_then(source_duration) {
+                // A photo has no source to run out of.
+                let source = clip.source.as_deref().filter(|_| !clip.photo);
+                if let Some(duration) = source.and_then(source_duration) {
                     let max_end = clip.time_at(duration).max(clip.start);
                     new_end = new_end.min(max_end);
                 }

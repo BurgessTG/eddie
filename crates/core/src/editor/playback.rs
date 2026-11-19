@@ -207,13 +207,17 @@ impl Editor {
     /// Pictures shown over the last second of playback and the rate the
     /// active picture should reach (its source rate at the clip's speed, at
     /// most the project's). `None` until playback has run a full second over
-    /// video.
+    /// video, and over a photo.
     pub fn playback_rate(&self) -> Option<(usize, f64)> {
         let since = self.playing_since?;
         if !self.playing || since.elapsed() < Duration::from_secs(1) {
             return None;
         }
-        let clip = self.timeline.active_video(self.playhead)?;
+        // A photo is one picture: there is no rate to keep up with.
+        let clip = self
+            .timeline
+            .active_video(self.playhead)
+            .filter(|clip| !clip.photo)?;
         let source_fps = self
             .asset(clip.source.as_deref()?)
             .map_or(0.0, |asset| asset.info.fps);

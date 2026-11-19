@@ -31,6 +31,7 @@ fn test_info() -> MediaInfo {
         fps: 30.0,
         has_video: true,
         has_audio: true,
+        photo: false,
     }
 }
 

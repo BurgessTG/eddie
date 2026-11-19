@@ -32,6 +32,29 @@ pub struct BinAsset {
     pub sweep: SweepData,
 }
 
+/// How long a photo lasts when it is added whole, as in CapCut.
+pub const PHOTO_SECONDS: f64 = 3.0;
+
+impl BinAsset {
+    /// What adding the whole file places: its length, or
+    /// [`PHOTO_SECONDS`] of a photo.
+    pub fn clip_length(&self) -> f64 {
+        if self.info.photo {
+            PHOTO_SECONDS
+        } else {
+            self.info.duration
+        }
+    }
+
+    /// Imported and never curated, and not a photo, which has no shots or
+    /// speech to find.
+    pub fn awaits_curation(&self) -> bool {
+        self.state == AssetState::Ready
+            && !self.info.photo
+            && self.sweep.status == super::sweep::SweepStatus::NotStarted
+    }
+}
+
 pub struct ImportedAsset {
     pub info: MediaInfo,
     pub peaks: Vec<f32>,
@@ -107,6 +130,7 @@ impl Editor {
                 fps: 0.0,
                 has_video: false,
                 has_audio: false,
+                photo: false,
             },
             size_bytes,
             state: AssetState::Probing,
@@ -336,7 +360,7 @@ impl Editor {
         let Some(asset) = self.asset(path) else {
             return;
         };
-        let (name, duration) = (asset.info.name.clone(), asset.info.duration);
+        let (name, duration) = (asset.info.name.clone(), asset.clip_length());
         self.add_asset_range_to_timeline(path, &name, row, at, 0.0, duration);
     }
 
@@ -375,7 +399,7 @@ impl Editor {
         }
         let asset_name = asset.info.name.clone();
         let source_duration = asset.info.duration;
-        let has_video = asset.info.has_video;
+        let (has_video, photo) = (asset.info.has_video, asset.info.photo);
         // Baked-in montage music must not ride into a new edit, so the
         // add path mutes video whose added range is mostly curator-flagged
         // music bed. Audio-only media is the new soundtrack itself and is
@@ -389,8 +413,16 @@ impl Editor {
         // and must stay unducked, or it would stop counting as speech.
         let ducks = !has_video
             && (asset.beats.is_some() || (duration > 0.0 && bed_overlap >= duration * 0.5));
-        let source_in = source_in.clamp(0.0, source_duration.max(0.0));
-        let duration = duration.min((source_duration - source_in).max(0.0));
+        // A photo shows its one picture for as long as it is asked to.
+        let (source_in, duration) = if photo {
+            (0.0, duration)
+        } else {
+            let source_in = source_in.clamp(0.0, source_duration.max(0.0));
+            (
+                source_in,
+                duration.min((source_duration - source_in).max(0.0)),
+            )
+        };
         if duration <= 0.0 {
             return Err("That clip range is outside the media.".to_owned());
         }
@@ -425,6 +457,7 @@ impl Editor {
                 clip.volume = 0.0;
             }
             clip.duck = ducks;
+            clip.photo = photo;
         }
         self.selected = Some(id);
         self.status = format!(
@@ -449,7 +482,9 @@ pub fn asset_meta(asset: &BinAsset) -> String {
         AssetState::Probing => format!("{} · {size}", file_extension(&info.name)),
         AssetState::Processing | AssetState::Ready => {
             let dur = format_duration(info.duration);
-            if info.has_video {
+            if info.photo {
+                format!("Photo · {}×{} · {size}", info.width, info.height)
+            } else if info.has_video {
                 format!("{}×{} · {dur} · {size}", info.width, info.height)
             } else {
                 format!("Audio · {dur} · {size}")
@@ -495,14 +530,15 @@ fn import_one(
     thumbnails: bool,
 ) -> bool {
     let path_str = path.to_string_lossy().into_owned();
-    // A raw stream has no timestamps to seek or place by.
-    let probed = openreel_media::probe(&path_str).and_then(|info| match info.duration > 0.0 {
-        true => Ok(info),
-        false => Err(
-            "no duration; put a raw stream in a container first (ffmpeg -i in -c copy out.mp4)"
-                .to_owned(),
-        ),
-    });
+    // A raw stream has no timestamps to seek or place by; a photo needs none.
+    let probed =
+        openreel_media::probe(&path_str).and_then(|info| match info.duration > 0.0 || info.photo {
+            true => Ok(info),
+            false => Err(
+                "no duration; put a raw stream in a container first (ffmpeg -i in -c copy out.mp4)"
+                    .to_owned(),
+            ),
+        });
     let msg = match probed {
         Ok(info) => {
             if tx.send(ImportMsg::Probed(Box::new(info.clone()))).is_err() {

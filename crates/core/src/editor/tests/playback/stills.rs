@@ -82,6 +82,7 @@ fn a_still_that_cannot_decode_is_not_asked_for_every_frame() {
             fps: 30.0,
             has_video: true,
             has_audio: false,
+            photo: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

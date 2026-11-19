@@ -19,6 +19,7 @@ fn summary(ui: &Ui, asset: &BinAsset) -> String {
         .filter(|clip| clip.review.status == ReviewStatus::NeedsReview)
         .count();
     match sweep.status {
+        _ if asset.info.photo => "Photo".to_owned(),
         SweepStatus::NotStarted if asset.state != AssetState::Ready => "Importing…".to_owned(),
         SweepStatus::NotStarted => "Not curated yet".to_owned(),
         SweepStatus::Running if ui.editor.sweep_queue.contains(&asset.info.path) => {
@@ -71,11 +72,9 @@ pub(super) fn card(ui: &Ui, width: f32) -> El {
     let uncurated = editor
         .assets
         .iter()
-        .filter(|asset| {
-            asset.state == AssetState::Ready && asset.sweep.status == SweepStatus::NotStarted
-        })
+        .filter(|asset| asset.awaits_curation())
         .count();
-    if uncurated > 1 || (uncurated == 1 && asset.sweep.status != SweepStatus::NotStarted) {
+    if uncurated > 1 || (uncurated == 1 && !asset.awaits_curation()) {
         return card.child(
             theme::button(
                 "curator-all-new",
@@ -179,14 +178,16 @@ fn buttons(asset: &BinAsset, width: f32) -> El {
     };
     let mut buttons = row().h(30.0).gap(6.0).center_y();
     if let Some((label, variant, tooltip)) = curate {
-        // Curating ignores assets still importing; say so instead of
-        // taking a silent click.
-        let ready = asset.state == AssetState::Ready;
+        // Curating ignores assets still importing and photos; say so
+        // instead of taking a silent click.
+        let ready = asset.state == AssetState::Ready && !asset.info.photo;
         let button = theme::button(
             "curator-curate",
             label,
             variant,
-            if ready {
+            if asset.info.photo {
+                "A photo has no shots or speech to curate"
+            } else if ready {
                 tooltip
             } else {
                 "Available once import finishes"

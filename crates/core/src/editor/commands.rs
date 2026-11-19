@@ -362,13 +362,19 @@ fn curate(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     let mut targets = Vec::new();
     for name in &wanted {
         let asset = app.asset_named(name)?;
+        if asset.info.photo {
+            return Err(format!(
+                "{} is a photo: it has no shots or speech to curate",
+                asset.info.name
+            ));
+        }
         targets.push(asset.info.path.clone());
     }
     if wanted.is_empty() {
         targets = app
             .assets
             .iter()
-            .filter(|asset| asset.state == AssetState::Ready)
+            .filter(|asset| asset.state == AssetState::Ready && !asset.info.photo)
             .map(|asset| asset.info.path.clone())
             .collect();
     }

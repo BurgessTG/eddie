@@ -14,6 +14,7 @@ fn asset(path: &str, duration: f64, video: bool) -> BinAsset {
             fps: if video { 30.0 } else { 0.0 },
             has_video: video,
             has_audio: true,
+            photo: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,
@@ -664,4 +665,76 @@ fn speed_keeps_the_source_range_and_refuses_what_it_cannot_play() {
     )
     .unwrap();
     assert_eq!(app.timeline.clip(video).unwrap().duration, 8.0);
+}
+
+#[test]
+fn a_photo_lasts_three_seconds_and_trims_to_any_length() {
+    let dir = std::env::temp_dir().join(format!("eddie-photo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("photo.jpg");
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=green:s=64x36",
+        ])
+        .args(["-frames:v", "1"])
+        .arg(&photo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let mut app = Editor::headless();
+    app.spawn_import(vec![photo.clone()]);
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    while app.import_rx.is_some() || !app.import_queue.is_empty() {
+        app.poll_imports();
+        assert!(Instant::now() < deadline, "import timed out");
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let asset = &app.assets[0];
+    assert!(
+        asset.state == AssetState::Ready && asset.info.photo,
+        "{}",
+        app.status
+    );
+
+    // Whole, it lasts CapCut's 3 s; a range is only a length.
+    run(
+        &mut app,
+        "addAsset('photo.jpg', 1); addAssetRange('photo.jpg', 6, 40, 0.5)",
+    )
+    .unwrap();
+    let (whole, range) = (app.timeline.clips[0].clone(), &app.timeline.clips[1]);
+    assert_eq!(
+        (whole.start, whole.duration, whole.source_in, whole.photo),
+        (1.0, 3.0, 0.0, true)
+    );
+    assert_eq!(
+        (range.duration, range.source_in, range.photo),
+        (0.5, 0.0, true)
+    );
+
+    // Either edge goes as far as it likes: no source runs out.
+    let id = whole.id;
+    run(&mut app, &format!("trimClip({id}, 0, 5.5)")).unwrap();
+    let trimmed = app.timeline.clip(id).unwrap();
+    assert_eq!(
+        (trimmed.start, trimmed.end(), trimmed.source_in),
+        (0.0, 5.5, 0.0)
+    );
+    let error = run(&mut app, &format!("setSpeed({id}, 2)")).unwrap_err();
+    assert!(error.contains("is a photo"), "{error}");
+    let path = photo.to_string_lossy().into_owned();
+    assert!(!app.queue_curation(path), "nothing to curate");
+
+    // A saved project keeps them photos.
+    app.save_project_to(&dir.join("photos")).unwrap();
+    let mut reopened = Editor::headless();
+    reopened.open_project(&dir.join("photos.eddie")).unwrap();
+    assert_eq!(reopened.timeline, app.timeline);
+    let _ = std::fs::remove_dir_all(&dir);
 }

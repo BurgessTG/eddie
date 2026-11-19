@@ -57,7 +57,8 @@ const STILL_CACHE_CAP: usize = 24;
 const STILL_RETRY: Duration = Duration::from_secs(2);
 const SHUTTLE_MAX: f64 = 8.0;
 pub const MEDIA_EXTS: &[&str] = &[
-    "mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "flac", "m4a", "aac", "ogg",
+    "mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "flac", "m4a", "aac", "ogg", "png",
+    "jpg", "jpeg", "webp",
 ];
 
 // Clip identity, source, and exact timeline/source starts. Editing a clip's

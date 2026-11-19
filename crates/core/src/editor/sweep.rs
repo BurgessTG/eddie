@@ -160,13 +160,14 @@ impl Editor {
     }
 
     /// `curate_asset` without opening the Gallery, for a request from
-    /// outside the window. False when the asset is not ready or is already
-    /// being curated.
+    /// outside the window. False when the asset is not ready, is a photo
+    /// (no shots or speech to find) or is already being curated.
     pub fn queue_curation(&mut self, path: String) -> bool {
         let Some(asset) = self.assets.iter_mut().find(|asset| asset.info.path == path) else {
             return false;
         };
         if asset.state != AssetState::Ready
+            || asset.info.photo
             || asset.sweep.status == SweepStatus::Running
             || self.sweep_queue.contains(&path)
         {
@@ -187,9 +188,7 @@ impl Editor {
         let paths: Vec<String> = self
             .assets
             .iter()
-            .filter(|asset| {
-                asset.state == AssetState::Ready && asset.sweep.status == SweepStatus::NotStarted
-            })
+            .filter(|asset| asset.awaits_curation())
             .map(|asset| asset.info.path.clone())
             .collect();
         for path in paths {

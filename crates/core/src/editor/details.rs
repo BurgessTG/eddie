@@ -60,6 +60,7 @@ impl Editor {
             .source
             .as_deref()
             .and_then(|source| self.asset(source))
+            .filter(|asset| !asset.info.photo)
             .map(|asset| asset.info.duration);
         if let Some(longest) = source_duration {
             source_in = source_in.min(longest.max(0.0));
@@ -95,7 +96,8 @@ impl Editor {
         let Some(clip) = self.timeline.clip(id) else {
             return;
         };
-        if !speed.is_finite() || clip.kind == ClipKind::Title || clip.source.is_none() {
+        if !speed.is_finite() || clip.kind == ClipKind::Title || clip.source.is_none() || clip.photo
+        {
             return;
         }
         let range = clip.duration * clip.speed;
@@ -299,6 +301,7 @@ impl Editor {
             .and_then(|linked| self.timeline.clip(linked));
         Some(ClipDetails {
             has_source: clip.source.is_some(),
+            has_sound: source_has_audio,
             embedded_audio_choice: video_audio && clip.linked_clip.is_none(),
             can_detach: video_audio && clip.embedded_audio && clip.linked_clip.is_none(),
             can_remove_silence: source_has_audio && clip.kind != ClipKind::Title,
@@ -313,6 +316,8 @@ impl Editor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipDetails {
     pub has_source: bool,
+    /// Its file has sound, so Volume does something (not for a photo).
+    pub has_sound: bool,
     /// A video clip whose own sound can be switched on and off.
     pub embedded_audio_choice: bool,
     pub can_detach: bool,
@@ -342,6 +347,7 @@ mod tests {
                 fps: 30.0,
                 has_video: true,
                 has_audio: true,
+                photo: false,
             },
             size_bytes: 0,
             state: AssetState::Ready,
