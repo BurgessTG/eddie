@@ -265,6 +265,8 @@ fn every_control_has_a_tooltip() {
                 "details-start",
                 "details-duration",
                 "details-source-in",
+                "details-speed-slider",
+                "details-speed",
                 "details-opacity-slider",
                 "details-opacity",
                 "details-volume-slider",
@@ -399,4 +401,61 @@ fn the_colour_card_grades_the_clip_from_its_list_sliders_and_fields() {
     click(&mut rt, "details-color-reset");
     assert_eq!(color(&rt), ColorAdjust::default());
     assert!(rt.find("details-strength").is_none());
+}
+
+#[test]
+fn speed_changes_the_length_and_slows_only_as_far_as_the_lane_has_room() {
+    // Four source seconds from 1 s, placed at 2 s.
+    let (mut rt, id) = window(ClipKind::Video);
+    click(&mut rt, "details-speed");
+    rt.paste("2x");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    assert_eq!((clip(&rt, id).speed, clip(&rt, id).duration), (2.0, 2.0));
+    assert_eq!(typed(&rt, Field::Speed), "2.00×");
+    assert_eq!(typed(&rt, Field::Duration), "2.00 s");
+
+    // With a clip at 8 s, the slider's slow end stops where the four
+    // seconds still fit in the six before it: 4 / 6, rounded up to 0.67x.
+    rt.state.editor.timeline.add_media_clip(
+        "Next",
+        ClipKind::Video,
+        0,
+        8.0,
+        1.0,
+        0.0,
+        "/media/a.mp4",
+    );
+    let (x, y) = rt.find("details-speed-slider").expect("the slider");
+    rt.pointer_move(x, y);
+    rt.frame(FRAME);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x - 400.0, y);
+    rt.frame(FRAME);
+    rt.pointer_up(x - 400.0, y);
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    let slowed = clip(&rt, id);
+    assert_eq!(slowed.speed, 0.67);
+    assert!(
+        slowed.end() <= 8.0,
+        "runs into the next clip: {}",
+        slowed.end()
+    );
+    assert_eq!(typed(&rt, Field::Speed), "0.67×");
+    assert!(
+        rt.state.editor.status.contains("0.67×"),
+        "{}",
+        rt.state.editor.status
+    );
+
+    // Back at normal speed the clip covers the same four source seconds.
+    click(&mut rt, "details-speed");
+    rt.paste("1");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    let normal = clip(&rt, id);
+    assert!((normal.duration - 4.0).abs() < 1e-9, "{}", normal.duration);
+    assert!((normal.source_end() - 5.0).abs() < 1e-9);
 }

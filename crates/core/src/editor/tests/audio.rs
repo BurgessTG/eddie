@@ -324,6 +324,8 @@ fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
         (clip.fade_in, clip.fade_out) = (0.2, 0.3);
         (clip.duck, clip.clean_voice, clip.smooth_fades) = (true, true, true);
         clip.volume = 0.5;
+        clip.transform.scale = 1.4;
+        clip.color.saturation = -0.5;
     }
 
     let pieces = app
@@ -357,6 +359,11 @@ fn tightening_silence_replaces_dead_air_and_ripples_following_clips() {
             ),
             (0.5, true, true, true),
             "every phrase sounds as the clip did"
+        );
+        assert_eq!(
+            (piece.transform.scale, piece.color.saturation),
+            (1.4, -0.5),
+            "every phrase looks as the clip did"
         );
     }
     assert_eq!(

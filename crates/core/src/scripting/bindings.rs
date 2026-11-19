@@ -169,6 +169,11 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
             .push(0, || ScriptCommand::SetVolume { clip, value })
     })?;
     let q = api.queue();
+    api.set("setSpeed", move |Whole(clip): Whole, speed: f64| {
+        q.borrow_mut()
+            .push(0, || ScriptCommand::SetSpeed { clip, speed })
+    })?;
+    let q = api.queue();
     api.set("setCleanVoice", move |Whole(clip): Whole, enabled: bool| {
         q.borrow_mut()
             .push(0, || ScriptCommand::SetCleanVoice { clip, enabled })

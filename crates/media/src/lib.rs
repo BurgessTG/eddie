@@ -20,6 +20,7 @@ mod samples;
 mod sheet;
 mod stills;
 mod sweep;
+mod tempo;
 mod voice;
 mod waveform;
 

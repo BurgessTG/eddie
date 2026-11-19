@@ -168,8 +168,9 @@ impl Timeline {
     }
 
     /// Whether every number is one the editor can work with: a real frame
-    /// rate, finite clip times inside [`MAX_TIMELINE_SECONDS`], and transforms
-    /// and colour the renderers take ([`Transform::is_valid`](crate::Transform),
+    /// rate, finite clip times inside [`MAX_TIMELINE_SECONDS`], speeds from
+    /// [`MIN_SPEED`](crate::MIN_SPEED) to [`MAX_SPEED`](crate::MAX_SPEED), and
+    /// transforms and colour the renderers take ([`Transform::is_valid`](crate::Transform),
     /// [`ColorAdjust::is_valid`](crate::ColorAdjust)). A project
     /// file or a script can otherwise carry values that divide by zero or
     /// keep offline work running for hours.
@@ -183,6 +184,7 @@ impl Timeline {
                     && clip.end() <= MAX_TIMELINE_SECONDS
                     && clip.transform.is_valid()
                     && clip.color.is_valid()
+                    && (crate::MIN_SPEED..=crate::MAX_SPEED).contains(&clip.speed)
             })
     }
 
@@ -323,6 +325,7 @@ impl Timeline {
             transform: crate::Transform::default(),
             background: crate::Background::default(),
             color: crate::ColorAdjust::default(),
+            speed: 1.0,
         });
         id
     }

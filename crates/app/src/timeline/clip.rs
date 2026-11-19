@@ -63,7 +63,16 @@ fn filmstrip(
     };
     let tile_w = (h * aspect).max(12.0);
     let opacity = clip.opacity.clamp(0.0, 1.0) * 230.0 / 255.0;
-    for tile in lanes::filmstrip_tiles(clip.source_in, clip.duration, px_per_sec, tile_w) {
+    // Tiles sit on the source clock: a faster clip packs more source into
+    // each point.
+    let per_source = px_per_sec / clip.speed as f32;
+    let tiles = lanes::filmstrip_tiles(
+        clip.source_in,
+        clip.duration * clip.speed,
+        per_source,
+        tile_w,
+    );
+    for tile in tiles {
         let x = left + tile.x;
         if x + tile.w < 0.0 || x > w {
             continue;
@@ -110,7 +119,7 @@ fn waveform(
     // one in view.
     let mut x = 2.0 + ((-left - 2.0) / 3.0).floor().max(0.0) * 3.0;
     while x < full_w - 2.0 && left + x <= w {
-        let source_time = clip.source_in + f64::from(x) / f64::from(px_per_sec);
+        let source_time = clip.source_at(clip.start + f64::from(x) / f64::from(px_per_sec));
         if let Some(peak) = asset.peaks.get((source_time * peaks_per_sec) as usize) {
             // Square-root scale, so quiet dialogue stays visible beside
             // loud music.

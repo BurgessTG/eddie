@@ -102,6 +102,7 @@ impl Editor {
             clip.source.clone()?,
             clip.start.to_bits(),
             clip.source_in.to_bits(),
+            clip.speed.to_bits(),
         ))
     }
 
@@ -130,7 +131,7 @@ impl Editor {
         let source = clip
             .source
             .as_deref()
-            .map(|source| (source, clip.source_in + (edge - clip.start)));
+            .map(|source| (source, clip.source_at(edge)));
         Some((edge, source))
     }
 
@@ -204,8 +205,9 @@ impl Editor {
     }
 
     /// Pictures shown over the last second of playback and the rate the
-    /// active picture should reach (its source rate, at most the project's).
-    /// `None` until playback has run a full second over video.
+    /// active picture should reach (its source rate at the clip's speed, at
+    /// most the project's). `None` until playback has run a full second over
+    /// video.
     pub fn playback_rate(&self) -> Option<(usize, f64)> {
         let since = self.playing_since?;
         if !self.playing || since.elapsed() < Duration::from_secs(1) {
@@ -216,7 +218,7 @@ impl Editor {
             .asset(clip.source.as_deref()?)
             .map_or(0.0, |asset| asset.info.fps);
         let target = if source_fps > 0.0 {
-            source_fps.min(self.timeline.fps)
+            (source_fps * clip.speed).min(self.timeline.fps)
         } else {
             self.timeline.fps
         };
@@ -239,9 +241,7 @@ impl Editor {
             self.preview_key = None;
         }
         let active = self.active_video_clip();
-        let source_time = active
-            .as_ref()
-            .map(|clip| clip.source_in + (self.playhead - clip.start));
+        let source_time = active.as_ref().map(|clip| clip.source_at(self.playhead));
         let wants_still = !self.playing || self.scrubbing();
         while let Ok((gen, result)) = self.still_rx.try_recv() {
             let Some((pending, key, prefetch)) = self.still_inflight else {
@@ -356,7 +356,7 @@ impl Editor {
             // first would also discard the prerolled next clip.
             let requests = active_key
                 .as_ref()
-                .is_some_and(|(_, source, _, _)| self.asset(source).is_some());
+                .is_some_and(|(_, source, _, _, _)| self.asset(source).is_some());
             if !requests {
                 if let Some(stream) = &self.stream {
                     stream.cancel_preview();
@@ -369,7 +369,7 @@ impl Editor {
             if let Some(clip) = &active_video {
                 if let Some(source) = &clip.source {
                     if self.asset(source).is_some() {
-                        let start = clip.source_in + (self.playhead - clip.start);
+                        let start = clip.source_at(self.playhead);
                         if self.stream.is_none() {
                             let wake = self.wake.clone();
                             match FrameStream::spawn_preview(move || wake.wake()) {
@@ -414,7 +414,7 @@ impl Editor {
             let active_until = self
                 .timeline
                 .active_video(self.playhead)
-                .map(|clip| clip.source_in + (edge - clip.start));
+                .map(|clip| clip.source_at(edge));
             let _ = stream.prefetch_preview(source, time, PREVIEW_W, active_until);
         }
         self.sync_audio();

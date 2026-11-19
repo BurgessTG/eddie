@@ -81,7 +81,7 @@ impl Editor {
         }
         let transcript = asset.sweep.transcript.clone();
         let source_start = target.source_in;
-        let source_end = target.source_in + target.duration;
+        let source_end = target.source_end();
         let frame = 1.0 / self.timeline.fps;
         let mut pass = CaptionPass::default();
         let mut last_added: Option<ClipId> = None;
@@ -99,12 +99,8 @@ impl Editor {
                     pass.outside += 1;
                     continue;
                 }
-                let start = self
-                    .timeline
-                    .snap(target.start + (clipped_start - source_start));
-                let mut end = self
-                    .timeline
-                    .snap(target.start + (clipped_end - source_start));
+                let start = self.timeline.snap(target.time_at(clipped_start));
+                let mut end = self.timeline.snap(target.time_at(clipped_end));
                 if end - start < frame {
                     end = (start + frame).min(target.end());
                 }
@@ -139,9 +135,7 @@ impl Editor {
                     clip.words = chunk
                         .words
                         .iter()
-                        .map(|word| {
-                            (target.start + word - source_start - start).clamp(0.0, duration)
-                        })
+                        .map(|&word| (target.time_at(word) - start).clamp(0.0, duration))
                         .collect();
                 }
                 last_added = Some(caption);

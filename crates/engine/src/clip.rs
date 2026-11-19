@@ -116,8 +116,8 @@ pub struct Clip {
     #[serde(default)]
     pub smooth_fades: bool,
     /// Titles only: when each whitespace-separated word of `name` starts,
-    /// on the clip's source clock (timeline time is
-    /// `start + word - source_in`, so trims and splits keep them aligned).
+    /// on the clip's source clock ([`Clip::time_at`] places them, so trims
+    /// and splits keep them aligned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<f64>,
     /// Video only: where the picture sits on the canvas (`place`).
@@ -129,6 +129,23 @@ pub struct Clip {
     /// Video only: colour adjustments and filter (`ColorAdjust`).
     #[serde(default, skip_serializing_if = "ColorAdjust::is_identity")]
     pub color: ColorAdjust,
+    /// Source seconds played per timeline second, [`MIN_SPEED`] to
+    /// [`MAX_SPEED`]; sound keeps its pitch. Use [`Clip::source_at`] and
+    /// [`Clip::time_at`] to move between the two clocks.
+    #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
+    pub speed: f64,
+}
+
+/// The slowest and fastest a clip plays.
+pub const MIN_SPEED: f64 = 0.25;
+pub const MAX_SPEED: f64 = 4.0;
+
+fn normal_speed() -> f64 {
+    1.0
+}
+
+fn is_normal_speed(speed: &f64) -> bool {
+    *speed == 1.0
 }
 
 fn is_black(background: &Background) -> bool {
@@ -144,6 +161,22 @@ impl Clip {
         time >= self.start && time < self.end()
     }
 
+    /// The source time shown or heard at timeline `time`.
+    pub fn source_at(&self, time: f64) -> f64 {
+        self.source_in + (time - self.start) * self.speed
+    }
+
+    /// The timeline time that shows or plays source time `source`.
+    pub fn time_at(&self, source: f64) -> f64 {
+        self.start + (source - self.source_in) / self.speed
+    }
+
+    /// Where the clip's source range ends: `source_in` plus the source
+    /// seconds its duration plays.
+    pub fn source_end(&self) -> f64 {
+        self.source_at(self.end())
+    }
+
     /// Fades that fit the clip: each at most its length, and when
     /// together they exceed it, both scale down to meet.
     pub fn fade_lengths(&self) -> (f64, f64) {
@@ -153,14 +186,8 @@ impl Clip {
     /// Word start times on the timeline, when there is one per word of the
     /// title text (a renamed title loses its timing).
     pub fn word_times(&self) -> Option<Vec<f64>> {
-        (!self.words.is_empty() && self.words.len() == self.name.split_whitespace().count()).then(
-            || {
-                self.words
-                    .iter()
-                    .map(|word| self.start + word - self.source_in)
-                    .collect()
-            },
-        )
+        (!self.words.is_empty() && self.words.len() == self.name.split_whitespace().count())
+            .then(|| self.words.iter().map(|&word| self.time_at(word)).collect())
     }
 
     /// The word being spoken at `time`: the last one started by then.

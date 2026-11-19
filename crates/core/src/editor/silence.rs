@@ -26,6 +26,12 @@ impl Editor {
             .clip(id)
             .cloned()
             .ok_or_else(|| format!("no clip {id}"))?;
+        if target.speed != 1.0 {
+            return Err(format!(
+                "clip {id} plays at {}x; remove silence at normal speed, then change its speed",
+                target.speed
+            ));
+        }
         let kept = self.kept_phrases(&target, threshold, min_silence, padding)?;
         let frame = 1.0 / self.timeline.fps;
         let kept_total: f64 = kept.iter().map(|range| range.duration()).sum();
@@ -207,15 +213,18 @@ impl Editor {
             ),
         };
         if let Some(clip) = self.timeline.clip_mut(new_id) {
-            clip.opacity = template.opacity;
-            clip.volume = template.volume;
-            clip.embedded_audio = template.embedded_audio;
-            clip.duck = template.duck;
-            clip.clean_voice = template.clean_voice;
-            clip.smooth_fades = template.smooth_fades;
-            if place.last {
-                clip.fade_out = template.fade_out;
-            }
+            // Every setting carries over, picture and sound alike.
+            *clip = Clip {
+                id: new_id,
+                track: clip.track,
+                start: clip.start,
+                duration: clip.duration,
+                source_in: clip.source_in,
+                fade_in: 0.0,
+                fade_out: if place.last { template.fade_out } else { 0.0 },
+                linked_clip: None,
+                ..template.clone()
+            };
         }
         new_id
     }

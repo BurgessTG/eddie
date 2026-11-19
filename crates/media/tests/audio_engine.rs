@@ -82,6 +82,7 @@ fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) 
         duck: Vec::new(),
         clean_voice: false,
         smooth_fades: false,
+        speed: 1.0,
     }
 }
 

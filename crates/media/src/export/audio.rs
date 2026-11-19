@@ -8,6 +8,7 @@ use openreel_engine::{Clip, ClipKind, Timeline};
 
 use super::scratch::FilterGraphFile;
 use super::{export_error, f, ExportOptions};
+use crate::tempo::{tempo_filter, TEMPO_TAIL};
 use crate::{MediaInfo, MediaResult};
 
 /// Integrated loudness a normalized export aims for, in LUFS.
@@ -116,8 +117,9 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
                 && last.smooth_fades == clip.smooth_fades
                 && last.fade_lengths() == (0.0, 0.0)
                 && clip.fade_lengths() == (0.0, 0.0)
+                && last.speed == clip.speed
                 && same_time(last.end(), clip.start)
-                && same_time(last.source_in + last.duration, clip.source_in)
+                && same_time(last.source_end(), clip.source_in)
         }) {
             last.duration = clip.end() - last.start;
         } else {
@@ -192,11 +194,21 @@ fn branch(
             amount.join("+")
         ));
     }
+    // Speed stretches the trimmed source onto the clip's own length; it
+    // reads `TEMPO_TAIL` further, as the preview does, so the stretch is not
+    // short at the end.
+    let (source_end, tempo) = match tempo_filter(clip.speed) {
+        None => (clip.source_end(), String::new()),
+        Some(chain) => (
+            clip.source_end() + TEMPO_TAIL,
+            format!(",{chain},atrim=end={}", f(clip.duration)),
+        ),
+    };
     format!(
-        "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{cleanup},\
+        "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{tempo}{cleanup},\
          volume={:.3}{fades},adelay=delays={delay}S:all=1[{label}]",
         f(clip.source_in),
-        f(clip.source_in + clip.duration),
+        f(source_end),
         clip.volume,
     )
 }

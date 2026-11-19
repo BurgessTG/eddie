@@ -845,3 +845,95 @@ fn splitting_ducked_music_does_not_change_how_it_ducks() {
     let late = tl.clip(late).unwrap().clone();
     assert!(tl.duck_ranges(&late, &speech).is_empty());
 }
+
+#[test]
+fn speed_keeps_the_source_range_through_split_trim_and_its_partner() {
+    let mut tl = Timeline::new(30.0);
+    let id = tl.add_media_clip(
+        "talk.mp4",
+        ClipKind::Video,
+        0,
+        1.0,
+        4.0,
+        2.0,
+        "/media/talk.mp4",
+    );
+    {
+        let clip = tl.clip_mut(id).unwrap();
+        clip.transform.scale = 1.5;
+        clip.color.contrast = 0.3;
+        clip.background = Background::Blur;
+    }
+    let audio = tl.detach_audio(id).expect("detach");
+
+    // Twice as fast: the same source seconds 2-6 in half the time, for both
+    // of the pair.
+    assert!(tl.set_speed(id, 2.0));
+    for clip in [id, audio] {
+        let clip = tl.clip(clip).unwrap();
+        assert_eq!(
+            (clip.duration, clip.speed, clip.source_end()),
+            (2.0, 2.0, 6.0)
+        );
+    }
+    let clip = tl.clip(id).unwrap();
+    assert_eq!(clip.source_at(2.0), 4.0);
+    assert_eq!(clip.time_at(5.0), 2.5);
+
+    // Split one second in: source 2-4 stays left, 4-6 goes right, and the
+    // right piece keeps the speed and the picture's look.
+    let right = tl.split_at(id, 2.0).expect("split");
+    assert_eq!(tl.clip(id).unwrap().source_end(), 4.0);
+    let piece = tl.clip(right).unwrap();
+    assert_eq!(
+        (piece.start, piece.duration, piece.source_in, piece.speed),
+        (2.0, 1.0, 4.0, 2.0)
+    );
+    assert_eq!(piece.transform.scale, 1.5);
+    assert_eq!(piece.color.contrast, 0.3);
+    assert_eq!(piece.background, Background::Blur);
+    let partner = tl
+        .clip(piece.linked_clip.expect("pieces stay linked"))
+        .unwrap();
+    assert_eq!((partner.source_in, partner.speed), (4.0, 2.0));
+
+    // Half a second off the front is a second of source.
+    tl.trim_left(right, 2.5);
+    assert_eq!(tl.clip(right).unwrap().source_in, 5.0);
+
+    // Slowing back down keeps the range: source 2-4 now takes 4 s.
+    assert!(tl.set_speed(id, 0.5));
+    let clip = tl.clip(id).unwrap();
+    assert_eq!((clip.duration, clip.source_end()), (4.0, 4.0));
+
+    // Out of range, titles and clips without a source are left alone.
+    assert!(!tl.set_speed(id, 4.5));
+    assert!(!tl.set_speed(id, 0.2));
+    let title = tl.add_clip("Hi", ClipKind::Title, 0, 0.0, 1.0, 0.0);
+    assert!(!tl.set_speed(title, 2.0));
+    assert_eq!(tl.clip(id).unwrap().speed, 0.5);
+    assert!(tl.in_supported_range());
+    tl.clip_mut(id).unwrap().speed = 8.0;
+    assert!(!tl.in_supported_range());
+}
+
+#[test]
+fn room_after_start_stops_at_the_next_clip_on_either_lane_of_a_pair() {
+    let mut tl = Timeline::new(30.0);
+    let id = tl.add_media_clip("a.mp4", ClipKind::Video, 0, 1.0, 2.0, 0.0, "/media/a.mp4");
+    tl.add_media_clip("b.mp4", ClipKind::Video, 0, 6.0, 2.0, 0.0, "/media/b.mp4");
+    assert_eq!(tl.room_after_start(id), 5.0);
+    let audio = tl.detach_audio(id).expect("detach");
+    let lane = tl.clip(audio).unwrap().track;
+    tl.add_media_clip(
+        "c.wav",
+        ClipKind::Audio,
+        lane,
+        4.0,
+        1.0,
+        0.0,
+        "/media/c.wav",
+    );
+    assert_eq!(tl.room_after_start(id), 3.0);
+    assert_eq!(tl.room_after_start(audio), 3.0);
+}

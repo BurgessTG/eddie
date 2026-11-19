@@ -32,7 +32,7 @@ impl Editor {
         let clip = self.timeline.active_video(at)?;
         let source = clip.source.clone()?;
         let info = &self.asset(&source)?.info;
-        let time = clip.source_in + (at - clip.start);
+        let time = clip.source_at(at);
         Some(StillTarget {
             key: (clip.id, (time * self.timeline.fps).round() as i64, width),
             size: (info.width, info.height),

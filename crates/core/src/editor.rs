@@ -62,7 +62,7 @@ pub const MEDIA_EXTS: &[&str] = &[
 
 // Clip identity, source, and exact timeline/source starts. Editing a clip's
 // source mapping invalidates playback even when its ID has not changed.
-type VideoKey = (ClipId, String, u64, u64);
+type VideoKey = (ClipId, String, u64, u64, u64);
 /// A still picture: clip, source frame index, and decoded width.
 pub type StillKey = (ClipId, i64, u32);
 

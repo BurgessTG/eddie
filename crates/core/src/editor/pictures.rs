@@ -143,7 +143,7 @@ pub fn frames(
             .clips
             .iter()
             .filter(|clip| clip.source.as_deref() == Some(info.path.as_str()))
-            .map(|clip| (clip.id, clip.source_in, clip.source_in + clip.duration))
+            .map(|clip| (clip.id, clip.source_in, clip.source_end()))
             .collect(),
     };
     let (start, end, times) = frame_times(&index, range, every)?;
@@ -388,7 +388,7 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
                         clip.id,
                         clip.track,
                         clip.source.clone(),
-                        clip.source_in + (time - clip.start),
+                        clip.source_at(time),
                         clip.opacity,
                     )
                 }),
@@ -425,7 +425,7 @@ impl StripSource {
                     clip.kind == ClipKind::Video
                         && clip.source.as_deref() == Some(asset.info.path.as_str())
                 })
-                .map(|clip| (clip.source_in, clip.source_in + clip.duration))
+                .map(|clip| (clip.source_in, clip.source_end()))
                 .collect(),
             shots: (!scenes.is_empty()).then(|| {
                 scenes

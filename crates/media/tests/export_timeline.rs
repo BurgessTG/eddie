@@ -1374,6 +1374,7 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
                 duck: Vec::new(),
                 clean_voice: false,
                 smooth_fades: smooth,
+                speed: 1.0,
             },
         )]);
         let mut preview = Vec::new();
@@ -1452,6 +1453,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             duck: Vec::new(),
             clean_voice: true,
             smooth_fades: false,
+            speed: 1.0,
         },
     )]);
     let mut preview = Vec::new();
@@ -1947,4 +1949,146 @@ fn segment_seams_keep_timestamps_and_titles_on_the_timeline_clock() {
         quietest > 0.02,
         "audio is continuous at the seam: {quietest}"
     );
+}
+
+#[test]
+fn speed_shows_every_nth_source_frame_or_holds_each_longer() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices.mp4", "30");
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    // Speed, source in (frames), output frames, and the source frame each
+    // one shows: the frame covering `source_in + n / 30 * speed`. 2x and 4x
+    // land exactly on source frames, as does every fourth frame at 0.25x.
+    let cases: [(f64, f64, usize, &[usize]); 5] = [
+        (2.0, 2.0, 5, &[2, 4, 6, 8, 10]),
+        (0.5, 20.0, 6, &[20, 20, 21, 21, 22, 22]),
+        (1.5, 0.0, 4, &[0, 1, 3, 4]),
+        (4.0, 1.0, 4, &[1, 5, 9, 13]),
+        (0.25, 26.0, 5, &[26, 26, 26, 26, 27]),
+    ];
+    let mut at = 0.0;
+    let mut expected: Vec<&[u8]> = Vec::new();
+    for (speed, source_in, count, shown) in cases {
+        let duration = count as f64 / 30.0;
+        let id = video(&mut timeline, &source, 0, at, duration, source_in / 30.0);
+        timeline.clip_mut(id).unwrap().speed = speed;
+        at += duration;
+        expected.extend(shown.iter().map(|&frame| original[frame].as_slice()));
+    }
+    let exported = fixture.export("speeds.mp4", &timeline);
+    assert_frames("speeds", &frames(&exported), &expected);
+}
+
+#[test]
+fn speed_keeps_the_pitch_and_preview_matches_export() {
+    // 440 Hz for the first 1.5 s of source, then 220 Hz.
+    let fixture = Fixture::new();
+    let tones = fixture.0.join("tones.wav");
+    run(Command::new("ffmpeg").args([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=0.5*sin(2*PI*if(lt(t\\,1.5)\\,440\\,220)*t):s=48000:d=3",
+        "-c:a",
+        "pcm_f32le",
+        tones.to_str().unwrap(),
+    ]));
+    let tones = tones.to_str().unwrap().to_owned();
+    let picture = fixture.color("black.mp4", "black", None);
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &picture, 0, 0.0, 3.0, 0.0);
+    // Source 0-3 s at 2x fills 0-1.5 s: 440 Hz until 0.75 s. Source 1.2-2 s
+    // at 0.4x (two chained stages) fills 1.5-3.5 s: 440 Hz until 2.25 s.
+    let segments = [(0.0, 1.5, 0.0, 2.0), (1.5, 2.0, 1.2, 0.4)];
+    let mut voices = Vec::new();
+    for (start, duration, source_in, speed) in segments {
+        let id = timeline.add_media_clip(
+            "tones",
+            ClipKind::Audio,
+            1,
+            start,
+            duration,
+            source_in,
+            &tones,
+        );
+        timeline.clip_mut(id).unwrap().speed = speed;
+        voices.push((
+            id,
+            openreel_media::AudioSegment {
+                path: tones.clone(),
+                start,
+                duration,
+                source_in,
+                volume: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                duck: Vec::new(),
+                clean_voice: false,
+                smooth_fades: false,
+                speed,
+            },
+        ));
+    }
+    let exported = audio_samples(&fixture.export("speeds.mp4", &timeline));
+
+    let mut engine = openreel_media::AudioEngine::manual();
+    engine.seek(0.0);
+    engine.set_limit(3.5);
+    engine.set_running(true);
+    engine.set_voices(&voices);
+    let mut preview = Vec::new();
+    while preview.len() < (3.5 * 48_000.0) as usize {
+        let block = engine.render(1024);
+        assert!(!block.is_empty(), "preview clock stopped");
+        preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
+    }
+    // The preview upmixes the mono source 3 dB down per channel.
+    for sample in &mut preview {
+        *sample *= std::f32::consts::SQRT_2;
+    }
+
+    let tone = |samples: &[f32], frequency: f64, from: f64, to: f64| {
+        let window = &samples[(from * 48_000.0) as usize..(to * 48_000.0) as usize];
+        let (mut sin, mut cos) = (0.0, 0.0);
+        for (i, sample) in window.iter().enumerate() {
+            let angle = std::f64::consts::TAU * frequency * i as f64 / 48_000.0;
+            sin += f64::from(*sample) * angle.sin();
+            cos += f64::from(*sample) * angle.cos();
+        }
+        2.0 * f64::hypot(sin, cos) / window.len() as f64
+    };
+    for (name, samples) in [("export", &exported), ("preview", &preview)] {
+        // Each stretch is heard at its recorded pitch, never doubled or
+        // lowered, and switches tone where the speed puts source 1.5 s.
+        for (from, to, frequency, wrong) in [
+            (0.1, 0.65, 440.0, 880.0),
+            (0.85, 1.4, 220.0, 440.0),
+            (1.6, 2.15, 440.0, 176.0),
+            (2.35, 3.4, 220.0, 88.0),
+        ] {
+            let right = tone(samples, frequency, from, to);
+            let shifted = tone(samples, wrong, from, to);
+            eprintln!("{name} {from}-{to}s: {frequency} Hz {right:.3}, {wrong} Hz {shifted:.3}");
+            assert!(
+                right > 0.35 && shifted < 0.05,
+                "{name} {from}-{to}s: {frequency} Hz at {right}, {wrong} Hz at {shifted}"
+            );
+        }
+    }
+    let db = |samples: &[f32]| {
+        let mean =
+            samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64;
+        10.0 * mean.log10()
+    };
+    let mut worst = 0.0_f64;
+    for window in 1..34 {
+        let (a, b) = (window * 4800, (window + 1) * 4800);
+        worst = worst.max((db(&preview[a..b]) - db(&exported[a..b])).abs());
+    }
+    eprintln!("speed: worst preview-export window {worst:.2} dB");
+    assert!(worst < 0.5, "preview and export differ by {worst:.2} dB");
 }

@@ -30,6 +30,7 @@ impl Editor {
                     "duck": c.duck,
                     "cleanVoice": c.clean_voice,
                     "smoothFades": c.smooth_fades,
+                    "speed": c.speed,
                     "embeddedAudio": c.embedded_audio,
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),

@@ -171,7 +171,7 @@ fn waveform(w: f32, h: f32, clip: &Clip, peaks: &[f32], duration: f64, playhead:
     let mut x = left;
     while x < right {
         let frac = (x - left) / inner_w;
-        let source_time = clip.source_in + f64::from(frac) * clip.duration;
+        let source_time = clip.source_at(clip.start + f64::from(frac) * clip.duration);
         if let Some(peak) = peaks.get((source_time * peaks_per_sec) as usize) {
             let amp = (peak * max_amp).max(1.0);
             shape = shape.line(

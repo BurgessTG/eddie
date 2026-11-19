@@ -7,6 +7,7 @@ use ffmpeg_next as ffmpeg;
 
 use super::mixer::Chunk;
 use super::{sample, RATE};
+use crate::tempo::{Tempo, TEMPO_TAIL};
 use crate::{AudioSegment, MediaResult, AUDIO_RATE};
 
 /// Decode `segment` from timeline sample `first` to `end` into chunks.
@@ -18,26 +19,44 @@ pub(super) fn decode_voice(
     recycle: &Receiver<Vec<f32>>,
 ) -> MediaResult<()> {
     let mut source = Source::open(&segment.path)?;
-    let start = sample(segment.start);
-    let source_start = sample(segment.source_in) as i64 - start as i64;
-    // Source sample wanted at timeline sample `first`.
-    let wanted = first as i64 + source_start;
+    let start = sample(segment.start) as i64;
+    let source_in = sample(segment.source_in) as i64;
+    // The source sample heard at timeline sample `t`.
+    let source_at = |t: u64| source_in + ((t as i64 - start) as f64 * segment.speed).round() as i64;
+    let mut tempo = Tempo::for_speed(segment.speed, AUDIO_RATE)?;
+    // The source samples this voice plays, [wanted, stop). A sped-up clip
+    // reads a little further, as export does, so the stretch reaches `end`.
+    let wanted = source_at(first);
+    let tail = if tempo.is_some() {
+        sample(TEMPO_TAIL)
+    } else {
+        0
+    };
+    let stop = source_at(end) + tail as i64;
     source.seek(wanted as f64 / RATE)?;
 
+    let mut out = Out {
+        first: first as i64,
+        end: end as i64,
+        cleanup: segment
+            .clean_voice
+            .then(|| crate::voice::VoiceCleanup::new(RATE)),
+        chunks,
+        recycle,
+    };
+    // Timeline sample of the next stretched sample.
+    let mut heard = first as i64;
     let mut resampler = Resampler::default();
     let mut frame = ffmpeg::frame::Audio::empty();
     // Source sample (at RATE) of the next resampled frame.
     let mut cursor: Option<i64> = None;
-    let mut cleanup = segment
-        .clean_voice
-        .then(|| crate::voice::VoiceCleanup::new(RATE));
     while source.next_frame(&mut frame)? {
         if frame.rate() == 0 || frame.samples() == 0 {
             continue;
         }
         let shape = shape_of(&frame);
         if !resampler.fits(shape) {
-            if let Some(cleanup) = cleanup.as_mut() {
+            if let Some(cleanup) = out.cleanup.as_mut() {
                 // Upmixing puts mono 3 dB down on each channel; export
                 // compresses the mono source itself, so detect at its level.
                 cleanup.set_mono(shape.1.channels() == 1);
@@ -59,33 +78,77 @@ pub(super) fn decode_voice(
             }
         }
         let samples = resampler.convert(&frame)?;
-        let produced = samples.len() / 2;
+        let produced = samples.len() as i64 / 2;
         let block_source = cursor.unwrap_or(0);
-        cursor = Some(block_source + produced as i64);
-        // Timeline position of this block, then keep [first, end).
-        let block_at = block_source - source_start;
-        let keep_from = (first as i64 - block_at).clamp(0, produced as i64) as usize;
-        let keep_to = (end as i64 - block_at).clamp(0, produced as i64) as usize;
-        if keep_to > keep_from {
-            let mut data = recycle.try_recv().unwrap_or_default();
+        cursor = Some(block_source + produced);
+        // The part of this block the voice plays.
+        let keep_from = (wanted - block_source).clamp(0, produced) as usize;
+        let keep_to = (stop - block_source).clamp(0, produced) as usize;
+        let kept = &samples[keep_from * 2..keep_to.max(keep_from) * 2];
+        let more = match tempo.as_mut() {
+            None => out.send(block_source + keep_from as i64 - source_in + start, kept),
+            Some(tempo) => {
+                tempo.push(kept)?;
+                tempo.drain(|stretched| {
+                    let more = out.send(heard, stretched);
+                    heard += stretched.len() as i64 / 2;
+                    more
+                })?
+            }
+        };
+        if !more {
+            return Ok(());
+        }
+        if block_source + produced >= stop {
+            break;
+        }
+    }
+    // The end of the read: the stretch gives back what it still holds.
+    if let Some(tempo) = tempo.as_mut() {
+        tempo.finish()?;
+        tempo.drain(|stretched| {
+            let more = out.send(heard, stretched);
+            heard += stretched.len() as i64 / 2;
+            more
+        })?;
+    }
+    Ok(())
+}
+
+/// Where a voice's samples go: the mixer, only `[first, end)` of the
+/// timeline, cleaned when the clip asks.
+struct Out<'a> {
+    first: i64,
+    end: i64,
+    cleanup: Option<crate::voice::VoiceCleanup>,
+    chunks: &'a SyncSender<MediaResult<Chunk>>,
+    recycle: &'a Receiver<Vec<f32>>,
+}
+
+impl Out<'_> {
+    /// Send the interleaved `samples` heard from timeline sample `at`. False
+    /// once the mixer has gone or `end` is reached.
+    fn send(&mut self, at: i64, samples: &[f32]) -> bool {
+        let count = samples.len() as i64 / 2;
+        let from = (self.first - at).clamp(0, count) as usize;
+        let to = (self.end - at).clamp(0, count) as usize;
+        if to > from {
+            let mut data = self.recycle.try_recv().unwrap_or_default();
             data.clear();
-            data.extend_from_slice(&samples[keep_from * 2..keep_to * 2]);
-            if let Some(cleanup) = cleanup.as_mut() {
+            data.extend_from_slice(&samples[from * 2..to * 2]);
+            if let Some(cleanup) = self.cleanup.as_mut() {
                 cleanup.process(&mut data);
             }
             let chunk = Chunk {
-                at: (block_at + keep_from as i64) as u64,
+                at: (at + from as i64) as u64,
                 data,
             };
-            if chunks.send(Ok(chunk)).is_err() {
-                return Ok(());
+            if self.chunks.send(Ok(chunk)).is_err() {
+                return false;
             }
         }
-        if block_at + produced as i64 >= end as i64 {
-            return Ok(());
-        }
+        at + count < self.end
     }
-    Ok(())
 }
 
 fn fail(context: &str, error: ffmpeg::Error) -> String {

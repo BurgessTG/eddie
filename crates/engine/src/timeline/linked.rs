@@ -48,6 +48,7 @@ impl Timeline {
             sound.smooth_fades = clip.smooth_fades;
             sound.clean_voice = clip.clean_voice;
             sound.duck = clip.duck;
+            sound.speed = clip.speed;
         }
         if let Some(picture) = self.clip_mut(id) {
             picture.embedded_audio = false;

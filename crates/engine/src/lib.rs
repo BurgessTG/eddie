@@ -14,7 +14,7 @@ mod timeline;
 #[cfg(test)]
 mod tests;
 
-pub use clip::{Clip, ClipId, ClipKind, TitleStyle};
+pub use clip::{Clip, ClipId, ClipKind, TitleStyle, MAX_SPEED, MIN_SPEED};
 pub use color::{ColorAdjust, Filter, MAX_EXPOSURE};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};

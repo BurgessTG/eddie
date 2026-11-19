@@ -11,6 +11,7 @@ description = "FFmpeg-backed probing, decoding, playback, analysis and export fo
 ab_glyph = "0.2"
 cpal = "0.18"
 ffmpeg-next = { version = "9", default-features = false, features = [
+    "filter",
     "format",
     "software-scaling",
     "software-resampling",

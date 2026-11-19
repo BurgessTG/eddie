@@ -1,7 +1,7 @@
 //! Moving, trimming, splitting and closing up clips.
 
 use super::{Timeline, EDGE_EPSILON};
-use crate::{Clip, ClipId, ClipKind};
+use crate::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED};
 
 impl Timeline {
     /// Move a clip. Start is clamped to >= 0 and snapped to a frame.
@@ -120,7 +120,7 @@ impl Timeline {
         let min_start = if generated {
             0.0
         } else {
-            (clip.start - clip.source_in).max(0.0)
+            clip.time_at(0.0).max(0.0)
         };
         let max_start = clip.end() - frame;
         // The request is a bound the caller may have clamped to a neighbour
@@ -135,7 +135,7 @@ impl Timeline {
         let delta = desired - clip.start;
         if let Some(clip) = self.clip_mut(id) {
             clip.start = desired;
-            clip.source_in += delta;
+            clip.source_in += delta * clip.speed;
             if !generated {
                 clip.source_in = clip.source_in.max(0.0);
             }
@@ -223,25 +223,65 @@ impl Timeline {
             clip.track,
             at,
             clip.end() - at,
-            clip.source_in + left_duration,
+            clip.source_at(at),
             clip.source.as_deref(),
         );
         if let Some(right_clip) = self.clip_mut(right) {
-            // A title extended earlier has a negative source clock; adding
-            // a clip clamps it, which would shift the word timing.
-            right_clip.source_in = clip.source_in + left_duration;
-            right_clip.opacity = clip.opacity;
-            right_clip.volume = clip.volume;
-            right_clip.embedded_audio = clip.embedded_audio;
-            right_clip.fade_out = clip.fade_out;
-            right_clip.linked_clip = None;
-            right_clip.title_style = clip.title_style;
-            right_clip.duck = clip.duck;
-            right_clip.clean_voice = clip.clean_voice;
-            right_clip.smooth_fades = clip.smooth_fades;
-            right_clip.words = clip.words.clone();
+            // Everything else carries over: look, sound, speed and words. A
+            // title extended earlier keeps its negative source clock, which
+            // adding a clip would clamp and so shift its word timing.
+            *right_clip = Clip {
+                id: right,
+                start: at,
+                duration: clip.end() - at,
+                source_in: clip.source_at(at),
+                fade_in: 0.0,
+                linked_clip: None,
+                ..clip.clone()
+            };
         }
         Some(right)
+    }
+
+    /// Play a media clip at `speed` source seconds per second. It keeps its
+    /// source range, so its length becomes that range at the new speed; a
+    /// linked partner changes with it. False, and nothing changes, for a
+    /// title, a clip without a source or a speed outside
+    /// [`MIN_SPEED`]..=[`MAX_SPEED`].
+    pub fn set_speed(&mut self, id: ClipId, speed: f64) -> bool {
+        let media = self
+            .clip(id)
+            .is_some_and(|clip| clip.kind != ClipKind::Title && clip.source.is_some());
+        if !media || !(MIN_SPEED..=MAX_SPEED).contains(&speed) {
+            return false;
+        }
+        for id in [Some(id), self.linked_id(id)].into_iter().flatten() {
+            if let Some(clip) = self.clip_mut(id) {
+                clip.duration = clip.duration * clip.speed / speed;
+                clip.speed = speed;
+            }
+        }
+        true
+    }
+
+    /// How long a clip may last from its start before it runs into the next
+    /// clip on its lane, or its linked partner into one on its own lane.
+    pub fn room_after_start(&self, id: ClipId) -> f64 {
+        let pair = [Some(id), self.linked_id(id)];
+        pair.iter()
+            .flatten()
+            .filter_map(|&id| self.clip(id))
+            .flat_map(|clip| {
+                self.clips
+                    .iter()
+                    .filter(move |other| {
+                        other.same_lane(clip)
+                            && !pair.contains(&Some(other.id))
+                            && other.start >= clip.start - EDGE_EPSILON
+                    })
+                    .map(move |other| other.start - clip.start)
+            })
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Split a clip at `time`. Returns the new (right-hand) clip id.

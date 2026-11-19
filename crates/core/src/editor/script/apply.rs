@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use openreel_engine::{
     fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TitleStyle, Transform,
+    MAX_SPEED, MIN_SPEED,
 };
 
 use super::super::details;
@@ -201,7 +202,7 @@ impl Editor {
                     let mut end = self.timeline.snap(right);
                     if let Some(c) = self.timeline.clip(clip) {
                         if let Some(asset) = c.source.as_ref().and_then(|s| self.asset(s)) {
-                            end = end.min(c.start + (asset.info.duration - c.source_in).max(0.0));
+                            end = end.min(c.time_at(asset.info.duration).max(c.start));
                         }
                     }
                     self.timeline.trim_right(clip, end);
@@ -251,6 +252,23 @@ impl Editor {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.volume = value.clamp(0.0, details::MAX_VOLUME);
                 }
+            }
+            ScriptCommand::SetSpeed { clip, speed } => {
+                if !(MIN_SPEED..=MAX_SPEED).contains(&speed) {
+                    return Err(format!(
+                        "setSpeed takes {MIN_SPEED} to {MAX_SPEED}, not {speed}"
+                    ));
+                }
+                let target = self
+                    .timeline
+                    .clip(clip)
+                    .ok_or_else(|| format!("setSpeed: there is no clip {clip}"))?;
+                if target.kind == ClipKind::Title || target.source.is_none() {
+                    return Err(format!(
+                        "setSpeed needs a video or audio clip; clip {clip} is not one"
+                    ));
+                }
+                self.timeline.set_speed(clip, speed);
             }
             ScriptCommand::SetFade {
                 clip,

@@ -181,7 +181,8 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background`.
+  transform, background, color, speed`. A clip shows source `sourceIn` to
+  `sourceIn + duration * speed`.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -244,8 +245,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - `left` is the clip's new start and `right` its new end, both timeline
     times. `null` or -1 keeps that edge. An end at or before the start
     is an error.
-  - A new start moves the source in-point by the same amount. A new end
-    stops at the end of the source.
+  - A new start moves the source in-point by the same amount, times the
+    clip's speed. A new end stops at the end of the source.
   - Two clips can't overlap on one lane. This is checked once, after the
     whole script: clips may cross on the way, but a script that ends with
     a new overlap is refused with an error naming both clips. Trim one,
@@ -257,6 +258,14 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   bool)`, `detachAudio(id)`, `unlinkClip(id)`.
   - `gain` is linear, from 0 to 2: 1 leaves the clip as recorded, 0.5 is
     about 6 dB quieter, 0.25 about 12 dB.
+- **Speed:** `setSpeed(id, speed)` plays a video or audio clip 0.25 to 4
+  times as fast; its sound keeps its pitch, and a linked partner changes
+  with it. The clip keeps its source range, so its length becomes that
+  range at the new speed: `setSpeed(id, 0.5)` doubles it. A slowed clip
+  that would run into the next one on its lane is refused like any
+  overlap, so make room in the same script first (`insertTime` or
+  `moveClip`). `tightenSilence` refuses a clip that is not at speed 1:
+  remove pauses first, then change the speed.
 - **Canvas and framing:** video of any shape goes on any canvas. Each
   picture fits inside the canvas, centred, until you move it.
   - `setFormat(name)` sets the canvas shape: `original` (the shape of the

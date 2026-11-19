@@ -74,12 +74,12 @@ impl Timeline {
             let Some(spans) = clip.source.as_ref().and_then(|source| speech.get(source)) else {
                 continue;
             };
-            let source_end = clip.source_in + clip.duration;
-            let offset = clip.start - clip.source_in - target.start;
+            let source_end = clip.source_end();
             for &(from, to) in spans {
                 let (from, to) = (from.max(clip.source_in), to.min(source_end));
                 if to > from {
-                    ranges.push((from + offset, to + offset));
+                    let local = |source| clip.time_at(source) - target.start;
+                    ranges.push((local(from), local(to)));
                 }
             }
         }

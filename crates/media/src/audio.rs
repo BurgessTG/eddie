@@ -56,6 +56,8 @@ pub struct AudioSegment {
     pub clean_voice: bool,
     /// Fades follow `openreel_engine::fade_shape`'s quarter sine.
     pub smooth_fades: bool,
+    /// Source seconds per timeline second; the pitch stays (`tempo_filter`).
+    pub speed: f64,
 }
 
 /// Fitted fade lengths in samples, packed in/out so a fade change
@@ -384,6 +386,7 @@ fn same_source(a: &AudioSegment, b: &AudioSegment) -> bool {
         && a.source_in == b.source_in
         && a.clean_voice == b.clean_voice
         && a.smooth_fades == b.smooth_fades
+        && a.speed == b.speed
 }
 
 #[cfg(test)]

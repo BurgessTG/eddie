@@ -605,3 +605,63 @@ fn color_changes_only_what_is_asked_and_refuses_what_renderers_cannot_draw() {
     run(&mut app, &format!("setColor({video}, null)")).unwrap();
     assert_eq!(color(&app), ColorAdjust::default());
 }
+
+#[test]
+fn speed_keeps_the_source_range_and_refuses_what_it_cannot_play() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("wide.mp4", 20.0, true));
+    app.assets.push(asset("song.wav", 20.0, false));
+    run(
+        &mut app,
+        "var a = addAssetRange('wide.mp4', 0, 2, 4); addAssetRange('wide.mp4', 6, 0, 2); \
+         detachAudio(a); setSpeed(a, 2)",
+    )
+    .unwrap();
+    let video = app.timeline.clips[0].id;
+    let partner = app.timeline.clip(video).unwrap().linked_clip.unwrap();
+    for id in [video, partner] {
+        let clip = app.timeline.clip(id).unwrap();
+        assert_eq!(
+            (clip.duration, clip.speed, clip.source_end()),
+            (2.0, 2.0, 6.0)
+        );
+    }
+    let read = run(
+        &mut app,
+        &format!("return clips().find(c => c.id == {video}).speed"),
+    )
+    .unwrap();
+    assert_eq!(read, "2");
+    // A sped-up clip saves its speed; one at normal speed saves nothing.
+    let saved = serde_json::to_value(app.timeline.clip(video).unwrap()).unwrap();
+    assert_eq!(saved["speed"], 2.0);
+    let next = app.timeline.clips[1].id;
+    let plain = serde_json::to_value(app.timeline.clip(next).unwrap()).unwrap();
+    assert!(plain.get("speed").is_none(), "{plain}");
+
+    let before = app.timeline.clone();
+    for (code, says) in [
+        (format!("setSpeed({video}, 5)"), "0.25 to 4"),
+        (format!("setSpeed({video}, 0.1)"), "0.25 to 4"),
+        (format!("setSpeed({video}, NaN)"), "finite"),
+        (
+            "setSpeed(addTitle('Hi', 10, 1), 2)".to_owned(),
+            "video or audio",
+        ),
+        ("setSpeed(999, 2)".to_owned(), "no clip 999"),
+        // At 0.5x the four source seconds take 8 s and would run into the
+        // clip at 6 s; the whole run is refused.
+        (format!("setSpeed({video}, 0.5)"), "overlap"),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(says), "{code}: {error}");
+        assert_eq!(app.timeline, before, "{code}");
+    }
+    // Moving the next clip out of the way first makes room in the same run.
+    run(
+        &mut app,
+        &format!("moveClip({next}, 9); setSpeed({video}, 0.5)"),
+    )
+    .unwrap();
+    assert_eq!(app.timeline.clip(video).unwrap().duration, 8.0);
+}

@@ -98,7 +98,10 @@ pub(super) struct VideoLayer<'a> {
     transform: Transform,
     background: Background,
     color: ColorAdjust,
+    /// Source ticks at timeline tick zero: the source clock is
+    /// `speed * timeline + source_offset`.
     source_offset: i64,
+    speed: f64,
     ranges: Vec<(i64, i64)>,
 }
 
@@ -139,11 +142,18 @@ pub(super) fn plan_video<'a>(
         let convert = conversions
             .get(source)
             .and_then(|convert| convert.as_deref());
-        let start = clock.boundary(clip.start);
-        let source_in = clip.source_in + (start as f64 / timeline.fps - clip.start);
-        let source_offset = (source_in * tick_rate as f64).round() as i64 - start * frame_ticks;
+        let source_offset = if clip.speed == 1.0 {
+            // In whole ticks from the clip's first frame, so a source frame
+            // on a timeline frame stays on it.
+            let start = clock.boundary(clip.start);
+            let source_in = clip.source_at(start as f64 / timeline.fps);
+            (source_in * tick_rate as f64).round() as i64 - start * frame_ticks
+        } else {
+            ((clip.source_in - clip.start * clip.speed) * tick_rate as f64).round() as i64
+        };
         if let Some(layer) = layers.iter_mut().find(|layer| {
             layer.source == source
+                && layer.speed == clip.speed
                 && layer.source_offset == source_offset
                 && layer.opacity == clip.opacity
                 && layer.transform == clip.transform
@@ -160,6 +170,7 @@ pub(super) fn plan_video<'a>(
                 background: clip.background,
                 color: clip.color,
                 source_offset,
+                speed: clip.speed,
                 ranges: ranges.clone(),
             });
         }
@@ -441,8 +452,8 @@ pub(super) fn batch_command(
             })
             .collect();
         let first = ranges.iter().map(|range| range.0).min().unwrap();
-        let source_time =
-            (start + first) as f64 / timeline.fps + layer.source_offset as f64 / tick_rate as f64;
+        let source_time = (start + first) as f64 / timeline.fps * layer.speed
+            + layer.source_offset as f64 / tick_rate as f64;
         let last_seek = infos
             .get(layer.source)
             .map(|info| (info.duration - 1.0).max(0.0))
@@ -462,7 +473,20 @@ pub(super) fn batch_command(
             "-i",
             layer.source,
         ]);
-        let offset = layer.source_offset + (start + first) * frame_ticks - seek * tick_rate;
+        // Input timestamps (source ticks after the seek) onto output ticks
+        // from this input's first frame.
+        let timestamps = if layer.speed == 1.0 {
+            let offset = layer.source_offset + (start + first) * frame_ticks - seek * tick_rate;
+            format!("PTS-({offset})")
+        } else {
+            // setpts truncates, and fps puts a frame just under an output
+            // frame's time on that frame: rounding the offset up keeps a
+            // source frame that lands exactly on one from slipping to the
+            // next.
+            let offset = layer.source_offset as f64 - (seek * tick_rate) as f64
+                + layer.speed * ((start + first) * frame_ticks) as f64;
+            format!("(PTS-({}))/{}", offset.ceil() as i64 + 1, layer.speed)
+        };
         // Stop decoding at this input's last visible frame; overlay
         // stops drawing it there anyway (enable), so the 4K decode of
         // the rest of the batch was wasted.
@@ -506,7 +530,7 @@ pub(super) fn batch_command(
         // Pad before fps so EOF holds the final source frame even if it
         // falls between output samples.
         filters.push(format!(
-            "[{index}:v]settb=1/{tick_rate},setpts=PTS-({offset}),\
+            "[{index}:v]settb=1/{tick_rate},setpts={timestamps},\
              tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
              trim=end_frame={layer_frames},setpts=PTS+{first}{picture}"
         ));

@@ -3,7 +3,7 @@
 
 use eddie_core::editor::details::{ClipDetails, MAX_VOLUME};
 use eddie_core::{Action, Editor, shortcuts};
-use openreel_engine::{Clip, ClipId, ClipKind};
+use openreel_engine::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED};
 use rune::{El, Key, col, el, row};
 
 use super::fields::Field;
@@ -41,7 +41,10 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
         .w_full()
         .child(header(ui, clip))
         .child(el().h(16.0))
-        .child(section("Timing", timing(ui, clip, info.has_source)));
+        .child(section(
+            "Timing",
+            timing(ui, id, clip, info.has_source, value_w),
+        ));
     if !look.is_empty() {
         let title = match clip.kind {
             ClipKind::Video => "Picture & sound",
@@ -60,8 +63,8 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
     body.child(el().h(20.0)).child(actions(id, inner))
 }
 
-/// Where the clip sits and how long it plays.
-fn timing(ui: &Ui, clip: &Clip, has_source: bool) -> Vec<El> {
+/// Where the clip sits, how long it plays and how fast.
+fn timing(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> Vec<El> {
     let mut timing = vec![
         seconds_row(
             ui,
@@ -87,7 +90,36 @@ fn timing(ui: &Ui, clip: &Clip, has_source: bool) -> Vec<El> {
             "Where playback starts inside the source file",
         ));
     }
+    if has_source && clip.kind != ClipKind::Title {
+        // Doubling and halving are equal steps, so 1x sits in the middle.
+        timing.push(last_slider(slider_row(
+            ui,
+            id,
+            "Speed",
+            Field::Speed,
+            clip.speed.log2() as f32,
+            MIN_SPEED.log2() as f32..=MAX_SPEED.log2() as f32,
+            value_w,
+            speed_at,
+            "How fast the clip plays, 0.25× to 4×; its sound keeps its pitch and its length follows",
+        )));
+    }
     timing
+}
+
+/// The Speed slider's handle at `position`, log2 of the speed, in the
+/// hundredths the field shows. A step too small to change them still
+/// moves one hundredth, so the arrow keys never stick at the slow end.
+fn speed_at(editor: &mut Editor, id: ClipId, position: f32) {
+    let Some(current) = editor.timeline.clip(id).map(|clip| clip.speed) else {
+        return;
+    };
+    let wanted = 2f64.powf(f64::from(position));
+    let mut speed = (wanted * 100.0).round() / 100.0;
+    if speed == current && wanted != current {
+        speed += if wanted > current { 0.01 } else { -0.01 };
+    }
+    editor.set_clip_speed(id, speed);
 }
 
 /// The Opacity and Volume sliders, for a clip that has a picture or sound.

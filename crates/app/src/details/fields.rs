@@ -14,6 +14,7 @@ pub enum Field {
     Start,
     Duration,
     SourceIn,
+    Speed,
     Opacity,
     Volume,
     FadeIn,
@@ -36,10 +37,11 @@ pub enum Field {
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 22] = [
+    pub(super) const ALL: [Self; 23] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
+        Self::Speed,
         Self::Opacity,
         Self::Volume,
         Self::FadeIn,
@@ -66,6 +68,7 @@ impl Field {
             Self::Start => "details-start",
             Self::Duration => "details-duration",
             Self::SourceIn => "details-source-in",
+            Self::Speed => "details-speed",
             Self::Opacity => "details-opacity",
             Self::Volume => "details-volume",
             Self::FadeIn => "details-fade-in",
@@ -94,6 +97,7 @@ impl Field {
             Self::Start
                 | Self::Duration
                 | Self::SourceIn
+                | Self::Speed
                 | Self::FadeIn
                 | Self::FadeOut
                 | Self::Rotation
@@ -108,6 +112,7 @@ impl Field {
             Self::Start => clip.start,
             Self::Duration => clip.duration,
             Self::SourceIn => clip.source_in,
+            Self::Speed => clip.speed,
             Self::Opacity => f64::from(clip.opacity) * 100.0,
             Self::Volume => f64::from(clip.volume) * 100.0,
             Self::FadeIn => clip.fade_in,
@@ -141,6 +146,8 @@ impl Field {
         } else if self == Self::Exposure {
             let value = if value.abs() < 0.05 { 0.0 } else { value };
             format!("{value:.1} EV")
+        } else if self == Self::Speed {
+            format!("{value:.2}×")
         } else {
             format!("{value:.2} s")
         }
@@ -153,6 +160,8 @@ impl Field {
             typed.strip_suffix('%').unwrap_or(typed)
         } else if self == Self::Rotation {
             typed.strip_suffix('°').unwrap_or(typed)
+        } else if self == Self::Speed {
+            typed.trim_end_matches(['×', 'x', 'X'])
         } else if self == Self::Exposure {
             let unit = typed
                 .len()
@@ -174,6 +183,7 @@ impl Field {
             Self::Start => editor.set_clip_start(id, value),
             Self::Duration => editor.set_clip_duration(id, value),
             Self::SourceIn => editor.set_clip_source_in(id, value),
+            Self::Speed => editor.set_clip_speed(id, value),
             Self::Opacity => editor.set_clip_opacity(id, (value / 100.0) as f32),
             Self::Volume => editor.set_clip_volume(id, (value / 100.0) as f32),
             Self::FadeIn => editor.set_clip_fades(id, Some(value), None),

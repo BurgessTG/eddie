@@ -80,6 +80,7 @@ fn samples_probe_decode_and_export_end_to_end() {
             duck: Vec::new(),
             clean_voice: false,
             smooth_fades: false,
+            speed: 1.0,
         },
     )]);
     let mut mix = Vec::new();

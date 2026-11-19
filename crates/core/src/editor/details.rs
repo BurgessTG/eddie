@@ -3,8 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Transform, MAX_SCALE, MIN_CROP_KEEP,
-    MIN_SCALE,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Transform, MAX_SCALE, MAX_SPEED,
+    MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
 };
 
 use super::Editor;
@@ -63,7 +63,7 @@ impl Editor {
             .map(|asset| asset.info.duration);
         if let Some(longest) = source_duration {
             source_in = source_in.min(longest.max(0.0));
-            duration = duration.min((longest - source_in).max(MIN_DURATION));
+            duration = duration.min(((longest - source_in) / before.speed).max(MIN_DURATION));
         }
         let linked_before = before
             .linked_clip
@@ -84,6 +84,30 @@ impl Editor {
                 linked.source_in = (linked_before.source_in + source_delta).max(0.0);
             }
         }
+    }
+
+    /// The Speed slider and its field: `MIN_SPEED` to `MAX_SPEED` times as
+    /// fast. The clip keeps its source range and its length follows, so a
+    /// slider dragged down and back loses nothing. Slowing stops at the
+    /// slowest speed whose length still fits before the next clip on the
+    /// lane, and the status bar says so.
+    pub fn set_clip_speed(&mut self, id: ClipId, speed: f64) {
+        let Some(clip) = self.timeline.clip(id) else {
+            return;
+        };
+        if !speed.is_finite() || clip.kind == ClipKind::Title || clip.source.is_none() {
+            return;
+        }
+        let range = clip.duration * clip.speed;
+        let room = self.timeline.room_after_start(id);
+        let fits = (range / room).clamp(MIN_SPEED, MAX_SPEED);
+        let mut speed = speed.clamp(MIN_SPEED, MAX_SPEED);
+        if speed < fits {
+            // Hundredths, as the field shows, rounded up so it still fits.
+            speed = ((fits * 100.0).ceil() / 100.0).min(MAX_SPEED);
+            self.status = format!("Slowest that fits before the next clip: {speed:.2}×.");
+        }
+        self.timeline.set_speed(id, speed);
     }
 
     /// The Opacity slider and its field: 0 is black, 1 the whole picture.

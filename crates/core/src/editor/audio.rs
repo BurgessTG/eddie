@@ -144,6 +144,7 @@ impl Editor {
                             duck: self.timeline.duck_ranges(c, &speech),
                             clean_voice: c.clean_voice,
                             smooth_fades: c.smooth_fades,
+                            speed: c.speed,
                         },
                     )
                 })

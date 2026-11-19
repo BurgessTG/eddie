@@ -57,6 +57,11 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    /// Source seconds per timeline second; the clip keeps its source range.
+    SetSpeed {
+        clip: u64,
+        speed: f64,
+    },
     SetCleanVoice {
         clip: u64,
         enabled: bool,
@@ -156,6 +161,7 @@ impl ScriptCommand {
             | Self::SetBackground { clip, .. }
             | Self::SetColor { clip, .. }
             | Self::SetVolume { clip, .. }
+            | Self::SetSpeed { clip, .. }
             | Self::SetFade { clip, .. }
             | Self::SetCleanVoice { clip, .. }
             | Self::SetSmoothFades { clip, .. }
@@ -208,6 +214,7 @@ impl ScriptCommand {
             Self::SetOpacity { value, .. }
             | Self::SetVolume { value, .. }
             | Self::SetZoom(value) => value.is_finite(),
+            Self::SetSpeed { speed, .. } => speed.is_finite(),
             Self::TightenSilence {
                 threshold,
                 min_silence,

@@ -530,7 +530,7 @@ impl Gesture {
                 let desired = orig_end + (time - press_time);
                 let mut new_end = timeline.snap(snap_to(desired, &candidates, threshold));
                 if let Some(duration) = clip.source.as_deref().and_then(source_duration) {
-                    let max_end = clip.start + (duration - clip.source_in).max(0.0);
+                    let max_end = clip.time_at(duration).max(clip.start);
                     new_end = new_end.min(max_end);
                 }
                 if let Some(next) = next_start(timeline, &clip, clip.start) {

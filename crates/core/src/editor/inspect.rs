@@ -160,7 +160,7 @@ impl<'a> Inspection<'a> {
             );
         }
         if info.duration > 0.0
-            && (clip.source_in < -1e-6 || clip.source_in + clip.duration > info.duration + frame)
+            && (clip.source_in < -1e-6 || clip.source_end() > info.duration + frame)
         {
             self.report(
                 "source-range",
@@ -168,7 +168,7 @@ impl<'a> Inspection<'a> {
                 format!(
                     "Clip {id} plays source {:.2}-{:.2}s; the file is {:.2}s long.",
                     clip.source_in,
-                    clip.source_in + clip.duration,
+                    clip.source_end(),
                     info.duration
                 ),
                 vec![id],
@@ -196,7 +196,7 @@ impl<'a> Inspection<'a> {
 
     /// Ranges the curator tagged `on-screen-text` that the clip shows.
     fn burned_in_text(&mut self, clip: &Clip, asset: &BinAsset) {
-        let (id, start, frame) = (clip.id, clip.start, self.frame);
+        let (id, frame) = (clip.id, self.frame);
         let text = asset
             .sweep
             .candidates
@@ -205,7 +205,7 @@ impl<'a> Inspection<'a> {
             .filter(|range| range.tags.iter().any(|tag| tag == "on-screen-text"))
             .map(|range| {
                 let from = range.source_in.max(clip.source_in);
-                let to = range.end().min(clip.source_in + clip.duration);
+                let to = range.end().min(clip.source_end());
                 (from, to)
             })
             .filter(|(from, to)| to - from > frame / 2.0)
@@ -220,8 +220,8 @@ impl<'a> Inspection<'a> {
                     "Clip {id} shows burned-in text from an earlier edit (source {from:.2}-{to:.2}s)."
                 ),
                 vec![id],
-                start + (from - clip.source_in),
-                start + (to - clip.source_in),
+                clip.time_at(from),
+                clip.time_at(to),
             );
         }
     }
@@ -290,7 +290,7 @@ impl<'a> Inspection<'a> {
                 .as_deref()
                 .and_then(|source| self.asset(source))
                 .map_or(frame, |asset| 1.0 / asset.info.fps.max(1.0));
-            let jump = (b.source_in + (cut - b.start)) - (a.source_in + (cut - a.start));
+            let jump = b.source_at(cut) - a.source_at(cut);
             let frames = (jump / source_frame).round();
             if frames != 0.0 && frames.abs() <= 3.0 {
                 let (verb, count) = if frames > 0.0 {

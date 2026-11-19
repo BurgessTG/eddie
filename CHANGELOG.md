@@ -21,12 +21,22 @@
   picked from tiles that show each filter on the clip's own frame. The
   monitor shows the grade as export renders it. Scripts use
   `setColor`, and `state()` gives each clip's `color`.
+- Clip speed from 0.25× to 4× in Details (Timing → Speed), with the sound
+  kept at its pitch in preview and export. A clip keeps its source range,
+  so its length follows the speed; slowing stops where the next clip on the
+  lane starts. Scripts use `setSpeed`, and `state()` gives each clip's
+  `speed`.
 
 ### Changed
 
 - Projects saved as Landscape or Portrait now render at exactly 16:9 or
   9:16. They took the shape of their largest video of that orientation
   before.
+
+### Fixed
+
+- Splitting a moved, cropped or graded clip, or removing silence from one,
+  kept that look only on the first piece; every piece keeps it now.
 
 ## 0.2.0 (2026-11-13)
 
