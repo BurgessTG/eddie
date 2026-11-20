@@ -38,6 +38,12 @@ makepkg -si
    - builds `eddie` from the tag in an Arch container, then pushes both
      AUR packages (`release/aur.sh`).
 
+A patch release for a version master has moved past (v0.2.1 after
+v0.2.0) is tagged on a branch from the older tag. Set master's `version`
+past it first and let its preview publish: Eddie compares versions
+before builds, so preview users would otherwise be offered the patch,
+which lacks master's changes.
+
 Every `master` commit CI passes is published by `preview.yml` as the
 `preview` pre-release, replacing the one before. Only Eddies set to
 Updates → Previews look at it.

@@ -64,8 +64,14 @@
   to show the whole list.
 - A title below full opacity now fades its box and outline in export and
   contact sheets too, as the monitor showed it; they stayed solid before.
-- Eddie builds against FFmpeg 9.1. With 9.0's ffmpeg-next the build
-  stopped in `hwcontext_cuda.h`.
+
+## 0.2.1 (2026-11-20)
+
+### Fixed
+
+- Eddie builds again on Arch Linux, which moved to FFmpeg 9.1: the AUR
+  package stopped in `hwcontext_cuda.h` while generating FFmpeg's
+  bindings. Nothing else changed.
 
 ## 0.2.0 (2026-11-13)
 
