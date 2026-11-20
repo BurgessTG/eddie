@@ -31,10 +31,12 @@
   remembers the last choice. Titles keep their size and place on the
   frame at any resolution. `eddie export` takes `--resolution`, `--fps`
   and `--quality`.
-- Photos (PNG, JPEG and WebP) as clips. One added whole lasts 3 seconds;
-  trim either edge to any length. A phone photo shows upright from its
-  EXIF orientation, and photos take the same transform, background and
-  colour as video. `state()` marks photo assets and clips `photo`.
+- Photos (PNG, JPEG, WebP and HEIC) as clips. One added whole lasts 3
+  seconds; trim either edge to any length. A phone photo shows upright
+  from its orientation, an iPhone's HEIC included, and photos take the
+  same transform, background and colour as video. `state()` marks photo
+  assets and clips `photo`. Import's file list shows `IMG_0001.HEIC` and
+  other upper-case names on Linux too.
 
 ### Changed
 

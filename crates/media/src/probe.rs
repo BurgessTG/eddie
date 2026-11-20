@@ -14,7 +14,7 @@ pub struct MediaInfo {
     pub fps: f64,
     pub has_video: bool,
     pub has_audio: bool,
-    /// One picture, such as a PNG, JPEG or WebP photo. It has no length
+    /// One picture, such as a PNG, JPEG, WebP or HEIC photo. It has no length
     /// (`duration` and `fps` are 0): a clip shows it for as long as it lasts.
     pub photo: bool,
 }
@@ -84,10 +84,9 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         // Image demuxers give a picture a nominal 25 fps and one frame.
         (info.duration, info.fps) = (0.0, 0.0);
         // A photo's EXIF orientation reaches its decoded picture, not the
-        // stream, so the decoder reads it from the picture.
-        if decode::VideoDecoder::open(path, 16, true)?.turns % 2 == 1 {
-            std::mem::swap(&mut info.width, &mut info.height);
-        }
+        // stream, and a HEIF photo's tiles are joined to one picture, so
+        // the decoder says the size.
+        (info.width, info.height) = decode::VideoDecoder::open(path, 16, true)?.photo_size();
     }
     Ok(info)
 }

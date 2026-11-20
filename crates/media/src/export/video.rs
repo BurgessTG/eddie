@@ -9,14 +9,15 @@ use std::process::{Command, Stdio};
 use openreel_engine::{place, Background, Clip, ClipId, ColorAdjust, Timeline, Transform};
 
 use super::scratch::FilterGraphFile;
+use super::source::Source;
 use super::{collect_stderr, export_error};
 use crate::{MediaInfo, MediaResult};
 
 // Raw batches cannot carry source color metadata. Convert their matrix/range
 // before mixing and declare the same representation at the encoder handoff.
-const VIDEO_COLOR_SPACE: &str = "bt709";
+pub(super) const VIDEO_COLOR_SPACE: &str = "bt709";
 
-const VIDEO_COLOR_RANGE: &str = "tv";
+pub(super) const VIDEO_COLOR_RANGE: &str = "tv";
 
 #[derive(Clone, Copy)]
 pub(super) struct VideoClock {
@@ -98,8 +99,9 @@ pub(super) fn enabled_frames(ranges: &[(i64, i64)]) -> String {
 
 pub(super) struct VideoLayer<'a> {
     source: &'a str,
-    /// A cheaper exact matrix/range conversion, applied after resizing.
-    convert: Option<&'a str>,
+    /// How the picture is read: its stream, and a cheaper exact
+    /// matrix/range conversion applied after resizing.
+    read: &'a Source,
     opacity: f32,
     transform: Transform,
     background: Background,
@@ -129,7 +131,7 @@ const MAX_INPUTS: usize = 4;
 
 pub(super) fn plan_video<'a>(
     timeline: &'a Timeline,
-    conversions: &'a HashMap<&str, Option<String>>,
+    sources: &'a HashMap<&str, Source>,
     clock: VideoClock,
     frame_count: i64,
 ) -> (Vec<VideoLayer<'a>>, Vec<Batch>) {
@@ -147,9 +149,9 @@ pub(super) fn plan_video<'a>(
         if clip.opacity <= 0.0 {
             continue;
         }
-        let convert = conversions
-            .get(source)
-            .and_then(|convert| convert.as_deref());
+        let Some(read) = sources.get(source) else {
+            continue;
+        };
         let source_offset = if clip.photo {
             0
         } else if clip.speed == 1.0 {
@@ -174,7 +176,7 @@ pub(super) fn plan_video<'a>(
         } else {
             layers.push(VideoLayer {
                 source,
-                convert,
+                read,
                 opacity: clip.opacity,
                 transform: clip.transform,
                 background: clip.background,
@@ -213,79 +215,6 @@ pub(super) fn plan_video<'a>(
         start = end;
     }
     (layers, batches)
-}
-
-/// The colorspace filter that brings a source to the export's BT.709 limited
-/// range after resizing, or `None` when it already is BT.709 limited range
-/// or the filter cannot read its format (swscale then converts while
-/// resizing). Untagged matrices are BT.601, as the FFmpeg CLI and the
-/// preview assume. Primaries and transfer stay as they are, so only the
-/// matrix and range change, as before.
-pub(super) fn colorspace_filter(path: &str) -> Option<String> {
-    use ffmpeg_next::ffi::{AVColorRange, AVColorSpace, AVPixelFormat};
-    crate::decode::ensure_init();
-    let input = ffmpeg_next::format::input(path).ok()?;
-    let stream = input.streams().best(ffmpeg_next::media::Type::Video)?;
-    // SAFETY: the parameters belong to the open input and outlive this read.
-    let (space, range, format) = unsafe {
-        let parameters = stream.parameters().as_ptr();
-        (
-            crate::decode::raw_enum(std::ptr::addr_of!((*parameters).color_space)),
-            crate::decode::raw_enum(std::ptr::addr_of!((*parameters).color_range)),
-            (*parameters).format,
-        )
-    };
-    // Compare raw values: a pixel format newer than these bindings, or a
-    // matrix the file made up, is not a valid Rust enum value.
-    let is = |f: AVPixelFormat| f as i32 == format;
-    use AVPixelFormat::*;
-    // The colorspace filter keeps a yuvj input's pixel format while tagging
-    // it limited range, and later conversions read yuvj as full range.
-    // Name the plain format of the same layout as its output.
-    let (output, full_range_format) = [
-        (AV_PIX_FMT_YUVJ420P, "yuv420p", true),
-        (AV_PIX_FMT_YUVJ422P, "yuv422p", true),
-        (AV_PIX_FMT_YUVJ444P, "yuv444p", true),
-        (AV_PIX_FMT_YUV420P, "yuv420p", false),
-        (AV_PIX_FMT_YUV422P, "yuv422p", false),
-        (AV_PIX_FMT_YUV444P, "yuv444p", false),
-        (AV_PIX_FMT_YUV420P10LE, "yuv420p10", false),
-        (AV_PIX_FMT_YUV422P10LE, "yuv422p10", false),
-        (AV_PIX_FMT_YUV444P10LE, "yuv444p10", false),
-        (AV_PIX_FMT_YUV420P12LE, "yuv420p12", false),
-        (AV_PIX_FMT_YUV422P12LE, "yuv422p12", false),
-        (AV_PIX_FMT_YUV444P12LE, "yuv444p12", false),
-    ]
-    .into_iter()
-    .find(|&(f, ..)| is(f))
-    .map(|(_, output, full)| (output, full))?;
-    let matrix = [
-        (AVColorSpace::AVCOL_SPC_BT709, "bt709"),
-        (AVColorSpace::AVCOL_SPC_UNSPECIFIED, "smpte170m"),
-        (AVColorSpace::AVCOL_SPC_RESERVED, "smpte170m"),
-        (AVColorSpace::AVCOL_SPC_SMPTE170M, "smpte170m"),
-        (AVColorSpace::AVCOL_SPC_BT470BG, "bt470bg"),
-        (AVColorSpace::AVCOL_SPC_SMPTE240M, "smpte240m"),
-        (AVColorSpace::AVCOL_SPC_FCC, "fcc"),
-        (AVColorSpace::AVCOL_SPC_BT2020_NCL, "bt2020ncl"),
-    ]
-    .into_iter()
-    .find(|&(named, _)| named as u32 == space)
-    .map(|(_, matrix)| matrix)?;
-    let range = if range == AVColorRange::AVCOL_RANGE_JPEG as u32 {
-        "pc"
-    } else if range == AVColorRange::AVCOL_RANGE_MPEG as u32 || !full_range_format {
-        "tv"
-    } else {
-        "pc"
-    };
-    ((matrix, range) != (VIDEO_COLOR_SPACE, VIDEO_COLOR_RANGE)).then(|| {
-        format!(
-            "colorspace=ispace={matrix}:irange={range}:itrc=bt709:iprimaries=bt709:\
-             space={VIDEO_COLOR_SPACE}:range={VIDEO_COLOR_RANGE}:trc=bt709:primaries=bt709:\
-             format={output}"
-        )
-    })
 }
 
 /// Even and at least 2, as yuv420p and the colorspace filter need.
@@ -471,7 +400,13 @@ pub(super) fn batch_command(
         let seek = source_time.min(last_seek).max(0.0).floor() as i64;
         // Slice threads split each picture: frame threading on four 4K
         // inputs pushed export to about 2.8 GB RSS.
-        cmd.args(["-thread_type:v", "slice", "-threads:v", "0", "-an"]);
+        cmd.args([
+            "-thread_type:v",
+            "slice",
+            "-threads:v",
+            layer.read.threads(),
+            "-an",
+        ]);
         // A photo is read from the top: `image2` returns no picture at all
         // after a seek, even to 0.
         if !layer.photo {
@@ -501,7 +436,7 @@ pub(super) fn batch_command(
         // resize cost about 4x a BT.709 one. Resize at the source matrix,
         // then convert at canvas size with the colorspace filter: 6.8 vs
         // 14.1 CPU-s per 240 4K frames, and no further from true RGB.
-        let (resize, convert) = match layer.convert {
+        let (resize, convert) = match layer.read.convert.as_deref() {
             Some(convert) => ("bicubic+accurate_rnd".to_owned(), format!(",{convert}")),
             None => (
                 format!(
@@ -545,12 +480,14 @@ pub(super) fn batch_command(
                 .strip_suffix(&format!("[seg{index}]"))
                 .expect("a picture chain ends at its segment");
             filters.push(format!(
-                "[{index}:v]settb=1/{tick_rate},setpts=PTS-STARTPTS{picture}[photo{index}]"
+                "{}settb=1/{tick_rate},setpts=PTS-STARTPTS{picture}[photo{index}]",
+                layer.read.head(index)
             ));
             filters.push(format!("[photo{index}]{hold}[seg{index}]"));
         } else {
             filters.push(format!(
-                "[{index}:v]settb=1/{tick_rate},setpts={timestamps},{hold}{picture}"
+                "{}settb=1/{tick_rate},setpts={timestamps},{hold}{picture}",
+                layer.read.head(index)
             ));
         }
         filters.push(format!(

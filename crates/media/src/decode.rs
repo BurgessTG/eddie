@@ -13,6 +13,7 @@ use ffmpeg_next as ffmpeg;
 use crate::{MediaResult, RawFrame};
 
 mod hardware;
+mod heif;
 mod photo;
 mod scaler;
 mod stills;
@@ -22,6 +23,7 @@ pub(crate) use hardware::{hardware_broken, hardware_failed};
 pub use hardware::{
     inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
 };
+pub(crate) use heif::{heif_picture, Heif, TileGrid};
 pub(crate) use photo::is_photo;
 use scaler::Scaler;
 pub(crate) use stills::frame_at;
@@ -156,13 +158,20 @@ impl VideoDecoder {
         ensure_init();
         let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
         let photo = is_photo(&input);
+        let heif = heif_picture(&input);
         // The GPU has nothing to gain on one picture.
         let hardware = hardware && !photo;
+        // Each tile is a picture of its own, so frame threads decode several.
+        let threading = match heif {
+            Some(Heif::Grid(_)) => ffmpeg::codec::threading::Type::Frame,
+            _ => threading,
+        };
         let (stream_index, time_base, stream_start, parameters, turns) = {
-            let stream = input
-                .streams()
-                .best(ffmpeg::media::Type::Video)
-                .ok_or_else(|| "no video stream".to_owned())?;
+            let stream = match &heif {
+                Some(heif) => input.stream(heif.stream()),
+                None => input.streams().best(ffmpeg::media::Type::Video),
+            }
+            .ok_or_else(|| "no video stream".to_owned())?;
             let turns = display_turns(&stream);
             (
                 stream.index(),
@@ -255,7 +264,7 @@ impl VideoDecoder {
             photo,
         };
         if photo {
-            this.queue_photo()?;
+            this.queue_photo(heif.as_ref())?;
         }
         Ok(this)
     }

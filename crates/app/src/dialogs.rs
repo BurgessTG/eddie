@@ -39,10 +39,19 @@ pub enum Discard {
     Restart(PathBuf),
 }
 
+/// Every media extension in both cases: GTK's file filter matches case by
+/// case, and phones name their files `IMG_0001.HEIC` and `IMG_0002.MOV`.
+fn media_extensions() -> Vec<String> {
+    MEDIA_EXTS
+        .iter()
+        .flat_map(|extension| [extension.to_string(), extension.to_uppercase()])
+        .collect()
+}
+
 impl Ui {
     pub fn pick_import(&mut self) {
         let dialog = rfd::FileDialog::new()
-            .add_filter("Media", MEDIA_EXTS)
+            .add_filter("Media", &media_extensions())
             .set_title("Import media");
         self.open_file_dialog(FilePurpose::Import, dialog);
     }
@@ -177,7 +186,7 @@ impl Ui {
             return;
         };
         let dialog = rfd::FileDialog::new()
-            .add_filter("Media", MEDIA_EXTS)
+            .add_filter("Media", &media_extensions())
             .set_title(format!("Locate {}", file_name(Path::new(first))));
         self.open_file_dialog(FilePurpose::LocateMedia, dialog);
     }

@@ -192,7 +192,7 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
-  - `photo: true` marks a photo (PNG, JPEG or WebP): one picture, with
+  - `photo: true` marks a photo (PNG, JPEG, WebP or HEIC): one picture, with
     `duration` 0. `curate`, `strip` and `frames` refuse it; open the file
     itself to see it.
   - `silenceRanges` are stretches of 0.35 s or more below the recording's

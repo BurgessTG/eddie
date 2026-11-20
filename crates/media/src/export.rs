@@ -17,13 +17,12 @@ use crate::{MediaInfo, MediaResult};
 use audio::encode_audio;
 use scratch::ScratchDir;
 use titles::Titles;
-use video::{
-    batch_command, colorspace_filter, encode_segment, plan_video, visible_frames, VideoClock,
-};
+use video::{batch_command, encode_segment, plan_video, visible_frames, VideoClock};
 
 mod audio;
 mod scratch;
 mod settings;
+mod source;
 mod titles;
 mod video;
 
@@ -166,13 +165,13 @@ pub fn export_timeline(
     // seams.
     let mix = audio::mix(timeline, infos, options)?;
 
-    let mut conversions: HashMap<&str, Option<String>> = HashMap::new();
+    let mut sources = HashMap::new();
     for source in video_clips.iter().filter_map(|clip| clip.source.as_deref()) {
-        conversions
+        sources
             .entry(source)
-            .or_insert_with(|| colorspace_filter(source));
+            .or_insert_with(|| source::read(source));
     }
-    let (layers, batches) = plan_video(timeline, &conversions, clock, frame_count);
+    let (layers, batches) = plan_video(timeline, &sources, clock, frame_count);
     // Each batch decodes up to four inputs on slice threads and encodes on
     // its own x264, with threads from the CPU budget (cgroup quota included)
     // rather than x264's per-core default. On four CPUs one batch already

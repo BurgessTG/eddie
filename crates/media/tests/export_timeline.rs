@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
 use openreel_engine::{Background, ClipKind, Format, Timeline, TitleStyle, Transform};
-use openreel_media::{export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution};
+use openreel_media::{
+    export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution, VideoDecoder,
+};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1174,6 +1176,78 @@ fn a_phone_photo_exports_upright_from_its_exif_orientation() {
             &colors_at(frame, 320, &points),
             &[BL, TL, BR, TR, BLACK, BLACK],
         );
+    }
+}
+
+/// HEIC photos as libheif's `heif-enc` saves them (`tests/data/README.md`).
+/// Both hold one 600x350 picture whose 128-pixel blocks each have their own
+/// colour, so a tile in the wrong place shows. `grid.heic` is saved as
+/// iPhones save photos: 128-pixel tiles (a 640x384 grid cropped back to
+/// 600x350) turned a quarter clockwise by the grid's `irot`, so it shows
+/// 350x600. `single.heic` is one image with a thumbnail beside it.
+#[test]
+fn heic_photos_preview_and_export_upright_with_every_tile_in_place() {
+    let fixture = Fixture::new();
+    for (name, turned) in [("grid.heic", true), ("single.heic", false)] {
+        let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+        let info = probe(&path).unwrap();
+        assert!(info.photo && info.has_video, "{name}: {info:?}");
+        let size = if turned { (350, 600) } else { (600, 350) };
+        assert_eq!(
+            (info.width, info.height, info.duration),
+            (size.0, size.1, 0.0)
+        );
+        // Each block's middle (the right and bottom blocks are cut short),
+        // where the displayed picture shows it, and its colour.
+        let mut points = Vec::new();
+        let mut expected = Vec::new();
+        for column in 0..5 {
+            for row in 0..3 {
+                let (x, y) = ((64 + 128 * column).min(556), (64 + 128 * row).min(303));
+                // A quarter turn clockwise: the stored bottom-left is shown
+                // top-left.
+                points.push(if turned { (349 - y, x) } else { (x, y) });
+                expected.push([30 + 45 * column as u8, 40 + 80 * row as u8, 128]);
+            }
+        }
+        // The preview's decoder joins the tiles itself...
+        let picture = VideoDecoder::open(&path, size.0, false)
+            .unwrap()
+            .frame_at(0.0)
+            .unwrap();
+        assert_eq!(
+            (picture.width, picture.height),
+            size,
+            "{name}: preview size"
+        );
+        let rgb: Vec<u8> = picture
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|pixel| &pixel[..3])
+            .copied()
+            .collect();
+        assert_colors(
+            &format!("{name} preview"),
+            &colors_at(&rgb, size.0, &points),
+            &expected,
+        );
+        // ...and export has the FFmpeg CLI join them.
+        let mut timeline = Timeline::new(10.0);
+        photo(&mut timeline, Path::new(&path), 0.0, 0.2);
+        let exported = fixture.export(&format!("{name}.mp4"), &timeline);
+        let out = probe(exported.to_str().unwrap()).unwrap();
+        assert_eq!((out.width, out.height), size, "{name}: export size");
+        let frames = frames(&exported);
+        assert_eq!(frames.len(), 2, "{name}");
+        for (index, frame) in frames.iter().enumerate() {
+            assert_colors(
+                &format!("{name} export frame {index}"),
+                &colors_at(frame, size.0, &points),
+                &expected,
+            );
+        }
     }
 }
 

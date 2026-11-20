@@ -177,6 +177,9 @@ has filters drawtext
 has encoders libx264
 has encoders libmp3lame
 has decoders libdav1d
+# HEIC photos: HEVC tiles, joined by export with xstack.
+has decoders hevc
+has filters xstack
 has devices lavfi
 
 # The GPL asks that whoever gets the program can get its source: the app
