@@ -1116,3 +1116,135 @@ fn a_freeze_frame_holds_the_picture_at_the_playhead_and_moves_later_clips() {
     );
     assert_eq!(clip(&tl, after).start, 7.0);
 }
+
+#[test]
+fn a_transition_sits_on_the_cut_into_its_clip_and_takes_at_most_half_of_each_side() {
+    let mut tl = Timeline::new(30.0);
+    let a = tl.add_media_clip("a", ClipKind::Video, 1, 0.0, 4.0, 1.0, "/m/a.mp4");
+    // A media edge a third of a frame off the cut still meets it.
+    let b = tl.add_media_clip("b", ClipKind::Video, 1, 4.01, 2.0, 0.0, "/m/b.mp4");
+    tl.clip_mut(b).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 1.0));
+    assert_eq!(tl.clip_before(b).map(|clip| clip.id), Some(a));
+    assert_eq!(tl.clip_before(a), None);
+    let span = tl.transitions()[0];
+    assert_eq!((span.from, span.to, span.kind), (a, b, TransitionKind::Mix));
+    assert_eq!((span.start, span.cut, span.end), (3.51, 4.01, 4.51));
+    assert!((span.progress(3.76) - 0.25).abs() < 1e-9);
+
+    // Past the cut the program still plays the clip before, to the end.
+    let program = |tl: &Timeline, at: f64| tl.program_video(at).map(|clip| clip.id);
+    assert_eq!(tl.active_video(4.2).map(|clip| clip.id), Some(b));
+    assert_eq!(program(&tl, 4.2), Some(a));
+    assert_eq!(program(&tl, 3.4), Some(a));
+    assert_eq!(
+        program(&tl, 4.51),
+        Some(b),
+        "the end is the next clip's own"
+    );
+
+    // A lower lane covering part of it hides that part.
+    let cover = tl.add_media_clip("c", ClipKind::Video, 0, 3.6, 0.3, 0.0, "/m/c.mp4");
+    assert_eq!(tl.transition_at(3.7), None);
+    assert_eq!(program(&tl, 3.7), Some(cover));
+    assert_eq!(tl.transition_at(3.55).map(|span| span.to), Some(b));
+    tl.remove_clip(cover);
+
+    // Each side takes at most half its clip.
+    tl.trim_right(b, 4.6);
+    let half = tl.clip(b).unwrap().duration / 2.0;
+    assert!(half < 0.5);
+    let span = tl.transitions()[0];
+    assert!((span.end - span.cut - half).abs() < 1e-9, "{span:?}");
+    assert!((span.cut - span.start - half).abs() < 1e-9, "{span:?}");
+
+    // The cut a split leaves has none, and a copy brings none along.
+    tl.trim_right(b, 6.01);
+    let right = tl.split_at(b, 5.0).unwrap();
+    assert!(tl.clip(b).unwrap().transition.is_some());
+    assert_eq!(tl.clip(right).unwrap().transition, None);
+    let copied = tl.clip(b).unwrap().clone();
+    let copy = tl.place_copies(&[copied], 10.0)[0];
+    assert_eq!(tl.clip(copy).unwrap().transition, None);
+    assert_eq!(tl.transitions().len(), 1);
+
+    // Moved away from its cut it does nothing; it is kept for when a clip
+    // ends there again.
+    tl.move_clip(b, 20.0);
+    assert!(tl.transitions().is_empty());
+    assert_eq!(program(&tl, 3.9), Some(a));
+
+    // Out of range lengths are not a project the editor opens.
+    tl.clip_mut(b).unwrap().transition = Some(Transition {
+        kind: TransitionKind::Mix,
+        duration: f64::NAN,
+    });
+    assert!(!tl.in_supported_range());
+    assert_eq!(
+        Transition::new(TransitionKind::Mix, 9.0).duration,
+        MAX_TRANSITION
+    );
+    assert_eq!(
+        TransitionKind::from_name("Dip to white"),
+        Some(TransitionKind::DipWhite)
+    );
+    assert_eq!(
+        TransitionKind::from_name("slide-up"),
+        Some(TransitionKind::SlideUp)
+    );
+}
+
+/// The monitor draws what `xfade` computes: from progress `p = 1 - t`, a
+/// wipe's edge at `int(w * p)`, a slide by `int(w * p)`.
+#[test]
+fn a_transition_frame_follows_xfade_arithmetic() {
+    let canvas = (100, 50);
+    let at = |kind: TransitionKind, t| kind.frame(t, canvas);
+    let mix = at(TransitionKind::Mix, 0.25);
+    assert_eq!(
+        (mix.from.opacity, mix.to.opacity, mix.veil),
+        (1.0, 0.25, None)
+    );
+    // 75 pixels of the old picture stay, then the edge pixel, column 75.
+    assert_eq!(
+        at(TransitionKind::WipeLeft, 0.25).to.window,
+        [76.0, 0.0, 24.0, 50.0]
+    );
+    assert_eq!(
+        at(TransitionKind::WipeRight, 0.25).to.window,
+        [0.0, 0.0, 26.0, 50.0]
+    );
+    assert_eq!(
+        at(TransitionKind::WipeUp, 0.5).to.window,
+        [0.0, 26.0, 100.0, 24.0]
+    );
+    assert_eq!(
+        at(TransitionKind::WipeDown, 0.5).to.window,
+        [0.0, 0.0, 100.0, 26.0]
+    );
+    assert_eq!(at(TransitionKind::WipeLeft, 0.0).to.window[2], 0.0);
+    let slide = at(TransitionKind::SlideLeft, 0.25);
+    assert_eq!(
+        (slide.from.offset, slide.to.offset),
+        ([-25.0, 0.0], [75.0, 0.0])
+    );
+    let slide = at(TransitionKind::SlideRight, 0.25);
+    assert_eq!(
+        (slide.from.offset, slide.to.offset),
+        ([25.0, 0.0], [-75.0, 0.0])
+    );
+    let slide = at(TransitionKind::SlideDown, 0.5);
+    assert_eq!(
+        (slide.from.offset, slide.to.offset),
+        ([0.0, 25.0], [0.0, -25.0])
+    );
+    let dip = at(TransitionKind::DipWhite, 0.25);
+    assert_eq!(
+        (dip.from.opacity, dip.to.opacity, dip.veil),
+        (1.0, 0.0, Some((true, 0.5)))
+    );
+    let dip = at(TransitionKind::DipBlack, 0.75);
+    assert_eq!(
+        (dip.from.opacity, dip.to.opacity, dip.veil),
+        (0.0, 1.0, Some((false, 0.5)))
+    );
+}

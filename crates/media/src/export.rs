@@ -20,10 +20,12 @@ use titles::Titles;
 use video::{batch_command, encode_segment, plan_video, visible_frames, VideoClock};
 
 mod audio;
+mod picture;
 mod scratch;
 mod settings;
 mod source;
 mod titles;
+mod transition;
 mod video;
 
 pub use audio::LOUDNESS_TARGET;
@@ -171,7 +173,7 @@ pub fn export_timeline(
             .entry(source)
             .or_insert_with(|| source::read(source));
     }
-    let (layers, batches) = plan_video(timeline, &sources, clock, frame_count);
+    let (layers, transitions, batches) = plan_video(timeline, &sources, clock, frame_count);
     // Each batch decodes up to four inputs on slice threads and encodes on
     // its own x264, with threads from the CPU budget (cgroup quota included)
     // rather than x264's per-core default. On four CPUs one batch already
@@ -199,20 +201,26 @@ pub fn export_timeline(
                             break;
                         };
                         let count = batch.end - batch.start;
-                        let result =
-                            batch_command(infos, (canvas_w, canvas_h), clock, &layers, batch)
-                                .and_then(|decoder| {
-                                    encode_segment(
-                                        decoder,
-                                        &titles.graph(batch.start, batch.end),
-                                        (canvas_w, canvas_h),
-                                        rate,
-                                        options.settings.quality.crf(),
-                                        count,
-                                        encoder_threads,
-                                        &segment(index),
-                                    )
-                                });
+                        let result = batch_command(
+                            infos,
+                            (canvas_w, canvas_h),
+                            clock,
+                            &layers,
+                            &transitions,
+                            batch,
+                        )
+                        .and_then(|decoder| {
+                            encode_segment(
+                                decoder,
+                                &titles.graph(batch.start, batch.end),
+                                (canvas_w, canvas_h),
+                                rate,
+                                options.settings.quality.crf(),
+                                count,
+                                encoder_threads,
+                                &segment(index),
+                            )
+                        });
                         if let Err(error) = result {
                             failed.store(true, Ordering::Relaxed);
                             return Err(error);

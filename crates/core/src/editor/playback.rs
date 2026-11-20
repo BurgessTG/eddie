@@ -3,11 +3,23 @@
 
 use std::time::{Duration, Instant};
 
-use openreel_engine::ClipKind;
+use openreel_engine::{Clip, ClipKind};
 use openreel_media::{FrameStream, RawFrame};
 
-use super::{VideoKey, PREVIEW_W, SHUTTLE_MAX, STILL_CACHE_CAP};
+use super::{StillUse, VideoKey, PREVIEW_W, SHUTTLE_MAX, STILL_CACHE_CAP};
 use crate::Editor;
+
+/// What a video stream is asked for: a clip's identity, source and
+/// mapping, so editing the mapping restarts it.
+pub(super) fn video_key(clip: &Clip) -> Option<VideoKey> {
+    Some((
+        clip.id,
+        clip.source.clone()?,
+        clip.start.to_bits(),
+        clip.source_in.to_bits(),
+        clip.speed.to_bits(),
+    ))
+}
 
 impl Editor {
     pub fn stop_sources(&mut self) {
@@ -17,6 +29,7 @@ impl Editor {
         if let Some(stream) = &self.stream {
             stream.cancel_preview();
         }
+        self.stop_incoming();
         self.stream_key = None;
         self.stream_ready = false;
         self.stream_failed = false;
@@ -91,39 +104,40 @@ impl Editor {
         self.status = format!("{} {speed}x.", if forward { "Forward" } else { "Reverse" });
     }
 
-    pub fn active_video_clip(&self) -> Option<openreel_engine::Clip> {
-        self.timeline.active_video(self.playhead).cloned()
+    /// The clip the program stream plays at the playhead
+    /// ([`openreel_engine::Timeline::program_video`]): during a transition,
+    /// the clip it comes from.
+    pub fn program_video_clip(&self) -> Option<Clip> {
+        self.timeline.program_video(self.playhead).cloned()
     }
 
-    pub fn active_video_key(&self) -> Option<VideoKey> {
-        let clip = self.timeline.active_video(self.playhead)?;
-        Some((
-            clip.id,
-            clip.source.clone()?,
-            clip.start.to_bits(),
-            clip.source_in.to_bits(),
-            clip.speed.to_bits(),
-        ))
+    pub fn program_video_key(&self) -> Option<VideoKey> {
+        video_key(self.timeline.program_video(self.playhead)?)
     }
 
-    /// The next edge after `after` where a different clip becomes visible,
-    /// with its source and source time there, as `sync_playback` computes
-    /// them at that edge. Edges into a video gap need no picture.
+    /// The next edge after `after` where the program stream plays a
+    /// different clip, with its source and source time there, as
+    /// `sync_playback` computes them at that edge. A transition's clip
+    /// takes over at its end. Edges into a video gap need no picture.
     pub fn next_video_change(&self, after: f64) -> Option<(f64, Option<(&str, f64)>)> {
-        let current = self.timeline.active_video(after).map(|clip| clip.id);
-        let mut next: Option<(f64, &openreel_engine::Clip)> = None;
-        for clip in &self.timeline.clips {
-            if clip.kind != ClipKind::Video {
+        let spans = self.timeline.transitions();
+        let program = |time| self.timeline.program_video_among(&spans, time);
+        let current = program(after).map(|clip| clip.id);
+        let edges = self
+            .timeline
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Video)
+            .flat_map(|clip| [clip.start, clip.end()])
+            .chain(spans.iter().map(|span| span.end));
+        let mut next: Option<(f64, &Clip)> = None;
+        for edge in edges {
+            if edge <= after || next.is_some_and(|(best, _)| edge >= best) {
                 continue;
             }
-            for edge in [clip.start, clip.end()] {
-                if edge <= after || next.is_some_and(|(best, _)| edge >= best) {
-                    continue;
-                }
-                if let Some(visible) = self.timeline.active_video(edge) {
-                    if Some(visible.id) != current {
-                        next = Some((edge, visible));
-                    }
+            if let Some(visible) = program(edge) {
+                if Some(visible.id) != current {
+                    next = Some((edge, visible));
                 }
             }
         }
@@ -137,31 +151,42 @@ impl Editor {
 
     /// How far the audio clock may run before a picture must be ready: the
     /// next visible cut, or the one after it when the preview worker has
-    /// already prerolled that cut's first picture.
+    /// already prerolled that cut's first picture, and at most the start of
+    /// a transition whose incoming picture has not arrived.
     pub fn clock_limit(&self) -> f64 {
         let end = self.timeline.end();
         if self.waiting_for_video() {
             return self.playhead;
         }
-        let Some((edge, source)) = self.next_video_change(self.playhead) else {
-            return end;
+        let limit = match self.next_video_change(self.playhead) {
+            None => end,
+            Some((edge, source)) => {
+                let prerolled =
+                    source
+                        .zip(self.stream.as_ref())
+                        .is_some_and(|((path, time), stream)| {
+                            stream.prefetch_ready(path, time, PREVIEW_W)
+                        });
+                if prerolled {
+                    self.next_video_change(edge).map_or(end, |(after, _)| after)
+                } else {
+                    edge
+                }
+            }
         };
-        let prerolled = source
-            .zip(self.stream.as_ref())
-            .is_some_and(|((path, time), stream)| stream.prefetch_ready(path, time, PREVIEW_W));
-        if !prerolled {
-            return edge.min(end);
-        }
-        self.next_video_change(edge)
-            .map_or(end, |(after, _)| after)
-            .min(end)
+        let limit = limit.min(end);
+        self.incoming_limit(limit)
+            .map_or(limit, |start| start.min(limit))
     }
 
     pub fn waiting_for_video(&self) -> bool {
         self.playing
-            && self
-                .active_video_key()
+            && (self
+                .program_video_key()
                 .is_some_and(|key| self.stream_key.as_ref() != Some(&key) || !self.stream_ready)
+                || self
+                    .incoming_limit(self.playhead + 1e-9)
+                    .is_some_and(|start| start <= self.playhead))
     }
 
     pub fn video_playback_failed(&mut self, error: String) {
@@ -176,7 +201,7 @@ impl Editor {
     /// The monitor holds the active clip's picture. False while a newer
     /// clip's first picture is still decoding: draw nothing, not the old one.
     pub fn preview_is_current(&self) -> bool {
-        self.preview_shown && self.preview_key == self.active_video_key()
+        self.preview_shown && self.preview_key == self.program_video_key()
     }
 
     /// Forget the shown picture so the next still is asked for again, such
@@ -190,7 +215,7 @@ impl Editor {
     pub(super) fn show_preview(&mut self, frame: &RawFrame) {
         self.preview.show(frame);
         self.preview_shown = true;
-        self.preview_key = self.active_video_key();
+        self.preview_key = self.program_video_key();
         if self.playing {
             let now = Instant::now();
             while self
@@ -216,7 +241,7 @@ impl Editor {
         // A still is one picture: there is no rate to keep up with.
         let clip = self
             .timeline
-            .active_video(self.playhead)
+            .program_video(self.playhead)
             .filter(|clip| !clip.still())?;
         let source_fps = self
             .asset(clip.source.as_deref()?)
@@ -236,7 +261,7 @@ impl Editor {
     }
 
     pub fn poll_frames(&mut self) {
-        let active_key = self.active_video_key();
+        let active_key = self.program_video_key();
         if self.preview_key != active_key {
             if self.preview_shown {
                 self.preview.clear();
@@ -244,11 +269,11 @@ impl Editor {
             }
             self.preview_key = None;
         }
-        let active = self.active_video_clip();
+        let active = self.program_video_clip();
         let source_time = active.as_ref().map(|clip| clip.source_at(self.playhead));
         let wants_still = !self.playing || self.scrubbing();
         while let Ok((gen, result)) = self.still_rx.try_recv() {
-            let Some((pending, key, prefetch)) = self.still_inflight else {
+            let Some((pending, key, used)) = self.still_inflight else {
                 continue;
             };
             if gen != pending {
@@ -269,15 +294,25 @@ impl Editor {
             // The newest finished picture of this clip shows even when the
             // pointer has moved on; the next request chases the pointer.
             // A prefetched neighbor shows only once the playhead is on it.
-            let shows = if prefetch {
-                self.still_target(self.playhead, PREVIEW_W)
-                    .is_some_and(|target| target.key == key)
-            } else {
-                active.as_ref().is_some_and(|clip| clip.id == key.0)
+            let shows = match used {
+                StillUse::Prefetch => self
+                    .still_target(self.playhead, PREVIEW_W)
+                    .is_some_and(|target| target.key == key),
+                StillUse::Program => active.as_ref().is_some_and(|clip| clip.id == key.0),
+                StillUse::Incoming => self
+                    .incoming_clip(self.playhead)
+                    .is_some_and(|clip| clip.id == key.0),
             };
             if wants_still && shows {
-                self.show_preview(&frame);
-                self.still_shown = Some(key);
+                if used == StillUse::Incoming {
+                    self.preview.show_incoming(&frame);
+                    let clip = self.timeline.clip(key.0);
+                    self.incoming.shown = clip.and_then(video_key);
+                    self.incoming.still = Some(key);
+                } else {
+                    self.show_preview(&frame);
+                    self.still_shown = Some(key);
+                }
             }
             self.still_cache.retain(|(cached, _)| *cached != key);
             if self.still_cache.len() >= STILL_CACHE_CAP {
@@ -286,6 +321,9 @@ impl Editor {
             self.still_cache.push_back((key, frame));
         }
 
+        if !wants_still {
+            self.poll_incoming();
+        }
         // A boundary/seek may precede sync_playback in this UI frame. Never
         // upload the previous generation as the active clip's picture.
         if wants_still || self.stream_key != active_key {
@@ -342,7 +380,7 @@ impl Editor {
         if !self.playing {
             // A terminal decode failure pauses visibly instead of consuming
             // an unseen clip or automatically retrying it through stills.
-            if self.stream_failed && self.stream_key == self.active_video_key() {
+            if self.stream_failed && self.stream_key == self.program_video_key() {
                 return;
             }
             if self.stream_key.is_some() || self.audio_running() {
@@ -352,9 +390,9 @@ impl Editor {
             return;
         }
 
-        // Video stream follows the active video clip.
-        let active_video = self.active_video_clip();
-        let active_key = self.active_video_key();
+        // Video stream follows the program clip.
+        let active_video = self.program_video_clip();
+        let active_key = self.program_video_key();
         if self.stream_key != active_key {
             // A following request replaces the generation itself; cancelling
             // first would also discard the prerolled next clip.
@@ -417,9 +455,13 @@ impl Editor {
             // Where the playing clip's decoder will be when the cut comes.
             let active_until = self
                 .timeline
-                .active_video(self.playhead)
+                .program_video(self.playhead)
                 .map(|clip| clip.source_at(edge));
             let _ = stream.prefetch_preview(source, time, PREVIEW_W, active_until);
+        }
+        self.sync_incoming();
+        if self.stream_failed {
+            return;
         }
         self.sync_audio();
         if self.waiting_for_video() {

@@ -3,7 +3,7 @@
 
 use eddie_core::editor::lanes::{self, ClipHit, HEADER_W, ViewRect};
 use eddie_core::editor::media::BinAsset;
-use openreel_engine::{Clip, ClipKind};
+use openreel_engine::{Clip, ClipKind, TransitionSpan};
 use rune::{Color, El, LineCap, Shape, el, row, text};
 
 use super::{black, white};
@@ -219,6 +219,50 @@ pub(super) fn clip_el(
         );
     }
     Some(body)
+}
+
+/// Two triangles meeting at a point, 16×16: the mark of a transition.
+fn transition_glyph() -> Shape {
+    Shape::new()
+        .view_box(16.0, 16.0)
+        .fill([[3.0, 4.0], [8.0, 8.0], [3.0, 12.0]], white(225))
+        .fill([[13.0, 4.0], [8.0, 8.0], [13.0, 12.0]], white(225))
+}
+
+/// Where a transition plays: a badge over the cut on the lane of the clip
+/// it leads into, as wide as the transition (at least the glyph), or
+/// `None` out of view.
+pub(super) fn transition_mark(
+    ui: &Ui,
+    span: &TransitionSpan,
+    view: ViewRect,
+    lanes_w: f32,
+) -> Option<El> {
+    const H: f32 = 16.0;
+    let editor = &ui.editor;
+    let port = &editor.viewport;
+    let clip = editor.timeline.clip(span.to)?;
+    let rect = lanes::clip_rect(port, view, &editor.timeline, clip);
+    let x = |time| lanes::x_at(port, 0.0, time);
+    let w = (x(span.end) - x(span.start)).max(H);
+    let left = x(span.cut) - w / 2.0;
+    if left + w < 0.0 || left > lanes_w {
+        return None;
+    }
+    let selected = editor.selected == Some(span.to);
+    Some(
+        el().key(format!("transition-{}", span.to))
+            .absolute(left, rect.top + (rect.height() - H) / 2.0)
+            .size(w, H)
+            .radius(H / 2.0)
+            .fill(black(180))
+            .border(1.0, if selected { c().brand } else { white(110) })
+            .child(
+                el().absolute((w - 16.0) / 2.0, 0.0)
+                    .size(16.0, 16.0)
+                    .shape(transition_glyph()),
+            ),
+    )
 }
 
 /// A lighter top edge, and a grip on the edge the pointer would trim.

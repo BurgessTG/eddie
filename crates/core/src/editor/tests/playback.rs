@@ -10,6 +10,7 @@ use super::*;
 mod cuts;
 mod loudness;
 mod stills;
+mod transitions;
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -96,9 +97,17 @@ fn await_picture(app: &mut Editor, monitor: &Monitor) -> Rgb {
 }
 
 /// The program monitor of an editor under test: whether a picture is on
-/// it and the centre pixel of each one shown since the last `take`.
+/// it and the centre pixel of each one shown since the last `take`, then
+/// the same for the incoming pictures of transitions.
 #[derive(Clone, Default)]
-struct Monitor(Rc<RefCell<(bool, Vec<Rgb>)>>);
+struct Monitor(Rc<RefCell<Shown>>);
+
+#[derive(Default)]
+struct Shown {
+    on: bool,
+    program: Vec<Rgb>,
+    incoming: Vec<Rgb>,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Rgb([u8; 3]);
@@ -115,25 +124,37 @@ impl Rgb {
 
 impl Monitor {
     fn on(&self) -> bool {
-        self.0.borrow().0
+        self.0.borrow().on
     }
 
     fn take(&self) -> Vec<Rgb> {
-        std::mem::take(&mut self.0.borrow_mut().1)
+        std::mem::take(&mut self.0.borrow_mut().program)
     }
+
+    fn take_incoming(&self) -> Vec<Rgb> {
+        std::mem::take(&mut self.0.borrow_mut().incoming)
+    }
+}
+
+fn centre(frame: &RawFrame) -> Rgb {
+    let centre = frame.rgba.len() / 8 * 4;
+    let pixel = &frame.rgba[centre..centre + 3];
+    Rgb([pixel[0], pixel[1], pixel[2]])
 }
 
 impl PreviewSink for Monitor {
     fn show(&mut self, frame: &RawFrame) {
-        let centre = frame.rgba.len() / 8 * 4;
-        let pixel = &frame.rgba[centre..centre + 3];
         let mut monitor = self.0.borrow_mut();
-        monitor.0 = true;
-        monitor.1.push(Rgb([pixel[0], pixel[1], pixel[2]]));
+        monitor.on = true;
+        monitor.program.push(centre(frame));
     }
 
     fn clear(&mut self) {
-        self.0.borrow_mut().0 = false;
+        self.0.borrow_mut().on = false;
+    }
+
+    fn show_incoming(&mut self, frame: &RawFrame) {
+        self.0.borrow_mut().incoming.push(centre(frame));
     }
 }
 

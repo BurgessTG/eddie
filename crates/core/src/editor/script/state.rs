@@ -40,6 +40,10 @@ impl Editor {
                     "background": c.background.as_str(),
                     "color": c.color,
                     "text": c.text,
+                    "transition": c.transition.map(|t| serde_json::json!({
+                        "kind": t.kind.as_str(),
+                        "duration": t.duration,
+                    })),
                 })
             })
             .collect()

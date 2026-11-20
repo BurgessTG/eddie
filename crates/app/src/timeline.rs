@@ -276,6 +276,11 @@ fn view(ui: &Ui) -> El {
             content = content.child(clip);
         }
     }
+    for span in timeline.transitions() {
+        if let Some(mark) = clip::transition_mark(ui, &span, rect, lanes_w) {
+            content = content.child(mark);
+        }
+    }
     let x = lanes::x_at(port, 0.0, ui.editor.playhead);
     if (0.0..=lanes_w).contains(&x) {
         content = content.child(chrome::playhead(x, height));

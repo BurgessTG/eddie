@@ -7,7 +7,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
-use openreel_engine::{Background, ClipKind, Format, Timeline, TitleStyle, Transform};
+use openreel_engine::{
+    Background, ClipKind, Format, Timeline, TitleStyle, Transform, Transition, TransitionKind,
+};
 use openreel_media::{
     export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution, VideoDecoder,
 };
@@ -2583,4 +2585,129 @@ fn higher_quality_keeps_more_in_a_larger_file() {
         })
         .collect();
     assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]), "{sizes:?}");
+}
+
+/// A mix: the clip before plays on past its out point and the next starts
+/// before its in point, and each frame is the two mixed by how far through
+/// it is. The cut is half a frame off the grid, as media cuts often are.
+#[test]
+fn a_mix_plays_both_clips_through_it_and_fades_by_how_far_through_it_is() {
+    let fixture = Fixture::new();
+    let ramp = |name, lum: &str, chroma: &str| {
+        fixture.video(
+            name,
+            "nullsrc=s=64x36:r=30:d=2.5",
+            &format!("geq=lum='{lum}':{chroma}"),
+            None,
+        )
+    };
+    // Far apart where they meet, and inside RGB: the test mixes RGB and
+    // export mixes YUV, which agree only where no channel clips.
+    let a = ramp("a.mp4", "20+2*N", "cb=128:cr=128");
+    let b = ramp("b.mp4", "200-N", "cb=150:cr=110");
+    let (a_frames, b_frames) = (frames(Path::new(&a)), frames(Path::new(&b)));
+    let mut timeline = Timeline::new(30.0);
+    let cut = 1.0 + 1.0 / 60.0;
+    video(&mut timeline, &a, 0, 0.0, cut, 0.0);
+    // Each file's source time is the timeline's: frame k of either is the
+    // one timeline frame k shows.
+    let next = video(&mut timeline, &b, 0, cut, 1.0, cut);
+    timeline.clip_mut(next).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 0.4));
+    let exported = frames(&fixture.export("mix.mp4", &timeline));
+    assert_eq!(exported.len(), 61);
+    // From 0.2 s before the cut to 0.2 s after: frames 25 to 36. Each
+    // frame's mean luma is compared: xfade truncates each mixed Y, Cb and
+    // Cr, which on flat pictures puts blue up to 3 levels low but luma at
+    // most 1.2. A picture a frame late is 10 levels off, half a frame 5.
+    let luma = |frame: &[u8]| {
+        frame
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]))
+            .sum::<f64>()
+            / (frame.len() / 3) as f64
+    };
+    for (k, frame) in exported.iter().enumerate() {
+        let t = ((k as f64 / 30.0 - (cut - 0.2)) / 0.4).clamp(0.0, 1.0);
+        let expected = luma(&a_frames[k]) * (1.0 - t) + luma(&b_frames[k]) * t;
+        let bias = luma(frame) - expected;
+        if std::env::var("PRINT").is_ok() {
+            eprintln!("{k} {t:.3} {bias:.2}");
+        }
+        assert!(
+            bias.abs() < 2.5,
+            "frame {k} at {t:.3} of the mix: mean luma off by {bias:.2}"
+        );
+    }
+}
+
+/// Each kind halfway through, on quadrant media into flat blue: which half
+/// of the canvas shows which picture, and which part of it. Clips are a
+/// second each, so every transition into blue is centred on an even second;
+/// the one at 8 s sits on the export's 8-second batch edge.
+#[test]
+fn every_transition_kind_draws_its_halfway_picture() {
+    let fixture = Fixture::new();
+    let quadrants = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=30:d=2",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        None,
+    );
+    let blue = fixture.color("blue.mp4", "blue", None);
+    const B: [u8; 3] = [0, 0, 255];
+    const WHITE: [u8; 3] = [255, 255, 255];
+    let half =
+        |a: [u8; 3], b: [u8; 3]| [0, 1, 2].map(|i| ((u16::from(a[i]) + u16::from(b[i])) / 2) as u8);
+    // Top left, bottom left, top right and bottom right of the canvas.
+    let points = [(80, 45), (80, 135), (240, 45), (240, 135)];
+    let kinds = [
+        (
+            TransitionKind::Mix,
+            [half(TL, B), half(BL, B), half(TR, B), half(BR, B)],
+        ),
+        (TransitionKind::DipBlack, [BLACK; 4]),
+        (TransitionKind::DipWhite, [WHITE; 4]),
+        (TransitionKind::WipeLeft, [TL, BL, B, B]),
+        (TransitionKind::WipeRight, [B, B, TR, BR]),
+        (TransitionKind::WipeUp, [TL, B, TR, B]),
+        (TransitionKind::WipeDown, [B, BL, B, BR]),
+        // The quadrants have moved half a canvas left, up, right or down.
+        (TransitionKind::SlideLeft, [TR, BR, B, B]),
+        (TransitionKind::SlideRight, [B, B, TL, BL]),
+        (TransitionKind::SlideUp, [BL, B, BR, B]),
+        (TransitionKind::SlideDown, [B, TL, B, TR]),
+    ];
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &blue, 0, 0.0, 1.0, 0.0);
+    for (index, (kind, _)) in kinds.iter().enumerate() {
+        let at = 1.0 + 2.0 * index as f64;
+        video(&mut timeline, &quadrants, 0, at, 1.0, 0.0);
+        let into = video(&mut timeline, &blue, 0, at + 1.0, 1.0, 0.0);
+        timeline.clip_mut(into).unwrap().transition = Some(Transition::new(*kind, 0.4));
+    }
+    let exported = frames(&fixture.export("kinds.mp4", &timeline));
+    assert_eq!(exported.len(), 30 * (1 + 2 * kinds.len()));
+    for (index, (kind, expected)) in kinds.iter().enumerate() {
+        let cut = 30 * (2 + 2 * index);
+        let at = |frame: usize| colors_at(&exported[frame], 320, &points);
+        assert_colors(&format!("{kind:?} halfway"), &at(cut), expected);
+        // It starts at 0.2 s before the cut and is gone 0.2 s after.
+        assert_colors(&format!("{kind:?} before"), &at(cut - 7), &[TL, BL, TR, BR]);
+        assert_colors(&format!("{kind:?} after"), &at(cut + 6), &[B; 4]);
+    }
+    // A dip is halfway to its colour a quarter and three quarters through.
+    let cut = 30 * 4;
+    let dimmed = |c: [u8; 3]| c.map(|v| v / 2);
+    assert_colors(
+        "dip a quarter through",
+        &colors_at(&exported[cut - 3], 320, &points),
+        &[TL, BL, TR, BR].map(dimmed),
+    );
+    assert_colors(
+        "dip three quarters through",
+        &colors_at(&exported[cut + 3], 320, &points),
+        &[dimmed(B); 4],
+    );
 }

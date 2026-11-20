@@ -23,6 +23,7 @@ mod export;
 pub mod gallery;
 mod headless;
 pub mod history;
+mod incoming;
 pub mod inspect;
 pub mod lanes;
 pub mod media;
@@ -38,6 +39,7 @@ pub mod server;
 pub mod settings;
 mod silence;
 mod stills;
+use stills::StillUse;
 pub mod sweep;
 mod untitled;
 pub mod viewport;
@@ -65,6 +67,7 @@ pub const MEDIA_EXTS: &[&str] = &[
 // Clip identity, source, and exact timeline/source starts. Editing a clip's
 // source mapping invalidates playback even when its ID has not changed.
 type VideoKey = (ClipId, String, u64, u64, u64);
+
 /// A still picture: clip, source frame index, and decoded width.
 pub type StillKey = (ClipId, i64, u32);
 
@@ -93,6 +96,9 @@ impl Wake {
 pub trait PreviewSink {
     fn show(&mut self, frame: &RawFrame);
     fn clear(&mut self);
+    /// The picture of the clip a transition at the playhead goes to
+    /// ([`Editor::transition_shown`]).
+    fn show_incoming(&mut self, _frame: &RawFrame) {}
 }
 
 /// The monitor of an editor nothing draws.
@@ -211,7 +217,7 @@ pub struct Editor {
     still_gen: u64,
     /// The one still request being decoded; `None` key discards its answer.
     /// A prefetch only shows if the playhead has since moved onto it.
-    still_inflight: Option<(u64, Option<StillKey>, bool)>,
+    still_inflight: Option<(u64, Option<StillKey>, StillUse)>,
     /// The still the preview shows, if it shows one.
     still_shown: Option<StillKey>,
     /// Recently decoded stills, least recently used first.
@@ -225,6 +231,7 @@ pub struct Editor {
     stream_generation: u64,
     stream_ready: bool,
     stream_failed: bool,
+    incoming: incoming::Incoming,
     /// Mixer and master playback clock, opened on first play.
     audio: Option<AudioEngine>,
     /// The mixer renders only when the editor advances it: no device, so
@@ -394,6 +401,7 @@ impl Editor {
             stream_generation: 0,
             stream_ready: false,
             stream_failed: false,
+            incoming: incoming::Incoming::default(),
             audio: None,
             manual_audio: true,
             rehearsing: false,

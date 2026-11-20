@@ -249,6 +249,8 @@ impl Timeline {
                 source_in: clip.source_at(at),
                 fade_in: 0.0,
                 linked_clip: None,
+                // The cut it leaves has no transition.
+                transition: None,
                 ..clip.clone()
             };
         }
@@ -397,6 +399,7 @@ impl Timeline {
             smooth_fades: false,
             speed: 1.0,
             freeze: true,
+            transition: None,
             ..clip
         });
         Some(freeze)

@@ -562,3 +562,80 @@ fn a_photo_has_a_length_but_no_source_range_speed_or_sound() {
     press(&mut rt, Key::Enter);
     assert_eq!(clip(&rt, id).duration, 60.0);
 }
+
+#[test]
+fn the_transition_card_shows_after_a_cut_and_sets_the_kind_and_length() {
+    use openreel_engine::TransitionKind;
+    let (mut rt, id) = window(ClipKind::Video);
+    assert!(
+        rt.find("details-transition-none").is_none(),
+        "nothing comes before the clip, so there is nothing to pass from"
+    );
+    // A clip that ends where the selected one starts.
+    rt.state.editor.timeline.add_media_clip(
+        "Before",
+        ClipKind::Video,
+        0,
+        0.0,
+        2.0,
+        0.0,
+        "/media/a.mp4",
+    );
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    reveal(&mut rt, "details-transition-mix");
+    assert!(rt.find("details-transition-length").is_none());
+    click(&mut rt, "details-transition-dip-white");
+    // The Duration row grows into the card.
+    for _ in 0..30 {
+        rt.frame(FRAME);
+    }
+    let transition = |rt: &Runtime<Ui>| clip(rt, id).transition;
+    assert_eq!(
+        transition(&rt).map(|t| (t.kind, t.duration)),
+        Some((TransitionKind::DipWhite, 0.5))
+    );
+
+    // The length is typed in seconds and moved into range; another kind
+    // keeps it.
+    reveal(&mut rt, "details-transition-length");
+    click(&mut rt, "details-transition-length");
+    rt.paste("9");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    assert_eq!(transition(&rt).unwrap().duration, 5.0);
+    assert_eq!(typed(&rt, Field::TransitionLength), "5.00 s");
+    reveal(&mut rt, "details-transition-slide-up");
+    click(&mut rt, "details-transition-slide-up");
+    assert_eq!(
+        transition(&rt).map(|t| (t.kind, t.duration)),
+        Some((TransitionKind::SlideUp, 5.0))
+    );
+
+    rt.help_delay = 0.0;
+    let mut keys = vec![
+        "details-transition-none".to_owned(),
+        "details-transition-length".to_owned(),
+    ];
+    keys.extend(TransitionKind::ALL.map(|kind| format!("details-transition-{}", kind.as_str())));
+    for key in keys {
+        reveal(&mut rt, &key);
+        let (x, y) = rt
+            .find(&key)
+            .unwrap_or_else(|| panic!("{key} is not shown"));
+        rt.pointer_move(700.0, 300.0);
+        rt.frame(FRAME);
+        rt.pointer_move(x, y);
+        rt.frame(FRAME);
+        rt.frame(FRAME);
+        let shown = rt.help_tooltip().map(|(words, _)| words.to_owned());
+        assert!(
+            shown.is_some_and(|words| !words.is_empty()),
+            "{key} has no tooltip"
+        );
+    }
+
+    click(&mut rt, "details-transition-none");
+    assert_eq!(transition(&rt), None);
+    assert!(rt.find("details-transition-length").is_none());
+}

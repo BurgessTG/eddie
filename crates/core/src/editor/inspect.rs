@@ -88,6 +88,7 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     inspection.gaps_and_flashes(&segments, &runs);
     inspection.near_match_cuts(&runs);
     inspection.hidden_clips(&runs);
+    inspection.transitions();
     inspection.findings
 }
 
@@ -124,6 +125,83 @@ impl<'a> Inspection<'a> {
             start,
             end,
         });
+    }
+
+    /// Transitions that do not play as set: with no clip right before, cut
+    /// short by a short clip, or past where a side's file has pictures, so
+    /// its edge picture holds.
+    fn transitions(&mut self) {
+        let timeline = self.timeline;
+        let spans = timeline.transitions();
+        for clip in &timeline.clips {
+            let Some(transition) = clip.transition else {
+                continue;
+            };
+            let id = clip.id;
+            let Some(span) = spans.iter().find(|span| span.to == id) else {
+                self.report(
+                    "transition",
+                    "warning",
+                    format!("Clip {id}'s transition has no clip right before it on its lane, so it does not play."),
+                    vec![id],
+                    clip.start,
+                    clip.start,
+                );
+                continue;
+            };
+            let (start, end) = (span.start, span.end);
+            if end - start < transition.duration - self.frame / 2.0 {
+                self.report(
+                    "transition",
+                    "warning",
+                    format!(
+                        "Clip {id}'s {:.2} s transition plays {:.2} s: each side takes at most half of its clip.",
+                        transition.duration,
+                        end - start
+                    ),
+                    vec![span.from, id],
+                    start,
+                    end,
+                );
+            }
+            let assets = self.assets;
+            let file = |clip: &Clip| {
+                let source = clip.source.as_deref().filter(|_| !clip.still())?;
+                let asset = assets.iter().find(|asset| asset.info.path == source)?;
+                Some(asset.info.duration).filter(|duration| *duration > 0.0)
+            };
+            if let Some(from) = timeline.clip(span.from) {
+                let past = file(from).map_or(0.0, |duration| {
+                    (from.source_at(end) - duration) / from.speed
+                });
+                if past > self.frame {
+                    self.report(
+                        "transition",
+                        "warning",
+                        format!(
+                            "Clip {}'s file ends {past:.2} s before the transition into clip {id} does; its last picture holds.",
+                            from.id
+                        ),
+                        vec![from.id, id],
+                        end - past,
+                        end,
+                    );
+                }
+            }
+            let before = file(clip).map_or(0.0, |_| -clip.source_at(start) / clip.speed);
+            if before > self.frame {
+                self.report(
+                    "transition",
+                    "warning",
+                    format!(
+                        "Clip {id}'s file starts {before:.2} s after the transition into it does; its first picture holds."
+                    ),
+                    vec![span.from, id],
+                    start,
+                    start + before,
+                );
+            }
+        }
     }
 
     /// A title moved off the canvas: the middle of its line (its left end,

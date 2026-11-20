@@ -11,6 +11,7 @@ mod place;
 mod text;
 pub mod time_spec;
 mod timeline;
+mod transition;
 
 #[cfg(test)]
 mod tests;
@@ -29,4 +30,8 @@ pub use text::{
 pub use time_spec::format_timecode;
 pub use timeline::{
     orientation_name, Format, Lanes, Ripple, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS,
+};
+pub use transition::{
+    Layer, Transition, TransitionFrame, TransitionKind, TransitionSpan, DEFAULT_TRANSITION,
+    MAX_TRANSITION, MIN_TRANSITION,
 };

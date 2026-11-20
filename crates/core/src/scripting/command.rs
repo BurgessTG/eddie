@@ -77,6 +77,13 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    /// `kind` names a transition, or is empty to remove it; `seconds` is
+    /// its length, centred on the cut.
+    SetTransition {
+        clip: u64,
+        kind: String,
+        seconds: f64,
+    },
     /// Source seconds per timeline second; the clip keeps its source range.
     SetSpeed {
         clip: u64,
@@ -185,6 +192,7 @@ impl ScriptCommand {
             | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
             | Self::SetSpeed { clip, .. }
+            | Self::SetTransition { clip, .. }
             | Self::SetFade { clip, .. }
             | Self::SetCleanVoice { clip, .. }
             | Self::SetSmoothFades { clip, .. }
@@ -240,6 +248,7 @@ impl ScriptCommand {
             | Self::SetVolume { value, .. }
             | Self::SetZoom(value) => value.is_finite(),
             Self::SetSpeed { speed, .. } => speed.is_finite(),
+            Self::SetTransition { seconds, .. } => seconds.is_finite(),
             Self::TightenSilence {
                 threshold,
                 min_silence,

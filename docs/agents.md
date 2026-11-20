@@ -186,11 +186,13 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed, photo, freeze, text`. A clip shows
+  transform, background, color, speed, photo, freeze, text, transition`.
+  A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
-  `setText` changed; a `null` field follows the style.
+  `setText` changed; a `null` field follows the style. `transition` is
+  `{kind, duration}` or `null`.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -297,6 +299,22 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   `moveClip`). `tightenSilence` refuses a clip that is not at speed 1:
   remove pauses first, then change the speed. A photo has no speed; trim
   it to change how long it shows.
+- **Transitions:** `setTransition(id, kind, seconds?)` sets how a video
+  clip's picture comes in from the clip that ends where it starts, on
+  its lane; `null` removes it. Kinds: `mix`, `dip-black`, `dip-white`,
+  `wipe-left`, `wipe-right`, `wipe-up`, `wipe-down`, `slide-left`,
+  `slide-right`, `slide-up`, `slide-down`. `seconds` runs from 0.1 to 5
+  (0.5 by default).
+  - A transition is centred on the cut and moves no clip: the clip
+    before plays on past its out point and the clip after starts before
+    its in point. Each side uses at most half of its clip, so a short
+    clip shortens it.
+  - Where a file has no picture past the clip's edge, its last (or
+    first) picture holds; `inspect()` says so. Leave the sources some
+    room on both sides of a cut you transition.
+  - Sound still cuts at the cut.
+  - A clip with no clip right before it on its lane cannot take one.
+    Moving clips apart keeps the setting but it does not play.
 - **Canvas and framing:** video of any shape goes on any canvas. Each
   picture fits inside the canvas, centred, until you move it.
   - `setFormat(name)` sets the canvas shape: `original` (the shape of the
@@ -456,7 +474,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - black gaps without a title;
   - flash frames (visible for under two frames);
   - near-match cuts that skip or repeat 1–3 frames of the same shot;
-  - clips hidden by a lower lane.
+  - clips hidden by a lower lane;
+  - transitions that play shorter than set, have no clip before them, or
+    run past a file's pictures.
 - `state()` doesn't show what the edit looks like. Before calling an edit
   done, open a `sheet` and compare each cell with what you meant to place
   there. Past 16 shots, sheet the timeline in ranges.

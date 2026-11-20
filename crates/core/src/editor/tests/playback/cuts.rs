@@ -451,7 +451,7 @@ fn run_short_clip_diagnostics(transport_clock: bool) {
             app.last_now = Some(app.playhead);
         }
         previous_wall = wall;
-        let active = app.active_video_clip().unwrap();
+        let active = app.program_video_clip().unwrap();
         app.poll_frames();
         let syncing = Instant::now();
         app.sync_playback();

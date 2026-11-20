@@ -13,7 +13,7 @@ use super::rows::{
 };
 use super::styles::{Select, select};
 use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
-use super::{color, title_text, transform};
+use super::{color, title_text, transform, transition};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
 
@@ -57,6 +57,11 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
         body = body
             .child(el().h(14.0))
             .child(title_text::card(ui, id, clip, value_w, card_inner));
+    }
+    if clip.kind == ClipKind::Video && ui.editor.timeline.clip_before(id).is_some() {
+        body = body
+            .child(el().h(14.0))
+            .child(transition::card(ui, id, clip, value_w, card_inner));
     }
     if clip.kind == ClipKind::Video && info.has_source {
         body = body

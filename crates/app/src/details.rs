@@ -16,6 +16,7 @@ mod rows;
 mod styles;
 mod title_text;
 mod transform;
+mod transition;
 
 use openreel_engine::ClipId;
 use rune::{Cursor, El, Phase, ScrollSpec, TextEdit, col, el, row, text};

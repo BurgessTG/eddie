@@ -180,6 +180,8 @@ has decoders libdav1d
 # HEIC photos: HEVC tiles, joined by export with xstack.
 has decoders hevc
 has filters xstack
+# Transitions: xfade between two clips' pictures.
+has filters xfade
 has devices lavfi
 
 # The GPL asks that whoever gets the program can get its source: the app

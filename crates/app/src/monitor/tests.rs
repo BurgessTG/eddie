@@ -324,3 +324,51 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
     frames(&mut rt, 2);
     assert_eq!(rt.state.editor.timeline.clip(title).unwrap().text, text);
 }
+
+/// Halfway through a wipe to the left the incoming picture shows right of
+/// the edge xfade puts at `int(320 * 0.5) + 1` = 161 of the 320 canvas
+/// pixels, the outgoing one under all of it; past the wipe one picture
+/// shows alone.
+#[test]
+fn a_transition_previews_both_pictures_where_export_puts_them() {
+    use openreel_engine::{Transition, TransitionKind};
+    let footage = Footage::new();
+    let path = footage.path();
+    let mut ui = Ui::headless();
+    ui.editor.spawn_import(vec![path.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the import", |ui| {
+        ui.editor.asset(&path).is_some() && !ui.editor.importing()
+    });
+    let timeline = &mut rt.state.editor.timeline;
+    timeline.add_media_clip("Out", ClipKind::Video, 0, 0.0, 1.0, 0.0, &path);
+    let next = timeline.add_media_clip("In", ClipKind::Video, 0, 1.0, 1.0, 0.0, &path);
+    timeline.clip_mut(next).unwrap().transition =
+        Some(Transition::new(TransitionKind::WipeLeft, 0.6));
+    rt.state.editor.seek(1.0);
+    until(&mut rt, "both pictures", |ui| {
+        ui.editor.transition_shown().is_some()
+    });
+
+    let share = |rt: &Runtime<Ui>, key: &str| {
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let ([x, y, w, h], _) = rt.presented(key).unwrap();
+        [(x - fx) / fw, (y - fy) / fh, w / fw, h / fh]
+    };
+    let close =
+        |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.002);
+    let from = share(&rt, "monitor-from");
+    let to = share(&rt, "monitor-to");
+    assert!(close(from, [0.0, 0.0, 1.0, 1.0]), "{from:?}");
+    assert!(
+        close(to, [161.0 / 320.0, 0.0, 159.0 / 320.0, 1.0]),
+        "{to:?}"
+    );
+
+    rt.state.editor.seek(1.5);
+    until(&mut rt, "the next picture", |ui| {
+        ui.editor.preview_is_current()
+    });
+    assert!(!shown(&rt, "monitor-transition"));
+    assert!(shown(&rt, "monitor-placed"));
+}

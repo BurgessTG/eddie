@@ -6,10 +6,12 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use openreel_engine::{place, Background, Clip, ClipId, ColorAdjust, Timeline, Transform};
+use openreel_engine::{Background, Clip, ClipId, ColorAdjust, Timeline, Transform};
 
+use super::picture::picture;
 use super::scratch::FilterGraphFile;
 use super::source::Source;
+use super::transition::{self, TransitionPlan};
 use super::{collect_stderr, export_error};
 use crate::{MediaInfo, MediaResult};
 
@@ -21,8 +23,8 @@ pub(super) const VIDEO_COLOR_RANGE: &str = "tv";
 
 #[derive(Clone, Copy)]
 pub(super) struct VideoClock {
-    rate: ffmpeg_next::Rational,
-    tick_rate: i64,
+    pub(super) rate: ffmpeg_next::Rational,
+    pub(super) tick_rate: i64,
     frame_ticks: i64,
 }
 
@@ -103,9 +105,9 @@ pub(super) struct VideoLayer<'a> {
     /// matrix/range conversion applied after resizing.
     read: &'a Source,
     opacity: f32,
-    transform: Transform,
-    background: Background,
-    color: ColorAdjust,
+    pub(super) transform: Transform,
+    pub(super) background: Background,
+    pub(super) color: ColorAdjust,
     /// Source ticks at timeline tick zero: the source clock is
     /// `speed * timeline + source_offset`.
     source_offset: i64,
@@ -115,7 +117,11 @@ pub(super) struct VideoLayer<'a> {
     /// One picture held: a photo, or a freeze frame of the source picture
     /// at `source_offset`.
     still: bool,
+    /// The frames it is the picture on.
     ranges: Vec<(i64, i64)>,
+    /// Frames a transition draws it on, past its own: decoded, but drawn
+    /// only through the transition.
+    extents: Vec<(i64, i64)>,
 }
 
 /// One bounded batch of output frames: `[start, end)` drawn from at most
@@ -125,6 +131,8 @@ pub(super) struct Batch {
     pub(super) start: i64,
     pub(super) end: i64,
     inputs: Vec<usize>,
+    /// The transitions it draws, each whole.
+    transitions: Vec<usize>,
 }
 
 // Sharing a decode across different source clocks retains every frame
@@ -137,19 +145,24 @@ pub(super) fn plan_video<'a>(
     sources: &'a HashMap<&str, Source>,
     clock: VideoClock,
     frame_count: i64,
-) -> (Vec<VideoLayer<'a>>, Vec<Batch>) {
+) -> (Vec<VideoLayer<'a>>, Vec<TransitionPlan>, Vec<Batch>) {
     let VideoClock {
         tick_rate,
         frame_ticks,
         ..
     } = clock;
-    let visible = visible_frames(timeline, clock, Timeline::active_video);
+    let mut visible = visible_frames(timeline, clock, Timeline::active_video);
+    let (mut transitions, extents) = transition::plan(timeline, clock, &mut visible);
     let mut layers: Vec<VideoLayer<'_>> = Vec::new();
+    let mut layer_of: HashMap<ClipId, usize> = HashMap::new();
+    let none = Vec::new();
     for clip in &timeline.clips {
-        let (Some(source), Some(ranges)) = (clip.source.as_deref(), visible.get(&clip.id)) else {
+        let Some(source) = clip.source.as_deref() else {
             continue;
         };
-        if clip.opacity <= 0.0 {
+        let ranges = visible.get(&clip.id).unwrap_or(&none);
+        let extent = extents.get(&clip.id).unwrap_or(&none);
+        if (ranges.is_empty() && extent.is_empty()) || clip.opacity <= 0.0 {
             continue;
         }
         let Some(read) = sources.get(source) else {
@@ -168,7 +181,7 @@ pub(super) fn plan_video<'a>(
         } else {
             ((clip.source_in - clip.start * clip.speed) * tick_rate as f64).round() as i64
         };
-        if let Some(layer) = layers.iter_mut().find(|layer| {
+        let same = layers.iter().position(|layer| {
             layer.source == source
                 && layer.speed == clip.speed
                 && layer.source_offset == source_offset
@@ -177,28 +190,43 @@ pub(super) fn plan_video<'a>(
                 && layer.transform == clip.transform
                 && layer.background == clip.background
                 && layer.color == clip.color
-        }) {
-            layer.ranges.extend_from_slice(ranges);
-        } else {
-            layers.push(VideoLayer {
-                source,
-                read,
-                opacity: clip.opacity,
-                transform: clip.transform,
-                background: clip.background,
-                color: clip.color,
-                source_offset,
-                speed: clip.speed,
-                photo: clip.photo,
-                still: clip.still(),
-                ranges: ranges.clone(),
-            });
-        }
+        });
+        let index = match same {
+            Some(index) => {
+                layers[index].ranges.extend_from_slice(ranges);
+                layers[index].extents.extend_from_slice(extent);
+                index
+            }
+            None => {
+                layers.push(VideoLayer {
+                    source,
+                    read,
+                    opacity: clip.opacity,
+                    transform: clip.transform,
+                    background: clip.background,
+                    color: clip.color,
+                    source_offset,
+                    speed: clip.speed,
+                    photo: clip.photo,
+                    still: clip.still(),
+                    ranges: ranges.clone(),
+                    extents: extent.clone(),
+                });
+                layers.len() - 1
+            }
+        };
+        layer_of.insert(clip.id, index);
+    }
+    for plan in &mut transitions {
+        plan.layers = plan.clips().map(|clip| layer_of.get(&clip).copied());
     }
     let mut spans: Vec<_> = layers
         .iter()
         .enumerate()
-        .flat_map(|(index, layer)| layer.ranges.iter().map(move |&(a, b)| (a, b, index)))
+        .flat_map(|(index, layer)| {
+            let frames = layer.ranges.iter().chain(&layer.extents);
+            frames.map(move |&(a, b)| (a, b, index))
+        })
         .collect();
     spans.sort_unstable();
 
@@ -207,153 +235,50 @@ pub(super) fn plan_video<'a>(
     let mut start = 0;
     while start < frame_count {
         let mut end = (start + batch_frames).min(frame_count);
-        let mut inputs = Vec::new();
+        let mut seen = Vec::new();
         for &(a, b, layer) in &spans {
-            if b <= start || a >= end || inputs.contains(&layer) {
+            if b <= start || a >= end || seen.contains(&layer) {
                 continue;
             }
-            if inputs.len() == MAX_INPUTS {
+            if seen.len() == MAX_INPUTS {
                 end = a;
                 break;
             }
-            inputs.push(layer);
+            seen.push(layer);
         }
-        batches.push(Batch { start, end, inputs });
+        // A transition needs both its pictures in one batch: end before it,
+        // or after it when it starts the batch (a fifth input then, rarely).
+        if let Some(plan) = transitions
+            .iter()
+            .find(|plan| plan.first < end && end < plan.end_frame)
+        {
+            end = if plan.first > start {
+                plan.first
+            } else {
+                plan.end_frame
+            };
+        }
+        let mut inputs = Vec::new();
+        for &(a, b, layer) in &spans {
+            if b > start && a < end && !inputs.contains(&layer) {
+                inputs.push(layer);
+            }
+        }
+        let drawn = (0..transitions.len())
+            .filter(|&index| {
+                let plan = &transitions[index];
+                start <= plan.first && plan.end_frame <= end
+            })
+            .collect();
+        batches.push(Batch {
+            start,
+            end,
+            inputs,
+            transitions: drawn,
+        });
         start = end;
     }
-    (layers, batches)
-}
-
-/// Even and at least 2, as yuv420p and the colorspace filter need.
-fn even(value: f64) -> u32 {
-    ((value / 2.0).round() as u32).max(1) * 2
-}
-
-/// The filters that grade a picture as [`ColorAdjust::apply_rgba`] does
-/// for the preview, starting with a comma, or nothing for no change. One
-/// `colorchannelmixer` on 8-bit RGBA clamps once, at the end, as the
-/// preview does. A matrix past the mixer's ±2 runs halved, then doubled
-/// back, on float RGBA, which does not clamp between filters (3 ms more a
-/// 1080p frame), and converting back to 8 bits clamps. `lutrgb` then bends
-/// brightness with the preview's own formula.
-fn color_filters(color: &ColorAdjust) -> String {
-    if color.is_identity() {
-        return String::new();
-    }
-    let mut m = color.matrix();
-    let largest = m.iter().flatten().fold(0f64, |a, v| a.max(v.abs()));
-    let mut doublings = 0;
-    while largest / f64::from(1u32 << doublings) > 2.0 {
-        doublings += 1;
-    }
-    let k = f64::from(1u32 << doublings);
-    m.iter_mut().flatten().for_each(|v| *v /= k);
-    let format = if doublings == 0 { "rgba" } else { "gbrapf32le" };
-    let mut out = format!(",format={format},colorchannelmixer=");
-    let names = [
-        ["rr", "rg", "rb", "ra"],
-        ["gr", "gg", "gb", "ga"],
-        ["br", "bg", "bb", "ba"],
-    ];
-    let terms: Vec<String> = names
-        .iter()
-        .flatten()
-        .zip(m.iter().flatten())
-        .map(|(name, v)| format!("{name}={v}"))
-        .collect();
-    out.push_str(&terms.join(":"));
-    if doublings > 0 {
-        for _ in 0..doublings {
-            out.push_str(",colorchannelmixer=rr=2:gg=2:bb=2");
-        }
-        out.push_str(",format=rgba");
-    }
-    if color.brightness != 0.0 {
-        let curve = format!("round(255*exp({}*log(val/255)))", color.gamma());
-        out.push_str(&format!(",lutrgb=r={curve}:g={curve}:b={curve}"));
-    }
-    out
-}
-
-/// The filters that turn one layer's frames into its picture on the canvas,
-/// ending in `[seg{index}]`, and where that picture overlays the canvas.
-/// [`place`] decides the geometry, as it does for the preview. An untouched
-/// clip on black keeps the resize-and-pad chain export always had.
-fn picture(
-    index: usize,
-    layer: &VideoLayer<'_>,
-    canvas: (u32, u32),
-    source: (u32, u32),
-    (resize, convert, alpha): (&str, &str, &str),
-) -> (String, i64, i64) {
-    let (width, height) = canvas;
-    let color = color_filters(&layer.color);
-    if layer.transform.is_identity() && layer.background == Background::Black && color.is_empty() {
-        return (
-            format!(
-                ",scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
-                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}[seg{index}]"
-            ),
-            0,
-            0,
-        );
-    }
-    let canvas_f = (f64::from(width), f64::from(height));
-    let t = &layer.transform;
-    let p = place(canvas_f, (f64::from(source.0), f64::from(source.1)), t);
-    let mut chain = String::new();
-    if t.has_crop() {
-        let [x, y, w, h] = p.crop.map(|v| v.round() as i64);
-        chain.push_str(&format!("crop={}:{}:{x}:{y},", w.max(2), h.max(2)));
-    }
-    let (pw, ph) = (even(p.size[0]), even(p.size[1]));
-    chain.push_str(&format!(
-        "scale={pw}:{ph}:flags={resize}{convert}{color},setsar=1"
-    ));
-    if t.flip_h {
-        chain.push_str(",hflip");
-    }
-    if t.flip_v {
-        chain.push_str(",vflip");
-    }
-    let (mut out_w, mut out_h) = (f64::from(pw), f64::from(ph));
-    if t.rotation.rem_euclid(360.0) != 0.0 {
-        let [rw, rh] = p.turned_size();
-        let (rw, rh) = (rw.round().max(1.0), rh.round().max(1.0));
-        chain.push_str(&format!(
-            ",format=rgba,rotate=a={:.9}:ow={rw}:oh={rh}:c=none",
-            t.rotation.to_radians()
-        ));
-        (out_w, out_h) = (rw, rh);
-    }
-    let x = (p.center[0] - out_w / 2.0).round() as i64;
-    let y = (p.center[1] - out_h / 2.0).round() as i64;
-    if layer.background == Background::Blur && !p.covers(canvas_f) {
-        // The same frames, filling the canvas and blurred: scaled to an
-        // eighth first, so the blur costs little at any canvas size. They
-        // flip with the picture, as the preview's do.
-        let (bw, bh) = (even(canvas_f.0 / 8.0).max(8), even(canvas_f.1 / 8.0).max(8));
-        let radius = ((f64::from(bw) * 0.025).round() as u32).clamp(1, (bw.min(bh) / 4).max(1));
-        let flips = match (t.flip_h, t.flip_v) {
-            (true, true) => ",hflip,vflip",
-            (true, false) => ",hflip",
-            (false, true) => ",vflip",
-            (false, false) => "",
-        };
-        return (
-            format!(
-                ",split[pic{index}][bgin{index}];\
-                 [bgin{index}]scale={bw}:{bh}:force_original_aspect_ratio=increase:flags={resize},\
-                 crop={bw}:{bh}{convert}{color}{flips},boxblur={radius}:2,scale={width}:{height}:flags=bilinear,\
-                 setsar=1[bg{index}];\
-                 [pic{index}]{chain}[fg{index}];\
-                 [bg{index}][fg{index}]overlay={x}:{y}{alpha}[seg{index}]"
-            ),
-            0,
-            0,
-        );
-    }
-    (format!(",{chain}{alpha}[seg{index}]"), x, y)
+    (layers, transitions, batches)
 }
 
 /// The FFmpeg command that renders one batch as raw yuv420p on `pipe:1`.
@@ -362,6 +287,7 @@ pub(super) fn batch_command(
     canvas: (u32, u32),
     clock: VideoClock,
     layers: &[VideoLayer<'_>],
+    transitions: &[TransitionPlan],
     batch: &Batch,
 ) -> MediaResult<(Command, FilterGraphFile)> {
     let (width, height) = canvas;
@@ -387,17 +313,27 @@ pub(super) fn batch_command(
         "-filter_buffered_frames",
         "128",
     ]);
-    for (index, &layer) in batch.inputs.iter().enumerate() {
-        let layer = &layers[layer];
-        let ranges: Vec<_> = layer
-            .ranges
+    let in_batch = |frames: &[(i64, i64)]| -> Vec<(i64, i64)> {
+        frames
             .iter()
             .filter_map(|&(a, b)| {
                 let (a, b) = (a.max(start), b.min(end));
                 (a < b).then_some((a - start, b - start))
             })
+            .collect()
+    };
+    // Where each transition's two pictures sit on the canvas.
+    let mut sides = vec![[None; 2]; batch.transitions.len()];
+    for (index, &layer_index) in batch.inputs.iter().enumerate() {
+        let layer = &layers[layer_index];
+        let ranges = in_batch(&layer.ranges);
+        // Decoded wherever it shows or a transition draws it.
+        let needed: Vec<_> = ranges
+            .iter()
+            .copied()
+            .chain(in_batch(&layer.extents))
             .collect();
-        let first = ranges.iter().map(|range| range.0).min().unwrap();
+        let first = needed.iter().map(|range| range.0).min().unwrap();
         let source_time = if layer.still {
             0.0
         } else {
@@ -440,7 +376,7 @@ pub(super) fn batch_command(
         // Stop decoding at this input's last visible frame; overlay
         // stops drawing it there anyway (enable), so the 4K decode of
         // the rest of the batch was wasted.
-        let last = ranges.iter().map(|range| range.1).max().unwrap();
+        let last = needed.iter().map(|range| range.1).max().unwrap();
         let layer_frames = last - first;
         // swscale's accurate, full-chroma matrix change made a 4K BT.601
         // resize cost about 4x a BT.709 one. Resize at the source matrix,
@@ -510,12 +446,59 @@ pub(super) fn batch_command(
                 layer.read.head(index)
             ));
         }
-        filters.push(format!(
-            "[{current}][seg{index}]overlay={x}:{y}:eof_action=repeat:ts_sync_mode=default:\
-             enable='{}'[v{index}]",
-            enabled_frames(&ranges),
-        ));
-        current = format!("v{index}");
+        // The transitions in this batch that draw this picture, by side.
+        let uses: Vec<(usize, usize)> = batch
+            .transitions
+            .iter()
+            .enumerate()
+            .flat_map(|(t, &plan)| {
+                let layers = transitions[plan].layers;
+                (0..2).filter_map(move |side| {
+                    (layers[side] == Some(layer_index)).then_some((t, side))
+                })
+            })
+            .collect();
+        let shows = !ranges.is_empty();
+        let own = if uses.is_empty() {
+            format!("seg{index}")
+        } else {
+            let mut outputs: String = uses
+                .iter()
+                .map(|(t, side)| format!("[tw{t}_{side}]"))
+                .collect();
+            if shows {
+                outputs.push_str(&format!("[own{index}]"));
+            }
+            filters.push(format!(
+                "[seg{index}]split={}{outputs}",
+                uses.len() + usize::from(shows)
+            ));
+            for &(t, side) in &uses {
+                sides[t][side] = Some((x, y));
+            }
+            format!("own{index}")
+        };
+        if shows {
+            filters.push(format!(
+                "[{current}][{own}]overlay={x}:{y}:eof_action=repeat:ts_sync_mode=default:\
+                 enable='{}'[v{index}]",
+                enabled_frames(&ranges),
+            ));
+            current = format!("v{index}");
+        }
+    }
+    for (index, &plan) in batch.transitions.iter().enumerate() {
+        let (drawn, next) = transition::filters(
+            &transitions[plan],
+            index,
+            start,
+            canvas,
+            clock,
+            sides[index],
+            &current,
+        );
+        filters.extend(drawn);
+        current = next;
     }
     filters.push(format!("[{current}]format=yuv420p[vout]"));
     let graph = FilterGraphFile::create(&filters.join(";"))?;

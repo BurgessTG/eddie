@@ -60,6 +60,10 @@ offers the newest build.
   and tint, and nine filters with a strength. The monitor shows the grade
   export renders.
 - Speed per clip from 0.25× to 4×, with the sound kept at its pitch.
+- Transitions between clips: mix, dip to black or white, and wipes and
+  slides in four directions, from 0.1 to 5 seconds, picked from tiles in
+  Details that picture each one. The monitor plays them as export renders
+  them.
 - Photos (PNG, JPEG, WebP, HEIC) as clips: 3 seconds when added, any
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and

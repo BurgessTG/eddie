@@ -867,3 +867,99 @@ fn scripts_duplicate_freeze_and_ripple_delete_through_handles() {
     let error = run(&mut app, &format!("freezeFrame({freeze}, 1.5)")).unwrap_err();
     assert!(error.contains("already a still"), "{error}");
 }
+
+#[test]
+fn a_transition_needs_a_clip_before_it_and_inspect_says_where_it_falls_short() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("wide.mp4", 10.0, true));
+    // 2-4 s of the file, then 0.6 s from 4 s straight after it, with a 1 s
+    // dip.
+    run(
+        &mut app,
+        "var a = addAssetRange('wide.mp4', 0, 2, 2); \
+         var b = addAssetRange('wide.mp4', 2, 4, 0.6); setTransition(b, 'dip-black', 1)",
+    )
+    .unwrap();
+    let (a, b) = (app.timeline.clips[0].id, app.timeline.clips[1].id);
+    let read = |app: &mut Editor| {
+        run(
+            app,
+            &format!("return clips().find(c => c.id == {b}).transition"),
+        )
+        .unwrap()
+    };
+    assert_eq!(read(&mut app), r#"{"duration":1,"kind":"dip-black"}"#);
+    let saved = serde_json::to_value(app.timeline.clip(b).unwrap()).unwrap();
+    assert_eq!(saved["transition"]["kind"], "dip-black");
+    let plain = serde_json::to_value(app.timeline.clip(a).unwrap()).unwrap();
+    assert!(plain.get("transition").is_none(), "{plain}");
+    let findings = |app: &Editor| {
+        inspect::inspect(&app.timeline, &app.assets)
+            .into_iter()
+            .filter(|finding| finding.kind == "transition")
+            .map(|finding| finding.message)
+            .collect::<Vec<_>>()
+    };
+    // Each side takes at most half of its own clip: 0.3 s of the 0.6 s
+    // clip after the cut, and as much before it.
+    assert_eq!(
+        findings(&app),
+        [format!(
+            "Clip {b}'s 1.00 s transition plays 0.60 s: each side takes at most half of its clip."
+        )]
+    );
+
+    // A label names a kind too; without a length it takes 0.5 s.
+    run(&mut app, &format!("setTransition({b}, 'Wipe left')")).unwrap();
+    assert_eq!(read(&mut app), r#"{"duration":0.5,"kind":"wipe-left"}"#);
+    assert!(findings(&app).is_empty(), "{:?}", findings(&app));
+    run(&mut app, &format!("setTransition({b}, null)")).unwrap();
+    assert_eq!(read(&mut app), "null");
+
+    let before = app.timeline.clone();
+    for (code, says) in [
+        (format!("setTransition({a}, 'mix')"), "no clip right before"),
+        (format!("setTransition({b}, 'spin')"), "use mix, dip-black"),
+        (format!("setTransition({b}, 'mix', 6)"), "0.1 to 5"),
+        (format!("setTransition({b}, 'mix', NaN)"), "finite"),
+        (format!("setTransition({b})"), "needs a kind"),
+        (
+            "setTransition(addTitle('Hi', 10, 1), 'mix')".to_owned(),
+            "needs a video clip",
+        ),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(says), "{code}: {error}");
+        assert_eq!(app.timeline, before, "{code}");
+    }
+
+    // The file's last 2 s, then its first 2 s, with a 1 s mix: the first
+    // file runs out 0.5 s before the mix ends and the second starts 0.5 s
+    // after it begins.
+    run(
+        &mut app,
+        "addAssetRange('wide.mp4', 5, 8, 2); \
+         setTransition(addAssetRange('wide.mp4', 7, 0, 2), 'mix', 1)",
+    )
+    .unwrap();
+    let (d, e) = (app.timeline.clips[2].id, app.timeline.clips[3].id);
+    assert_eq!(
+        findings(&app),
+        [
+            format!(
+                "Clip {d}'s file ends 0.50 s before the transition into clip {e} does; its last picture holds."
+            ),
+            format!(
+                "Clip {e}'s file starts 0.50 s after the transition into it does; its first picture holds."
+            ),
+        ]
+    );
+    // With the clip before it gone, the transition has nothing to come from.
+    run(&mut app, &format!("deleteClip({d})")).unwrap();
+    assert_eq!(
+        findings(&app),
+        [format!(
+            "Clip {e}'s transition has no clip right before it on its lane, so it does not play."
+        )]
+    );
+}

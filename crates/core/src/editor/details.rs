@@ -3,8 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, TextLook, Transform, MAX_SCALE,
-    MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, TextLook, Transform, Transition,
+    MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
 };
 
 use super::Editor;
@@ -223,6 +223,21 @@ impl Editor {
             let mut color = clip.color;
             edit(&mut color);
             clip.color = color.clamped();
+        }
+    }
+
+    /// The Transition card: a video clip's way in from the clip right
+    /// before it, or none. A clip with nothing before it gets none.
+    pub fn set_clip_transition(&mut self, id: ClipId, transition: Option<Transition>) {
+        let before = self.timeline.clip_before(id).is_some();
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            clip.transition = transition
+                .filter(|_| before)
+                .map(|t| Transition::new(t.kind, t.duration));
         }
     }
 

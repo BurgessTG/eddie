@@ -1,10 +1,9 @@
 //! The window's state and its per-frame work around the editor: the editor
 //! pump, keys, actions, thumbnails and the root view.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::Instant;
 
 use eddie_core::shortcuts::{self, Chord, KeyName};
@@ -32,11 +31,10 @@ pub struct Ui {
     pub editor: Editor,
     /// Shows, focuses and wakes the window; `None` in tests.
     handle: Option<AppHandle<Ui>>,
-    pub monitor: Pixels,
-    /// The size of the picture the monitor holds, while it holds one.
-    pub monitor_size: Rc<Cell<Option<(u32, u32)>>>,
-    /// The monitor's last frame, upright, and the look it shows.
-    pub monitor_picture: Rc<RefCell<monitor::Picture>>,
+    /// The program monitor's picture.
+    pub monitor: monitor::Slot,
+    /// The picture a transition at the playhead goes to.
+    pub incoming: monitor::Slot,
     /// The clip whose picture a drag on the monitor moves, and where it was.
     pub monitor_drag: Option<(ClipId, Transform)>,
     /// Where the title a drag on the monitor moves was.
@@ -138,9 +136,7 @@ impl Ui {
         last_input: fn() -> Option<Instant>,
         editor: impl FnOnce(Box<dyn PreviewSink>) -> Editor,
     ) -> Self {
-        let monitor = Pixels::new();
-        let monitor_size = Rc::new(Cell::new(None));
-        let monitor_picture = Rc::new(RefCell::new(monitor::Picture::default()));
+        let (monitor, incoming) = (monitor::Slot::default(), monitor::Slot::default());
         let wake = handle.clone();
         let gallery = gallery::State::new(move || {
             if let Some(handle) = &wake {
@@ -148,16 +144,14 @@ impl Ui {
             }
         });
         let editor = editor(Box::new(monitor::Sink {
-            pixels: monitor.clone(),
-            size: Rc::clone(&monitor_size),
-            picture: Rc::clone(&monitor_picture),
+            program: monitor.clone(),
+            incoming: incoming.clone(),
         }));
         Self {
             editor,
             handle,
             monitor,
-            monitor_size,
-            monitor_picture,
+            incoming,
             monitor_drag: None,
             title_drag: None,
             thumbs: HashMap::new(),
@@ -206,12 +200,18 @@ impl Ui {
         while started.elapsed().as_secs() < 120 && quiet < 20 {
             self.pump(started.elapsed().as_secs_f64());
             let waiting = self.editor.importing()
-                || (self
+                || self
                     .editor
                     .timeline
-                    .active_video(self.editor.playhead)
+                    .program_video(self.editor.playhead)
                     .is_some()
-                    && !self.editor.preview_is_current());
+                    && !self.editor.preview_is_current()
+                || self
+                    .editor
+                    .timeline
+                    .transition_at(self.editor.playhead)
+                    .is_some()
+                    && self.editor.transition_shown().is_none();
             quiet = if waiting { 0 } else { quiet + 1 };
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -228,8 +228,13 @@ impl Ui {
         self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
         // A frame shown this pump with the last clip's look is redrawn.
-        let look = monitor::look(self.editor.timeline.active_video(self.editor.playhead));
-        self.monitor_picture.borrow_mut().want(look, &self.monitor);
+        let (timeline, playhead) = (&self.editor.timeline, self.editor.playhead);
+        self.monitor
+            .want(monitor::look(timeline.program_video(playhead)));
+        let incoming = timeline
+            .transition_at(playhead)
+            .and_then(|span| timeline.clip(span.to));
+        self.incoming.want(monitor::look(incoming));
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported

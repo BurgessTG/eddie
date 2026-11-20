@@ -202,6 +202,18 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
             .push(0, || ScriptCommand::SetVolume { clip, value })
     })?;
     let q = api.queue();
+    api.set(
+        "__set_transition",
+        move |Whole(clip): Whole, kind: CString<'_>, seconds: f64| {
+            q.borrow_mut()
+                .push(kind.len(), || ScriptCommand::SetTransition {
+                    clip,
+                    kind: kind.as_str().to_owned(),
+                    seconds,
+                })
+        },
+    )?;
+    let q = api.queue();
     api.set("setSpeed", move |Whole(clip): Whole, speed: f64| {
         q.borrow_mut()
             .push(0, || ScriptCommand::SetSpeed { clip, speed })

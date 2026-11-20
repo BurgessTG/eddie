@@ -85,13 +85,13 @@ pub(super) fn sync(ui: &mut Ui) {
     let on_screen = !editor.playing
         && editor
             .timeline
-            .active_video(editor.playhead)
+            .program_video(editor.playhead)
             .map(|clip| clip.id)
             == Some(id)
         && editor.preview_is_current();
     let previews = &mut ui.details.filters;
     if on_screen {
-        let picture = ui.monitor_picture.borrow();
+        let picture = ui.monitor.picture.borrow();
         let (width, rgba, frame) = picture.upright();
         if previews.taken != Some((id, frame)) && !rgba.is_empty() {
             previews.width = shrink(width, rgba, &mut previews.rgba);
@@ -180,31 +180,71 @@ fn help(filter: Filter) -> &'static str {
     }
 }
 
+/// How many tiles fit a row `width` wide, and each tile's size.
+pub(super) fn tile_size(width: f32) -> (usize, f32, f32) {
+    let cols = ((width + GAP) / (MIN_TILE + GAP)).floor().clamp(3.0, 5.0);
+    let w = ((width - GAP * (cols - 1.0)) / cols).floor();
+    (cols as usize, w, (w * 0.75).round())
+}
+
+/// `tiles` in rows of `cols`.
+pub(super) fn tile_grid(key: &str, tiles: Vec<El>, cols: usize) -> El {
+    let mut rows = Vec::new();
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        rows.push(
+            row()
+                .gap(GAP)
+                .children(tiles.by_ref().take(cols).collect::<Vec<_>>()),
+        );
+    }
+    col().key(key.to_owned()).w_full().gap(8.0).children(rows)
+}
+
 /// The tiles, as many to a row as fit `width`. A press picks a filter at
 /// full strength; pressing the current one keeps its strength.
 pub(super) fn grid(ui: &Ui, id: ClipId, current: Filter, width: f32) -> El {
-    let cols = ((width + GAP) / (MIN_TILE + GAP)).floor().clamp(3.0, 5.0);
-    let w = ((width - GAP * (cols - 1.0)) / cols).floor();
-    let h = (w * 0.75).round();
-    let mut rows = Vec::new();
-    let mut line = Vec::new();
-    for (filter, pixels) in Filter::ALL.into_iter().zip(&ui.details.filters.pixels) {
-        line.push(tile(pixels, id, filter, filter == current, w, h));
-        if line.len() == cols as usize {
-            rows.push(row().gap(GAP).children(std::mem::take(&mut line)));
-        }
-    }
-    if !line.is_empty() {
-        rows.push(row().gap(GAP).children(line));
-    }
-    col()
-        .key("details-filters")
-        .w_full()
-        .gap(8.0)
-        .children(rows)
+    let (cols, w, h) = tile_size(width);
+    let tiles = Filter::ALL
+        .into_iter()
+        .zip(&ui.details.filters.pixels)
+        .map(|(filter, pixels)| {
+            let picture = el()
+                .absolute(0.0, 0.0)
+                .size(w, h)
+                .pixels_fit(pixels, SurfaceFit::Fill);
+            let key = format!("details-filter-{}", filter.as_str());
+            tile(
+                key,
+                filter.label(),
+                help(filter),
+                picture,
+                filter == current,
+                (w, h),
+            )
+            .on_press(move |ui: &mut Ui| {
+                ui.editor.edit_clip_color(id, |color| {
+                    if color.filter != filter {
+                        color.filter = filter;
+                        color.strength = 1.0;
+                    }
+                });
+            })
+        })
+        .collect();
+    tile_grid("details-filters", tiles, cols)
 }
 
-fn tile(pixels: &Pixels, id: ClipId, filter: Filter, current: bool, w: f32, h: f32) -> El {
+/// A picture to pick, `picture` drawn inside its frame, with its label
+/// under it; the current one is outlined in the selection colour.
+pub(super) fn tile(
+    key: String,
+    label: &'static str,
+    help: &'static str,
+    picture: El,
+    current: bool,
+    (w, h): (f32, f32),
+) -> El {
     let c = c();
     let layer = || {
         el().absolute(0.0, 0.0)
@@ -216,7 +256,8 @@ fn tile(pixels: &Pixels, id: ClipId, filter: Filter, current: bool, w: f32, h: f
         .size(w, h)
         .radius(theme::R_SM)
         .fill(c.secondary)
-        .child(layer().pixels_fit(pixels, SurfaceFit::Fill))
+        .clip_rounded(theme::R_SM)
+        .child(picture.inert())
         .child(if current {
             layer().border(2.0, c.brand)
         } else {
@@ -225,28 +266,22 @@ fn tile(pixels: &Pixels, id: ClipId, filter: Filter, current: bool, w: f32, h: f
                 .group_opacity(0.0, 1.0)
         });
     col()
-        .key(format!("details-filter-{}", filter.as_str()))
+        .key(key)
         .w(w)
         .gap(4.0)
         .items_center()
         .cursor(Cursor::Pointer)
         .hover_group()
         .role("option")
-        .label(filter.label())
-        .help(help(filter))
+        .label(label)
+        .help(help)
         .child(picture)
         .child(
-            text(filter.label())
+            text(label)
                 .font(theme::SMALL)
                 .color(if current { c.brand } else { c.muted_fg })
-                .single_line(),
+                .single_line()
+                .truncate()
+                .max_w(w),
         )
-        .on_press(move |ui: &mut Ui| {
-            ui.editor.edit_clip_color(id, |color| {
-                if color.filter != filter {
-                    color.filter = filter;
-                    color.strength = 1.0;
-                }
-            });
-        })
 }

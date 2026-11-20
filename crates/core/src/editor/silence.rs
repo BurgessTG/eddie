@@ -170,7 +170,8 @@ impl Editor {
     /// One phrase of one template, keeping the template's offsets from
     /// `target`. The first phrase is the template's own clip; each later one
     /// is a new clip with the template's settings. As a split does, the fade
-    /// in stays on the first phrase and the fade out moves to the last.
+    /// in and the transition in stay on the first phrase and the fade out
+    /// moves to the last.
     fn place_phrase(
         &mut self,
         template: &Clip,
@@ -223,6 +224,8 @@ impl Editor {
                 fade_in: 0.0,
                 fade_out: if place.last { template.fade_out } else { 0.0 },
                 linked_clip: None,
+                // The cuts between phrases have none.
+                transition: None,
                 ..template.clone()
             };
         }

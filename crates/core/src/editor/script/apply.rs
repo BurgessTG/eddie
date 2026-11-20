@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use openreel_engine::{
     fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TextLook, TitleStyle,
-    Transform, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MIN_SPEED, MIN_TEXT_SIZE,
+    Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET, MAX_TEXT_SIZE,
+    MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
 };
 
 use super::super::details;
@@ -321,6 +322,38 @@ impl Editor {
                 self.video_clip(clip, "setBackground")?;
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.background = background;
+                }
+            }
+            ScriptCommand::SetTransition {
+                clip,
+                kind,
+                seconds,
+            } => {
+                self.video_clip(clip, "setTransition")?;
+                let transition = if kind.is_empty() || kind.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    let kind = TransitionKind::from_name(&kind).ok_or_else(|| {
+                        let known: Vec<&str> = TransitionKind::ALL
+                            .iter()
+                            .map(|kind| kind.as_str())
+                            .collect();
+                        format!("unknown transition '{kind}'; use {}", known.join(", "))
+                    })?;
+                    if !(MIN_TRANSITION..=MAX_TRANSITION).contains(&seconds) {
+                        return Err(format!(
+                            "setTransition takes {MIN_TRANSITION} to {MAX_TRANSITION} seconds, not {seconds}"
+                        ));
+                    }
+                    if self.timeline.clip_before(clip).is_none() {
+                        return Err(format!(
+                            "setTransition: clip {clip} has no clip right before it on its lane"
+                        ));
+                    }
+                    Some(Transition::new(kind, seconds))
+                };
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.transition = transition;
                 }
             }
             ScriptCommand::SetVolume { clip, value } => {

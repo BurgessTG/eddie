@@ -56,6 +56,7 @@ function help() {
     "setBackground(id, 'black' | 'blur')  // what fills the canvas around a video picture",
     "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
+    "setTransition(id, kind, seconds?)  // video only: how the picture passes from the clip right before it on its lane, centred on the cut. kinds: mix dip-black dip-white wipe-left wipe-right wipe-up wipe-down slide-left slide-right slide-up slide-down; seconds 0.1 to 5 (0.5); null removes it",
     "setSpeed(id, 0.25..4)  // video or audio; keeps the source range, so the clip's length becomes it at that speed (a linked partner too); sound keeps its pitch",
     "setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
@@ -108,6 +109,10 @@ function setTransform(id, changes) {
   __set_transform(id, JSON.stringify(changes));
 }
 function setBackground(id, name) { __set_background(id, String(name)); }
+function setTransition(id, kind, seconds) {
+  if (kind === undefined) throw new Error("setTransition needs a kind such as 'mix', or null to remove it");
+  __set_transition(id, kind === null ? "" : String(kind), seconds === undefined ? 0.5 : seconds);
+}
 function setColor(id, changes) {
   if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
     throw new Error("setColor needs an object such as {saturation: 0.2, filter: 'warm'}, or null to reset");

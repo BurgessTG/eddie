@@ -14,7 +14,9 @@ use crate::theme::{self, c};
 
 mod picture;
 mod title;
-pub use picture::{Picture, Sink, look};
+mod transition;
+pub use picture::{Sink, Slot, look};
+pub(crate) use transition::layers as transition_layers;
 
 /// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
 const TRANSPORT_H: f32 = 62.0;
@@ -108,13 +110,17 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
     let timeline = &editor.timeline;
     let playhead = editor.playhead;
     let picture = ui
-        .monitor_size
+        .monitor
+        .size
         .get()
         .filter(|_| editor.preview_is_current());
-    match (timeline.active_video(playhead), picture) {
+    match (timeline.program_video(playhead), picture) {
         (Some(clip), Some(decoded)) => {
-            frame =
-                picture::draggable(frame).child(picture::placed(ui, clip, canvas, (w, h), decoded));
+            let shown = match editor.transition_shown() {
+                Some(span) => transition::view(ui, span, clip, canvas, (w, h), decoded),
+                None => picture::placed(ui, &ui.monitor, "monitor", clip, canvas, (w, h), decoded),
+            };
+            frame = picture::draggable(frame).child(shown);
         }
         (Some(_), None) => frame = frame.child(message("Loading frame…")),
         (None, _) => {

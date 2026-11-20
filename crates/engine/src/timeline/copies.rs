@@ -6,7 +6,7 @@ use crate::{Clip, ClipId};
 impl Timeline {
     /// Add copies of `clips` so the first starts at `start` and the rest
     /// keep their offsets from it, none before zero. Each copy keeps its
-    /// look, sound and words, and copies of a linked pair are linked to
+    /// look, sound and words but not its transition, and copies of a linked pair are linked to
     /// each other. A copy lands on its own lane when that lane is free for
     /// its new time, else on the first lane of its kind free then (a new
     /// one below the others when none is). Returns the copies' IDs in the
@@ -38,6 +38,8 @@ impl Timeline {
                 start,
                 track,
                 linked_clip: None,
+                // A transition belongs to the cut it was put on.
+                transition: None,
                 ..clip.clone()
             });
             ids.push(id);

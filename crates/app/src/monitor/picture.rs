@@ -102,16 +102,22 @@ pub(super) fn flipped(rgba: &[u8], width: u32, (across, down): (bool, bool)) -> 
     out
 }
 
-/// Where the editor sends each decoded frame. Rune uploads it and wakes
-/// the window.
-pub struct Sink {
+/// One picture the monitor holds: the pixels Rune draws, the decoded
+/// size while it holds one, and the frame behind them.
+#[derive(Clone, Default)]
+pub struct Slot {
     pub pixels: Pixels,
     pub size: Rc<Cell<Option<(u32, u32)>>>,
     pub picture: Rc<RefCell<Picture>>,
 }
 
-impl PreviewSink for Sink {
-    fn show(&mut self, frame: &RawFrame) {
+impl Slot {
+    /// Show the held frame as the clip `look` describes wants it.
+    pub fn want(&self, look: Look) {
+        self.picture.borrow_mut().want(look, &self.pixels);
+    }
+
+    fn show(&self, frame: &RawFrame) {
         let mut picture = self.picture.borrow_mut();
         picture.width = frame.width;
         picture.rgba.clear();
@@ -120,18 +126,38 @@ impl PreviewSink for Sink {
         picture.show(&self.pixels);
         self.size.set(Some((frame.width, frame.height)));
     }
+}
+
+/// Where the editor sends each decoded frame: the program picture, and
+/// during a transition the picture it goes to. Rune uploads each and wakes
+/// the window.
+pub struct Sink {
+    pub program: Slot,
+    pub incoming: Slot,
+}
+
+impl PreviewSink for Sink {
+    fn show(&mut self, frame: &RawFrame) {
+        self.program.show(frame);
+    }
 
     fn clear(&mut self) {
-        self.size.set(None);
+        self.program.size.set(None);
+    }
+
+    fn show_incoming(&mut self, frame: &RawFrame) {
+        self.incoming.show(frame);
     }
 }
 
-/// The active clip's picture on a `w` by `h` monitor showing a `canvas`
-/// sized frame: its background, then the picture, cropped, turned and
-/// moved as `place` says. `decoded` is the held frame's size, used when the
-/// clip's media is not in the bin.
+/// `clip`'s picture, held in `slot`, on a `w` by `h` monitor showing a
+/// `canvas` sized frame: its background, then the picture, cropped, turned
+/// and moved as `place` says. `decoded` is the held frame's size, used when
+/// the clip's media is not in the bin. Its parts are keyed `{key}-…`.
 pub fn placed(
     ui: &Ui,
+    slot: &Slot,
+    key: &str,
     clip: &Clip,
     canvas: (u32, u32),
     (w, h): (f32, f32),
@@ -159,10 +185,10 @@ pub fn placed(
         let sigma = BLUR_SHARE * w;
         let rim = 3.0 * sigma;
         layer = layer.child(
-            el().key("monitor-background")
+            el().key(format!("{key}-background"))
                 .absolute(-rim, -rim)
                 .size(w + 2.0 * rim, h + 2.0 * rim)
-                .pixels_fit(&ui.monitor, SurfaceFit::Fill)
+                .pixels_fit(&slot.pixels, SurfaceFit::Fill)
                 .blur(sigma),
         );
     }
@@ -180,10 +206,10 @@ pub fn placed(
     };
     let per = p.size[0] / crop_w * k;
     let whole = el()
-        .key("monitor-picture")
+        .key(format!("{key}-picture"))
         .absolute((-crop_x * per) as f32, (-crop_y * per) as f32)
         .size((sw * per) as f32, (sh * per) as f32)
-        .pixels_fit(&ui.monitor, SurfaceFit::Fill);
+        .pixels_fit(&slot.pixels, SurfaceFit::Fill);
     let [ox, oy] = p.origin();
     let (bw, bh) = ((p.size[0] * k) as f32, (p.size[1] * k) as f32);
     let mut shown = el().size(bw, bh).child(whole);
@@ -192,7 +218,7 @@ pub fn placed(
     }
     // Turned about its centre, outside the crop's clip.
     let turned = el()
-        .key("monitor-placed")
+        .key(format!("{key}-placed"))
         .absolute((ox * k) as f32, (oy * k) as f32)
         .size(bw, bh)
         .rotate(t.rotation.to_radians() as f32)

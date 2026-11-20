@@ -49,6 +49,14 @@
   swatches or a typed `#RRGGBB`. Drag a title on the monitor to move it.
   Scripts use `setText`, `state()` gives each title's `text`, and
   `inspect()` reports a title moved off the canvas.
+- Transitions: a Transition card in Details for a video clip that follows
+  another on its lane, with Mix, Dip to black, Dip to white, and Wipe and
+  Slide left, right, up and down, from 0.1 to 5 seconds (0.5 by default).
+  A transition is centred on the cut and moves no clip; the monitor plays
+  it as export renders it, and the timeline marks it on the cut. Scripts
+  use `setTransition`, `state()` gives each clip's `transition`, and
+  `inspect()` reports one that plays shorter than set or runs past a
+  file's pictures.
 
 ### Changed
 

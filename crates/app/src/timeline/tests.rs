@@ -297,3 +297,33 @@ fn a_right_click_opens_a_clips_menu_and_keys_copy_and_paste() {
     assert!(rt.state.editor.timeline.clip(pasted).is_none());
     assert_eq!(rt.state.editor.status, "Clip deleted; the gap closed.");
 }
+
+/// A transition shows as a badge centred on its cut, as wide as it plays.
+#[test]
+fn a_transition_is_marked_on_its_cut_as_wide_as_it_plays() {
+    use openreel_engine::{Transition, TransitionKind};
+    let (mut rt, _) = window();
+    let timeline = &mut rt.state.editor.timeline;
+    timeline.add_clip("Before", ClipKind::Video, 0, 1.0, 4.0, 0.0);
+    let next = timeline.add_clip("After", ClipKind::Video, 0, 5.0, 4.0, 0.0);
+    // Without a source the clips still sit on the lane; the badge needs
+    // only the clips.
+    timeline.clip_mut(next).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 2.0));
+    rt.invalidate();
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    let key = format!("transition-{next}");
+    let ([x, _, w, _], _) = rt.presented(&key).expect("the badge is drawn");
+    let (start, _) = at(&rt, 4.0, 1);
+    let (end, _) = at(&rt, 6.0, 1);
+    assert!(
+        (x - start).abs() < 0.5 && (x + w - end).abs() < 0.5,
+        "{x} {w}: {start}..{end}"
+    );
+
+    rt.state.editor.timeline.clip_mut(next).unwrap().transition = None;
+    rt.invalidate();
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    assert!(rt.presented(&key).is_none(), "no transition, no badge");
+}

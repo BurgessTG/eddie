@@ -2,7 +2,7 @@
 //! and applies, and when what was typed reaches the clip.
 
 use eddie_core::Editor;
-use openreel_engine::{Clip, ClipId, ClipKind, Rgb};
+use openreel_engine::{Clip, ClipId, ClipKind, DEFAULT_TRANSITION, Rgb, Transition};
 use rune::TextEdit;
 
 use super::one_line;
@@ -34,6 +34,7 @@ pub enum Field {
     Temperature,
     Tint,
     Strength,
+    TransitionLength,
     TextSize,
     TextColor,
     BoxColor,
@@ -45,7 +46,7 @@ pub enum Field {
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 31] = [
+    pub(super) const ALL: [Self; 32] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -69,6 +70,7 @@ impl Field {
         Self::Temperature,
         Self::Tint,
         Self::Strength,
+        Self::TransitionLength,
         Self::TextSize,
         Self::TextColor,
         Self::BoxColor,
@@ -104,6 +106,7 @@ impl Field {
             Self::Temperature => "details-temperature",
             Self::Tint => "details-tint",
             Self::Strength => "details-strength",
+            Self::TransitionLength => "details-transition-length",
             Self::TextSize => "details-text-size",
             Self::TextColor => "details-text-color",
             Self::BoxColor => "details-box-color",
@@ -129,6 +132,7 @@ impl Field {
                 | Self::Speed
                 | Self::FadeIn
                 | Self::FadeOut
+                | Self::TransitionLength
                 | Self::Rotation
                 | Self::Exposure
                 | Self::TextColor
@@ -164,6 +168,9 @@ impl Field {
             Self::Temperature => clip.color.temperature * 100.0,
             Self::Tint => clip.color.tint * 100.0,
             Self::Strength => clip.color.strength * 100.0,
+            Self::TransitionLength => clip
+                .transition
+                .map_or(DEFAULT_TRANSITION, |transition| transition.duration),
             Self::TextSize => clip.text.size * 100.0,
             Self::TextX => clip.text.x * 100.0,
             Self::TextY => clip.text.y * 100.0,
@@ -256,6 +263,10 @@ impl Field {
             Self::Temperature => editor.edit_clip_color(id, |c| c.temperature = value / 100.0),
             Self::Tint => editor.edit_clip_color(id, |c| c.tint = value / 100.0),
             Self::Strength => editor.edit_clip_color(id, |c| c.strength = value / 100.0),
+            Self::TransitionLength => {
+                let kept = editor.timeline.clip(id).and_then(|clip| clip.transition);
+                editor.set_clip_transition(id, kept.map(|t| Transition::new(t.kind, value)));
+            }
             Self::TextSize => editor.edit_title_text(id, |t| t.size = value / 100.0),
             Self::TextX => editor.edit_title_text(id, |t| t.x = value / 100.0),
             Self::TextY => editor.edit_title_text(id, |t| t.y = value / 100.0),
