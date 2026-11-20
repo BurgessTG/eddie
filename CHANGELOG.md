@@ -26,6 +26,11 @@
   so its length follows the speed; slowing stops where the next clip on the
   lane starts. Scripts use `setSpeed`, and `state()` gives each clip's
   `speed`.
+- An Export dialog: resolution (Auto, 480p, 720p, 1080p, 2K, 4K), frame
+  rate (24, 25, 30, 50, 60) and quality (Lower, Recommended, Higher). It
+  remembers the last choice. Titles keep their size and place on the
+  frame at any resolution. `eddie export` takes `--resolution`, `--fps`
+  and `--quality`.
 - Photos (PNG, JPEG and WebP) as clips. One added whole lasts 3 seconds;
   trim either edge to any length. A phone photo shows upright from its
   EXIF orientation, and photos take the same transform, background and

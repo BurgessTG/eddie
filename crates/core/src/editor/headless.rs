@@ -61,7 +61,12 @@ Usage: eddie <command> <project.eddie> ...
                                      the range without --every). Times are
                                      source times; clip:7 is the source range
                                      clip 7 shows
-  export <project> <out.mp4>         render the timeline
+  export <project> <out.mp4> [--resolution auto|480p|720p|1080p|2k|4k]
+         [--fps 24|25|30|50|60] [--quality lower|recommended|higher]
+                                     render the timeline. Without a flag,
+                                     what the window's Export dialog last
+                                     chose (auto size, the project's rate,
+                                     recommended quality at first)
   editors                            every running Eddie (windows and serve)
                                      with the project it has open; a window
                                      not saved yet has an untitled project
@@ -215,6 +220,7 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
         ),
         "curate" => (&["--force"], &[]),
         "frames" => (&[], &["--every", "--width"]),
+        "export" => (&[], &["--resolution", "--fps", "--quality"]),
         _ => (&[], &[]),
     };
     let mut rest = args.iter();
@@ -300,7 +306,17 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
         }
         "export" => {
             at_most(1)?;
-            json!({ "output": absolute(at(0, "<out.mp4>")?)? })
+            // A number stays a number; anything else is the method's to refuse.
+            let fps = values.get("fps").map(|fps| {
+                let number = fps.as_str().and_then(|text| text.parse::<u64>().ok());
+                number.map_or_else(|| fps.clone(), |number| json!(number))
+            });
+            json!({
+                "output": absolute(at(0, "<out.mp4>")?)?,
+                "resolution": values.get("resolution"),
+                "fps": fps,
+                "quality": values.get("quality"),
+            })
         }
         _ => {
             at_most(0)?;

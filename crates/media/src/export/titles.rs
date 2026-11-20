@@ -49,6 +49,8 @@ pub(super) struct Titles<'a> {
     /// The font file's bytes, to measure highlight captions.
     pub(super) font_data: Option<Vec<u8>>,
     pub(super) clock: VideoClock,
+    /// The output's size against the canvas [`title_look`] is laid out on.
+    pub(super) scale: f64,
     pub(super) clips: Vec<(&'a Clip, Vec<(i64, i64)>)>,
 }
 
@@ -88,7 +90,7 @@ impl Titles<'_> {
                 if ranges.is_empty() {
                     continue;
                 }
-                let look = title_look(clip.title_style);
+                let look = title_look(clip.title_style).scaled(self.scale);
                 let (r, g, b) = look.color;
                 let font_size = look.font_size;
                 let font_color = format!("0x{r:02X}{g:02X}{b:02X}");
@@ -189,6 +191,20 @@ pub struct TitleLook {
     pub bottom: u32,
     /// Colour of the word being spoken, for titles with word timing.
     pub highlight: Option<(u8, u8, u8)>,
+}
+
+impl TitleLook {
+    /// The look on a canvas `scale` times as large.
+    fn scaled(self, scale: f64) -> Self {
+        let px = |value: u32| (f64::from(value) * scale).round() as u32;
+        Self {
+            font_size: px(self.font_size).max(1),
+            border: px(self.border),
+            left: self.left.map(px),
+            bottom: px(self.bottom),
+            ..self
+        }
+    }
 }
 
 pub fn title_look(style: TitleStyle) -> TitleLook {

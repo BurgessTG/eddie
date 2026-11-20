@@ -236,13 +236,13 @@ fn file(ui: &Ui) -> Vec<El> {
         separator(),
         item(
             "Import media…",
-            "Import video or audio files",
+            "Import video, audio or photos",
             true,
             Action::Import,
         ),
         item(
             "Export MP4…",
-            "Export the timeline as an MP4",
+            "Pick the size, frame rate and quality, then export an MP4",
             true,
             Action::Export,
         ),

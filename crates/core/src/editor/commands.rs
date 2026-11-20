@@ -126,6 +126,7 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
         }
         "export" => {
             let output = path(params, "output")?;
+            let settings = export_settings(app.settings.export, params)?;
             if !app.missing_media.is_empty() {
                 return Err(format!(
                     "{} media file(s) are missing: {}",
@@ -136,17 +137,52 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
             if app.exporting() {
                 return Err("An export is already running.".to_owned());
             }
-            app.start_export(output);
+            app.start_export_with(output, settings);
             if !app.exporting() {
                 return Err(app.status.clone());
             }
+            let (size, fps) = app.export_output(settings);
             Reply::Later(Job::Export {
                 started: Instant::now(),
                 reported: 0.0,
+                made: json!({ "size": size, "fps": fps, "quality": settings.quality.as_str() }),
             })
         }
         other => return Err(format!("unknown method '{other}'")),
     })
+}
+
+/// The saved export settings, with whatever the request names instead.
+fn export_settings(
+    saved: openreel_media::ExportSettings,
+    params: &Value,
+) -> Result<openreel_media::ExportSettings, String> {
+    use openreel_media::{Quality, Resolution, FRAME_RATES};
+    let given = |key: &str| params.get(key).filter(|value| !value.is_null());
+    let mut settings = saved;
+    if let Some(value) = given("resolution") {
+        settings.resolution = value
+            .as_str()
+            .and_then(Resolution::from_name)
+            .ok_or_else(|| {
+                format!("resolution takes auto, 480p, 720p, 1080p, 2k or 4k, not {value}")
+            })?;
+    }
+    if let Some(value) = given("fps") {
+        let fps = value
+            .as_u64()
+            .and_then(|fps| u32::try_from(fps).ok())
+            .filter(|fps| FRAME_RATES.contains(fps));
+        settings.fps =
+            Some(fps.ok_or_else(|| format!("fps takes 24, 25, 30, 50 or 60, not {value}"))?);
+    }
+    if let Some(value) = given("quality") {
+        settings.quality = value
+            .as_str()
+            .and_then(Quality::from_name)
+            .ok_or_else(|| format!("quality takes lower, recommended or higher, not {value}"))?;
+    }
+    Ok(settings)
 }
 
 fn text<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {

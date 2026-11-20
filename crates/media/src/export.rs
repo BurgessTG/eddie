@@ -23,10 +23,12 @@ use video::{
 
 mod audio;
 mod scratch;
+mod settings;
 mod titles;
 mod video;
 
 pub use audio::LOUDNESS_TARGET;
+pub use settings::{ExportSettings, Quality, Resolution, FRAME_RATES};
 pub(crate) use titles::{filter_value, font_file};
 pub use titles::{title_look, TitleLook};
 
@@ -62,6 +64,16 @@ fn export_error(stderr: &str) -> String {
 /// size. Every clip fits this canvas by its transform; the program monitor
 /// uses the same canvas, so pictures and titles preview as exported.
 pub fn export_canvas(timeline: &Timeline, size: impl Fn(&str) -> Option<(u32, u32)>) -> (u32, u32) {
+    output_canvas(timeline, size, Resolution::Auto)
+}
+
+/// The picture an export at `resolution` renders: [`export_canvas`]'s
+/// shape, with the resolution's short side.
+pub fn output_canvas(
+    timeline: &Timeline,
+    size: impl Fn(&str) -> Option<(u32, u32)>,
+    resolution: Resolution,
+) -> (u32, u32) {
     let mut pictures: Vec<(&Clip, (u32, u32))> = timeline
         .clips
         .iter()
@@ -75,7 +87,9 @@ pub fn export_canvas(timeline: &Timeline, size: impl Fn(&str) -> Option<(u32, u3
         .max()
         .map_or(720, |short| short.min(1080));
     let first = pictures.first().map_or((1280, 720), |(_, size)| *size);
-    timeline.format.canvas(short, first)
+    timeline
+        .format
+        .canvas(resolution.short_side().unwrap_or(short), first)
 }
 
 /// How export treats the audio mix.
@@ -88,6 +102,7 @@ pub struct ExportOptions {
     /// Audible source-time ranges per source path, for clips that duck
     /// under speech (`openreel_engine::Timeline::duck_ranges`).
     pub speech: HashMap<String, Vec<(f64, f64)>>,
+    pub settings: ExportSettings,
 }
 
 /// Export `timeline` to `output` (H.264/AAC MP4). Sends 0..=1 progress on
@@ -104,7 +119,7 @@ pub fn export_timeline(
         return Err("timeline is empty".to_owned());
     }
     let output = &*argument_path(output);
-    let fps = timeline.fps;
+    let fps = options.settings.fps.map_or(timeline.fps, f64::from);
     if !fps.is_finite() || fps <= 0.0 || !total.is_finite() {
         return Err("timeline has an invalid frame rate or duration".to_owned());
     }
@@ -128,15 +143,19 @@ pub fn export_timeline(
         .filter(|c| c.kind == ClipKind::Title)
         .collect();
 
-    let (canvas_w, canvas_h) = export_canvas(timeline, |path| {
-        infos.get(path).map(|i| (i.width, i.height))
-    });
+    let size = |path: &str| infos.get(path).map(|i| (i.width, i.height));
+    let (canvas_w, canvas_h) = output_canvas(timeline, size, options.settings.resolution);
+    // Titles are sized on the canvas the monitor shows, and keep their
+    // place on the frame at any other size.
+    let layout = export_canvas(timeline, size);
+    let title_scale = f64::from(canvas_w.min(canvas_h)) / f64::from(layout.0.min(layout.1));
 
     let font = font_file();
     let titles = Titles {
         font_data: font.as_deref().and_then(|path| fs::read(path).ok()),
         font,
         clock,
+        scale: title_scale,
         clips: title_clips
             .iter()
             .filter(|clip| clip.opacity > 0.0)
@@ -181,25 +200,20 @@ pub fn export_timeline(
                             break;
                         };
                         let count = batch.end - batch.start;
-                        let result = batch_command(
-                            timeline,
-                            infos,
-                            (canvas_w, canvas_h),
-                            clock,
-                            &layers,
-                            batch,
-                        )
-                        .and_then(|decoder| {
-                            encode_segment(
-                                decoder,
-                                &titles.graph(batch.start, batch.end),
-                                (canvas_w, canvas_h),
-                                rate,
-                                count,
-                                encoder_threads,
-                                &segment(index),
-                            )
-                        });
+                        let result =
+                            batch_command(infos, (canvas_w, canvas_h), clock, &layers, batch)
+                                .and_then(|decoder| {
+                                    encode_segment(
+                                        decoder,
+                                        &titles.graph(batch.start, batch.end),
+                                        (canvas_w, canvas_h),
+                                        rate,
+                                        options.settings.quality.crf(),
+                                        count,
+                                        encoder_threads,
+                                        &segment(index),
+                                    )
+                                });
                         if let Err(error) = result {
                             failed.store(true, Ordering::Relaxed);
                             return Err(error);
@@ -272,7 +286,7 @@ fn argument_path(path: &Path) -> std::borrow::Cow<'_, Path> {
 
 #[cfg(test)]
 mod canvas_tests {
-    use super::export_canvas;
+    use super::{export_canvas, output_canvas, Resolution};
     use openreel_engine::{ClipKind, Format, Timeline};
 
     /// A timeline whose pictures start one after another in this order.
@@ -318,5 +332,39 @@ mod canvas_tests {
         assert_eq!(canvas(Format::Original, &[(80, 48)]), (80, 48));
         assert_eq!(canvas(Format::Original, &[(1440, 1080)]), (1440, 1080));
         assert_eq!(canvas(Format::Original, &[]), (1280, 720));
+    }
+
+    #[test]
+    fn a_resolution_sets_the_short_side_and_keeps_the_shape() {
+        let at = |format: Format, sources: &[(u32, u32)], resolution: Resolution| {
+            let mut timeline = Timeline::new(30.0).with_format(format);
+            for index in 0..sources.len() {
+                let path = index.to_string();
+                timeline.add_media_clip("v", ClipKind::Video, 0, index as f64, 1.0, 0.0, &path);
+            }
+            output_canvas(
+                &timeline,
+                |path| sources.get(path.parse::<usize>().ok()?).copied(),
+                resolution,
+            )
+        };
+        // Above the sources' own size, and past the 1080 that Auto stops at.
+        assert_eq!(
+            at(Format::Landscape, &[(1280, 720)], Resolution::P2160),
+            (3840, 2160)
+        );
+        assert_eq!(
+            at(Format::Portrait, &[(1920, 1080)], Resolution::P1440),
+            (1440, 2560)
+        );
+        assert_eq!(
+            at(Format::Original, &[(1440, 1080)], Resolution::P480),
+            (640, 480)
+        );
+        assert_eq!(at(Format::Cinema, &[], Resolution::P720), (1680, 720));
+        assert_eq!(
+            at(Format::Square, &[(3840, 2160)], Resolution::Auto),
+            (1080, 1080)
+        );
     }
 }

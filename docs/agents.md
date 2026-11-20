@@ -40,6 +40,11 @@ guide` prints this guide as written for the installed version.
 - `run` and `import` on one project take turns, each waiting up to 60
   seconds for the one before it. Starting several at once loses no edit.
 - An unknown command is an error too; it never opens the window.
+- `export` takes `--resolution auto|480p|720p|1080p|2k|4k`, `--fps
+  24|25|30|50|60` and `--quality lower|recommended|higher`. Without them
+  it uses what the window's Export dialog last chose: at first `auto`
+  (the largest video's size, at most 1080p), the project's frame rate and
+  `recommended`. Its reply gives the `size`, `fps` and `quality` it made.
 
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
 `sheet`, and fix what the edit broke. `run --dry-run` keeps nothing: its
@@ -106,8 +111,8 @@ commands, with these parameters:
   `vocabulary`, `apiKey` (the `eddie` command sends
   `EDDIE_TRANSCRIBE_API_KEY` here). `curate`: `assets`, `force`.
 - `sheet`: `output`, `range`. `strip`: `asset`, `output`. `frames`:
-  `asset`, `range`, `directory`, `every`, `width`. `export`: `output`.
-  Output paths are absolute.
+  `asset`, `range`, `directory`, `every`, `width`. `export`: `output`,
+  `resolution`, `fps`, `quality`. Output paths are absolute.
 - `state`, `inspect`, `undo`, `redo`, `save` and `stop` take none.
 
 ## Pictures

@@ -71,7 +71,8 @@ offers the newest build.
 - Projects (`.eddie`) store the timeline and media paths. Footage moved
   with its project is found again; anything else is relinked with File →
   Locate missing media.
-- Export to H.264/AAC MP4 in limited-range BT.709, normalized to -16 LUFS.
+- Export to H.264/AAC MP4 at 480p to 4K, 24 to 60 fps and three quality
+  levels, in limited-range BT.709, normalized to -16 LUFS.
 
 **Curator**
 

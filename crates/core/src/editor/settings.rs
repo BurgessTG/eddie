@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use openreel_engine::Format;
+use openreel_media::{ExportSettings, Quality, Resolution, FRAME_RATES};
 
 use super::sweep::transcribe::{Provider, TranscribeSettings};
 use crate::update::Channel;
@@ -24,6 +25,8 @@ pub struct Settings {
     pub transcription: TranscribeSettings,
     /// Which published updates the window looks for.
     pub updates: Channel,
+    /// What Export makes, as the Export dialog last left it.
+    pub export: ExportSettings,
     /// The Meta key and endpoint the removed built-in AI saved at the top
     /// level (`api_key`, `base_url`). Kept so Meta transcription without its
     /// own key still works; there is no field for them any more.
@@ -90,6 +93,24 @@ pub fn adopt_old_config() {
     }
 }
 
+/// Export settings as saved; anything missing or unknown is the default.
+fn export_from_json(value: &serde_json::Value) -> ExportSettings {
+    ExportSettings {
+        resolution: value["resolution"]
+            .as_str()
+            .and_then(Resolution::from_name)
+            .unwrap_or_default(),
+        fps: value["fps"]
+            .as_u64()
+            .and_then(|fps| u32::try_from(fps).ok())
+            .filter(|fps| FRAME_RATES.contains(fps)),
+        quality: value["quality"]
+            .as_str()
+            .and_then(Quality::from_name)
+            .unwrap_or_default(),
+    }
+}
+
 /// Where a config that could not be read is moved when settings are saved.
 const UNREADABLE: &str = "config.unreadable.json";
 
@@ -113,6 +134,7 @@ impl Settings {
                 .as_str()
                 .and_then(Channel::from_name)
                 .unwrap_or_default(),
+            export: export_from_json(&value["export"]),
             meta_api_key: text("api_key"),
             meta_base_url: text("base_url"),
         }
@@ -128,6 +150,11 @@ impl Settings {
             "hardware_decode": self.hardware_decode,
             "transcription": self.transcription.to_json(),
             "updates": self.updates.as_str(),
+            "export": {
+                "resolution": self.export.resolution.as_str(),
+                "fps": self.export.fps,
+                "quality": self.export.quality.as_str(),
+            },
         });
         if !self.meta_api_key.is_empty() {
             body["api_key"] = self.meta_api_key.clone().into();
@@ -363,13 +390,24 @@ mod tests {
                     "https://api.meta.ai/v1"
                 );
                 assert_eq!(settings.updates, Channel::Releases, "the default");
-                for (format, hardware, updates) in [
-                    (Format::Landscape, false, Channel::Previews),
-                    (Format::Portrait, true, Channel::Off),
+                let export = ExportSettings {
+                    resolution: Resolution::P2160,
+                    fps: Some(60),
+                    quality: Quality::Higher,
+                };
+                for (format, hardware, updates, export) in [
+                    (Format::Landscape, false, Channel::Previews, export),
+                    (
+                        Format::Portrait,
+                        true,
+                        Channel::Off,
+                        ExportSettings::default(),
+                    ),
                 ] {
                     settings.format = format;
                     settings.hardware_decode = hardware;
                     settings.updates = updates;
+                    settings.export = export;
                     settings.save().unwrap();
                     assert_eq!(Settings::load(), settings, "settings round-trip");
                     let value: serde_json::Value =
@@ -381,6 +419,7 @@ mod tests {
                         [
                             "api_key",
                             "base_url",
+                            "export",
                             "format",
                             "hardware_decode",
                             "transcription",

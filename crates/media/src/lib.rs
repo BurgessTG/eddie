@@ -40,7 +40,8 @@ pub use decode::{
 };
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::{
-    export_canvas, export_timeline, title_look, ExportOptions, TitleLook, LOUDNESS_TARGET,
+    export_canvas, export_timeline, output_canvas, title_look, ExportOptions, ExportSettings,
+    Quality, Resolution, TitleLook, FRAME_RATES, LOUDNESS_TARGET,
 };
 pub use frame::{scaled_height, RawFrame};
 pub use loudness::{measure_mix, Loudness, LoudnessMeter};

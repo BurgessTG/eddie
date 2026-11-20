@@ -16,8 +16,8 @@ use crate::dialogs::{Discard, PendingFileDialog};
 use crate::menus::Menu;
 use crate::theme::c;
 use crate::{
-    console, details, dialogs, gallery, keys, media, menus, monitor, settings, shell, timeline,
-    updates,
+    console, details, dialogs, export, gallery, keys, media, menus, monitor, settings, shell,
+    timeline, updates,
 };
 
 /// One filmstrip still of a bin asset: its source time and picture.
@@ -48,6 +48,7 @@ pub struct Ui {
     pub show_console: bool,
     pub show_settings: bool,
     pub show_shortcuts: bool,
+    pub show_export: bool,
     /// The Settings dialog's typed fields and open list.
     pub settings: settings::State,
     /// The console's input line and height.
@@ -161,6 +162,7 @@ impl Ui {
             show_console: false,
             show_settings: false,
             show_shortcuts: false,
+            show_export: false,
             settings: settings::State::default(),
             console: console::State::default(),
             jump: TextEdit::new(""),
@@ -329,7 +331,9 @@ impl Ui {
     pub fn act(&mut self, action: Action) {
         match action {
             Action::Import => self.pick_import(),
-            Action::Export => self.pick_export(),
+            // Again while the dialog is open: export with what it shows.
+            Action::Export if self.show_export => export::confirm(self),
+            Action::Export => export::open(self),
             Action::NewProject => self.request_discard(Discard::New),
             Action::OpenProject => self.request_discard(Discard::Open),
             Action::SaveProject => self.save_project(false, None),
@@ -338,10 +342,12 @@ impl Ui {
             Action::OpenSettings if self.show_settings => settings::close(self),
             Action::OpenSettings => {
                 self.show_shortcuts = false;
+                export::close(self);
                 self.show_settings = true;
             }
             Action::ShowShortcuts => {
                 settings::close(self);
+                export::close(self);
                 self.show_shortcuts = !self.show_shortcuts;
             }
             // Esc closes what is open before it deselects.
@@ -359,6 +365,7 @@ impl Ui {
             Action::Deselect if self.settings.models.is_some() => self.settings.models = None,
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
             Action::Deselect if self.show_settings => settings::close(self),
+            Action::Deselect if self.show_export => export::close(self),
             _ => {
                 self.editor.perform(action);
             }
@@ -505,10 +512,10 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     };
     // Under a dialog the editor is inert to keys as it is to the pointer.
-    let dialog = ui.show_settings || ui.show_shortcuts;
+    let dialog = ui.show_settings || ui.show_shortcuts || ui.show_export;
     let closes = matches!(
         action,
-        Action::Deselect | Action::OpenSettings | Action::ShowShortcuts
+        Action::Deselect | Action::OpenSettings | Action::ShowShortcuts | Action::Export
     );
     if !dialog || closes {
         ui.act(action);
@@ -565,6 +572,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     gallery::overlays(ui, cx, &mut overlays);
     menus::overlay(ui, &mut overlays);
     settings::overlays(ui, &mut overlays);
+    export::overlays(ui, &mut overlays);
     keys::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);

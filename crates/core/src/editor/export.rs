@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, TryRecvError};
 use std::thread;
 
-use openreel_media::MediaInfo;
+use openreel_media::{ExportSettings, MediaInfo};
 
 use crate::Editor;
 
@@ -58,7 +58,12 @@ impl Editor {
         exported
     }
 
+    /// Export with the settings the Export dialog last left.
     pub fn start_export(&mut self, output: PathBuf) {
+        self.start_export_with(output, self.settings.export);
+    }
+
+    pub fn start_export_with(&mut self, output: PathBuf, settings: ExportSettings) {
         if self.export_rx.is_some() {
             self.status = "An export is already running.".to_owned();
             return;
@@ -75,6 +80,7 @@ impl Editor {
         let options = openreel_media::ExportOptions {
             normalize_loudness: true,
             speech: self.speech_map(),
+            settings,
         };
         let infos: HashMap<String, MediaInfo> = self
             .assets
@@ -124,5 +130,18 @@ impl Editor {
 
     pub fn exporting(&self) -> bool {
         self.export_rx.is_some()
+    }
+
+    /// The picture size and frame rate an export with `settings` makes.
+    pub fn export_output(&self, settings: ExportSettings) -> ((u32, u32), f64) {
+        let size = openreel_media::output_canvas(
+            &self.timeline,
+            |path| {
+                self.asset(path)
+                    .map(|asset| (asset.info.width, asset.info.height))
+            },
+            settings.resolution,
+        );
+        (size, settings.fps.map_or(self.timeline.fps, f64::from))
     }
 }

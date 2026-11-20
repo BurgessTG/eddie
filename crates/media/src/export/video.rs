@@ -43,6 +43,12 @@ impl VideoClock {
         let ticks = (time.max(0.0) * self.tick_rate as f64).round() as i64;
         ticks / self.frame_ticks + i64::from(ticks % self.frame_ticks != 0)
     }
+
+    /// When output frame `frame` starts. The output rate need not be the
+    /// timeline's.
+    pub(super) fn time(self, frame: i64) -> f64 {
+        frame as f64 / f64::from(self.rate)
+    }
 }
 
 /// Sample only where visibility can change, not once per output frame. The
@@ -65,7 +71,7 @@ pub(super) fn visible_frames(
         if start >= end {
             continue;
         }
-        let time = pair[0].max(start as f64 / timeline.fps);
+        let time = pair[0].max(clock.time(start));
         if let Some(clip) = active(timeline, time) {
             let ranges = spans.entry(clip.id).or_default();
             if let Some(last) = ranges.last_mut().filter(|last| last.1 == start) {
@@ -150,7 +156,7 @@ pub(super) fn plan_video<'a>(
             // In whole ticks from the clip's first frame, so a source frame
             // on a timeline frame stays on it.
             let start = clock.boundary(clip.start);
-            let source_in = clip.source_at(start as f64 / timeline.fps);
+            let source_in = clip.source_at(clock.time(start));
             (source_in * tick_rate as f64).round() as i64 - start * frame_ticks
         } else {
             ((clip.source_in - clip.start * clip.speed) * tick_rate as f64).round() as i64
@@ -416,7 +422,6 @@ fn picture(
 
 /// The FFmpeg command that renders one batch as raw yuv420p on `pipe:1`.
 pub(super) fn batch_command(
-    timeline: &Timeline,
     infos: &HashMap<String, MediaInfo>,
     canvas: (u32, u32),
     clock: VideoClock,
@@ -457,8 +462,8 @@ pub(super) fn batch_command(
             })
             .collect();
         let first = ranges.iter().map(|range| range.0).min().unwrap();
-        let source_time = (start + first) as f64 / timeline.fps * layer.speed
-            + layer.source_offset as f64 / tick_rate as f64;
+        let source_time =
+            clock.time(start + first) * layer.speed + layer.source_offset as f64 / tick_rate as f64;
         let last_seek = infos
             .get(layer.source)
             .map(|info| (info.duration - 1.0).max(0.0))
@@ -582,6 +587,7 @@ pub(super) fn encode_segment(
     titles: &str,
     canvas: (u32, u32),
     rate: ffmpeg_next::Rational,
+    crf: u8,
     count: i64,
     threads: usize,
     path: &Path,
@@ -621,7 +627,7 @@ pub(super) fn encode_segment(
             "-preset",
             "veryfast",
             "-crf",
-            "20",
+            &crf.to_string(),
             "-f",
             "mp4",
         ])

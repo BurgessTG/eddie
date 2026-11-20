@@ -5,6 +5,7 @@ mod app;
 mod console;
 mod details;
 mod dialogs;
+mod export;
 #[cfg(target_os = "macos")]
 mod finder;
 mod gallery;

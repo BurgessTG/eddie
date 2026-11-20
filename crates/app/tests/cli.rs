@@ -307,6 +307,61 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     assert_eq!(code, 0, "{exported}");
     let length = duration(&dir.0.join("out.mp4"));
     assert!((length - 3.0).abs() < 0.1, "exported {length} s");
+    assert_eq!(
+        (&exported["size"], &exported["fps"], &exported["quality"]),
+        (
+            &serde_json::json!([320, 180]),
+            &30.0.into(),
+            &"recommended".into()
+        ),
+        "the source's size at the project's rate: {exported}"
+    );
+
+    // The flags choose the size, rate and quality of this export only.
+    let (code, exported) = dir.eddie(&[
+        "export",
+        "p.eddie",
+        "big.mp4",
+        "--resolution",
+        "720p",
+        "--fps",
+        "60",
+        "--quality",
+        "higher",
+    ]);
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(
+        (&exported["size"], &exported["fps"], &exported["quality"]),
+        (
+            &serde_json::json!([1280, 720]),
+            &60.0.into(),
+            &"higher".into()
+        ),
+        "{exported}"
+    );
+    let probed = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v", "-show_entries"])
+        .args(["stream=width,height,r_frame_rate", "-of", "csv=p=0"])
+        .arg(dir.0.join("big.mp4"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&probed.stdout).trim(),
+        "1280,720,60/1"
+    );
+    for (flag, value) in [
+        ("--resolution", "8k"),
+        ("--fps", "29"),
+        ("--quality", "best"),
+    ] {
+        let (code, refused) = dir.eddie(&["export", "p.eddie", "x.mp4", flag, value]);
+        assert_eq!(code, 1, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(value),
+            "{refused}"
+        );
+    }
+    assert!(!dir.0.join("x.mp4").exists());
 
     // An export never replaces the project or the media it is made from.
     let source = std::fs::read(&talk).unwrap();

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
 use openreel_engine::{Background, ClipKind, Format, Timeline, TitleStyle, Transform};
-use openreel_media::{export_timeline, probe, ExportOptions};
+use openreel_media::{export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2204,4 +2204,131 @@ fn speed_keeps_the_pitch_and_preview_matches_export() {
     }
     eprintln!("speed: worst preview-export window {worst:.2} dB");
     assert!(worst < 0.5, "preview and export differ by {worst:.2} dB");
+}
+
+fn with(settings: ExportSettings) -> ExportOptions {
+    ExportOptions {
+        settings,
+        ..ExportOptions::default()
+    }
+}
+
+#[test]
+fn another_frame_rate_samples_the_source_at_that_rate() {
+    let fixture = Fixture::new();
+    let source = fixture.indices("indices60.mp4", "60");
+    let original = frames(Path::new(&source));
+    // A 30 fps timeline showing 0.2 s from source frame 6.
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &source, 0, 0.0, 0.2, 0.1);
+    // Output frame n shows the source frame covering 0.1 + n / rate.
+    for (fps, shown) in [
+        (60, (6..18).collect::<Vec<_>>()),
+        (24, vec![6, 8, 11, 13, 16]),
+    ] {
+        let settings = ExportSettings {
+            fps: Some(fps),
+            ..ExportSettings::default()
+        };
+        let name = format!("rate{fps}.mp4");
+        let exported = fixture.export_with(&name, &timeline, &with(settings));
+        assert_eq!(
+            probe(exported.to_str().unwrap()).unwrap().fps,
+            f64::from(fps)
+        );
+        let expected: Vec<&[u8]> = shown.iter().map(|&n| original[n].as_slice()).collect();
+        assert_frames(&name, &frames(&exported), &expected);
+    }
+}
+
+/// The share of the frame white text covers: left, top, right and bottom
+/// as fractions of its width and height.
+fn text_box(frame: &[u8], width: usize) -> [f64; 4] {
+    let height = frame.len() / 3 / width;
+    let (mut left, mut top, mut right, mut bottom) = (width, height, 0, 0);
+    for (index, pixel) in frame.as_chunks::<3>().0.iter().enumerate() {
+        if pixel.iter().all(|&value| value > 200) {
+            let (x, y) = (index % width, index / width);
+            (left, top) = (left.min(x), top.min(y));
+            (right, bottom) = (right.max(x + 1), bottom.max(y + 1));
+        }
+    }
+    assert!(right > left, "no text drawn");
+    let (w, h) = (width as f64, height as f64);
+    [
+        left as f64 / w,
+        top as f64 / h,
+        right as f64 / w,
+        bottom as f64 / h,
+    ]
+}
+
+#[test]
+fn a_larger_resolution_keeps_pictures_and_titles_in_place() {
+    let fixture = Fixture::new();
+    let quadrants = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=10:d=1",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        None,
+    );
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let mut timeline = Timeline::new(10.0).with_format(Format::Landscape);
+    video(&mut timeline, &quadrants, 0, 0.0, 0.3, 0.0);
+    video(&mut timeline, &blue, 0, 0.3, 0.3, 0.0);
+    let title = timeline.add_clip("Eddie", ClipKind::Title, 0, 0.3, 0.3, 0.0);
+    timeline.clip_mut(title).unwrap().title_style = TitleStyle::LowerThird;
+
+    let auto = fixture.export("auto.mp4", &timeline);
+    let settings = ExportSettings {
+        resolution: Resolution::P720,
+        ..ExportSettings::default()
+    };
+    let large = fixture.export_with("720p.mp4", &timeline, &with(settings));
+    let info = probe(large.to_str().unwrap()).unwrap();
+    assert_eq!((info.width, info.height), (1280, 720));
+
+    // The picture fills the larger frame: each quadrant four times as far in.
+    let large_frames = frames(&large);
+    let points = [(320, 180), (960, 180), (320, 540), (960, 540)];
+    assert_colors(
+        "720p",
+        &colors_at(&large_frames[1], 1280, &points),
+        &[TL, TR, BL, BR],
+    );
+    // The title covers the same share of the frame at both sizes.
+    let small = text_box(&frames(&auto)[4], 320);
+    let big = text_box(&large_frames[4], 1280);
+    for (side, (a, b)) in small.iter().zip(big).enumerate() {
+        assert!(
+            (a - b).abs() < 0.02,
+            "side {side}: {small:?} against {big:?}"
+        );
+    }
+}
+
+#[test]
+fn higher_quality_keeps_more_in_a_larger_file() {
+    let fixture = Fixture::new();
+    let busy = fixture.video(
+        "busy.mp4",
+        "testsrc2=s=320x180:r=30:d=1",
+        "noise=alls=30:allf=t",
+        None,
+    );
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &busy, 0, 0.0, 1.0, 0.0);
+    let sizes: Vec<u64> = Quality::ALL
+        .into_iter()
+        .map(|quality| {
+            let settings = ExportSettings {
+                quality,
+                ..ExportSettings::default()
+            };
+            let name = format!("{}.mp4", quality.as_str());
+            let exported = fixture.export_with(&name, &timeline, &with(settings));
+            std::fs::metadata(exported).unwrap().len()
+        })
+        .collect();
+    assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]), "{sizes:?}");
 }

@@ -18,6 +18,8 @@ pub enum Job {
     Export {
         started: Instant,
         reported: f64,
+        /// The picture size, frame rate and quality it renders, for the reply.
+        made: Value,
     },
     Render(Receiver<Result<Value, String>>),
     Transcribe {
@@ -81,7 +83,11 @@ impl Job {
                 }
             }
             Job::Import(media) => imported(app, media),
-            Job::Export { started, reported } => exported(app, *started, reported, notes),
+            Job::Export {
+                started,
+                reported,
+                made,
+            } => exported(app, *started, reported, made, notes),
             Job::Render(rx) => match rx.try_recv() {
                 Ok(result) => Some(result.map(Outcome::read)),
                 Err(TryRecvError::Empty) => None,
@@ -128,7 +134,13 @@ fn imported(app: &Editor, media: &[PathBuf]) -> Polled {
 }
 
 /// The export's progress in tenths, then its file or its failure.
-fn exported(app: &Editor, started: Instant, reported: &mut f64, notes: &mut Vec<Note>) -> Polled {
+fn exported(
+    app: &Editor,
+    started: Instant,
+    reported: &mut f64,
+    made: &Value,
+    notes: &mut Vec<Note>,
+) -> Polled {
     if app.exporting() {
         let progress = app.export_progress.unwrap_or(0.0);
         if progress >= *reported + 0.1 {
@@ -138,10 +150,12 @@ fn exported(app: &Editor, started: Instant, reported: &mut f64, notes: &mut Vec<
         return None;
     }
     Some(match &app.exported {
-        Some((file, _)) => Ok(Outcome::read(json!({
-            "output": file.to_string_lossy(),
-            "seconds": started.elapsed().as_secs_f64(),
-        }))),
+        Some((file, _)) => {
+            let mut reply = made.clone();
+            reply["output"] = json!(file.to_string_lossy());
+            reply["seconds"] = json!(started.elapsed().as_secs_f64());
+            Ok(Outcome::read(reply))
+        }
         None => Err(app
             .export_failed
             .clone()
