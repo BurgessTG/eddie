@@ -15,11 +15,13 @@ use openreel_engine::{Clip, ClipKind, Timeline};
 
 use crate::{MediaInfo, MediaResult};
 use audio::encode_audio;
+use frames::{title_frames, VideoClock};
 use scratch::ScratchDir;
 use titles::Titles;
-use video::{batch_command, encode_segment, plan_video, visible_frames, VideoClock};
+use video::{batch_command, encode_segment, plan_video};
 
 mod audio;
+mod frames;
 mod picture;
 mod scratch;
 mod settings;
@@ -61,7 +63,7 @@ fn export_error(stderr: &str) -> String {
 /// Canvas for the project format: its shape, with a short side as long as
 /// the largest video source's (at most 1080), or 720 without one.
 /// `Format::Original` takes the shape of the picture that starts first
-/// (the lower lane on a tie), or 16:9. `size` gives a source's displayed
+/// (lane 0 first on a tie), or 16:9. `size` gives a source's displayed
 /// size. Every clip fits this canvas by its transform; the program monitor
 /// uses the same canvas, so pictures and titles preview as exported.
 pub fn export_canvas(timeline: &Timeline, size: impl Fn(&str) -> Option<(u32, u32)>) -> (u32, u32) {
@@ -130,7 +132,7 @@ pub fn export_timeline(
     }
     let clock = VideoClock::new(rate);
     let frame_count = clock.boundary(total);
-    let visible_title = visible_frames(timeline, clock, Timeline::active_title);
+    let visible_title = title_frames(timeline, clock);
 
     // Keep all source-backed videos here: hidden pictures still supply audio.
     let video_clips: Vec<&Clip> = timeline
@@ -173,7 +175,14 @@ pub fn export_timeline(
             .entry(source)
             .or_insert_with(|| source::read(source));
     }
-    let (layers, transitions, batches) = plan_video(timeline, &sources, clock, frame_count);
+    let (layers, transitions, batches) = plan_video(
+        timeline,
+        &sources,
+        infos,
+        (canvas_w, canvas_h),
+        clock,
+        frame_count,
+    );
     // Each batch decodes up to four inputs on slice threads and encodes on
     // its own x264, with threads from the CPU budget (cgroup quota included)
     // rather than x264's per-core default. On four CPUs one batch already

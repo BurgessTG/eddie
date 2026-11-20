@@ -15,6 +15,7 @@ fn asset(path: &str, duration: f64, video: bool) -> BinAsset {
             has_video: video,
             has_audio: true,
             photo: false,
+            alpha: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

@@ -882,7 +882,8 @@ fn same_track_ties_use_insertion_order_not_start_order() {
     );
 }
 
-fn opacity_over_black(opacity: f32) {
+/// Red at `opacity` on lane 0 over blue on lane 1: the blue shows through.
+fn opacity_over_another_lane(opacity: f32) {
     let fixture = Fixture::new();
     let red = fixture.color("red.mp4", "red", None);
     let blue = fixture.color("blue.mp4", "blue", None);
@@ -892,24 +893,105 @@ fn opacity_over_black(opacity: f32) {
     video(&mut timeline, &blue, 1, 0.0, 0.3, 0.0);
     let expected: Vec<_> = frames(Path::new(&red))[0]
         .iter()
-        .map(|&value| (value as f32 * opacity).round() as u8)
+        .zip(&frames(Path::new(&blue))[0])
+        .map(|(&red, &blue)| (red as f32 * opacity + blue as f32 * (1.0 - opacity)).round() as u8)
         .collect();
     let exported = fixture.export("opacity.mp4", &timeline);
     assert_frames(
-        &format!("opacity={opacity} over black"),
+        &format!("opacity={opacity} over blue"),
         &frames(&exported),
         &[expected.as_slice(); 3],
     );
 }
 
 #[test]
-fn zero_opacity_video_does_not_reveal_another_lane() {
-    opacity_over_black(0.0);
+fn zero_opacity_video_shows_the_lane_under_it() {
+    opacity_over_another_lane(0.0);
 }
 
 #[test]
-fn partial_opacity_video_fades_against_black() {
-    opacity_over_black(0.5);
+fn partial_opacity_video_shows_the_lane_under_it_through_it() {
+    opacity_over_another_lane(0.5);
+}
+
+const RED: [u8; 3] = [255, 0, 0];
+const GREEN: [u8; 3] = [0, 128, 0];
+const BLUE: [u8; 3] = [0, 0, 255];
+
+/// Each lane draws over the lanes under it: a half-size red picture on
+/// lane 1 over blue on lane 2, and over both a PNG whose left 60% is
+/// green and the rest clear. The PNG covers part of the red picture; the
+/// red and blue show through where it is clear.
+#[test]
+fn picture_in_picture_draws_each_lane_over_the_ones_under_it() {
+    let fixture = Fixture::new();
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let red = fixture.color("red.mp4", "red", None);
+    let png = fixture.0.join("half.png");
+    run(Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("color=c=green:s=320x180,format=rgba,geq=r=0:g=128:b=0:a='255*lt(X,192)'")
+        .args(["-frames:v", "1"])
+        .arg(&png));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &blue, 2, 0.0, 0.3, 0.0);
+    let pip = video(&mut timeline, &red, 1, 0.0, 0.3, 0.0);
+    timeline.clip_mut(pip).unwrap().transform = Transform {
+        scale: 0.5,
+        x: 0.25,
+        ..Transform::default()
+    };
+    let sticker = video(&mut timeline, png.to_str().unwrap(), 0, 0.0, 0.3, 0.0);
+    timeline.clip_mut(sticker).unwrap().photo = true;
+    let exported = fixture.export("pip.mp4", &timeline);
+    // The red picture fills x 160-320, y 45-135.
+    let colors = colors_at(
+        &frames(&exported)[1],
+        320,
+        &[(80, 90), (176, 90), (240, 90), (240, 20), (280, 160)],
+    );
+    assert_colors("lanes", &colors, &[GREEN, GREEN, RED, BLUE, BLUE]);
+}
+
+/// Between two half-size pictures on lane 0 over blue on lane 1, halfway
+/// through each kind: a wipe moves only the pictures, so the blue around
+/// them stays; a mix crossfades whole frames, which here differ only in
+/// the picture; a dip veils everything under the lane too.
+#[test]
+fn a_transition_over_another_lane_keeps_or_veils_what_is_under_it() {
+    let fixture = Fixture::new();
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let red = fixture.color("red.mp4", "red", None);
+    let green = fixture.color("green.mp4", "green", None);
+    let half = |kind: TransitionKind| {
+        let mut timeline = Timeline::new(10.0);
+        video(&mut timeline, &blue, 1, 0.0, 2.0, 0.0);
+        let a = video(&mut timeline, &red, 0, 0.0, 1.0, 0.0);
+        let b = video(&mut timeline, &green, 0, 1.0, 1.0, 1.0);
+        for id in [a, b] {
+            timeline.clip_mut(id).unwrap().transform.scale = 0.5;
+        }
+        timeline.clip_mut(b).unwrap().transition = Some(Transition::new(kind, 1.0));
+        let exported = fixture.export(&format!("{}.mp4", kind.as_str()), &timeline);
+        // The pictures fill x 80-240, y 45-135; frame 10 is the cut.
+        colors_at(
+            &frames(&exported)[10],
+            320,
+            &[(100, 90), (220, 90), (20, 20), (300, 160)],
+        )
+    };
+    let mid = [127, 64, 0];
+    assert_colors(
+        "wipe",
+        &half(TransitionKind::WipeLeft),
+        &[RED, GREEN, BLUE, BLUE],
+    );
+    assert_colors("mix", &half(TransitionKind::Mix), &[mid, mid, BLUE, BLUE]);
+    assert_colors(
+        "dip",
+        &half(TransitionKind::DipBlack),
+        &[BLACK, BLACK, BLACK, BLACK],
+    );
 }
 
 /// Yellow, green, red and dark blue quadrants (top-left, top-right,
@@ -1414,12 +1496,13 @@ fn occluded_video_resumes_at_advanced_source_time() {
     let source = fixture.indices("indices.mp4", "10");
     let original = frames(Path::new(&source));
     let black = vec![0; original[0].len()];
+    let cover = fixture.video("black.mp4", "color=c=black:s=64x36:r=10:d=1", "null", None);
     let mut timeline = Timeline::new(10.0);
     video(&mut timeline, &source, 1, 0.0, 0.6, 0.0);
-    timeline.add_clip("source-less picture", ClipKind::Video, 0, 0.2, 0.2, 0.0);
+    video(&mut timeline, &cover, 0, 0.2, 0.2, 0.0);
     let exported = fixture.export("occlusion.mp4", &timeline);
     assert_frames(
-        "source-less winner and resumed source",
+        "covered, then resumed",
         &frames(&exported),
         &[
             &original[0],
@@ -1742,6 +1825,7 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
                 clean_voice: false,
                 smooth_fades: smooth,
                 speed: 1.0,
+                crossfade: (0.0, 0.0),
             },
         )]);
         let mut preview = Vec::new();
@@ -1762,6 +1846,106 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
             (preview_mid - want).abs() < 0.02,
             "preview {preview_mid} vs {want}"
         );
+    }
+}
+
+/// Under a 1 s mix centred on the cut at 2 s, the 440 Hz clip plays on to
+/// 2.5 s while it fades out and the 880 Hz clip starts at 1.5 s, half a
+/// second before its in point, fading in: equal power, so each is at
+/// sin(pi/4) of full level at the cut and sin(pi/8) a quarter second
+/// either side of it. Preview and export agree.
+#[test]
+fn sound_crossfades_under_a_transition_in_preview_and_export() {
+    let fixture = Fixture::new();
+    let low = fixture.color("low.mp4", "red", Some(440));
+    let high = fixture.color("high.mp4", "blue", Some(880));
+    let mut timeline = Timeline::new(30.0);
+    let from = video(&mut timeline, &low, 0, 0.0, 2.0, 0.0);
+    let to = video(&mut timeline, &high, 0, 2.0, 1.0, 1.0);
+    timeline.clip_mut(to).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 1.0));
+    let exported = fixture.export("crossfade.mp4", &timeline);
+
+    let crossfades = timeline.crossfades();
+    let mut engine = openreel_media::AudioEngine::manual();
+    engine.seek(0.0);
+    engine.set_limit(3.0);
+    engine.set_running(true);
+    let voices: Vec<_> = [from, to]
+        .iter()
+        .map(|&id| {
+            let cross = crossfades[&id];
+            let clip = timeline.clip(id).unwrap().sounding(cross);
+            let segment = openreel_media::AudioSegment {
+                path: clip.source.clone().unwrap(),
+                start: clip.start,
+                duration: clip.duration,
+                source_in: clip.source_in,
+                volume: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                duck: Vec::new(),
+                clean_voice: false,
+                smooth_fades: false,
+                speed: 1.0,
+                crossfade: (cross.fade_in, cross.fade_out),
+            };
+            (id, segment)
+        })
+        .collect();
+    engine.set_voices(&voices);
+    let preview_path = fixture.0.join("preview.wav");
+    let mut preview = Vec::new();
+    while preview.len() < 3 * 48_000 {
+        let block = engine.render(1024);
+        assert!(!block.is_empty(), "preview clock stopped");
+        preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
+    }
+    let raw = fixture.0.join("preview.f32");
+    std::fs::write(
+        &raw,
+        preview
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    run(Command::new("ffmpeg").args([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "f32le",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-i",
+        raw.to_str().unwrap(),
+        preview_path.to_str().unwrap(),
+    ]));
+
+    let quarter = (std::f64::consts::PI / 8.0).sin();
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    // Windows of 18 cycles of 440 Hz (and 36 of 880), so neither tone
+    // leaks into the other's measure.
+    let around = |centre: f64| (centre - 9.0 / 440.0, centre + 9.0 / 440.0);
+    for (name, path) in [("export", &exported), ("preview", &preview_path)] {
+        let level = |hz, (from, to)| tone_window(path, hz, from, to);
+        let (low_full, high_full) = (level(440.0, (0.5, 1.0)), level(880.0, (2.6, 2.9)));
+        for (hz, full, at, want) in [
+            (440.0, low_full, 2.0, half),
+            (880.0, high_full, 2.0, half),
+            (440.0, low_full, 2.25, quarter),
+            (880.0, high_full, 1.75, quarter),
+            (440.0, low_full, 2.75, 0.0),
+            (880.0, high_full, 1.25, 0.0),
+        ] {
+            let got = level(hz, around(at)) / full;
+            assert!(
+                (got - want).abs() < 0.02,
+                "{name}: {hz} Hz at {at} s is {got:.3} of full, want {want:.3}"
+            );
+        }
     }
 }
 
@@ -1821,6 +2005,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             clean_voice: true,
             smooth_fades: false,
             speed: 1.0,
+            crossfade: (0.0, 0.0),
         },
     )]);
     let mut preview = Vec::new();
@@ -2397,6 +2582,7 @@ fn speed_keeps_the_pitch_and_preview_matches_export() {
                 clean_voice: false,
                 smooth_fades: false,
                 speed,
+                crossfade: (0.0, 0.0),
             },
         ));
     }

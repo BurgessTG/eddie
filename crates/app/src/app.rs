@@ -31,10 +31,8 @@ pub struct Ui {
     pub editor: Editor,
     /// Shows, focuses and wakes the window; `None` in tests.
     handle: Option<AppHandle<Ui>>,
-    /// The program monitor's picture.
-    pub monitor: monitor::Slot,
-    /// The picture a transition at the playhead goes to.
-    pub incoming: monitor::Slot,
+    /// The pictures the program monitor holds, one pair per video lane.
+    pub pictures: monitor::Pictures,
     /// The clip whose picture a drag on the monitor moves, and where it was.
     pub monitor_drag: Option<(ClipId, Transform)>,
     /// Where the title a drag on the monitor moves was.
@@ -136,7 +134,7 @@ impl Ui {
         last_input: fn() -> Option<Instant>,
         editor: impl FnOnce(Box<dyn PreviewSink>) -> Editor,
     ) -> Self {
-        let (monitor, incoming) = (monitor::Slot::default(), monitor::Slot::default());
+        let pictures = monitor::Pictures::default();
         let wake = handle.clone();
         let gallery = gallery::State::new(move || {
             if let Some(handle) = &wake {
@@ -144,14 +142,12 @@ impl Ui {
             }
         });
         let editor = editor(Box::new(monitor::Sink {
-            program: monitor.clone(),
-            incoming: incoming.clone(),
+            pictures: pictures.clone(),
         }));
         Self {
             editor,
             handle,
-            monitor,
-            incoming,
+            pictures,
             monitor_drag: None,
             title_drag: None,
             thumbs: HashMap::new(),
@@ -200,18 +196,9 @@ impl Ui {
         while started.elapsed().as_secs() < 120 && quiet < 20 {
             self.pump(started.elapsed().as_secs_f64());
             let waiting = self.editor.importing()
-                || self
-                    .editor
-                    .timeline
-                    .program_video(self.editor.playhead)
-                    .is_some()
-                    && !self.editor.preview_is_current()
-                || self
-                    .editor
-                    .timeline
-                    .transition_at(self.editor.playhead)
-                    .is_some()
-                    && self.editor.transition_shown().is_none();
+                || self.editor.program_layers().iter().any(|layer| {
+                    !layer.shown || layer.transition.is_some() && !layer.incoming_shown
+                });
             quiet = if waiting { 0 } else { quiet + 1 };
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -228,13 +215,13 @@ impl Ui {
         self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
         // A frame shown this pump with the last clip's look is redrawn.
-        let (timeline, playhead) = (&self.editor.timeline, self.editor.playhead);
-        self.monitor
-            .want(monitor::look(timeline.program_video(playhead)));
-        let incoming = timeline
-            .transition_at(playhead)
-            .and_then(|span| timeline.clip(span.to));
-        self.incoming.want(monitor::look(incoming));
+        let timeline = &self.editor.timeline;
+        for layer in self.editor.program_layers() {
+            let slots = self.pictures.lane(layer.lane);
+            slots.program.want(monitor::look(timeline.clip(layer.clip)));
+            let incoming = layer.transition.and_then(|span| timeline.clip(span.to));
+            slots.incoming.want(monitor::look(incoming));
+        }
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported

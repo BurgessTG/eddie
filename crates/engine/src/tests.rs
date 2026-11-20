@@ -987,6 +987,27 @@ fn copies_keep_their_pair_linked_and_take_a_free_lane() {
 }
 
 #[test]
+fn an_overlay_goes_on_the_lane_right_above_the_pictures_it_overlaps() {
+    let mut tl = Timeline::empty_project();
+    let base = tl.add_media_clip("base", ClipKind::Video, 0, 0.0, 4.0, 0.0, "/m/a.mp4");
+    // Nothing from 5 to 6: the top lane.
+    assert_eq!(tl.overlay_lane(5.0, 6.0), 0);
+    assert_eq!(tl.lanes.video, 1);
+    // Lane 0 is taken from 1 to 3, so a new top lane is made and the base
+    // moves under it.
+    assert_eq!(tl.overlay_lane(1.0, 3.0), 0);
+    assert_eq!((tl.lanes.video, tl.clip(base).unwrap().track), (2, 1));
+    // Lane 0 is now free there and over the base: no lane is added.
+    assert_eq!(tl.overlay_lane(1.0, 3.0), 0);
+    assert_eq!(tl.lanes.video, 2);
+    // A clip on lane 0 elsewhere does not count; one on the span does.
+    tl.add_media_clip("late", ClipKind::Video, 0, 8.0, 1.0, 0.0, "/m/b.mp4");
+    assert_eq!(tl.overlay_lane(1.0, 3.0), 0);
+    assert_eq!(tl.overlay_lane(3.5, 8.5), 0);
+    assert_eq!(tl.lanes.video, 3, "the late clip is on lane 0 from 8 s");
+}
+
+#[test]
 fn ripple_delete_closes_the_gap_on_every_lane_that_has_room() {
     let mut tl = Timeline::empty_project();
     let media = |tl: &mut Timeline, kind, track, start: f64, end: f64| {
@@ -1132,7 +1153,14 @@ fn a_transition_sits_on_the_cut_into_its_clip_and_takes_at_most_half_of_each_sid
     assert!((span.progress(3.76) - 0.25).abs() < 1e-9);
 
     // Past the cut the program still plays the clip before, to the end.
-    let program = |tl: &Timeline, at: f64| tl.program_video(at).map(|clip| clip.id);
+    let shown = |tl: &Timeline, at: f64| {
+        let spans = tl.transitions();
+        let opaque = |_: &Clip| true;
+        tl.video_stack(&spans, at, &opaque)
+            .first()
+            .map(|picture| (picture.clip.id, picture.transition.map(|span| span.to)))
+    };
+    let program = |tl: &Timeline, at: f64| shown(tl, at).map(|(clip, _)| clip);
     assert_eq!(tl.active_video(4.2).map(|clip| clip.id), Some(b));
     assert_eq!(program(&tl, 4.2), Some(a));
     assert_eq!(program(&tl, 3.4), Some(a));
@@ -1142,11 +1170,10 @@ fn a_transition_sits_on_the_cut_into_its_clip_and_takes_at_most_half_of_each_sid
         "the end is the next clip's own"
     );
 
-    // A lower lane covering part of it hides that part.
+    // A lane over it whose picture fills the frame hides that part.
     let cover = tl.add_media_clip("c", ClipKind::Video, 0, 3.6, 0.3, 0.0, "/m/c.mp4");
-    assert_eq!(tl.transition_at(3.7), None);
-    assert_eq!(program(&tl, 3.7), Some(cover));
-    assert_eq!(tl.transition_at(3.55).map(|span| span.to), Some(b));
+    assert_eq!(shown(&tl, 3.7), Some((cover, None)));
+    assert_eq!(shown(&tl, 3.55), Some((a, Some(b))));
     tl.remove_clip(cover);
 
     // Each side takes at most half its clip.
@@ -1193,6 +1220,117 @@ fn a_transition_sits_on_the_cut_into_its_clip_and_takes_at_most_half_of_each_sid
     );
 }
 
+#[test]
+fn lanes_stack_and_only_an_opaque_picture_filling_the_frame_hides_those_under_it() {
+    let hd = (1920.0, 1080.0);
+    let mut tl = Timeline::new(30.0);
+    let base = tl.add_media_clip("base", ClipKind::Video, 2, 0.0, 10.0, 0.0, "/m/base.mp4");
+    let middle = tl.add_media_clip("mid", ClipKind::Video, 1, 0.0, 10.0, 0.0, "/m/mid.mp4");
+    let top = tl.add_media_clip("top", ClipKind::Video, 0, 2.0, 2.0, 0.0, "/m/top.mp4");
+    // Every file is 16:9 and opaque.
+    let hides = |clip: &Clip| hides_below(clip, hd, hd, false);
+    let stack = |tl: &Timeline, at: f64| -> Vec<ClipId> {
+        tl.video_stack(&tl.transitions(), at, &hides)
+            .iter()
+            .map(|picture| picture.clip.id)
+            .collect()
+    };
+    assert_eq!(
+        stack(&tl, 1.0),
+        vec![middle],
+        "the middle lane fills the frame"
+    );
+    assert_eq!(stack(&tl, 3.0), vec![top]);
+
+    // Picture in picture: scaled down, the middle lane shows around it.
+    tl.clip_mut(top).unwrap().transform.scale = 0.3;
+    assert_eq!(stack(&tl, 3.0), vec![middle, top]);
+    // Faded, it shows through: lanes stack bottom first.
+    tl.clip_mut(middle).unwrap().opacity = 0.5;
+    assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
+    // Over its own blurred copy a small picture fills the frame again.
+    tl.clip_mut(top).unwrap().background = Background::Blur;
+    assert_eq!(stack(&tl, 3.0), vec![top]);
+    // A file with transparency never hides what is under it.
+    let pillarboxed = (1080.0, 1920.0);
+    let middle_clip = tl.clip(middle).unwrap().clone();
+    assert!(!hides_below(&middle_clip, hd, hd, false));
+    tl.clip_mut(middle).unwrap().opacity = 1.0;
+    let middle_clip = tl.clip(middle).unwrap();
+    assert!(hides_below(middle_clip, hd, hd, false));
+    assert!(!hides_below(middle_clip, hd, hd, true));
+    assert!(!hides_below(middle_clip, hd, pillarboxed, false));
+
+    // Through a transition a lane hides only when both its clips do.
+    let mut tl = Timeline::new(30.0);
+    tl.add_media_clip("base", ClipKind::Video, 1, 0.0, 10.0, 0.0, "/m/base.mp4");
+    let a = tl.add_media_clip("a", ClipKind::Video, 0, 0.0, 4.0, 0.0, "/m/a.mp4");
+    let b = tl.add_media_clip("b", ClipKind::Video, 0, 4.0, 4.0, 0.0, "/m/b.mp4");
+    tl.clip_mut(b).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 1.0));
+    tl.clip_mut(b).unwrap().transform.scale = 0.5;
+    let spans = tl.transitions();
+    let lanes = |at: f64| -> Vec<(usize, ClipId, bool)> {
+        tl.video_stack(&spans, at, &hides)
+            .iter()
+            .map(|p| (p.lane, p.clip.id, p.transition.is_some()))
+            .collect()
+    };
+    assert_eq!(lanes(3.0), vec![(0, a, false)]);
+    assert_eq!(lanes(3.8)[1], (0, a, true));
+    assert_eq!(lanes(4.2).len(), 2, "the base shows around b");
+    assert_eq!(lanes(4.6)[1], (0, b, false));
+}
+
+#[test]
+fn sound_crosses_a_transition_from_the_clip_before_into_the_clip_after() {
+    let mut tl = Timeline::new(30.0);
+    let a = tl.add_media_clip("a", ClipKind::Video, 0, 0.0, 4.0, 1.0, "/m/a.mp4");
+    // Its file has only 0.2 s of sound before its in point.
+    let b = tl.add_media_clip("b", ClipKind::Video, 0, 4.0, 2.0, 0.2, "/m/b.mp4");
+    tl.clip_mut(b).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 1.0));
+    let cross = tl.crossfades();
+    assert_eq!(
+        cross[&a],
+        Crossfade {
+            head: 0.0,
+            tail: 0.5,
+            fade_in: 0.0,
+            fade_out: 1.0
+        }
+    );
+    assert_eq!(
+        cross[&b],
+        Crossfade {
+            head: 0.2,
+            tail: 0.0,
+            fade_in: 0.7,
+            fade_out: 0.0
+        }
+    );
+    let heard = tl.clip(b).unwrap().sounding(cross[&b]);
+    assert_eq!(
+        (heard.start, heard.source_in, heard.duration),
+        (3.8, 0.0, 2.2)
+    );
+
+    // Detached sound crosses with its picture; the picture is silent.
+    let sound = tl.detach_audio(a).unwrap();
+    let cross = tl.crossfades();
+    assert_eq!(cross.get(&a), None);
+    assert_eq!(cross[&sound].tail, 0.5);
+    // Unlinked, it is sound of its own and plays as placed.
+    tl.unlink_clip(sound);
+    assert_eq!(tl.crossfades().get(&sound), None);
+
+    // A split's two halves join one recording end to end: no crossfade.
+    let mut tl = Timeline::new(30.0);
+    let whole = tl.add_media_clip("w", ClipKind::Video, 0, 0.0, 4.0, 1.0, "/m/w.mp4");
+    let right = tl.split_at(whole, 2.0).unwrap();
+    tl.clip_mut(right).unwrap().transition = Some(Transition::new(TransitionKind::Mix, 1.0));
+    assert_eq!(tl.transitions().len(), 1);
+    assert!(tl.crossfades().is_empty());
+}
+
 /// The monitor draws what `xfade` computes: from progress `p = 1 - t`, a
 /// wipe's edge at `int(w * p)`, a slide by `int(w * p)`.
 #[test]
@@ -1222,6 +1360,16 @@ fn a_transition_frame_follows_xfade_arithmetic() {
         [0.0, 0.0, 100.0, 26.0]
     );
     assert_eq!(at(TransitionKind::WipeLeft, 0.0).to.window[2], 0.0);
+    // The old picture shows only up to the edge, so a clear part of the new
+    // one does not show the old one through it.
+    assert_eq!(
+        at(TransitionKind::WipeLeft, 0.25).from.window,
+        [0.0, 0.0, 76.0, 50.0]
+    );
+    assert_eq!(
+        at(TransitionKind::WipeDown, 0.5).from.window,
+        [0.0, 26.0, 100.0, 24.0]
+    );
     let slide = at(TransitionKind::SlideLeft, 0.25);
     assert_eq!(
         (slide.from.offset, slide.to.offset),

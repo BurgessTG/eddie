@@ -8,6 +8,7 @@ mod color;
 mod duck;
 mod fade;
 mod place;
+mod stack;
 mod text;
 pub mod time_spec;
 mod timeline;
@@ -23,6 +24,7 @@ pub use fade::{fade_gain, fade_shape, fit_fades};
 pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
 };
+pub use stack::{hides_below, LanePicture};
 pub use text::{
     Rgb, TextLook, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE, MAX_OUTLINE, MAX_TEXT_OFFSET,
     MAX_TEXT_SIZE, MIN_TEXT_SIZE,
@@ -32,6 +34,6 @@ pub use timeline::{
     orientation_name, Format, Lanes, Ripple, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS,
 };
 pub use transition::{
-    Layer, Transition, TransitionFrame, TransitionKind, TransitionSpan, DEFAULT_TRANSITION,
-    MAX_TRANSITION, MIN_TRANSITION,
+    Crossfade, Layer, Transition, TransitionFrame, TransitionKind, TransitionSpan,
+    DEFAULT_TRANSITION, MAX_TRANSITION, MIN_TRANSITION,
 };

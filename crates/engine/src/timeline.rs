@@ -345,9 +345,9 @@ impl Timeline {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
-    /// The picture shown by both preview and export. Lower lane
-    /// indexes win; insertion order breaks ties. Opacity fades this
-    /// picture against black, not against pictures on other lanes.
+    /// The top-most video clip at `time`: lower lane numbers draw over
+    /// higher ones, and insertion order breaks ties. Lanes under it may
+    /// still show around or through it ([`Timeline::video_stack`]).
     pub fn active_video(&self, time: f64) -> Option<&Clip> {
         self.clips
             .iter()
@@ -374,15 +374,6 @@ impl Timeline {
                 clip.linked_clip = None;
             }
         }
-    }
-
-    /// Topmost video/title clip active at `time` (titles over video, then
-    /// the lowest lane).
-    pub fn visible_clip_at(&self, time: f64) -> Option<&Clip> {
-        self.clips
-            .iter()
-            .filter(|c| c.kind != ClipKind::Audio && c.contains(time))
-            .min_by_key(|c| self.row(c.kind, c.track))
     }
 
     /// Standard empty project: one lane each for titles, video and

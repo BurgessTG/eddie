@@ -13,6 +13,7 @@ fn asset(path: &str) -> BinAsset {
             has_video: true,
             has_audio: true,
             photo: false,
+            alpha: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,
@@ -126,13 +127,19 @@ fn sheet_cells_follow_visible_shots_and_titles() {
     let a = timeline.add_media_clip("A", ClipKind::Video, 0, 0.0, 2.0, 1.0, "a.mp4");
     let b = timeline.add_media_clip("B", ClipKind::Video, 0, 3.0, 2.0, 4.0, "b.mp4");
     let title = timeline.add_clip("Hello", ClipKind::Title, 1, 1.0, 1.0, 0.0);
+    let stack = Stack::new(&timeline, (1920.0, 1080.0), HashMap::new());
     let summary = |span: (f64, f64)| -> (Vec<_>, usize) {
         let (shots, total) = sheet_shots(&timeline, span);
         let cells = shots
             .iter()
             .map(|shot| {
-                let cell = shot.cell();
-                (cell.picture, cell.title.map(|title| title.0), cell.label)
+                let cell = shot.cell(&stack);
+                let picture = cell
+                    .layers
+                    .first()
+                    .map(|layer| (layer.path.clone(), layer.time));
+                assert!(cell.layers.len() <= 1);
+                (picture, cell.title.map(|title| title.0), cell.label)
             })
             .collect();
         (cells, total)
@@ -176,6 +183,57 @@ fn sheet_cells_follow_visible_shots_and_titles() {
             2
         )
     );
+}
+
+/// A picture in picture is two layers: the base under the inset, each
+/// where it lands on the canvas, and the label and JSON name both. A
+/// full-canvas picture over another is the only layer.
+#[test]
+fn a_sheet_cell_draws_a_picture_in_picture_over_the_lane_under_it() {
+    let mut timeline = Timeline::empty_project();
+    timeline.lanes.video = 2;
+    let base = timeline.add_media_clip("Base", ClipKind::Video, 1, 0.0, 4.0, 1.0, "base.mp4");
+    let inset = timeline.add_media_clip("Inset", ClipKind::Video, 0, 0.0, 2.0, 0.0, "inset.mp4");
+    timeline.clip_mut(inset).unwrap().transform.scale = 0.5;
+    let cover = timeline.add_media_clip("Cover", ClipKind::Video, 0, 2.0, 2.0, 0.0, "cover.mp4");
+    let stack = Stack::new(&timeline, (1920.0, 1080.0), HashMap::new());
+    let (shots, _) = sheet_shots(&timeline, (0.0, 4.0));
+    let cells: Vec<SheetCell> = shots.iter().map(|shot| shot.cell(&stack)).collect();
+
+    let layers: Vec<_> = cells[0]
+        .layers
+        .iter()
+        .map(|layer| {
+            (
+                layer.path.as_str(),
+                layer.time,
+                layer.placement.unwrap().0.size,
+            )
+        })
+        .collect();
+    assert_eq!(
+        layers,
+        [
+            ("base.mp4", 2.0, [1920.0, 1080.0]),
+            ("inset.mp4", 1.0, [960.0, 540.0])
+        ]
+    );
+    assert_eq!(
+        cells[0].label,
+        format!("1.00s clip {inset} L0 over {base} L1")
+    );
+    assert_eq!(
+        shots[0].json(&stack)["under"],
+        json!([{"clip": base, "lane": 1, "sourceTime": 2.0}])
+    );
+
+    let only: Vec<&str> = cells[1]
+        .layers
+        .iter()
+        .map(|layer| layer.path.as_str())
+        .collect();
+    assert_eq!(only, ["cover.mp4"]);
+    assert_eq!(cells[1].label, format!("3.00s clip {cover} L0"));
 }
 
 /// Captions change far more often than pictures. They are not shots,

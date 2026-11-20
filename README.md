@@ -62,8 +62,12 @@ offers the newest build.
 - Speed per clip from 0.25× to 4×, with the sound kept at its pitch.
 - Transitions between clips: mix, dip to black or white, and wipes and
   slides in four directions, from 0.1 to 5 seconds, picked from tiles in
-  Details that picture each one. The monitor plays them as export renders
-  them.
+  Details that picture each one, with the sound crossfading under them.
+  The monitor plays them as export renders them.
+- Picture-in-picture and overlays: video lanes stack, the top lane over
+  the ones under it, so a shrunk picture, a clip below full opacity or a
+  PNG with transparency shows what is beneath. A bin file's right-click
+  menu adds it as an overlay at the playhead.
 - Photos (PNG, JPEG, WebP, HEIC) as clips: 3 seconds when added, any
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and

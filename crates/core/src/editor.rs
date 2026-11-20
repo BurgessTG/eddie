@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openreel_engine::{Clip, ClipId, ClipKind, Timeline, TitleStyle};
-use openreel_media::{AudioEngine, AudioSegment, FrameStream, Loudness, RawFrame, StillDecoder};
+use openreel_media::{AudioEngine, AudioSegment, Loudness, RawFrame, StillDecoder};
 
 use crate::scripting::ScriptEngine;
 use export::ExportMsg;
@@ -29,6 +29,7 @@ pub mod lanes;
 pub mod media;
 pub mod pictures;
 mod playback;
+mod program;
 pub mod project;
 mod script;
 #[cfg(unix)]
@@ -45,6 +46,7 @@ mod untitled;
 pub mod viewport;
 
 pub use headless::cli_main;
+pub use program::ProgramLayer;
 pub use script::EditSnapshot;
 
 use gallery::CuratorGallery;
@@ -94,19 +96,20 @@ impl Wake {
 /// Where the program monitor's picture goes. The editor picks the frame;
 /// the front end owns the pixels it is copied into.
 pub trait PreviewSink {
-    fn show(&mut self, frame: &RawFrame);
-    fn clear(&mut self);
-    /// The picture of the clip a transition at the playhead goes to
-    /// ([`Editor::transition_shown`]).
-    fn show_incoming(&mut self, _frame: &RawFrame) {}
+    /// The picture of video lane `lane` ([`Editor::program_layers`]).
+    fn show(&mut self, lane: usize, frame: &RawFrame);
+    /// Lane `lane` no longer holds a picture of the clip it shows.
+    fn clear(&mut self, lane: usize);
+    /// The picture of the clip a transition on lane `lane` goes to.
+    fn show_incoming(&mut self, _lane: usize, _frame: &RawFrame) {}
 }
 
 /// The monitor of an editor nothing draws.
 pub struct NoPreview;
 
 impl PreviewSink for NoPreview {
-    fn show(&mut self, _frame: &RawFrame) {}
-    fn clear(&mut self) {}
+    fn show(&mut self, _lane: usize, _frame: &RawFrame) {}
+    fn clear(&mut self, _lane: usize) {}
 }
 
 /// Everything a key, menu item or toolbar button can ask for. The editor
@@ -207,31 +210,22 @@ pub struct Editor {
     still_decoder: StillDecoder,
     still_rx: Receiver<(u64, Result<RawFrame, String>)>,
     preview: Box<dyn PreviewSink>,
-    /// The sink holds a picture of the active clip.
-    preview_shown: bool,
-    /// When pictures were shown during the last second of playback.
-    shown_at: VecDeque<Instant>,
     /// Playback start, so the rate is judged only over a full second.
     playing_since: Option<Instant>,
-    preview_key: Option<VideoKey>,
     still_gen: u64,
     /// The one still request being decoded; `None` key discards its answer.
     /// A prefetch only shows if the playhead has since moved onto it.
     still_inflight: Option<(u64, Option<StillKey>, StillUse)>,
-    /// The still the preview shows, if it shows one.
-    still_shown: Option<StillKey>,
     /// Recently decoded stills, least recently used first.
     still_cache: VecDeque<(StillKey, RawFrame)>,
     /// Stills that failed to decode and when, so a file that cannot be read
     /// is not asked for again every frame.
     still_failed: VecDeque<(StillKey, Instant)>,
 
-    stream: Option<FrameStream>,
-    stream_key: Option<VideoKey>,
-    stream_generation: u64,
-    stream_ready: bool,
+    /// Each video lane's picture, by lane (`program`).
+    players: Vec<program::Player>,
+    /// A picture failed to decode; playback paused on it.
     stream_failed: bool,
-    incoming: incoming::Incoming,
     /// Mixer and master playback clock, opened on first play.
     audio: Option<AudioEngine>,
     /// The mixer renders only when the editor advances it: no device, so
@@ -387,21 +381,13 @@ impl Editor {
             still_decoder,
             still_rx,
             preview,
-            preview_shown: false,
-            shown_at: VecDeque::with_capacity(128),
             playing_since: None,
-            preview_key: None,
             still_gen: 0,
             still_inflight: None,
-            still_shown: None,
             still_cache: VecDeque::new(),
             still_failed: VecDeque::new(),
-            stream: None,
-            stream_key: None,
-            stream_generation: 0,
-            stream_ready: false,
+            players: Vec::new(),
             stream_failed: false,
-            incoming: incoming::Incoming::default(),
             audio: None,
             manual_audio: true,
             rehearsing: false,

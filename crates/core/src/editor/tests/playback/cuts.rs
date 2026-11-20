@@ -2,6 +2,7 @@
 //! clock that waits for them.
 
 use super::*;
+use openreel_media::FrameStream;
 
 #[test]
 fn preview_boundary_never_uploads_the_previous_clip() {
@@ -119,12 +120,12 @@ fn preview_prerolls_the_next_cut_before_the_playhead_reaches_it() {
             blue,
             "cut {index}: {picture:?}"
         );
-        let Some((_, Some((source, time)))) = app.next_video_change(app.playhead) else {
+        let Some((_, Some((source, time)))) = app.next_video_change(0, app.playhead) else {
             break;
         };
         let source = source.to_owned();
         if time < source_in + 0.2 {
-            let stream = app.stream.as_ref().unwrap();
+            let stream = app.players[0].stream.as_ref().unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while !stream.prefetch_ready(&source, time, PREVIEW_W) {
                 assert!(
@@ -140,7 +141,7 @@ fn preview_prerolls_the_next_cut_before_the_playhead_reaches_it() {
         assert_eq!(app.playhead, app.timeline.clips[index + 1].start);
     }
     assert_eq!(
-        app.stream.as_ref().unwrap().prefetch_handoffs(),
+        app.players[0].stream.as_ref().unwrap().prefetch_handoffs(),
         3,
         "every backward cut must be served from its prerolled picture"
     );
@@ -166,12 +167,12 @@ fn pausing_after_a_cut_keeps_one_preview_decoder() {
     // No parking, as on machines with eight or more cores.
     let stream = FrameStream::spawn_preview(|| {}).unwrap();
     stream.set_parked_decoders(0);
-    app.stream = Some(stream);
+    app.player(0).stream = Some(stream);
     app.last_now = Some(0.0);
     app.set_playing(true);
     await_picture(&mut app, &monitor);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !app
+    while !app.players[0]
         .stream
         .as_ref()
         .unwrap()
@@ -183,7 +184,7 @@ fn pausing_after_a_cut_keeps_one_preview_decoder() {
     app.advance_playback(0.3);
     assert_eq!(app.playhead, 0.2);
     await_picture(&mut app, &monitor);
-    let decoders = |app: &Editor| app.stream.as_ref().unwrap().preview_decoders();
+    let decoders = |app: &Editor| app.players[0].stream.as_ref().unwrap().preview_decoders();
     assert_eq!(
         decoders(&app),
         2,
@@ -238,7 +239,7 @@ fn preview_reentering_a_file_reuses_its_parked_decoder() {
     // Parking is off on 8+ cores; this tests the mechanism itself.
     let stream = FrameStream::spawn_preview(|| {}).unwrap();
     stream.set_parked_decoders(4);
-    app.stream = Some(stream);
+    app.player(0).stream = Some(stream);
     app.last_now = Some(0.0);
     app.set_playing(true);
     for (index, (_, _, blue)) in cuts.into_iter().enumerate() {
@@ -248,11 +249,11 @@ fn preview_reentering_a_file_reuses_its_parked_decoder() {
             blue,
             "cut {index}: {picture:?}"
         );
-        let Some((_, Some((source, time)))) = app.next_video_change(app.playhead) else {
+        let Some((_, Some((source, time)))) = app.next_video_change(0, app.playhead) else {
             break;
         };
         let source = source.to_owned();
-        let stream = app.stream.as_ref().unwrap();
+        let stream = app.players[0].stream.as_ref().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !stream.prefetch_ready(&source, time, PREVIEW_W) {
             assert!(Instant::now() < deadline, "cut {} not prerolled", index + 1);
@@ -262,7 +263,7 @@ fn preview_reentering_a_file_reuses_its_parked_decoder() {
         assert_eq!(app.playhead, app.timeline.clips[index + 1].start);
     }
     assert_eq!(
-        app.stream.as_ref().unwrap().preview_opens(),
+        app.players[0].stream.as_ref().unwrap().preview_opens(),
         3,
         "re-entering A must reuse its parked decoder"
     );
@@ -286,7 +287,7 @@ fn preview_prerolled_cut_keeps_the_audio_clock_running() {
     app.set_playing(true);
     await_picture(&mut app, &monitor);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !app
+    while !app.players[0]
         .stream
         .as_ref()
         .unwrap()
@@ -451,7 +452,7 @@ fn run_short_clip_diagnostics(transport_clock: bool) {
             app.last_now = Some(app.playhead);
         }
         previous_wall = wall;
-        let active = app.program_video_clip().unwrap();
+        let active = app.lane_clip(0, app.playhead).unwrap();
         app.poll_frames();
         let syncing = Instant::now();
         app.sync_playback();

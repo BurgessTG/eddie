@@ -123,13 +123,17 @@ outputs must end in `.jpg`, and cannot replace the project or its media.
 
 - `eddie sheet <project> <out.jpg> [range]` shows the program: one cell
   per visible shot, labelled with its timeline time, clip ID and lane, and
-  with titles drawn on the picture.
+  with titles drawn on the picture. Each picture is placed, scaled and
+  turned as export draws it, over the lanes it does not hide; the label
+  names those too ("clip 7 L0 over 3 L1").
   - A sheet has 16 cells at most. `shots` counts the pictures in the
     range; a new caption over the same picture is not a shot. Past 16
     shots the cells are spread evenly and the JSON says `sampled: true`.
     Give a timeline range (`10..25`, `clip:7`) to see every shot of one
     part.
-  - `cells` lists `time, clip, lane, sourceTime, title` for each picture.
+  - `cells` lists `time, clip, lane, sourceTime, title` for each cell's
+    top picture, and `under` the pictures beneath it as `[{clip, lane,
+    sourceTime}]`, the nearest first.
 - `eddie strip <project> <asset> <out.jpg>` shows one source from start
   to end in 16 pictures, labelled with source times. A `*` marks a time
   the timeline already shows.
@@ -301,7 +305,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   it to change how long it shows.
 - **Transitions:** `setTransition(id, kind, seconds?)` sets how a video
   clip's picture comes in from the clip that ends where it starts, on
-  its lane; `null` removes it. Kinds: `mix`, `dip-black`, `dip-white`,
+  its lane; `null` removes it. A mix or dip blends each side together
+  with the lanes under it; a wipe or slide moves only the two pictures,
+  over those lanes. Kinds: `mix`, `dip-black`, `dip-white`,
   `wipe-left`, `wipe-right`, `wipe-up`, `wipe-down`, `slide-left`,
   `slide-right`, `slide-up`, `slide-down`. `seconds` runs from 0.1 to 5
   (0.5 by default).
@@ -312,7 +318,11 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - Where a file has no picture past the clip's edge, its last (or
     first) picture holds; `inspect()` says so. Leave the sources some
     room on both sides of a cut you transition.
-  - Sound still cuts at the cut.
+  - The sound crossfades under it at equal power: the clip before plays
+    on to the transition's end, fading out, and the clip after starts at
+    the transition's start (or at its file's start, if that is later),
+    fading in. The sound that crosses is the picture's own or its linked
+    sound. Two pieces of one take split apart play straight on instead.
   - A clip with no clip right before it on its lane cannot take one.
     Moving clips apart keeps the setting but it does not play.
 - **Canvas and framing:** video of any shape goes on any canvas. Each
@@ -338,7 +348,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   `filter` is `none`, `vivid`, `dramatic`, `warm`, `cool`, `fade`,
   `vintage`, `sepia`, `mono` or `noir`, at `strength` 0 to 1 (1). The
   filter applies first, then the adjustments. Contact sheets, strips and
-  frames show the source as shot, so check a grade by exporting.
+  frames show the colours as shot, so check a grade by exporting.
 - **Pauses:** `tightenSilence(id, threshold?, minSilence?, padding?)`
   removes each pause of `minSilence` seconds or more (0.35 by default)
   and keeps `padding` seconds (0.08) at each cut. Leave `threshold` out
@@ -393,10 +403,17 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   `setClipLane` count only the lanes of its kind, from 0, so a title never
   shares a lane with a picture. A lane number past the last one adds lanes
   of that kind.
-- Where video overlaps, the lowest lane is the picture shown, and lane 0
-  wins. A clip below full opacity fades to black, and a picture smaller
-  than the canvas has its background around it; neither shows the lane
-  underneath. There is no picture-in-picture.
+- Video lanes stack: lane 0 draws on top, and each lane draws over the
+  lanes with higher numbers. A picture hides everything under it only
+  when it is fully opaque, has no transparency of its own (a PNG with an
+  alpha channel shows through), and covers the canvas or has a `'blur'`
+  background. Anything else shows the lanes under it: a clip below full
+  opacity shows them through it, and around a picture made smaller with
+  `setTransform` they show where its black background would be.
+- For picture-in-picture, put the inset on a lane above the base and
+  shrink it: `setClipLane(inset, 0)` after `setClipLane(base, 1)`, then
+  `setTransform(inset, {scale: 0.35, x: 0.3, y: -0.3})`. A logo or
+  sticker PNG with transparency goes on a lane above at full size.
 - To cut away from a long take and keep its sound:
   1. `setClipLane(base, 1)`.
   2. Add the cutaway.
@@ -474,7 +491,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - black gaps without a title;
   - flash frames (visible for under two frames);
   - near-match cuts that skip or repeat 1–3 frames of the same shot;
-  - clips hidden by a lower lane;
+  - clips that the lanes above always cover;
   - transitions that play shorter than set, have no clip before them, or
     run past a file's pictures.
 - `state()` doesn't show what the edit looks like. Before calling an edit

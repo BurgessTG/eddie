@@ -143,17 +143,17 @@ fn centre(frame: &RawFrame) -> Rgb {
 }
 
 impl PreviewSink for Monitor {
-    fn show(&mut self, frame: &RawFrame) {
+    fn show(&mut self, _lane: usize, frame: &RawFrame) {
         let mut monitor = self.0.borrow_mut();
         monitor.on = true;
         monitor.program.push(centre(frame));
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, _lane: usize) {
         self.0.borrow_mut().on = false;
     }
 
-    fn show_incoming(&mut self, frame: &RawFrame) {
+    fn show_incoming(&mut self, _lane: usize, frame: &RawFrame) {
         self.0.borrow_mut().incoming.push(centre(frame));
     }
 }
@@ -333,9 +333,9 @@ fn preview_slow_native_open_does_not_block_the_ui_and_reports_failure() {
         !app.playing,
         "a failed decoder must not consume an unseen clip"
     );
-    let failed_generation = app.stream_generation;
+    let failed_generation = app.players[0].generation;
     app.sync_playback();
-    assert_eq!(app.stream_generation, failed_generation);
+    assert_eq!(app.players[0].generation, failed_generation);
     assert!(
         app.still_inflight.is_none(),
         "a failure must not retry through the still worker"

@@ -159,6 +159,14 @@ impl Placement {
         x <= 0.5 && y <= 0.5 && x + w >= canvas.0 - 0.5 && y + h >= canvas.1 - 0.5
     }
 
+    /// Whether canvas point `point` is on the picture, turned as it is.
+    pub fn contains(&self, point: (f64, f64)) -> bool {
+        let (sin, cos) = (-self.rotation.to_radians()).sin_cos();
+        let (dx, dy) = (point.0 - self.center[0], point.1 - self.center[1]);
+        let (x, y) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        x.abs() <= self.size[0] / 2.0 && y.abs() <= self.size[1] / 2.0
+    }
+
     /// Whether any of the picture lands on the canvas.
     pub fn on_canvas(&self, canvas: (f64, f64)) -> bool {
         let [w, h] = self.turned_size();
@@ -266,6 +274,14 @@ mod tests {
         assert_eq!(p.size, [960.0, 540.0]);
         let [w, h] = p.turned_size();
         assert!((w - 540.0).abs() < 1e-9 && (h - 960.0).abs() < 1e-9);
+        // Stood on end, it reaches 480 up and down from its centre but
+        // only 270 to the sides.
+        assert!(p.contains((1440.0, 270.0 + 470.0)));
+        assert!(!p.contains((1440.0 + 280.0, 270.0)));
+        assert!(
+            !place(HD, (1920.0, 1080.0), &Transform { rotation: 0.0, ..t })
+                .contains((1440.0, 270.0 + 470.0))
+        );
         let gone = Transform {
             x: 2.0,
             ..Transform::default()

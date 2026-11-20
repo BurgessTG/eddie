@@ -56,10 +56,23 @@
   it as export renders it, and the timeline marks it on the cut. Scripts
   use `setTransition`, `state()` gives each clip's `transition`, and
   `inspect()` reports one that plays shorter than set or runs past a
-  file's pictures.
+  file's pictures. The sound crossfades under it at equal power, in
+  preview and export.
+- Picture-in-picture and overlays. Video lanes stack: the top lane draws
+  over the ones under it, and a picture made smaller, a clip below full
+  opacity or a PNG with transparency shows the lanes beneath, in preview,
+  export and transitions. Right-click a file in the bin and pick Add as
+  overlay to put it at the playhead on a lane above the video there.
+  Drag on the monitor to move the top picture under the pointer.
+  `eddie sheet` draws each picture moved, scaled and turned as export
+  does, over the lanes it does not hide, and each cell lists them as
+  `under`.
 
 ### Changed
 
+- A clip below full opacity, or a picture smaller than the canvas, shows
+  the video lanes under it instead of black. A clip on a lane under a
+  full-canvas, opaque picture is still covered.
 - Projects saved as Landscape or Portrait now render at exactly 16:9 or
   9:16. They took the shape of their largest video of that orientation
   before.

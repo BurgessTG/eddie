@@ -2,8 +2,8 @@
 //! the Gallery. The monitor shows the decoded picture under the playhead, a
 //! waveform for audio-only moments, and titles placed as export draws them.
 
-use eddie_core::Action;
 use eddie_core::shortcuts;
+use eddie_core::{Action, ProgramLayer};
 use openreel_engine::{Clip, ClipKind, format_timecode};
 use rune::{Color, Cursor, Cx, El, Phase, Shape, Span, col, el, rich, row, text};
 
@@ -15,7 +15,7 @@ use crate::theme::{self, c};
 mod picture;
 mod title;
 mod transition;
-pub use picture::{Sink, Slot, look};
+pub use picture::{Pictures, Sink, look};
 pub(crate) use transition::layers as transition_layers;
 
 /// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
@@ -109,47 +109,40 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
     };
     let timeline = &editor.timeline;
     let playhead = editor.playhead;
-    let picture = ui
-        .monitor
-        .size
-        .get()
-        .filter(|_| editor.preview_is_current());
-    match (timeline.program_video(playhead), picture) {
-        (Some(clip), Some(decoded)) => {
-            let shown = match editor.transition_shown() {
-                Some(span) => transition::view(ui, span, clip, canvas, (w, h), decoded),
-                None => picture::placed(ui, &ui.monitor, "monitor", clip, canvas, (w, h), decoded),
-            };
-            frame = picture::draggable(frame).child(shown);
-        }
-        (Some(_), None) => frame = frame.child(message("Loading frame…")),
-        (None, _) => {
-            let audio = timeline
-                .clips
-                .iter()
-                .filter(|clip| clip.kind == ClipKind::Audio && clip.contains(playhead))
-                .min_by_key(|clip| clip.track);
-            let peaks = audio
-                .and_then(|clip| clip.source.as_ref())
-                .and_then(|source| editor.asset(source))
-                .map(|asset| (asset.peaks.as_slice(), asset.info.duration));
-            match (audio, peaks) {
-                (Some(clip), Some((peaks, duration))) => {
-                    frame = frame.child(
-                        el().absolute(0.0, 0.0)
-                            .size(w, h)
-                            .shape(waveform(w, h, clip, peaks, duration, playhead)),
-                    );
-                }
-                _ => {
-                    frame = frame.child(message(if !timeline.clips.is_empty() {
-                        "No clip at playhead"
-                    } else if editor.assets.is_empty() {
-                        "Import media to start"
-                    } else {
-                        "Drag media onto the timeline"
-                    }));
-                }
+    let layers = editor.program_layers();
+    if !layers.is_empty() {
+        let drawn = lanes(ui, &layers, canvas, (w, h));
+        frame = if drawn.is_empty() {
+            frame.child(message("Loading frame…"))
+        } else {
+            picture::draggable(frame.children(drawn))
+        };
+    } else {
+        let audio = timeline
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Audio && clip.contains(playhead))
+            .min_by_key(|clip| clip.track);
+        let peaks = audio
+            .and_then(|clip| clip.source.as_ref())
+            .and_then(|source| editor.asset(source))
+            .map(|asset| (asset.peaks.as_slice(), asset.info.duration));
+        match (audio, peaks) {
+            (Some(clip), Some((peaks, duration))) => {
+                frame = frame.child(
+                    el().absolute(0.0, 0.0)
+                        .size(w, h)
+                        .shape(waveform(w, h, clip, peaks, duration, playhead)),
+                );
+            }
+            _ => {
+                frame = frame.child(message(if !timeline.clips.is_empty() {
+                    "No clip at playhead"
+                } else if editor.assets.is_empty() {
+                    "Import media to start"
+                } else {
+                    "Drag media onto the timeline"
+                }));
             }
         }
     }
@@ -157,6 +150,52 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
         frame = frame.child(title::overlay(title, playhead, w, h, canvas.1));
     }
     frame
+}
+
+/// What lane `lane`'s parts on the monitor are keyed by.
+pub(crate) fn lane_key(lane: usize) -> String {
+    format!("monitor-lane{lane}")
+}
+
+/// The pictures of `layers` (bottom first) that the monitor holds, each
+/// over the ones before it. A mix or dip passes between whole frames, so
+/// each of its sides carries the lanes under it, and they are not drawn
+/// again on their own.
+fn lanes(ui: &Ui, layers: &[ProgramLayer], canvas: (u32, u32), size: (f32, f32)) -> Vec<El> {
+    let editor = &ui.editor;
+    let mut drawn = Vec::new();
+    for layer in layers {
+        let slots = ui.pictures.lane(layer.lane);
+        let (Some(clip), Some(decoded)) = (
+            editor.timeline.clip(layer.clip),
+            slots.program.size.get().filter(|_| layer.shown),
+        ) else {
+            continue;
+        };
+        let key = lane_key(layer.lane);
+        match layer.transition.filter(|_| layer.incoming_shown) {
+            Some(span) => {
+                let under = if span.kind.blends() {
+                    std::mem::take(&mut drawn)
+                } else {
+                    Vec::new()
+                };
+                drawn.push(transition::view(
+                    ui, &slots, &key, span, clip, canvas, size, decoded, under,
+                ));
+            }
+            None => drawn.push(picture::placed(
+                ui,
+                &slots.program,
+                &key,
+                clip,
+                canvas,
+                size,
+                decoded,
+            )),
+        }
+    }
+    drawn
 }
 
 /// An audio-only moment: the clip's waveform with a progress line.

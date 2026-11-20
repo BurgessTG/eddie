@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use openreel_engine::time_spec::TimeIndex;
-use openreel_engine::{ClipId, ClipKind, Timeline};
-use openreel_media::{MediaInfo, SheetCell};
+use openreel_engine::{Background, ClipId, ClipKind, LanePicture, Timeline};
+use openreel_media::{MediaInfo, SheetCell, SheetLayer};
 use serde_json::{json, Value};
 
 use super::inspect::{program_segments, Segment};
 use super::media::{AssetState, BinAsset};
+use super::program::Stack;
 use super::Editor;
 
 /// The slow half of a picture command. It decodes and writes files without
@@ -50,8 +51,11 @@ pub fn sheet(app: &Editor, output: PathBuf, range: Option<&str>) -> Result<Rende
         return Err("the timeline is empty".to_owned());
     }
     let canvas = app.canvas();
+    let stack = app.stack();
+    let cells: Vec<SheetCell> = shots.iter().map(|shot| shot.cell(&stack)).collect();
+    let listed: Vec<Value> = shots.iter().map(|shot| shot.json(&stack)).collect();
+    let sampled = total > shots.len();
     Ok(Box::new(move || {
-        let cells: Vec<SheetCell> = shots.iter().map(SheetShot::cell).collect();
         let jpeg = openreel_media::contact_sheet(&cells, canvas)?;
         write(&output, &jpeg)?;
         Ok(json!({
@@ -60,8 +64,8 @@ pub fn sheet(app: &Editor, output: PathBuf, range: Option<&str>) -> Result<Rende
             "start": span.0,
             "end": span.1,
             "shots": total,
-            "sampled": total > shots.len(),
-            "cells": shots.iter().map(SheetShot::json).collect::<Vec<_>>(),
+            "sampled": sampled,
+            "cells": listed,
         }))
     }))
 }
@@ -79,8 +83,7 @@ pub fn strip(app: &Editor, asset: &str, output: PathBuf) -> Result<Render, Strin
         let cells: Vec<SheetCell> = times
             .iter()
             .map(|&(time, _)| SheetCell {
-                picture: Some((source.info.path.clone(), time)),
-                opacity: 1.0,
+                layers: vec![SheetLayer::whole(source.info.path.clone(), time)],
                 title: None,
                 label: format!(
                     "{time:.2}s{}",
@@ -287,18 +290,34 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[derive(Clone, Debug, PartialEq)]
 struct SheetShot {
     time: f64,
-    /// The visible clip, its lane, source and the source time shown.
-    video: Option<(ClipId, usize, Option<String>, f64, f32)>,
+    /// The top picture's clip, its lane and the source time shown.
+    video: Option<(ClipId, usize, f64)>,
     /// The active title: its clip, text, style and opacity.
     title: Option<(ClipId, String, openreel_media::TitleLook, f32)>,
 }
 
 impl SheetShot {
-    fn label(&self) -> String {
+    /// The pictures under the top one, from the lane right under it down.
+    fn under<'a>(&self, stack: &Stack<'a>) -> Vec<LanePicture<'a>> {
+        let mut pictures = stack.at(self.time);
+        pictures.pop();
+        pictures.reverse();
+        pictures
+    }
+
+    fn label(&self, stack: &Stack) -> String {
         let mut label = format!("{:.2}s", self.time);
         match &self.video {
             Some((clip, lane, ..)) => label.push_str(&format!(" clip {clip} L{lane}")),
             None => label.push_str(" no picture"),
+        }
+        let under: Vec<String> = self
+            .under(stack)
+            .iter()
+            .map(|picture| format!("{} L{}", picture.clip.id, picture.lane))
+            .collect();
+        if !under.is_empty() {
+            label.push_str(&format!(" over {}", under.join(", ")));
         }
         if let Some((title, ..)) = &self.title {
             label.push_str(&format!(" title {title}"));
@@ -306,27 +325,43 @@ impl SheetShot {
         label
     }
 
-    fn cell(&self) -> SheetCell {
+    /// The cell: every lane's picture, bottom first, placed on the canvas.
+    fn cell(&self, stack: &Stack) -> SheetCell {
+        let layers = stack
+            .at(self.time)
+            .iter()
+            .filter_map(|picture| {
+                let clip = picture.clip;
+                Some(SheetLayer {
+                    path: clip.source.clone()?,
+                    time: clip.source_at(self.time),
+                    placement: Some((stack.placement(clip), stack.file(clip).0)),
+                    opacity: clip.opacity,
+                    blur: clip.background == Background::Blur,
+                })
+            })
+            .collect();
         SheetCell {
-            picture: self
-                .video
-                .as_ref()
-                .and_then(|(_, _, source, time, _)| Some((source.clone()?, *time))),
-            opacity: self.video.as_ref().map_or(1.0, |video| video.4),
+            layers,
             title: self
                 .title
                 .as_ref()
                 .map(|(_, text, look, opacity)| (text.clone(), *look, *opacity)),
-            label: self.label(),
+            label: self.label(stack),
         }
     }
 
-    fn json(&self) -> Value {
+    fn json(&self, stack: &Stack) -> Value {
         json!({
             "time": self.time,
             "clip": self.video.as_ref().map(|video| video.0),
             "lane": self.video.as_ref().map(|video| video.1),
-            "sourceTime": self.video.as_ref().map(|video| video.3),
+            "sourceTime": self.video.as_ref().map(|video| video.2),
+            "under": self.under(stack).iter().map(|picture| json!({
+                "clip": picture.clip.id,
+                "lane": picture.lane,
+                "sourceTime": picture.clip.source_at(self.time),
+            })).collect::<Vec<_>>(),
             "title": self.title.as_ref().map(|title| title.0),
         })
     }
@@ -389,15 +424,10 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
             let time = (segment.start + segment.end) / 2.0;
             SheetShot {
                 time,
-                video: segment.video.and_then(|id| timeline.clip(id)).map(|clip| {
-                    (
-                        clip.id,
-                        clip.track,
-                        clip.source.clone(),
-                        clip.source_at(time),
-                        clip.opacity,
-                    )
-                }),
+                video: segment
+                    .video
+                    .and_then(|id| timeline.clip(id))
+                    .map(|clip| (clip.id, clip.track, clip.source_at(time))),
                 title: segment.title.and_then(|id| timeline.clip(id)).map(|clip| {
                     let look = openreel_media::clip_title_look(clip);
                     (clip.id, clip.name.clone(), look, clip.opacity)

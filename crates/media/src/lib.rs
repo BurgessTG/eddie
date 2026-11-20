@@ -48,7 +48,7 @@ pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use playback::FrameStream;
 pub use probe::{probe, MediaInfo};
 pub use samples::generate_samples;
-pub use sheet::{contact_sheet, source_strip, SheetCell};
+pub use sheet::{contact_sheet, source_strip, SheetCell, SheetLayer};
 pub use stills::{frame_at, thumbnails};
 pub use sweep::{
     analyze_segment, build_scene_segments, build_segments, detect_scene_cuts, frame_jpeg_at,

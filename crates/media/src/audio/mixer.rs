@@ -24,6 +24,8 @@ pub(super) struct Voice {
     pub(super) fades: Arc<AtomicU64>,
     pub(super) duck: Arc<[(f64, f64)]>,
     pub(super) smooth_fades: bool,
+    /// Equal-power fades in and out under transitions, in samples.
+    pub(super) crossfade: (u64, u64),
     pub(super) chunks: Receiver<MediaResult<Chunk>>,
     pub(super) recycle: SyncSender<Vec<f32>>,
     pub(super) current: Option<Chunk>,
@@ -95,6 +97,7 @@ impl Voice {
         let duck = Arc::clone(&self.duck);
         // Ramps over the fitted fades; unity in between.
         let smooth = self.smooth_fades;
+        let (cross_in, cross_out) = self.crossfade;
         let gain = |at: u64| -> f32 {
             let mut gain = 1.0_f32;
             if fade_in > 0 && at < start + fade_in {
@@ -104,6 +107,13 @@ impl Voice {
             if fade_out > 0 && at + fade_out > clip_end {
                 let progress = clip_end.saturating_sub(at) as f32 / fade_out as f32;
                 gain = gain.min(openreel_engine::fade_shape(progress, smooth));
+            }
+            if cross_in > 0 && at < start + cross_in {
+                gain *= openreel_engine::fade_shape((at - start) as f32 / cross_in as f32, true);
+            }
+            if cross_out > 0 && at + cross_out > clip_end {
+                let left = clip_end.saturating_sub(at) as f32;
+                gain *= openreel_engine::fade_shape(left / cross_out as f32, true);
             }
             if !duck.is_empty() {
                 gain *= openreel_engine::duck_gain((at - start) as f64 / RATE, &duck);
@@ -127,7 +137,12 @@ impl Voice {
                     let offset = (at - chunk.at) as usize * 2;
                     let target = (at - from) as usize * 2;
                     let count = (stop - at) as usize * 2;
-                    if fade_in == 0 && fade_out == 0 && duck.is_empty() {
+                    if fade_in == 0
+                        && fade_out == 0
+                        && cross_in == 0
+                        && cross_out == 0
+                        && duck.is_empty()
+                    {
                         for (dst, src) in out[target..target + count]
                             .iter_mut()
                             .zip(&chunk.data[offset..offset + count])

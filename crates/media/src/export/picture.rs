@@ -60,7 +60,8 @@ fn color_filters(color: &ColorAdjust) -> String {
 /// The filters that turn one layer's frames into its picture on the canvas,
 /// ending in `[seg{index}]`, and where that picture overlays the canvas.
 /// [`place`] decides the geometry, as it does for the preview. An untouched
-/// clip on black keeps the resize-and-pad chain export always had.
+/// clip on black keeps the resize-and-pad chain export always had, unless
+/// it is drawn over another lane, which must show around it.
 pub(super) fn picture(
     index: usize,
     layer: &VideoLayer<'_>,
@@ -70,7 +71,11 @@ pub(super) fn picture(
 ) -> (String, i64, i64) {
     let (width, height) = canvas;
     let color = color_filters(&layer.color);
-    if layer.transform.is_identity() && layer.background == Background::Black && color.is_empty() {
+    if layer.transform.is_identity()
+        && layer.background == Background::Black
+        && color.is_empty()
+        && !layer.over
+    {
         return (
             format!(
                 ",scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\

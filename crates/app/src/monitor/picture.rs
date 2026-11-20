@@ -128,25 +128,47 @@ impl Slot {
     }
 }
 
-/// Where the editor sends each decoded frame: the program picture, and
-/// during a transition the picture it goes to. Rune uploads each and wakes
-/// the window.
-pub struct Sink {
+/// The pictures the monitor holds for one video lane: its own, and during
+/// a transition on it the picture it goes to.
+#[derive(Clone, Default)]
+pub struct LaneSlots {
     pub program: Slot,
     pub incoming: Slot,
 }
 
+/// Every lane's pictures, made as lanes first show.
+#[derive(Clone, Default)]
+pub struct Pictures(Rc<RefCell<Vec<LaneSlots>>>);
+
+impl Pictures {
+    /// Lane `lane`'s pictures; cheap, they share the held frames.
+    pub fn lane(&self, lane: usize) -> LaneSlots {
+        let mut lanes = self.0.borrow_mut();
+        if lanes.len() <= lane {
+            lanes.resize_with(lane + 1, LaneSlots::default);
+        }
+        lanes[lane].clone()
+    }
+}
+
+/// Where the editor sends each decoded frame: each lane's picture, and
+/// during a transition the picture it goes to. Rune uploads each and wakes
+/// the window.
+pub struct Sink {
+    pub pictures: Pictures,
+}
+
 impl PreviewSink for Sink {
-    fn show(&mut self, frame: &RawFrame) {
-        self.program.show(frame);
+    fn show(&mut self, lane: usize, frame: &RawFrame) {
+        self.pictures.lane(lane).program.show(frame);
     }
 
-    fn clear(&mut self) {
-        self.program.size.set(None);
+    fn clear(&mut self, lane: usize) {
+        self.pictures.lane(lane).program.size.set(None);
     }
 
-    fn show_incoming(&mut self, frame: &RawFrame) {
-        self.incoming.show(frame);
+    fn show_incoming(&mut self, lane: usize, frame: &RawFrame) {
+        self.pictures.lane(lane).incoming.show(frame);
     }
 }
 
@@ -226,14 +248,23 @@ pub fn placed(
     layer.child(turned)
 }
 
-/// Drag the picture under the pointer to move its clip, which it selects.
-/// It lands on the canvas centre when near it, and Esc puts it back.
+/// Drag the top picture under the pointer to move its clip, which it
+/// selects. It lands on the canvas centre when near it, and Esc puts it
+/// back.
 pub fn draggable(frame: El) -> El {
     frame.cursor(Cursor::Move).on_drag(|ui: &mut Ui, drag, _| {
         let editor = &mut ui.editor;
         match drag.phase {
             Phase::Down => {
-                let clip = editor.timeline.active_video(editor.playhead);
+                // The top picture under the pointer, on the canvas.
+                let (cw, ch) = editor.canvas();
+                let point = (
+                    f64::from(drag.x / drag.w.max(1.0)) * f64::from(cw),
+                    f64::from(drag.y / drag.h.max(1.0)) * f64::from(ch),
+                );
+                let clip = editor
+                    .picture_at(point)
+                    .and_then(|id| editor.timeline.clip(id));
                 ui.monitor_drag = clip.map(|clip| (clip.id, clip.transform));
                 if let Some((id, _)) = ui.monitor_drag {
                     editor.selected = Some(id);

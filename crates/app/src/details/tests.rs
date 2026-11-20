@@ -25,6 +25,7 @@ fn window(kind: ClipKind) -> (Runtime<Ui>, ClipId) {
             has_video: true,
             has_audio: true,
             photo: false,
+            alpha: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

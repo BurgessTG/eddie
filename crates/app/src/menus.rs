@@ -121,6 +121,22 @@ fn entry(label: &str, tooltip: &str, off: Option<&str>, action: Action) -> El {
     }
 }
 
+/// A plain row for a menu outside the menu bar, greyed when not
+/// `enabled`. The caller adds `on_press`.
+pub fn plain_row(key: &str, label: &str, tooltip: &str, enabled: bool) -> El {
+    let fg = if enabled {
+        c().foreground
+    } else {
+        c().foreground.alpha(0.45)
+    };
+    row_frame(key, tooltip.to_owned(), enabled).child(
+        text(label.to_owned())
+            .font(theme::BODY)
+            .color(fg)
+            .single_line(),
+    )
+}
+
 /// A row in the destructive colour, for something that discards work. The
 /// caller adds `on_press`.
 pub fn destructive_row(key: &str, label: &str, tooltip: &str) -> El {

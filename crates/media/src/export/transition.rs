@@ -1,23 +1,24 @@
 //! Transitions in export: the frames each one draws, and the filters that
 //! draw them from the two clips' pictures with FFmpeg's `xfade`.
 //!
-//! Each side is its clip's whole canvas, its picture placed on black as the
-//! clip alone would show it, so the result is what
-//! [`TransitionKind::frame`] describes for the monitor. `xfade` takes the
-//! transition's own start and length in microseconds against a fine tick
-//! clock, so its progress at each frame is the monitor's at that time, not
-//! rounded to frames. A dip is two `fade`s, the clip into black or white
-//! up to the cut and out of it after; `xfade`'s own `fadeblack` reaches
-//! black in the first fifth and dips below video black.
-
-use std::collections::HashMap;
+//! Each side is its clip's whole canvas, its picture placed as the clip
+//! alone would show it, so the result is what [`TransitionKind::frame`]
+//! describes for the monitor. `xfade` takes the transition's own start and
+//! length in microseconds against a fine tick clock, so its progress at
+//! each frame is the monitor's at that time, not rounded to frames. A dip
+//! is two `fade`s, the clip into black or white up to the cut and out of
+//! it after; `xfade`'s own `fadeblack` reaches black in the first fifth
+//! and dips below video black.
 
 use openreel_engine::{ClipId, Timeline, TransitionKind};
 
-use super::video::{VideoClock, VIDEO_COLOR_RANGE, VIDEO_COLOR_SPACE};
+use super::frames::{enabled_frames, FrameRanges, VideoClock};
+use super::video::{VIDEO_COLOR_RANGE, VIDEO_COLOR_SPACE};
 
 /// One transition in output frames, and the layers that draw its clips.
 pub(super) struct TransitionPlan {
+    /// The video lane both its clips are on; it draws at that lane's depth.
+    pub(super) lane: usize,
     from: ClipId,
     to: ClipId,
     kind: TransitionKind,
@@ -30,7 +31,7 @@ pub(super) struct TransitionPlan {
     pub(super) first: i64,
     cut_frame: i64,
     pub(super) end_frame: i64,
-    /// The frames it is the picture on; a lower lane can cover the rest.
+    /// The frames it is the picture on; a lane above can cover the rest.
     shown: Vec<(i64, i64)>,
     /// The layers that draw `from` and `to`; a side without one is black.
     pub(super) layers: [Option<usize>; 2],
@@ -41,9 +42,6 @@ impl TransitionPlan {
         [self.from, self.to]
     }
 }
-
-/// Output frame ranges `[first, end)` per clip.
-type FrameRanges = HashMap<ClipId, Vec<(i64, i64)>>;
 
 /// Plan every transition that shows, taking the frames it draws out of
 /// `visible`. Returns the plans and, per clip, the frames its picture must
@@ -75,6 +73,7 @@ pub(super) fn plan(
             extents.entry(clip).or_default().push((first, end_frame));
         }
         plans.push(TransitionPlan {
+            lane: timeline.clip(span.from).map_or(0, |clip| clip.track),
             from: span.from,
             to: span.to,
             kind: span.kind,
@@ -133,6 +132,11 @@ fn xfade(kind: TransitionKind) -> Option<&'static str> {
 /// `batch_start` over the picture labelled `current`, and the label of the
 /// result. `sides` says where each clip's picture goes on the canvas; its
 /// frames come in as `[tw{index}_{side}]`, numbered on the batch's frames.
+///
+/// A wipe or slide moves each picture on a clear canvas over what is under
+/// its lane, so lanes under it stay put. A mix or dip passes between two
+/// whole frames, each picture over everything under its lane, so what
+/// shows around a picture crossfades with it, and a dip veils it too.
 pub(super) fn filters(
     plan: &TransitionPlan,
     index: usize,
@@ -146,6 +150,7 @@ pub(super) fn filters(
     let frame_base = format!("{}/{}", rate.denominator(), rate.numerator());
     let ticks = clock.tick_rate;
     let [first, cut, end] = [plan.first, plan.cut_frame, plan.end_frame].map(|f| f - batch_start);
+    let whole = plan.kind.blends();
     // xfade wants 4:4:4 and one time base on both inputs; a fine one, so
     // its progress is the transition's own and not rounded to frames.
     let canvas = |colour: &str, frames: i64| {
@@ -156,20 +161,41 @@ pub(super) fn filters(
         )
     };
     let mut filters = Vec::new();
+    let under = if whole {
+        filters.push(format!(
+            "[{current}]split=3[tkeep{index}][tu{index}_0][tu{index}_1]"
+        ));
+        format!("tkeep{index}")
+    } else {
+        current.to_owned()
+    };
     let mut used = [false; 2];
-    // Side `side`'s whole canvas over batch frames `from` to `to`.
+    // Side `side`'s canvas over batch frames `from` to `to`: what is under
+    // the lane there, or clear.
     let mut side = |filters: &mut Vec<String>, side: usize, from: i64, to: i64| {
         used[side] = true;
         let label = format!("tc{index}_{side}");
-        let black = canvas("black", to - from);
+        let ground = if whole {
+            format!(
+                "[tu{index}_{side}]trim=start_frame={from}:end_frame={to},\
+                 setpts=PTS-STARTPTS,format=yuv444p"
+            )
+        } else {
+            format!(
+                "color=c=black@0:s={width}x{height}:r={rate},format=yuva444p,\
+                 setparams=colorspace={VIDEO_COLOR_SPACE}:range={VIDEO_COLOR_RANGE},\
+                 trim=end_frame={}",
+                to - from
+            )
+        };
         filters.push(match sides[side] {
             Some((x, y)) => format!(
                 "[tw{index}_{side}]trim=start_pts={from}:end_pts={to},setpts=PTS-STARTPTS[tp{label}];\
-                 {black}[tb{label}];\
+                 {ground}[tb{label}];\
                  [tb{label}][tp{label}]overlay={x}:{y}:eof_action=repeat:format=yuv444,\
                  settb=1/{ticks}[{label}]"
             ),
-            None => format!("{black},settb=1/{ticks}[{label}]"),
+            None => format!("{ground},settb=1/{ticks}[{label}]"),
         });
         label
     };
@@ -258,6 +284,9 @@ pub(super) fn filters(
         if place.is_some() && !used[side] {
             filters.push(format!("[tw{index}_{side}]nullsink"));
         }
+        if whole && !used[side] {
+            filters.push(format!("[tu{index}_{side}]nullsink"));
+        }
     }
     let shown: Vec<_> = plan
         .shown
@@ -274,9 +303,9 @@ pub(super) fn filters(
     let next = format!("vt{index}");
     filters.push(format!(
         "[{result}]settb={frame_base},{pad}setpts=N[ts{index}];\
-         [{current}][ts{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
+         [{under}][ts{index}]overlay=0:0:eof_action=repeat:ts_sync_mode=default:\
          enable='{}'[{next}]",
-        super::video::enabled_frames(&shown),
+        enabled_frames(&shown),
     ));
     (filters, next)
 }

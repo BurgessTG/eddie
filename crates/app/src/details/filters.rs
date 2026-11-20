@@ -82,16 +82,15 @@ pub(super) fn sync(ui: &mut Ui) {
     else {
         return;
     };
-    let on_screen = !editor.playing
-        && editor
-            .timeline
-            .program_video(editor.playhead)
-            .map(|clip| clip.id)
-            == Some(id)
-        && editor.preview_is_current();
+    let on_screen = editor
+        .program_layers()
+        .into_iter()
+        .find(|layer| layer.clip == id && layer.shown)
+        .filter(|_| !editor.playing);
     let previews = &mut ui.details.filters;
-    if on_screen {
-        let picture = ui.monitor.picture.borrow();
+    if let Some(layer) = on_screen {
+        let slots = ui.pictures.lane(layer.lane);
+        let picture = slots.program.picture.borrow();
         let (width, rgba, frame) = picture.upright();
         if previews.taken != Some((id, frame)) && !rgba.is_empty() {
             previews.width = shrink(width, rgba, &mut previews.rgba);

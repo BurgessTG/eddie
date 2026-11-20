@@ -1,9 +1,9 @@
-//! The picture a transition passes to. While a transition shows, the
-//! program stream plays the clip it comes from past its out point
-//! ([`openreel_engine::Timeline::program_video`]) and a second preview
-//! worker plays the clip it goes to, from before its in point; the front
-//! end draws the two as [`openreel_engine::TransitionKind::frame`] says.
-//! Paused, both are stills.
+//! The picture a transition passes to. While a transition on a lane
+//! shows, the lane's worker plays the clip it comes from past its out
+//! point (the lane's picture, [`openreel_engine::LanePicture`]) and a
+//! second preview worker plays the clip it goes to, from before its in
+//! point; the front end draws the two as
+//! [`openreel_engine::TransitionKind::frame`] says. Paused, both are stills.
 
 use openreel_engine::{Clip, TransitionSpan};
 use openreel_media::FrameStream;
@@ -14,8 +14,9 @@ use crate::Editor;
 
 /// How long before a transition its incoming clip is asked for, so its
 /// first picture is ready when the transition starts (a 4K keyframe seek
-/// takes about 0.4 s).
-const LEAD: f64 = 2.0;
+/// takes about 0.4 s). A lane that shows nothing prerolls its next clip as
+/// late.
+pub(super) const LEAD: f64 = 2.0;
 
 #[derive(Default)]
 pub(super) struct Incoming {
@@ -36,60 +37,61 @@ pub(super) struct Incoming {
 }
 
 impl Editor {
-    /// The transition at the playhead when the monitor holds both its
-    /// pictures: the program picture of the clip it comes from and the
-    /// incoming picture of the clip it goes to.
-    pub fn transition_shown(&self) -> Option<TransitionSpan> {
-        let span = self.timeline.transition_at(self.playhead)?;
-        let to = video_key(self.timeline.clip(span.to)?)?;
-        (self.preview_is_current() && self.incoming.shown.as_ref() == Some(&to)).then_some(span)
-    }
-
-    /// The transition the incoming worker serves: the one at the playhead,
-    /// else the next to start within `LEAD`.
-    fn incoming_span(&self) -> Option<TransitionSpan> {
-        let spans = self.timeline.transitions();
-        spans.iter().copied().find(|span| {
+    /// The transition lane `lane`'s incoming worker serves: the one showing
+    /// on it at the playhead, else the next to start within `LEAD`.
+    fn incoming_span(&self, lane: usize) -> Option<TransitionSpan> {
+        let stack = self.stack();
+        stack.spans.iter().copied().find(|span| {
             span.end > self.playhead
                 && span.start <= self.playhead + LEAD
-                && self
-                    .timeline
-                    .transition_among(&spans, span.start.max(self.playhead))
+                && stack
+                    .lane(lane, span.start.max(self.playhead))
+                    .and_then(|picture| picture.transition)
                     == Some(*span)
         })
     }
 
-    /// Whether the clock must wait for the incoming picture before `until`:
-    /// a transition showing by then has no picture of its clip yet.
-    pub(super) fn incoming_limit(&self, until: f64) -> Option<f64> {
-        let span = self.incoming_span().filter(|span| span.start < until)?;
+    /// Whether the clock must wait for lane `lane`'s incoming picture
+    /// before `until`: a transition showing by then has no picture of its
+    /// clip yet.
+    pub(super) fn incoming_limit(&self, lane: usize, until: f64) -> Option<f64> {
+        let span = self.incoming_span(lane).filter(|span| span.start < until)?;
         let to = video_key(self.timeline.clip(span.to)?)?;
-        let ready = self.incoming.ready && self.incoming.key == Some((to, span.start.to_bits()));
+        let incoming = self.players.get(lane).map(|player| &player.incoming);
+        let ready = incoming.is_some_and(|incoming| {
+            incoming.ready && incoming.key == Some((to, span.start.to_bits()))
+        });
         (!ready).then_some(span.start.max(self.playhead))
     }
 
-    pub(super) fn stop_incoming(&mut self) {
-        if let Some(stream) = &self.incoming.stream {
+    pub(super) fn stop_incoming(&mut self, lane: usize) {
+        let Some(player) = self.players.get_mut(lane) else {
+            return;
+        };
+        if let Some(stream) = &player.incoming.stream {
             stream.cancel_preview();
         }
-        self.incoming.key = None;
-        self.incoming.ready = false;
+        player.incoming.key = None;
+        player.incoming.ready = false;
     }
 
-    /// Ask the incoming worker for the clip the next transition goes to,
-    /// at the source time the playhead (or the transition's start) shows.
-    pub(super) fn sync_incoming(&mut self) {
-        let wanted = self.incoming_span().and_then(|span| {
+    /// Ask lane `lane`'s incoming worker for the clip its next transition
+    /// goes to, at the source time the playhead (or the transition's start)
+    /// shows.
+    pub(super) fn sync_incoming(&mut self, lane: usize) {
+        let wanted = self.incoming_span(lane).and_then(|span| {
             let clip = self.timeline.clip(span.to)?;
             Some((span, clip.clone(), video_key(clip)?))
         });
         let wanted_key = wanted
             .as_ref()
             .map(|(span, _, key)| (key.clone(), span.start.to_bits()));
-        if self.incoming.key == wanted_key {
+        if self.players.get(lane).map(|player| &player.incoming.key) == Some(&wanted_key)
+            || (wanted_key.is_none() && self.players.len() <= lane)
+        {
             return;
         }
-        self.stop_incoming();
+        self.stop_incoming(lane);
         let Some((span, clip, _)) = wanted else {
             return;
         };
@@ -98,54 +100,63 @@ impl Editor {
             self.video_playback_failed("source is not imported".to_owned());
             return;
         }
-        if self.incoming.stream.is_none() {
+        if self.player(lane).incoming.stream.is_none() {
             let wake = self.wake.clone();
             match FrameStream::spawn_preview(move || wake.wake()) {
-                Ok(stream) => self.incoming.stream = Some(stream),
+                Ok(stream) => self.player(lane).incoming.stream = Some(stream),
                 Err(error) => return self.video_playback_failed(error),
             }
         }
         let from = clip.source_at(self.playhead.max(span.start)).max(0.0);
-        let Some(stream) = &self.incoming.stream else {
+        let fps = self.timeline.fps;
+        let incoming = &mut self.player(lane).incoming;
+        let Some(stream) = &incoming.stream else {
             return;
         };
-        match stream.request_preview(source, from, PREVIEW_W, self.timeline.fps) {
+        match stream.request_preview(source, from, PREVIEW_W, fps) {
             Ok(generation) => {
-                self.incoming.generation = generation;
-                self.incoming.from = from;
-                self.incoming.key = wanted_key;
+                incoming.generation = generation;
+                incoming.from = from;
+                incoming.key = wanted_key;
             }
             Err(error) => self.video_playback_failed(error),
         }
     }
 
-    /// Take the incoming worker's newest picture. Before the transition its
-    /// first picture is taken and held, so the clock need not wait at the
-    /// transition's start.
-    pub(super) fn poll_incoming(&mut self) {
-        let (Some(stream), Some((key, _))) = (&self.incoming.stream, &self.incoming.key) else {
+    /// Take lane `lane`'s incoming worker's newest picture. Before the
+    /// transition its first picture is taken and held, so the clock need
+    /// not wait at the transition's start.
+    pub(super) fn poll_incoming(&mut self, lane: usize) {
+        let Some(incoming) = self.players.get(lane).map(|player| &player.incoming) else {
+            return;
+        };
+        let (Some(stream), Some((key, _))) = (&incoming.stream, &incoming.key) else {
             return;
         };
         let Some(clip) = self.timeline.clip(key.0) else {
             return;
         };
-        let time = clip.source_at(self.playhead).max(self.incoming.from);
-        match stream.preview_frame(self.incoming.generation, time) {
+        let time = clip.source_at(self.playhead).max(incoming.from);
+        match stream.preview_frame(incoming.generation, time) {
             Some(Ok(frame)) => {
-                self.preview.show_incoming(&frame);
-                self.incoming.shown = Some(key.clone());
-                self.incoming.still = None;
-                self.incoming.ready = true;
-                stream.recycle(frame.rgba);
+                let key = key.clone();
+                self.preview.show_incoming(lane, &frame);
+                let incoming = &mut self.player(lane).incoming;
+                incoming.shown = Some(key);
+                incoming.still = None;
+                incoming.ready = true;
+                if let Some(stream) = &incoming.stream {
+                    stream.recycle(frame.rgba);
+                }
             }
             Some(Err(error)) => self.video_playback_failed(error),
             None => {}
         }
     }
 
-    /// The clip a transition at `at` goes to, for its still.
-    pub(super) fn incoming_clip(&self, at: f64) -> Option<&Clip> {
-        let span = self.timeline.transition_at(at)?;
+    /// The clip a transition on lane `lane` at `at` goes to, for its still.
+    pub(super) fn incoming_clip(&self, lane: usize, at: f64) -> Option<&Clip> {
+        let span = self.stack().lane(lane, at)?.transition?;
         self.timeline.clip(span.to)
     }
 }

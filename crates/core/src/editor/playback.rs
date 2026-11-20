@@ -1,12 +1,12 @@
-//! The transport and the program picture: play, seek, shuttle, and the
-//! video that follows the audio clock.
+//! The transport and the program pictures: play, seek, shuttle, and each
+//! lane's video following the audio clock.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use openreel_engine::{Clip, ClipKind};
-use openreel_media::{FrameStream, RawFrame};
+use openreel_media::FrameStream;
 
-use super::{StillUse, VideoKey, PREVIEW_W, SHUTTLE_MAX, STILL_CACHE_CAP};
+use super::{VideoKey, PREVIEW_W, SHUTTLE_MAX, STILL_CACHE_CAP};
 use crate::Editor;
 
 /// What a video stream is asked for: a clip's identity, source and
@@ -26,15 +26,18 @@ impl Editor {
         if self.rehearsing {
             return;
         }
-        if let Some(stream) = &self.stream {
-            stream.cancel_preview();
+        for lane in 0..self.players.len() {
+            let player = &mut self.players[lane];
+            if let Some(stream) = &player.stream {
+                stream.cancel_preview();
+            }
+            player.key = None;
+            player.ready = false;
+            // A still decoding now still answers its own frame; let it land.
+            player.still = None;
+            self.stop_incoming(lane);
         }
-        self.stop_incoming();
-        self.stream_key = None;
-        self.stream_ready = false;
         self.stream_failed = false;
-        // A still decoding now still answers its own frame; let it land.
-        self.still_shown = None;
         self.audio_failed = false;
         self.clock_playhead = None;
         if let Some(audio) = &mut self.audio {
@@ -55,7 +58,7 @@ impl Editor {
             self.playhead = 0.0;
         }
         self.playing = playing;
-        self.shown_at.clear();
+        self.forget_shown_rates();
         self.playing_since = playing.then(Instant::now);
         if !playing {
             self.stop_sources();
@@ -104,44 +107,34 @@ impl Editor {
         self.status = format!("{} {speed}x.", if forward { "Forward" } else { "Reverse" });
     }
 
-    /// The clip the program stream plays at the playhead
-    /// ([`openreel_engine::Timeline::program_video`]): during a transition,
-    /// the clip it comes from.
-    pub fn program_video_clip(&self) -> Option<Clip> {
-        self.timeline.program_video(self.playhead).cloned()
-    }
-
-    pub fn program_video_key(&self) -> Option<VideoKey> {
-        video_key(self.timeline.program_video(self.playhead)?)
-    }
-
-    /// The next edge after `after` where the program stream plays a
-    /// different clip, with its source and source time there, as
-    /// `sync_playback` computes them at that edge. A transition's clip
-    /// takes over at its end. Edges into a video gap need no picture.
-    pub fn next_video_change(&self, after: f64) -> Option<(f64, Option<(&str, f64)>)> {
-        let spans = self.timeline.transitions();
-        let program = |time| self.timeline.program_video_among(&spans, time);
-        let current = program(after).map(|clip| clip.id);
-        let edges = self
+    /// The next edge after `after` where lane `lane` shows a different
+    /// clip, with its source and source time there, as `sync_playback`
+    /// computes them at that edge. A transition's clip takes over at its
+    /// end, and a lane that a lane over it stops hiding shows again. Edges
+    /// where the lane stops showing need no picture.
+    pub fn next_video_change(&self, lane: usize, after: f64) -> Option<(f64, Option<(&str, f64)>)> {
+        let stack = self.stack();
+        let shown = |time| stack.lane(lane, time).map(|picture| picture.clip.id);
+        let mut edges: Vec<f64> = self
             .timeline
             .clips
             .iter()
             .filter(|clip| clip.kind == ClipKind::Video)
             .flat_map(|clip| [clip.start, clip.end()])
-            .chain(spans.iter().map(|span| span.end));
-        let mut next: Option<(f64, &Clip)> = None;
-        for edge in edges {
-            if edge <= after || next.is_some_and(|(best, _)| edge >= best) {
-                continue;
-            }
-            if let Some(visible) = program(edge) {
-                if Some(visible.id) != current {
-                    next = Some((edge, visible));
-                }
-            }
-        }
-        let (edge, clip) = next?;
+            .chain(stack.spans.iter().flat_map(|span| [span.start, span.end]))
+            .filter(|edge| *edge > after)
+            .collect();
+        edges.sort_by(f64::total_cmp);
+        edges.dedup();
+        // A clip shown again after a lane over it stops hiding it counts:
+        // its lane let its picture go meanwhile.
+        let mut before = shown(after);
+        let (edge, clip) = edges.into_iter().find_map(|edge| {
+            let now = shown(edge);
+            let change = now.filter(|id| Some(*id) != before);
+            before = now;
+            Some((edge, self.timeline.clip(change?)?))
+        })?;
         let source = clip
             .source
             .as_deref()
@@ -149,44 +142,51 @@ impl Editor {
         Some((edge, source))
     }
 
-    /// How far the audio clock may run before a picture must be ready: the
-    /// next visible cut, or the one after it when the preview worker has
-    /// already prerolled that cut's first picture, and at most the start of
-    /// a transition whose incoming picture has not arrived.
+    /// How far the audio clock may run before a picture must be ready: on
+    /// every lane, the next cut it shows, or the one after when its worker
+    /// has already prerolled that cut's first picture, and at most the start
+    /// of a transition whose incoming picture has not arrived.
     pub fn clock_limit(&self) -> f64 {
         let end = self.timeline.end();
         if self.waiting_for_video() {
             return self.playhead;
         }
-        let limit = match self.next_video_change(self.playhead) {
-            None => end,
-            Some((edge, source)) => {
-                let prerolled =
-                    source
-                        .zip(self.stream.as_ref())
-                        .is_some_and(|((path, time), stream)| {
-                            stream.prefetch_ready(path, time, PREVIEW_W)
-                        });
-                if prerolled {
-                    self.next_video_change(edge).map_or(end, |(after, _)| after)
-                } else {
-                    edge
+        let mut limit = end;
+        for lane in self.playing_lanes() {
+            let lane_limit = match self.next_video_change(lane, self.playhead) {
+                None => end,
+                Some((edge, source)) => {
+                    let stream = self.players.get(lane).and_then(|p| p.stream.as_ref());
+                    let prerolled = source.zip(stream).is_some_and(|((path, time), stream)| {
+                        stream.prefetch_ready(path, time, PREVIEW_W)
+                    });
+                    if prerolled {
+                        self.next_video_change(lane, edge)
+                            .map_or(end, |(after, _)| after)
+                    } else {
+                        edge
+                    }
                 }
+            };
+            limit = limit.min(lane_limit);
+            if let Some(start) = self.incoming_limit(lane, limit) {
+                limit = limit.min(start);
             }
-        };
-        let limit = limit.min(end);
-        self.incoming_limit(limit)
-            .map_or(limit, |start| start.min(limit))
+        }
+        limit.min(end)
     }
 
     pub fn waiting_for_video(&self) -> bool {
         self.playing
-            && (self
-                .program_video_key()
-                .is_some_and(|key| self.stream_key.as_ref() != Some(&key) || !self.stream_ready)
-                || self
-                    .incoming_limit(self.playhead + 1e-9)
-                    .is_some_and(|start| start <= self.playhead))
+            && self.playing_lanes().any(|lane| {
+                let wanted = self.lane_clip(lane, self.playhead);
+                let player = self.players.get(lane);
+                wanted.as_ref().and_then(video_key).is_some_and(|key| {
+                    player.is_none_or(|player| player.key.as_ref() != Some(&key) || !player.ready)
+                }) || self
+                    .incoming_limit(lane, self.playhead + 1e-9)
+                    .is_some_and(|start| start <= self.playhead)
+            })
     }
 
     pub fn video_playback_failed(&mut self, error: String) {
@@ -198,79 +198,20 @@ impl Editor {
         self.status = format!("Video playback failed: {error}");
     }
 
-    /// The monitor holds the active clip's picture. False while a newer
-    /// clip's first picture is still decoding: draw nothing, not the old one.
-    pub fn preview_is_current(&self) -> bool {
-        self.preview_shown && self.preview_key == self.program_video_key()
-    }
-
-    /// Forget the shown picture so the next still is asked for again, such
-    /// as at full size once a low-resolution scrub lets go.
-    pub fn drop_preview(&mut self) {
-        self.preview.clear();
-        self.preview_shown = false;
-        self.preview_key = None;
-    }
-
-    pub(super) fn show_preview(&mut self, frame: &RawFrame) {
-        self.preview.show(frame);
-        self.preview_shown = true;
-        self.preview_key = self.program_video_key();
-        if self.playing {
-            let now = Instant::now();
-            while self
-                .shown_at
-                .front()
-                .is_some_and(|at| now.duration_since(*at) > Duration::from_secs(1))
-            {
-                self.shown_at.pop_front();
-            }
-            self.shown_at.push_back(now);
-        }
-    }
-
-    /// Pictures shown over the last second of playback and the rate the
-    /// active picture should reach (its source rate at the clip's speed, at
-    /// most the project's). `None` until playback has run a full second over
-    /// video, and over a still.
-    pub fn playback_rate(&self) -> Option<(usize, f64)> {
-        let since = self.playing_since?;
-        if !self.playing || since.elapsed() < Duration::from_secs(1) {
-            return None;
-        }
-        // A still is one picture: there is no rate to keep up with.
-        let clip = self
-            .timeline
-            .program_video(self.playhead)
-            .filter(|clip| !clip.still())?;
-        let source_fps = self
-            .asset(clip.source.as_deref()?)
-            .map_or(0.0, |asset| asset.info.fps);
-        let target = if source_fps > 0.0 {
-            (source_fps * clip.speed).min(self.timeline.fps)
-        } else {
-            self.timeline.fps
-        };
-        let now = Instant::now();
-        let shown = self
-            .shown_at
-            .iter()
-            .filter(|at| now.duration_since(**at) <= Duration::from_secs(1))
-            .count();
-        Some((shown, target))
-    }
-
     pub fn poll_frames(&mut self) {
-        let active_key = self.program_video_key();
-        if self.preview_key != active_key {
-            if self.preview_shown {
-                self.preview.clear();
-                self.preview_shown = false;
-            }
-            self.preview_key = None;
+        let stack: Vec<(usize, Clip)> = self
+            .stack()
+            .at(self.playhead)
+            .iter()
+            .map(|picture| (picture.lane, picture.clip.clone()))
+            .collect();
+        for lane in self.playing_lanes() {
+            let wanted = stack
+                .iter()
+                .find(|(shown, _)| *shown == lane)
+                .and_then(|(_, clip)| video_key(clip));
+            self.drop_stale_picture(lane, wanted.as_ref());
         }
-        let active = self.program_video_clip();
-        let source_time = active.as_ref().map(|clip| clip.source_at(self.playhead));
         let wants_still = !self.playing || self.scrubbing();
         while let Ok((gen, result)) = self.still_rx.try_recv() {
             let Some((pending, key, used)) = self.still_inflight else {
@@ -291,28 +232,8 @@ impl Editor {
                 self.still_failed.push_back((key, Instant::now()));
                 continue;
             };
-            // The newest finished picture of this clip shows even when the
-            // pointer has moved on; the next request chases the pointer.
-            // A prefetched neighbor shows only once the playhead is on it.
-            let shows = match used {
-                StillUse::Prefetch => self
-                    .still_target(self.playhead, PREVIEW_W)
-                    .is_some_and(|target| target.key == key),
-                StillUse::Program => active.as_ref().is_some_and(|clip| clip.id == key.0),
-                StillUse::Incoming => self
-                    .incoming_clip(self.playhead)
-                    .is_some_and(|clip| clip.id == key.0),
-            };
-            if wants_still && shows {
-                if used == StillUse::Incoming {
-                    self.preview.show_incoming(&frame);
-                    let clip = self.timeline.clip(key.0);
-                    self.incoming.shown = clip.and_then(video_key);
-                    self.incoming.still = Some(key);
-                } else {
-                    self.show_preview(&frame);
-                    self.still_shown = Some(key);
-                }
+            if wants_still {
+                self.show_still(used, key, &frame);
             }
             self.still_cache.retain(|(cached, _)| *cached != key);
             if self.still_cache.len() >= STILL_CACHE_CAP {
@@ -320,29 +241,40 @@ impl Editor {
             }
             self.still_cache.push_back((key, frame));
         }
-
-        if !wants_still {
-            self.poll_incoming();
-        }
-        // A boundary/seek may precede sync_playback in this UI frame. Never
-        // upload the previous generation as the active clip's picture.
-        if wants_still || self.stream_key != active_key {
+        if wants_still {
             return;
         }
-        let result = self
-            .stream
-            .as_ref()
-            .and_then(|stream| stream.preview_frame(self.stream_generation, source_time?));
+        for (lane, clip) in stack {
+            self.poll_incoming(lane);
+            self.poll_lane(lane, &clip);
+        }
+    }
+
+    /// Take lane `lane`'s newest picture of `clip` from its worker.
+    fn poll_lane(&mut self, lane: usize, clip: &Clip) {
+        let key = video_key(clip);
+        let Some(player) = self.players.get(lane) else {
+            return;
+        };
+        // A boundary or seek may precede sync_playback in this UI frame.
+        // Never upload the previous generation as this clip's picture.
+        if key.is_none() || player.key != key {
+            return;
+        }
+        let result = player.stream.as_ref().and_then(|stream| {
+            stream.preview_frame(player.generation, clip.source_at(self.playhead))
+        });
         match result {
             Some(Ok(frame)) => {
-                self.show_preview(&frame);
-                self.still_shown = None;
-                self.stream_ready = true;
+                self.show_lane(lane, key, &frame);
+                let player = self.player(lane);
+                player.still = None;
+                player.ready = true;
+                if let Some(stream) = &player.stream {
+                    stream.recycle(frame.rgba);
+                }
                 if self.status == "Buffering video." {
                     self.status = "Playing.".to_owned();
-                }
-                if let Some(stream) = &self.stream {
-                    stream.recycle(frame.rgba);
                 }
             }
             Some(Err(error)) => self.video_playback_failed(error),
@@ -350,7 +282,7 @@ impl Editor {
         }
     }
 
-    /// Keep the video stream and audio players aligned with the playhead.
+    /// Keep the video streams and audio players aligned with the playhead.
     /// Restarts sources on seeks and clip-boundary crossings.
     pub fn sync_playback(&mut self) {
         let now = self.last_now.unwrap_or(0.0);
@@ -370,7 +302,7 @@ impl Editor {
         // While scrubbing/dragging, never (re)spawn playback processes —
         // still frames carry the picture until the pointer settles.
         if self.scrubbing() {
-            if self.stream_key.is_some() || self.audio_running() {
+            if self.players.iter().any(|player| player.key.is_some()) || self.audio_running() {
                 self.stop_sources();
             }
             self.request_still_if_needed();
@@ -380,88 +312,22 @@ impl Editor {
         if !self.playing {
             // A terminal decode failure pauses visibly instead of consuming
             // an unseen clip or automatically retrying it through stills.
-            if self.stream_failed && self.stream_key == self.program_video_key() {
+            if self.stream_failed {
                 return;
             }
-            if self.stream_key.is_some() || self.audio_running() {
+            if self.players.iter().any(|player| player.key.is_some()) || self.audio_running() {
                 self.stop_sources();
             }
             self.request_still_if_needed();
             return;
         }
 
-        // Video stream follows the program clip.
-        let active_video = self.program_video_clip();
-        let active_key = self.program_video_key();
-        if self.stream_key != active_key {
-            // A following request replaces the generation itself; cancelling
-            // first would also discard the prerolled next clip.
-            let requests = active_key
-                .as_ref()
-                .is_some_and(|(_, source, _, _, _)| self.asset(source).is_some());
-            if !requests {
-                if let Some(stream) = &self.stream {
-                    stream.cancel_preview();
-                }
+        for lane in self.playing_lanes() {
+            self.sync_lane(lane);
+            self.sync_incoming(lane);
+            if self.stream_failed {
+                return;
             }
-            self.stream_key = active_key;
-            self.stream_ready = false;
-            self.stream_failed = false;
-            self.still_shown = None;
-            if let Some(clip) = &active_video {
-                if let Some(source) = &clip.source {
-                    if self.asset(source).is_some() {
-                        let start = clip.source_at(self.playhead);
-                        if self.stream.is_none() {
-                            let wake = self.wake.clone();
-                            match FrameStream::spawn_preview(move || wake.wake()) {
-                                Ok(stream) => self.stream = Some(stream),
-                                Err(error) => self.video_playback_failed(error),
-                            }
-                        }
-                        if let Some(stream) = &self.stream {
-                            // A prerolled first picture is handed over, not
-                            // decoded. Holding the clock for its upload would
-                            // stall audio already rendered past the cut.
-                            let prerolled = stream.prefetch_ready(source, start, PREVIEW_W);
-                            match stream.request_preview(
-                                source,
-                                start,
-                                PREVIEW_W,
-                                self.timeline.fps,
-                            ) {
-                                Ok(generation) => {
-                                    self.stream_generation = generation;
-                                    self.stream_ready = prerolled;
-                                }
-                                Err(error) => self.video_playback_failed(error),
-                            }
-                        }
-                    } else {
-                        self.video_playback_failed("source is not imported".to_owned());
-                    }
-                }
-            }
-        }
-
-        if self.stream_failed {
-            return;
-        }
-        // Preroll the next visible clip while this one plays or buffers, so
-        // its first picture is ready when the playhead lands on the cut.
-        if let (Some(stream), Some((edge, Some((source, time))))) =
-            (&self.stream, self.next_video_change(self.playhead))
-        {
-            // Where the playing clip's decoder will be when the cut comes.
-            let active_until = self
-                .timeline
-                .program_video(self.playhead)
-                .map(|clip| clip.source_at(edge));
-            let _ = stream.prefetch_preview(source, time, PREVIEW_W, active_until);
-        }
-        self.sync_incoming();
-        if self.stream_failed {
-            return;
         }
         self.sync_audio();
         if self.waiting_for_video() {
@@ -474,6 +340,85 @@ impl Editor {
             // A held clock is not a seek, even if the next UI tick is late.
             self.last_sync_time = 0.0;
         }
+    }
+
+    /// Ask lane `lane`'s worker for the clip it shows at the playhead, and
+    /// preroll the next picture it shows.
+    fn sync_lane(&mut self, lane: usize) {
+        let clip = self.lane_clip(lane, self.playhead);
+        let key = clip.as_ref().and_then(video_key);
+        if self
+            .players
+            .get(lane)
+            .is_none_or(|player| player.key != key)
+        {
+            // A following request replaces the generation itself;
+            // cancelling first would also discard the prerolled next clip.
+            let source = clip.as_ref().and_then(|clip| clip.source.clone());
+            let imported = source
+                .as_deref()
+                .is_some_and(|source| self.asset(source).is_some());
+            let player = self.player(lane);
+            if !imported {
+                if let Some(stream) = &player.stream {
+                    stream.cancel_preview();
+                }
+            }
+            player.key = key;
+            player.ready = false;
+            player.still = None;
+            if let (Some(clip), Some(source)) = (&clip, source) {
+                if !imported {
+                    return self.video_playback_failed("source is not imported".to_owned());
+                }
+                let start = clip.source_at(self.playhead);
+                if let Err(error) = self.lane_stream(lane) {
+                    return self.video_playback_failed(error);
+                }
+                let fps = self.timeline.fps;
+                let player = self.player(lane);
+                let stream = player.stream.as_ref().expect("started above");
+                // A prerolled first picture is handed over, not decoded.
+                // Holding the clock for its upload would stall audio
+                // already rendered past the cut.
+                let prerolled = stream.prefetch_ready(&source, start, PREVIEW_W);
+                match stream.request_preview(&source, start, PREVIEW_W, fps) {
+                    Ok(generation) => {
+                        player.generation = generation;
+                        player.ready = prerolled;
+                    }
+                    Err(error) => return self.video_playback_failed(error),
+                }
+            }
+        }
+        // Preroll the next clip the lane shows while this one plays or
+        // buffers, so its first picture is ready when the playhead lands on
+        // the cut. A lane showing nothing prerolls only shortly before.
+        let Some((edge, Some((source, time)))) = self.next_video_change(lane, self.playhead) else {
+            return;
+        };
+        let source = source.to_owned();
+        if clip.is_none() && edge - self.playhead > super::incoming::LEAD {
+            return;
+        }
+        // Where the playing clip's decoder will be when the cut comes.
+        let active_until = clip.as_ref().map(|clip| clip.source_at(edge));
+        if self.lane_stream(lane).is_ok() {
+            if let Some(stream) = &self.players[lane].stream {
+                let _ = stream.prefetch_preview(&source, time, PREVIEW_W, active_until);
+            }
+        }
+    }
+
+    /// Start lane `lane`'s preview worker if it has none.
+    fn lane_stream(&mut self, lane: usize) -> Result<(), String> {
+        if self.player(lane).stream.is_some() {
+            return Ok(());
+        }
+        let wake = self.wake.clone();
+        let stream = FrameStream::spawn_preview(move || wake.wake())?;
+        self.player(lane).stream = Some(stream);
+        Ok(())
     }
 
     pub fn advance_playback(&mut self, now: f64) {
@@ -498,8 +443,10 @@ impl Editor {
             // The playhead still lands on each cut for one tick, so the clip
             // is requested at its first picture, which may be prerolled.
             let cut = self
-                .next_video_change(playhead)
-                .map_or(f64::INFINITY, |(edge, _)| edge);
+                .playing_lanes()
+                .filter_map(|lane| self.next_video_change(lane, playhead))
+                .map(|(edge, _)| edge)
+                .fold(f64::INFINITY, f64::min);
             self.playhead = playhead.max(clock.min(cut));
             self.clock_playhead = Some(self.playhead);
             if !self.scrubbing() {

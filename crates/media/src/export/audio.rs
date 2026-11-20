@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 
-use openreel_engine::{Clip, ClipKind, Timeline};
+use openreel_engine::{Clip, ClipKind, Crossfade, Timeline};
 
 use super::scratch::FilterGraphFile;
 use super::{export_error, f, ExportOptions};
@@ -40,7 +40,7 @@ pub(super) fn mix(
     let mut inputs: Vec<String> = Vec::new();
     let mut filters: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
-    for clip in audible_runs(timeline, infos) {
+    for (clip, crossfade) in audible_runs(timeline, infos) {
         let Some(src) = clip.source.as_ref() else {
             continue;
         };
@@ -51,7 +51,7 @@ pub(super) fn mix(
             inputs.len()
         };
         let label = format!("a{}", labels.len());
-        filters.push(branch(timeline, options, &clip, idx, &label));
+        filters.push(branch(timeline, options, &clip, crossfade, idx, &label));
         labels.push(label);
     }
     let audio_mix = match labels.len() {
@@ -81,8 +81,10 @@ pub(super) fn mix(
 }
 
 /// Every clip that sounds, in timeline order, with touching pieces of one
-/// recording joined into one run.
-fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<Clip> {
+/// recording joined into one run. A clip under a transition sounds past its
+/// edges ([`Timeline::crossfades`]) and is never joined.
+fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<(Clip, Crossfade)> {
+    let crossfades = timeline.crossfades();
     // Audio is independent of visibility. Coalesce only genuinely contiguous
     // same-source, same-gain runs (the All scenes workflow), rather than
     // creating hundreds of delayed amix branches for continuous sound.
@@ -104,12 +106,17 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
         })
         .collect();
     audio_clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut runs: Vec<Clip> = Vec::new();
+    let mut runs: Vec<(Clip, Crossfade)> = Vec::new();
     let same_time =
         |a: f64, b: f64| (a - b).abs() <= 8.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0);
     for clip in audio_clips {
-        if let Some(last) = runs.last_mut().filter(|last| {
-            last.source == clip.source
+        if let Some(cross) = crossfades.get(&clip.id) {
+            runs.push((clip.sounding(*cross), *cross));
+            continue;
+        }
+        if let Some((last, _)) = runs.last_mut().filter(|(last, cross)| {
+            *cross == Crossfade::default()
+                && last.source == clip.source
                 && last.volume == clip.volume
                 && !last.duck
                 && !clip.duck
@@ -123,18 +130,20 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
         }) {
             last.duration = clip.end() - last.start;
         } else {
-            runs.push(clip.clone());
+            runs.push((clip.clone(), Crossfade::default()));
         }
     }
     runs
 }
 
 /// One run's branch of the graph: input `idx` trimmed to the run, cleaned,
-/// set to its volume, faded, ducked and delayed to its place, as `[label]`.
+/// set to its volume, faded, crossfaded, ducked and delayed to its place,
+/// as `[label]`.
 fn branch(
     timeline: &Timeline,
     options: &ExportOptions,
     clip: &Clip,
+    crossfade: Crossfade,
     idx: usize,
     label: &str,
 ) -> String {
@@ -155,6 +164,21 @@ fn branch(
             ",afade=t=out:st={}:d={}{curve}",
             f(clip.duration - fade_out),
             f(fade_out)
+        ));
+    }
+    // The preview mixer's equal-power quarter sine, which multiplies the
+    // clip's own fades.
+    if crossfade.fade_in > 0.0 {
+        fades.push_str(&format!(
+            ",afade=t=in:st=0:d={}:curve=qsin",
+            f(crossfade.fade_in)
+        ));
+    }
+    if crossfade.fade_out > 0.0 {
+        fades.push_str(&format!(
+            ",afade=t=out:st={}:d={}:curve=qsin",
+            f(clip.duration - crossfade.fade_out),
+            f(crossfade.fade_out)
         ));
     }
     let cleanup = if clip.clean_voice {

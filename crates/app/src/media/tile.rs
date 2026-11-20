@@ -191,5 +191,5 @@ fn hover(asset: &BinAsset) -> String {
     } else {
         format!("{name}\n{meta}\nImporting…")
     };
-    format!("{hover}\nRight-click to remove it.")
+    format!("{hover}\nRight-click to add it as an overlay or remove it.")
 }

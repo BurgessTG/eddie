@@ -547,17 +547,36 @@ fn native_decoder_uses_the_source_color_matrix_and_range() {
 /// the picture as export places them.
 #[test]
 fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
-    use openreel_media::{contact_sheet, SheetCell};
+    use openreel_engine::{place, Transform};
+    use openreel_media::{contact_sheet, SheetCell, SheetLayer};
     let fixture = make_color_segments_video();
     let path = fixture.path.to_str().unwrap().to_owned();
     let cell = |picture: Option<f64>, opacity: f32, title: Option<&str>| SheetCell {
-        picture: picture.map(|time| (path.clone(), time)),
-        opacity,
+        layers: picture
+            .map(|time| SheetLayer {
+                opacity,
+                ..SheetLayer::whole(path.clone(), time)
+            })
+            .into_iter()
+            .collect(),
         title: title.map(|text| {
             let look = openreel_media::title_look(openreel_engine::TitleStyle::Caption);
             (text.to_owned(), look, 1.0)
         }),
         label: "cell".to_owned(),
+    };
+    // Blue over red, placed on the canvas as export places them.
+    let (canvas, source) = ((1920.0, 1080.0), (320.0, 180.0));
+    let layered = |transform: Transform| SheetCell {
+        layers: [(0.5, Transform::default()), (2.5, transform)]
+            .into_iter()
+            .map(|(time, t)| SheetLayer {
+                placement: Some((place(canvas, source, &t), source)),
+                ..SheetLayer::whole(path.clone(), time)
+            })
+            .collect(),
+        title: None,
+        label: "layers".to_owned(),
     };
     let cells = [
         cell(Some(2.5), 1.0, None),         // blue, before red in source
@@ -565,6 +584,19 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
         cell(Some(1.5), 0.5, None),         // lime at half opacity
         cell(None, 1.0, None),              // gap
         cell(Some(3.5), 1.0, Some("WWWW")), // white under a caption
+        // Half size in the top-right quarter.
+        layered(Transform {
+            scale: 0.5,
+            x: 0.25,
+            y: -0.25,
+            ..Transform::default()
+        }),
+        // Half size and stood on end in the middle: x 690-1230 of 1920.
+        layered(Transform {
+            scale: 0.5,
+            rotation: 90.0,
+            ..Transform::default()
+        }),
     ];
     let jpeg = contact_sheet(&cells, (1920, 1080)).expect("contact sheet");
     let sheet = fixture.dir.join("sheet.jpg");
@@ -604,21 +636,25 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
         .filter(|rgb| rgb.0 < 160.0)
         .count();
     assert!(caption > 20, "no caption box drawn ({caption} dark pixels)");
+    assert_color(at(5, 0.75, 0.25), 2, "the inset");
+    assert_color(at(5, 0.25, 0.75), 0, "the base around it");
+    assert_color(at(5, 0.45, 0.25), 0, "the base left of it");
+    assert_color(at(6, 0.5, 0.1), 2, "the turned picture's top");
+    assert_color(at(6, 0.3, 0.5), 0, "the base beside it");
 }
 
 /// A source strip is the same grid at 192 px, eight to a row, so many
 /// samples of a source fit one image; each cell shows its own time.
 #[test]
 fn source_strip_shows_each_sampled_time_in_eight_columns() {
-    use openreel_media::{source_strip, SheetCell};
+    use openreel_media::{source_strip, SheetCell, SheetLayer};
     let fixture = make_color_segments_video();
     let path = fixture.path.to_str().unwrap().to_owned();
     let order = [3.5, 0.5, 2.5, 1.5, 0.5, 1.5, 2.5, 3.5, 2.5];
     let cells: Vec<SheetCell> = order
         .iter()
         .map(|&time| SheetCell {
-            picture: Some((path.clone(), time)),
-            opacity: 1.0,
+            layers: vec![SheetLayer::whole(path.clone(), time)],
             title: None,
             label: format!("S1 {time:.1}s"),
         })

@@ -14,6 +14,7 @@ fn asset(path: &str, width: u32, height: u32) -> BinAsset {
             has_video: true,
             has_audio: true,
             photo: false,
+            alpha: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,
@@ -133,12 +134,12 @@ fn inspect_reports_broken_and_suspicious_clips() {
     };
     assert_eq!(
         covered(hidden),
-        format!("Clip {hidden} on lane 1 is always covered by a lower lane: it never shows.")
+        format!("Clip {hidden} on lane 1 is always covered by a lane above it: it never shows.")
     );
     assert_eq!(
         covered(voice),
         format!(
-            "Clip {voice} on lane 4 is always covered by a lower lane: its picture never \
+            "Clip {voice} on lane 4 is always covered by a lane above it: its picture never \
                  shows, only its sound plays."
         )
     );
@@ -205,4 +206,22 @@ fn near_match_cuts_report_skipped_and_repeated_frames() {
     assert!(pops[0].message.contains("skips 2"), "{}", pops[0].message);
     assert!(pops[1].message.contains("repeats 1"), "{}", pops[1].message);
     let _ = e;
+}
+
+/// A clip under a smaller picture shows around it, so it is not hidden.
+#[test]
+fn a_clip_under_a_picture_in_picture_is_not_hidden() {
+    let mut timeline = Timeline::empty_project();
+    let base = timeline.add_media_clip("B", ClipKind::Video, 1, 0.0, 4.0, 0.0, "a.mp4");
+    let top = timeline.add_media_clip("T", ClipKind::Video, 0, 0.0, 4.0, 0.0, "a.mp4");
+    let assets = [asset("a.mp4", 1920, 1080)];
+    let hidden = |timeline: &Timeline| {
+        kinds(&inspect(timeline, &assets))
+            .into_iter()
+            .filter(|(kind, _)| *kind == "hidden-clip")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hidden(&timeline), vec![("hidden-clip", vec![base])]);
+    timeline.clip_mut(top).unwrap().transform.scale = 0.4;
+    assert_eq!(hidden(&timeline), vec![]);
 }

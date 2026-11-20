@@ -1,51 +1,79 @@
 //! A transition on the monitor: the picture it comes from and the one it
-//! goes to, each its clip's whole canvas on black as export draws it, put
-//! where [`openreel_engine::TransitionKind::frame`] says, under a black or
-//! white veil for a dip.
+//! goes to, each its clip's whole canvas as export draws it, put where
+//! [`openreel_engine::TransitionKind::frame`] says, under a black or white
+//! veil for a dip.
 
 use openreel_engine::{Clip, Layer, TransitionFrame, TransitionSpan};
 use rune::{Color, El, el};
 
-use super::picture::placed;
+use super::picture::{LaneSlots, placed};
 use crate::app::Ui;
 
-/// `from`'s held picture and the incoming one, `span` as far through as
-/// the playhead, on a `w` by `h` monitor showing a `canvas` sized frame.
+/// `from`'s held picture and the incoming one, held in `slots` and keyed
+/// `{key}-…`, `span` as far through as the playhead, on a `w` by `h`
+/// monitor showing a `canvas` sized frame. A mix or dip passes between
+/// whole frames: each side is its picture over `under`, the lanes under
+/// it, on black. A wipe or slide moves only the pictures, over the lanes
+/// drawn before it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn view(
     ui: &Ui,
+    slots: &LaneSlots,
+    key: &str,
     span: TransitionSpan,
     from: &Clip,
     canvas: (u32, u32),
     (w, h): (f32, f32),
     decoded: (u32, u32),
+    under: Vec<El>,
 ) -> El {
     let editor = &ui.editor;
     let frame = span.kind.frame(span.progress(editor.playhead), canvas);
-    let from = placed(ui, &ui.monitor, "monitor", from, canvas, (w, h), decoded);
+    let side = |picture: El| {
+        if span.kind.blends() {
+            el().absolute(0.0, 0.0)
+                .size(w, h)
+                .fill(Color::BLACK)
+                .children(under.clone())
+                .child(picture)
+        } else {
+            picture
+        }
+    };
+    let from = side(placed(
+        ui,
+        &slots.program,
+        key,
+        from,
+        canvas,
+        (w, h),
+        decoded,
+    ));
+    let incoming = format!("{key}-incoming");
     let to = editor
         .timeline
         .clip(span.to)
-        .zip(ui.incoming.size.get())
+        .zip(slots.incoming.size.get())
         .map(|(to, size)| {
-            placed(
+            side(placed(
                 ui,
-                &ui.incoming,
-                "monitor-incoming",
+                &slots.incoming,
+                &incoming,
                 to,
                 canvas,
                 (w, h),
                 size,
-            )
+            ))
         });
-    layers("monitor", frame, canvas, (w, h), from, to)
-        .key("monitor-transition")
+    layers(key, frame, canvas, (w, h), from, to)
+        .key(format!("{key}-transition"))
         .instant_changes()
 }
 
 /// One moment of a transition on a `w` by `h` box showing a `canvas` sized
-/// frame: `from`, then `to` over it, each a whole picture on black (placed
-/// at the box's origin, `w` by `h`) moved and cut to its window, then the
-/// veil. The parts are keyed `{key}-from`, `{key}-to` and `{key}-veil`.
+/// frame: `from`, then `to` over it, each a whole canvas (placed at the
+/// box's origin, `w` by `h`) moved and cut to its window, then the veil.
+/// The parts are keyed `{key}-from`, `{key}-to` and `{key}-veil`.
 pub(crate) fn layers(
     key: &str,
     frame: TransitionFrame,
@@ -63,12 +91,7 @@ pub(crate) fn layers(
             .size(lw, lh)
             .clip_rounded(0.0)
             .layer_opacity(layer.opacity as f32)
-            .child(
-                el().absolute(ox - x, oy - y)
-                    .size(w, h)
-                    .fill(Color::BLACK)
-                    .child(picture),
-            )
+            .child(el().absolute(ox - x, oy - y).size(w, h).child(picture))
     };
     let mut stack = el()
         .absolute(0.0, 0.0)

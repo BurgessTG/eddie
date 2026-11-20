@@ -58,6 +58,10 @@ pub struct AudioSegment {
     pub smooth_fades: bool,
     /// Source seconds per timeline second; the pitch stays (`tempo_filter`).
     pub speed: f64,
+    /// Equal-power fades under transitions (`openreel_engine::Crossfade`):
+    /// seconds rising from the start, and falling to the end. They multiply
+    /// the fades above.
+    pub crossfade: (f64, f64),
 }
 
 /// Fitted fade lengths in samples, packed in/out so a fade change
@@ -328,6 +332,7 @@ impl AudioEngine {
                 fades: Arc::clone(&fades),
                 duck: segment.duck.as_slice().into(),
                 smooth_fades: segment.smooth_fades,
+                crossfade: (sample(segment.crossfade.0), sample(segment.crossfade.1)),
                 chunks,
                 recycle,
                 current: None,
@@ -387,6 +392,7 @@ fn same_source(a: &AudioSegment, b: &AudioSegment) -> bool {
         && a.clean_voice == b.clean_voice
         && a.smooth_fades == b.smooth_fades
         && a.speed == b.speed
+        && a.crossfade == b.crossfade
 }
 
 #[cfg(test)]

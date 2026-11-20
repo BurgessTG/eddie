@@ -17,6 +17,10 @@ pub struct MediaInfo {
     /// One picture, such as a PNG, JPEG, WebP or HEIC photo. It has no length
     /// (`duration` and `fps` are 0): a clip shows it for as long as it lasts.
     pub photo: bool,
+    /// Its picture has an alpha channel (a PNG with transparency, ProRes
+    /// 4444): what is under it on the timeline can show through, so it
+    /// never hides the lanes under it.
+    pub alpha: bool,
 }
 
 /// Probe a media file in process: what it holds, how long it runs and the
@@ -45,6 +49,7 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         has_video: false,
         has_audio: false,
         photo: false,
+        alpha: false,
     };
     for stream in input.streams() {
         let parameters = stream.parameters();
@@ -59,6 +64,7 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
                     unsafe { ((*parameters.as_ptr()).width, (*parameters.as_ptr()).height) };
                 info.width = width.max(0) as u32;
                 info.height = height.max(0) as u32;
+                info.alpha = has_alpha(&stream);
                 // Report displayed dimensions, as every decode path rotates.
                 if decode::display_turns(&stream) % 2 == 1 {
                     std::mem::swap(&mut info.width, &mut info.height);
@@ -89,4 +95,22 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         (info.width, info.height) = decode::VideoDecoder::open(path, 16, true)?.photo_size();
     }
     Ok(info)
+}
+
+/// Whether `stream`'s pixels carry alpha, from its pixel format.
+fn has_alpha(stream: &ffmpeg_next::format::stream::Stream) -> bool {
+    use ffmpeg_next::ffi::{AVPixFmtDescriptor, AV_PIX_FMT_FLAG_ALPHA};
+    use std::os::raw::c_int;
+    // Declared over a plain int: a format newer than these bindings is not
+    // a valid Rust enum value, and C passes the enum as an int.
+    unsafe extern "C" {
+        fn av_pix_fmt_desc_get(format: c_int) -> *const AVPixFmtDescriptor;
+    }
+    // SAFETY: the parameters belong to the open input and outlive this
+    // read, and the descriptor table is static.
+    unsafe {
+        let format = (*stream.parameters().as_ptr()).format;
+        let descriptor = av_pix_fmt_desc_get(format);
+        !descriptor.is_null() && (*descriptor).flags & AV_PIX_FMT_FLAG_ALPHA as u64 != 0
+    }
 }

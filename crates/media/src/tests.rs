@@ -81,6 +81,7 @@ fn samples_probe_decode_and_export_end_to_end() {
             clean_voice: false,
             smooth_fades: false,
             speed: 1.0,
+            crossfade: (0.0, 0.0),
         },
     )]);
     let mut mix = Vec::new();

@@ -277,10 +277,40 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
     if let Some(menu) = &ui.bin_menu {
         let close = |ui: &mut Ui| ui.bin_menu = None;
         let path = menu.path.clone();
+        let asset = ui.editor.asset(&path);
+        let ready = asset.is_some_and(|asset| asset.state == AssetState::Ready);
+        let picture = ready && asset.is_some_and(|asset| asset.info.has_video);
+        let (add, overlay) = (path.clone(), path.clone());
         overlays.push(rune_kit::scrim("bin-menu-scrim", close));
         overlays.push(
             menus::frame("bin-menu")
                 .absolute(menu.at[0], menu.at[1])
+                .child(
+                    menus::plain_row(
+                        "bin-menu-add",
+                        "Add at playhead",
+                        "Put this file on the timeline at the playhead",
+                        ready,
+                    )
+                    .on_press(move |ui: &mut Ui| {
+                        ui.bin_menu = None;
+                        let playhead = ui.editor.playhead;
+                        ui.editor.add_asset_to_timeline(&add, None, playhead);
+                    }),
+                )
+                .child(
+                    menus::plain_row(
+                        "bin-menu-overlay",
+                        "Add as overlay",
+                        "Put this picture at the playhead on a lane above the video there, \
+                         drawn over it; scale and move it in Details",
+                        picture,
+                    )
+                    .on_press(move |ui: &mut Ui| {
+                        ui.bin_menu = None;
+                        ui.editor.add_overlay(&overlay);
+                    }),
+                )
                 .child(
                     menus::destructive_row(
                         "bin-menu-remove",

@@ -1,7 +1,9 @@
 //! Timeline checks scripts and agents read (`inspect()`, `eddie inspect`):
 //! measured facts about the timeline, not taste.
 
-use openreel_engine::{place, Clip, ClipId, ClipKind, Timeline};
+use std::collections::HashSet;
+
+use openreel_engine::{hides_below, place, Clip, ClipId, ClipKind, Timeline};
 use serde::Serialize;
 
 use super::media::BinAsset;
@@ -17,7 +19,7 @@ pub struct Finding {
     pub end: f64,
 }
 
-/// A stretch of program time with one visible picture and one title.
+/// A stretch of program time with one top picture and one title.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Segment {
     pub start: f64,
@@ -27,7 +29,8 @@ pub struct Segment {
 }
 
 /// The program as preview and export show it, from 0 to the timeline end,
-/// split wherever the visible picture or title changes.
+/// split wherever the top picture or title changes. Lanes under the top
+/// picture may show around or through it.
 pub fn program_segments(timeline: &Timeline) -> Vec<Segment> {
     let mut edges: Vec<f64> = vec![0.0, timeline.end()];
     for clip in &timeline.clips {
@@ -87,7 +90,7 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     }
     inspection.gaps_and_flashes(&segments, &runs);
     inspection.near_match_cuts(&runs);
-    inspection.hidden_clips(&runs);
+    inspection.hidden_clips();
     inspection.transitions();
     inspection.findings
 }
@@ -415,11 +418,39 @@ impl<'a> Inspection<'a> {
         }
     }
 
-    /// Video a lower lane covers for its whole length.
-    fn hidden_clips(&mut self, runs: &[Run]) {
+    /// Video that the opaque, frame-filling pictures of the lanes above
+    /// cover for its whole length ([`Timeline::video_stack`]).
+    fn hidden_clips(&mut self) {
         let timeline = self.timeline;
+        let spans = timeline.transitions();
+        let hides = |clip: &Clip| {
+            clip.source
+                .as_deref()
+                .and_then(|source| self.asset(source))
+                .is_some_and(|asset| {
+                    let info = &asset.info;
+                    let size = (f64::from(info.width), f64::from(info.height));
+                    hides_below(clip, self.canvas, size, info.alpha)
+                })
+        };
+        let mut edges: Vec<f64> = timeline
+            .clips
+            .iter()
+            .flat_map(|clip| [clip.start, clip.end()])
+            .chain(spans.iter().flat_map(|span| [span.start, span.end]))
+            .collect();
+        edges.sort_by(f64::total_cmp);
+        edges.dedup();
+        let mut shown = HashSet::new();
+        for pair in edges.windows(2) {
+            let middle = (pair[0] + pair[1]) / 2.0;
+            for picture in timeline.video_stack(&spans, middle, &hides) {
+                shown.insert(picture.clip.id);
+                shown.extend(picture.transition.map(|span| span.to));
+            }
+        }
         for clip in &timeline.clips {
-            if clip.kind == ClipKind::Video && !runs.iter().any(|run| run.2 == Some(clip.id)) {
+            if clip.kind == ClipKind::Video && !shown.contains(&clip.id) {
                 // A voice kept under a cutaway is covered on purpose; say what
                 // still plays so the reader can tell that from a lost picture.
                 let heard = clip.embedded_audio
@@ -433,7 +464,7 @@ impl<'a> Inspection<'a> {
                     "hidden-clip",
                     "warning",
                     format!(
-                        "Clip {} on lane {} is always covered by a lower lane: {}.",
+                        "Clip {} on lane {} is always covered by a lane above it: {}.",
                         clip.id,
                         clip.track,
                         if heard {

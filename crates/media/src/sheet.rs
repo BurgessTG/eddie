@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::process::Stdio;
 use std::thread;
 
+use openreel_engine::Placement;
+
 use crate::export::{filter_value, font_file};
 use crate::{scaled_height, MediaResult, RawFrame, TitleLook, VideoDecoder};
 
@@ -17,16 +19,48 @@ const GUTTER: usize = 4;
 /// sheet's 3 with labels and shots still clear.
 const STRIP_QUALITY: u32 = 7;
 
-/// One cell: the picture shown at a program time, as preview and export
-/// compose it, and the label drawn under it.
+/// Decoders a sheet keeps open, so cells that go back and forth between a
+/// picture and the one under it do not reopen either.
+const OPEN_DECODERS: usize = 4;
+/// The blurred background's spread, as a share of the frame's width: the
+/// monitor's sigma.
+const BLUR_SHARE: f64 = 0.021;
+
+/// One cell: the pictures shown at a program time, as preview and export
+/// compose them, and the label drawn under it.
 pub struct SheetCell {
-    /// Source path and source time of the visible video, if any.
-    pub picture: Option<(String, f64)>,
-    /// The picture's opacity; it fades against black.
-    pub opacity: f32,
+    /// The pictures, bottom first, over black. None leaves the cell black.
+    pub layers: Vec<SheetLayer>,
     /// The active title's text, look ([`crate::clip_title_look`]) and opacity.
     pub title: Option<(String, TitleLook, f32)>,
     pub label: String,
+}
+
+/// One picture of a cell. The colour grade is not drawn.
+pub struct SheetLayer {
+    /// Source path and the source time shown.
+    pub path: String,
+    pub time: f64,
+    /// Where it lands on the canvas ([`openreel_engine::place`]) and its
+    /// file's displayed size. `None` fits the whole picture to the cell.
+    pub placement: Option<(Placement, (f64, f64))>,
+    /// Its opacity over what is under it.
+    pub opacity: f32,
+    /// Drawn over a blurred copy of itself that fills the canvas.
+    pub blur: bool,
+}
+
+impl SheetLayer {
+    /// The picture of `path` at `time`, fitted to the cell.
+    pub fn whole(path: String, time: f64) -> Self {
+        Self {
+            path,
+            time,
+            placement: None,
+            opacity: 1.0,
+            blur: false,
+        }
+    }
 }
 
 /// A labelled JPEG grid of `cells` on the export `canvas` aspect, four
@@ -68,15 +102,30 @@ fn render(
     }
 
     let mut labels: Vec<String> = cells.iter().map(|cell| cell.label.clone()).collect();
-    let mut decoder: Option<(String, VideoDecoder)> = None;
+    let mut decoders = Decoders::default();
+    let size = (f64::from(canvas.0), f64::from(canvas.1));
     for (index, cell) in cells.iter().enumerate() {
         grid.black(&mut sheet, index);
-        let Some((path, time)) = &cell.picture else {
-            continue;
-        };
-        match still(&mut decoder, path, *time, &grid) {
-            Ok(frame) => grid.paint(&mut sheet, index, &frame, cell.opacity),
-            Err(_) => labels[index].push_str(" (undecodable)"),
+        for layer in &cell.layers {
+            let drawn = match layer.placement {
+                None => decoders
+                    .fitted(&layer.path, layer.time, &grid)
+                    .map(|frame| grid.paint(&mut sheet, index, &frame, layer.opacity)),
+                Some((placement, source)) => decoders
+                    .placed(layer, &placement, source, &grid, size)
+                    .map(|frame| {
+                        let picture = Picture {
+                            frame: &frame,
+                            placement: &placement,
+                            source,
+                        };
+                        grid.layer(&mut sheet, index, &picture, layer, size);
+                    }),
+            };
+            if drawn.is_err() {
+                labels[index].push_str(" (undecodable)");
+                break;
+            }
         }
     }
     let filters = text_filters(cells, &labels, &grid, canvas);
@@ -150,29 +199,231 @@ impl Grid {
     }
 }
 
-/// The picture of `path` at `time`, sized to fit a cell. `decoder` stays
-/// open across cells of one file.
-fn still(
-    decoder: &mut Option<(String, VideoDecoder)>,
-    path: &str,
-    time: f64,
-    grid: &Grid,
-) -> MediaResult<RawFrame> {
-    if decoder.as_ref().is_none_or(|(open, _)| open != path) {
-        *decoder = Some((
-            path.to_owned(),
-            VideoDecoder::open(path, grid.cell_w as u32, false)?,
-        ));
+/// A decoded picture, the whole of a `source` sized file, and where it
+/// lands on the canvas.
+struct Picture<'a> {
+    frame: &'a RawFrame,
+    placement: &'a Placement,
+    source: (f64, f64),
+}
+
+impl Grid {
+    /// Draw `layer` over cell `index` where its placement puts it on a
+    /// `canvas` sized frame, over its blurred copy when it has one.
+    fn layer(
+        &self,
+        sheet: &mut [u8],
+        index: usize,
+        picture: &Picture,
+        layer: &SheetLayer,
+        canvas: (f64, f64),
+    ) {
+        let (x0, y0) = self.origin(index);
+        let at = |row: usize, col: usize| ((y0 + row) * self.width + x0 + col) * 4;
+        if layer.blur && !picture.placement.covers(canvas) {
+            let (sw, sh) = picture.source;
+            let k = (canvas.0 / sw).max(canvas.1 / sh);
+            let fill = Placement {
+                crop: [0.0, 0.0, sw, sh],
+                size: [sw * k, sh * k],
+                center: [canvas.0 / 2.0, canvas.1 / 2.0],
+                rotation: 0.0,
+                ..*picture.placement
+            };
+            let fill = Picture {
+                placement: &fill,
+                ..*picture
+            };
+            let mut background = vec![0_u8; self.cell_w * self.cell_h * 4];
+            self.sample(&fill, canvas, |row, col, rgba, alpha| {
+                let i = (row * self.cell_w + col) * 4;
+                for channel in 0..3 {
+                    background[i + channel] = (rgba[channel] * alpha).round() as u8;
+                }
+            });
+            let radius = (1.22 * BLUR_SHARE * self.cell_w as f64).round() as usize;
+            box_blur(&mut background, self.cell_w, self.cell_h, radius);
+            let gain = layer.opacity.clamp(0.0, 1.0);
+            for row in 0..self.cell_h {
+                for col in 0..self.cell_w {
+                    let (i, j) = (at(row, col), (row * self.cell_w + col) * 4);
+                    for channel in 0..3 {
+                        let (under, over) = (
+                            f32::from(sheet[i + channel]),
+                            f32::from(background[j + channel]),
+                        );
+                        sheet[i + channel] = (under + (over - under) * gain).round() as u8;
+                    }
+                }
+            }
+        }
+        let gain = layer.opacity.clamp(0.0, 1.0);
+        self.sample(picture, canvas, |row, col, rgba, alpha| {
+            let i = at(row, col);
+            let alpha = alpha * gain;
+            for channel in 0..3 {
+                let under = f32::from(sheet[i + channel]);
+                sheet[i + channel] = (under + (rgba[channel] - under) * alpha).round() as u8;
+            }
+        });
     }
-    let decoder = &mut decoder.as_mut().unwrap().1;
-    decoder.set_output(grid.cell_w as u32, false)?;
-    let (w, h) = decoder.output_size();
-    if h as usize > grid.cell_h {
-        // Taller than the canvas: fit the height (pillarbox).
-        let fit = (w as usize * grid.cell_h / h as usize) / 2 * 2;
-        decoder.set_output(fit.max(2) as u32, false)?;
+
+    /// Call `put(row, col, rgba, alpha)` for each pixel of a cell that
+    /// `picture` covers on a `canvas` sized frame, with the picture's
+    /// colour there (bilinear) and its own alpha from 0 to 1.
+    fn sample(
+        &self,
+        picture: &Picture,
+        canvas: (f64, f64),
+        mut put: impl FnMut(usize, usize, [f32; 4], f32),
+    ) {
+        let p = picture.placement;
+        let frame = picture.frame;
+        let (sin, cos) = (-p.rotation.to_radians()).sin_cos();
+        let (kx, ky) = (canvas.0 / self.cell_w as f64, canvas.1 / self.cell_h as f64);
+        let (fx, fy) = (
+            f64::from(frame.width) / picture.source.0,
+            f64::from(frame.height) / picture.source.1,
+        );
+        let [crop_x, crop_y, crop_w, crop_h] = p.crop;
+        for row in 0..self.cell_h {
+            for col in 0..self.cell_w {
+                let dx = (col as f64 + 0.5) * kx - p.center[0];
+                let dy = (row as f64 + 0.5) * ky - p.center[1];
+                let (u, v) = (
+                    (dx * cos - dy * sin) / p.size[0] + 0.5,
+                    (dx * sin + dy * cos) / p.size[1] + 0.5,
+                );
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                // The crop is of the unflipped source; the flip mirrors it.
+                let u = if p.flip_h { 1.0 - u } else { u };
+                let v = if p.flip_v { 1.0 - v } else { v };
+                let rgba = bilinear(
+                    frame,
+                    (crop_x + u * crop_w) * fx,
+                    (crop_y + v * crop_h) * fy,
+                );
+                put(row, col, rgba, rgba[3] / 255.0);
+            }
+        }
     }
-    decoder.still_at(time)
+}
+
+/// `frame`'s colour at pixel position `(x, y)`, pixel centres at halves.
+fn bilinear(frame: &RawFrame, x: f64, y: f64) -> [f32; 4] {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let x = (x - 0.5).clamp(0.0, (w - 1) as f64);
+    let y = (y - 0.5).clamp(0.0, (h - 1) as f64);
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = ((x - x0 as f64) as f32, (y - y0 as f64) as f32);
+    let at = |x: usize, y: usize, channel: usize| f32::from(frame.rgba[(y * w + x) * 4 + channel]);
+    let mut rgba = [0.0; 4];
+    for (channel, value) in rgba.iter_mut().enumerate() {
+        let top = at(x0, y0, channel) + (at(x1, y0, channel) - at(x0, y0, channel)) * tx;
+        let bottom = at(x0, y1, channel) + (at(x1, y1, channel) - at(x0, y1, channel)) * tx;
+        *value = top + (bottom - top) * ty;
+    }
+    rgba
+}
+
+/// Blur a `w` by `h` RGBA picture with two box passes each way, about a
+/// Gaussian of sigma `radius / 1.22`. Edges average what is inside.
+fn box_blur(pixels: &mut [u8], w: usize, h: usize, radius: usize) {
+    if radius == 0 {
+        return;
+    }
+    for _ in 0..2 {
+        blur_lines(pixels, (w, 4), (h, w * 4), radius);
+        blur_lines(pixels, (h, w * 4), (w, 4), radius);
+    }
+}
+
+/// Box-blur `lines` lines of `len` pixels each, `step` bytes apart along a
+/// line and `stride` bytes between lines.
+fn blur_lines(
+    pixels: &mut [u8],
+    (len, step): (usize, usize),
+    (lines, stride): (usize, usize),
+    radius: usize,
+) {
+    let mut line = vec![[0.0_f32; 3]; len];
+    for index in 0..lines {
+        let base = index * stride;
+        for (i, value) in line.iter_mut().enumerate() {
+            let o = base + i * step;
+            *value = [
+                f32::from(pixels[o]),
+                f32::from(pixels[o + 1]),
+                f32::from(pixels[o + 2]),
+            ];
+        }
+        for i in 0..len {
+            let (first, last) = (i.saturating_sub(radius), (i + radius).min(len - 1));
+            let mut sum = [0.0_f32; 3];
+            for value in &line[first..=last] {
+                for channel in 0..3 {
+                    sum[channel] += value[channel];
+                }
+            }
+            let n = (last - first + 1) as f32;
+            let o = base + i * step;
+            for channel in 0..3 {
+                pixels[o + channel] = (sum[channel] / n).round() as u8;
+            }
+        }
+    }
+}
+
+/// The decoders a sheet has open, the most recently used last.
+#[derive(Default)]
+struct Decoders(Vec<(String, VideoDecoder)>);
+
+impl Decoders {
+    /// `path`'s decoder, writing `width` wide pictures.
+    fn get(&mut self, path: &str, width: u32) -> MediaResult<&mut VideoDecoder> {
+        let decoder = match self.0.iter().position(|(open, _)| open == path) {
+            Some(index) => self.0.remove(index).1,
+            None => VideoDecoder::open(path, width, false)?,
+        };
+        if self.0.len() >= OPEN_DECODERS {
+            self.0.remove(0);
+        }
+        self.0.push((path.to_owned(), decoder));
+        let decoder = &mut self.0.last_mut().expect("just pushed").1;
+        decoder.set_output(width, false)?;
+        Ok(decoder)
+    }
+
+    /// The picture of `path` at `time`, sized to fit a cell.
+    fn fitted(&mut self, path: &str, time: f64, grid: &Grid) -> MediaResult<RawFrame> {
+        let decoder = self.get(path, grid.cell_w as u32)?;
+        let (w, h) = decoder.output_size();
+        if h as usize > grid.cell_h {
+            // Taller than the canvas: fit the height (pillarbox).
+            let fit = (w as usize * grid.cell_h / h as usize) / 2 * 2;
+            decoder.set_output(fit.max(2) as u32, false)?;
+        }
+        decoder.still_at(time)
+    }
+
+    /// `layer`'s picture, the whole file as wide as `placement` shows it
+    /// in a cell (at most 1920 pixels).
+    fn placed(
+        &mut self,
+        layer: &SheetLayer,
+        placement: &Placement,
+        source: (f64, f64),
+        grid: &Grid,
+        canvas: (f64, f64),
+    ) -> MediaResult<RawFrame> {
+        let shown = source.0 * placement.size[0] / placement.crop[2].max(1.0);
+        let width = shown * grid.cell_w as f64 / canvas.0;
+        let width = ((width / 2.0).ceil() * 2.0).clamp(16.0, 1920.0) as u32;
+        self.get(&layer.path, width)?.still_at(layer.time)
+    }
 }
 
 /// The drawtext chain for every label and title: export's title table,

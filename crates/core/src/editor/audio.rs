@@ -1,13 +1,14 @@
 //! What the timeline sounds like: the mixer's segments, the speech that
 //! ducks music, and the measured loudness of the mix.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openreel_engine::ClipKind;
+use openreel_engine::{ClipKind, Crossfade};
 use openreel_media::{AudioEngine, AudioSegment};
 
 use crate::Editor;
@@ -118,17 +119,23 @@ impl Editor {
 
     /// Every audible clip as the mixer plays it (ducking included), or only
     /// those overlapping `window`.
+    /// Each clip's sound runs past its edges under transitions
+    /// (`Timeline::crossfades`).
     pub fn audio_segments(&self, window: Option<(f64, f64)>) -> Vec<(u64, AudioSegment)> {
         let speech = self.speech_map();
+        let crossfades = self.timeline.crossfades();
         self.timeline
             .clips
             .iter()
             .filter(|c| {
-                window.is_none_or(|(from, to)| c.start < to && c.end() > from)
-                    && (c.kind == ClipKind::Audio
-                        || (c.kind == ClipKind::Video && c.embedded_audio))
+                c.kind == ClipKind::Audio || (c.kind == ClipKind::Video && c.embedded_audio)
             })
-            .filter_map(|c| {
+            .map(|c| match crossfades.get(&c.id) {
+                Some(cross) => (Cow::Owned(c.sounding(*cross)), *cross),
+                None => (Cow::Borrowed(c), Crossfade::default()),
+            })
+            .filter(|(c, _)| window.is_none_or(|(from, to)| c.start < to && c.end() > from))
+            .filter_map(|(c, cross)| {
                 let source = c.source.as_ref()?;
                 self.asset(source)?.info.has_audio.then(|| {
                     (
@@ -141,10 +148,11 @@ impl Editor {
                             volume: c.volume,
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
-                            duck: self.timeline.duck_ranges(c, &speech),
+                            duck: self.timeline.duck_ranges(&c, &speech),
                             clean_voice: c.clean_voice,
                             smooth_fades: c.smooth_fades,
                             speed: c.speed,
+                            crossfade: (cross.fade_in, cross.fade_out),
                         },
                     )
                 })

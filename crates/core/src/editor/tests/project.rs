@@ -51,6 +51,7 @@ fn finished_import_keeps_the_users_selection() {
             has_video: true,
             has_audio: false,
             photo: false,
+            alpha: false,
         },
         size_bytes: 0,
         state: AssetState::Ready,

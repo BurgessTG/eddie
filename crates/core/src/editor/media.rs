@@ -131,6 +131,7 @@ impl Editor {
                 has_video: false,
                 has_audio: false,
                 photo: false,
+                alpha: false,
             },
             size_bytes,
             state: AssetState::Probing,
@@ -362,6 +363,27 @@ impl Editor {
         };
         let (name, duration) = (asset.info.name.clone(), asset.clip_length());
         self.add_asset_range_to_timeline(path, &name, row, at, 0.0, duration);
+    }
+
+    /// Add a picture at the playhead as an overlay: on the video lane right
+    /// above every picture it overlaps, so it draws over them all.
+    pub fn add_overlay(&mut self, path: &str) {
+        let Some(asset) = self.asset(path) else {
+            return;
+        };
+        if asset.state != AssetState::Ready {
+            self.status = format!("Still importing {}", asset.info.name);
+            return;
+        }
+        if !asset.info.has_video {
+            self.status = format!("{} has no picture to overlay", asset.info.name);
+            return;
+        }
+        let (name, duration) = (asset.info.name.clone(), asset.clip_length());
+        let at = self.playhead;
+        let track = self.timeline.overlay_lane(at, at + duration);
+        let row = self.timeline.row(ClipKind::Video, track);
+        self.add_asset_range_to_timeline(path, &name, Some(row), at, 0.0, duration);
     }
 
     pub fn add_asset_range_to_timeline(

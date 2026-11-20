@@ -127,6 +127,23 @@ impl Timeline {
         }
     }
 
+    /// The video lane right above every video clip from `start` to `end`,
+    /// where an overlay there draws over all of them: a new top lane when
+    /// lane 0 has one.
+    pub fn overlay_lane(&mut self, start: f64, end: f64) -> usize {
+        let top = self
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Video && clip.start < end && start < clip.end())
+            .map(|clip| clip.track)
+            .min();
+        match top {
+            Some(0) => self.add_lane(ClipKind::Video, true),
+            Some(track) => track - 1,
+            None => 0,
+        }
+    }
+
     /// Where a clip of `kind` dropped on `row` lands: that lane when it is
     /// one of `kind`'s, else the first free from `start` to `end`. `None`
     /// means a new lane below the others.

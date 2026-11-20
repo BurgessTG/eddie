@@ -5,6 +5,8 @@
 //! past its out point and the clip after starts before its in point; where
 //! a file has no picture there, its edge picture holds.
 
+use std::collections::HashMap;
+
 use crate::{Clip, ClipId, ClipKind, Timeline};
 
 /// How one picture becomes the next. Export renders each with FFmpeg's
@@ -90,6 +92,14 @@ impl TransitionKind {
             .find(|kind| kind.as_str() == name || kind.label().to_lowercase() == name)
     }
 
+    /// A mix or dip passes between whole frames: each side is its clip's
+    /// picture over everything on the lanes under it, so what shows around
+    /// a picture crossfades with it, and a dip veils it too. A wipe or slide
+    /// moves only the two pictures over the lanes under them.
+    pub fn blends(self) -> bool {
+        matches!(self, Self::Mix | Self::DipBlack | Self::DipWhite)
+    }
+
     /// The picture `t` of the way through (0 to 1) on a `width` by
     /// `height` canvas. `xfade` works from its progress `p = 1 - t` and
     /// whole pixels: a wipe's edge is at `int(width * p)`, and a slide
@@ -126,16 +136,25 @@ impl TransitionKind {
                     (shown(0.0), shown(1.0), Some((white, 2.0 - 2.0 * t)))
                 }
             }
+            // Each picture shows only on its side of the edge, so where the
+            // next picture is clear (over another lane) this one does not
+            // show through.
             Self::WipeLeft => {
                 let x = edge(w, p);
-                (shown(1.0), cut_to([x, 0.0, w - x, h]), None)
+                (cut_to([0.0, 0.0, x, h]), cut_to([x, 0.0, w - x, h]), None)
             }
-            Self::WipeRight => (shown(1.0), cut_to([0.0, 0.0, edge(w, t), h]), None),
+            Self::WipeRight => {
+                let x = edge(w, t);
+                (cut_to([x, 0.0, w - x, h]), cut_to([0.0, 0.0, x, h]), None)
+            }
             Self::WipeUp => {
                 let y = edge(h, p);
-                (shown(1.0), cut_to([0.0, y, w, h - y]), None)
+                (cut_to([0.0, 0.0, w, y]), cut_to([0.0, y, w, h - y]), None)
             }
-            Self::WipeDown => (shown(1.0), cut_to([0.0, 0.0, w, edge(h, t)]), None),
+            Self::WipeDown => {
+                let y = edge(h, t);
+                (cut_to([0.0, y, w, h - y]), cut_to([0.0, 0.0, w, y]), None)
+            }
             Self::SlideLeft => {
                 let z = (w * p).trunc();
                 (at([z - w, 0.0]), at([z, 0.0]), None)
@@ -159,7 +178,8 @@ impl TransitionKind {
 
 /// One moment of a transition: the clip it comes from drawn first, the
 /// clip it goes to over it, then a black or white veil over both. Each
-/// picture is its clip's whole canvas, as the clip alone would show it.
+/// picture is its clip's whole canvas, as the clip alone would show it;
+/// where a picture does not cover the canvas the lanes under it show.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransitionFrame {
     pub from: Layer,
@@ -270,38 +290,80 @@ impl Timeline {
         spans
     }
 
-    /// The transition showing at `time`: one whose clips are the picture
-    /// there ([`Timeline::active_video`]), so a lower lane covering it
-    /// hides it.
-    pub fn transition_at(&self, time: f64) -> Option<TransitionSpan> {
-        self.transition_among(&self.transitions(), time)
-    }
-
-    /// [`Timeline::transition_at`] among `spans`, this timeline's
-    /// [`Timeline::transitions`], for callers that look up many times.
-    pub fn transition_among(&self, spans: &[TransitionSpan], time: f64) -> Option<TransitionSpan> {
-        let showing = spans.iter().filter(|span| span.contains(time));
-        let mut showing = showing.peekable();
-        showing.peek()?;
-        let active = self.active_video(time)?.id;
-        showing
-            .find(|span| span.from == active || span.to == active)
-            .copied()
-    }
-
-    /// The clip whose picture the program shows at `time`: the active
-    /// video, except during a transition, where the clip it comes from plays
-    /// on past the cut to the transition's end and the clip it goes to is
-    /// drawn with it.
-    pub fn program_video(&self, time: f64) -> Option<&Clip> {
-        self.program_video_among(&self.transitions(), time)
-    }
-
-    /// [`Timeline::program_video`] among `spans`.
-    pub fn program_video_among(&self, spans: &[TransitionSpan], time: f64) -> Option<&Clip> {
-        match self.transition_among(spans, time) {
-            Some(span) => self.clip(span.from),
-            None => self.active_video(time),
+    /// How the sound crosses each transition: the clip it comes from plays
+    /// on past the cut to the transition's end, fading out over the whole
+    /// transition, and the clip it goes to starts at the transition's start
+    /// (or at its file's first sound, if that is later), fading in to full
+    /// at the transition's end. A video clip's own sound crosses, and so does
+    /// the sound detached from it while it still meets the cut. A cut that
+    /// joins two pieces of one recording end to end is left as it is: its
+    /// sound already continues.
+    pub fn crossfades(&self) -> HashMap<ClipId, Crossfade> {
+        let mut crossfades: HashMap<ClipId, Crossfade> = HashMap::new();
+        let slack = 0.5 / self.fps;
+        for span in self.transitions() {
+            let (Some(from), Some(to)) = (self.clip(span.from), self.clip(span.to)) else {
+                continue;
+            };
+            let half = span.end - span.cut;
+            let (out, into) = (self.sound_at(from, span.cut), self.sound_at(to, span.cut));
+            if let (Some(out), Some(into)) = (out, into) {
+                let continues = out.source == into.source
+                    && out.speed == into.speed
+                    && (out.source_end() - into.source_in).abs() <= slack * out.speed;
+                if continues {
+                    continue;
+                }
+            }
+            if let Some(out) = out {
+                let cross = crossfades.entry(out.id).or_default();
+                cross.tail = half;
+                cross.fade_out = 2.0 * half;
+            }
+            if let Some(into) = into {
+                let head = half.min(into.source_in.max(0.0) / into.speed);
+                let cross = crossfades.entry(into.id).or_default();
+                cross.head = head;
+                cross.fade_in = head + half;
+            }
         }
+        crossfades
+    }
+
+    /// A video clip's own sound, or the sound detached from it when that
+    /// starts or ends at `cut` too.
+    fn sound_at<'a>(&'a self, clip: &'a Clip, cut: f64) -> Option<&'a Clip> {
+        if clip.embedded_audio && clip.source.is_some() && !clip.still() {
+            return Some(clip);
+        }
+        let partner = self.clip(clip.linked_clip?)?;
+        let meets = [partner.start, partner.end()]
+            .iter()
+            .any(|edge| (edge - cut).abs() <= 0.5 / self.fps);
+        (partner.kind == ClipKind::Audio && partner.source.is_some() && meets).then_some(partner)
+    }
+}
+
+/// How a clip's sound runs past its own ends under transitions
+/// ([`Timeline::crossfades`]), in timeline seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Crossfade {
+    /// How long it sounds before its start, and after its end.
+    pub head: f64,
+    pub tail: f64,
+    /// The equal-power fade in from the first sound, and out to the last.
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+impl Clip {
+    /// This clip as its sound plays: `cross.head` earlier and
+    /// `cross.tail` longer, reading its source from that much earlier.
+    pub fn sounding(&self, cross: Crossfade) -> Clip {
+        let mut clip = self.clone();
+        clip.start -= cross.head;
+        clip.source_in -= cross.head * self.speed;
+        clip.duration += cross.head + cross.tail;
+        clip
     }
 }

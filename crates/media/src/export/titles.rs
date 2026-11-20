@@ -6,7 +6,7 @@ use std::process::Command;
 
 use openreel_engine::{Clip, Rgb, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE};
 
-use super::video::{enabled_frames, VideoClock};
+use super::frames::{enabled_frames, VideoClock};
 
 /// `value` as one filter option, quoted for both parsers it passes: the
 /// option list (`:`, `'` and `\` are special) and then the filtergraph

@@ -32,6 +32,7 @@ fn test_info() -> MediaInfo {
         has_video: true,
         has_audio: true,
         photo: false,
+        alpha: false,
     }
 }
 

@@ -216,7 +216,7 @@ fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
     };
     let close =
         |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01);
-    let placed = share(&rt, "monitor-placed");
+    let placed = share(&rt, "monitor-lane0-placed");
     assert!(close(placed, [0.5, 0.0, 0.5, 0.5]), "{placed:?}");
 
     // A quarter turn about the same centre stands the box on end: 90x160
@@ -225,7 +225,7 @@ fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
         .editor
         .edit_clip_transform(id, |t| t.rotation = 90.0);
     frames(&mut rt, 2);
-    let turned = share(&rt, "monitor-placed");
+    let turned = share(&rt, "monitor-lane0-placed");
     let want = [
         (240.0 - 45.0) / 320.0,
         (45.0 - 80.0) / 180.0,
@@ -241,10 +241,61 @@ fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
         t.crop_left = 0.5;
     });
     frames(&mut rt, 2);
-    let boxed = share(&rt, "monitor-placed");
-    let whole = share(&rt, "monitor-picture");
+    let boxed = share(&rt, "monitor-lane0-placed");
+    let whole = share(&rt, "monitor-lane0-picture");
     assert!(close(boxed, [0.625, 0.0, 0.25, 0.5]), "{boxed:?}");
     assert!(close(whole, [0.375, 0.0, 0.5, 0.5]), "{whole:?}");
+}
+
+/// A half-size clip on video lane 0 over a whole-canvas clip on lane 1:
+/// both show, the top one in its quarter, and a press takes hold of the
+/// picture under it, the top one first.
+#[test]
+fn a_picture_in_picture_shows_over_the_lane_under_it() {
+    let footage = Footage::new();
+    let path = footage.path();
+    let mut ui = Ui::headless();
+    ui.editor.spawn_import(vec![path.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the import", |ui| {
+        ui.editor.asset(&path).is_some() && !ui.editor.importing()
+    });
+    let editor = &mut rt.state.editor;
+    editor.timeline.lanes.video = 2;
+    let base = editor
+        .timeline
+        .add_media_clip("Base", ClipKind::Video, 1, 0.0, 2.0, 0.0, &path);
+    let inset = editor
+        .timeline
+        .add_media_clip("Inset", ClipKind::Video, 0, 0.0, 2.0, 0.0, &path);
+    editor.edit_clip_transform(inset, |t| {
+        t.scale = 0.5;
+        t.x = 0.25;
+        t.y = -0.25;
+    });
+    editor.playhead = 0.5;
+    until(&mut rt, "both pictures", |ui| {
+        ui.editor.program_layers().len() == 2 && ui.editor.preview_is_current()
+    });
+    // The second video lane grows the timeline panel; let the monitor
+    // finish shrinking.
+    frames(&mut rt, 60);
+
+    let share = |rt: &Runtime<Ui>, key: &str| {
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let ([x, y, w, h], _) = rt.presented(key).unwrap();
+        [(x - fx) / fw, (y - fy) / fh, w / fw, h / fh]
+    };
+    let close =
+        |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01);
+    let under = share(&rt, "monitor-lane1-placed");
+    let over = share(&rt, "monitor-lane0-placed");
+    assert!(close(under, [0.0, 0.0, 1.0, 1.0]), "{under:?}");
+    assert!(close(over, [0.5, 0.0, 0.5, 0.5]), "{over:?}");
+
+    let editor = &rt.state.editor;
+    assert_eq!(editor.picture_at((240.0, 45.0)), Some(inset));
+    assert_eq!(editor.picture_at((80.0, 135.0)), Some(base));
 }
 
 #[test]
@@ -327,8 +378,8 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
 
 /// Halfway through a wipe to the left the incoming picture shows right of
 /// the edge xfade puts at `int(320 * 0.5) + 1` = 161 of the 320 canvas
-/// pixels, the outgoing one under all of it; past the wipe one picture
-/// shows alone.
+/// pixels and the outgoing one left of it; past the wipe one picture shows
+/// alone.
 #[test]
 fn a_transition_previews_both_pictures_where_export_puts_them() {
     use openreel_engine::{Transition, TransitionKind};
@@ -357,9 +408,9 @@ fn a_transition_previews_both_pictures_where_export_puts_them() {
     };
     let close =
         |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.002);
-    let from = share(&rt, "monitor-from");
-    let to = share(&rt, "monitor-to");
-    assert!(close(from, [0.0, 0.0, 1.0, 1.0]), "{from:?}");
+    let from = share(&rt, "monitor-lane0-from");
+    let to = share(&rt, "monitor-lane0-to");
+    assert!(close(from, [0.0, 0.0, 161.0 / 320.0, 1.0]), "{from:?}");
     assert!(
         close(to, [161.0 / 320.0, 0.0, 159.0 / 320.0, 1.0]),
         "{to:?}"
@@ -369,6 +420,6 @@ fn a_transition_previews_both_pictures_where_export_puts_them() {
     until(&mut rt, "the next picture", |ui| {
         ui.editor.preview_is_current()
     });
-    assert!(!shown(&rt, "monitor-transition"));
-    assert!(shown(&rt, "monitor-placed"));
+    assert!(!shown(&rt, "monitor-lane0-transition"));
+    assert!(shown(&rt, "monitor-lane0-placed"));
 }
