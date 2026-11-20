@@ -68,7 +68,9 @@ offers the newest build.
 - Program monitor with frame stepping. Audio drives the playhead, and the
   next cut's first picture is prerolled so short clips play through.
 - Titles and generated captions in five styles, identical in preview and
-  export. Remove silence tightens pauses out of speech.
+  export, each with its own size, colour, box, outline and position; drag
+  a title on the monitor to move it. Remove silence tightens pauses out of
+  speech.
 - Undo/redo covers every timeline edit, whether made by hand, in Details
   or in the console.
 - Projects (`.eddie`) store the timeline and media paths. Footage moved

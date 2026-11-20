@@ -246,3 +246,81 @@ fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
     assert!(close(boxed, [0.625, 0.0, 0.25, 0.5]), "{boxed:?}");
     assert!(close(whole, [0.375, 0.0, 0.5, 0.5]), "{whole:?}");
 }
+
+#[test]
+fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
+    let mut ui = Ui::headless();
+    let title = ui
+        .editor
+        .timeline
+        .add_clip("Drag me", ClipKind::Title, 0, 0.0, 4.0, 0.0);
+    ui.editor.playhead = 1.0;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    let (_, canvas_h) = rt.state.editor.canvas();
+    let canvas_h = canvas_h as f32;
+    let share = |rt: &Runtime<Ui>| {
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let ([x, y, w, h], _) = rt.presented("monitor-title").unwrap();
+        [(x - fx) / fw, (y - fy) / fh, w / fw, h / fh]
+    };
+    // A lower third's box: 42 px in and its text top 110 px up the canvas,
+    // with 14 px of box round the text.
+    let home = share(&rt);
+    let canvas_w = rt.state.editor.canvas().0 as f32;
+    assert!((home[0] - 28.0 / canvas_w).abs() < 0.005, "{home:?}");
+    assert!(
+        (home[1] - (canvas_h - 124.0) / canvas_h).abs() < 0.005,
+        "{home:?}"
+    );
+
+    // Twice the size is twice as tall and grows upward: its lower edge
+    // moves only by the doubled box padding and line spacing (about 23
+    // canvas pixels), not by the text's height (67).
+    rt.state.editor.edit_title_text(title, |t| t.size = 2.0);
+    frames(&mut rt, 60);
+    let large = share(&rt);
+    assert!(
+        (large[3] / home[3] - 2.0).abs() < 0.1,
+        "{large:?} against {home:?}"
+    );
+    let lower = (large[1] + large[3] - home[1] - home[3]) * canvas_h;
+    assert!((0.0..30.0).contains(&lower), "{lower} px lower");
+    rt.state.editor.edit_title_text(title, |t| t.size = 1.0);
+    frames(&mut rt, 60);
+
+    // A drag a tenth of the monitor right and down moves it a tenth of the
+    // canvas, and selects it.
+    let ([_, _, fw, fh], _) = rt.presented("monitor").unwrap();
+    let ([x, y, w, h], _) = rt.presented("monitor-title").unwrap();
+    let (x, y) = (x + w / 2.0, y + h / 2.0);
+    crate::testing::input_arrives();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x + fw * 0.1, y + fh * 0.1);
+    rt.frame(FRAME);
+    rt.pointer_up(x + fw * 0.1, y + fh * 0.1);
+    frames(&mut rt, 60);
+    let text = rt.state.editor.timeline.clip(title).unwrap().text;
+    assert!(
+        (text.x - 0.1).abs() < 0.005 && (text.y - 0.1).abs() < 0.005,
+        "{text:?}"
+    );
+    assert_eq!(rt.state.editor.selected, Some(title));
+    let moved = share(&rt);
+    assert!((moved[0] - home[0] - 0.1).abs() < 0.005, "{moved:?}");
+    assert!((moved[1] - home[1] - 0.1).abs() < 0.005, "{moved:?}");
+
+    // Esc during a drag puts it back where the drag started.
+    let (x, y) = (x + fw * 0.1, y + fh * 0.1);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x - fw * 0.3, y);
+    rt.frame(FRAME);
+    assert!(rt.state.editor.timeline.clip(title).unwrap().text.x < 0.0);
+    press(&mut rt, Key::Escape);
+    rt.pointer_up(x - fw * 0.3, y);
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.editor.timeline.clip(title).unwrap().text, text);
+}

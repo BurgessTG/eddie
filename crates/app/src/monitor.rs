@@ -13,6 +13,7 @@ use crate::icons::{self, Transport};
 use crate::theme::{self, c};
 
 mod picture;
+mod title;
 pub use picture::{Picture, Sink, look};
 
 /// The transport under the monitor: a 14 scrubber, a 44 bar and 3 spare.
@@ -147,7 +148,7 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
         }
     }
     if let Some(title) = timeline.active_title(playhead) {
-        frame = frame.child(title_overlay(title, playhead, w, h, canvas.1));
+        frame = frame.child(title::overlay(title, playhead, w, h, canvas.1));
     }
     frame
 }
@@ -193,81 +194,6 @@ fn waveform(w: f32, h: f32, clip: &Clip, peaks: &[f32], duration: f64, playhead:
         rune::LineCap::Butt,
         c().destructive,
     )
-}
-
-/// A title or caption from export's own table, scaled from canvas pixels
-/// to the monitor so it previews at its exported size and place.
-fn title_overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32) -> El {
-    let alpha = title.opacity.clamp(0.0, 1.0);
-    let look = openreel_media::title_look(title.title_style);
-    let scale = h / canvas_h.max(1) as f32;
-    let rgb = |(r, g, b): (u8, u8, u8), alpha: f32| {
-        rune::color::hex(&format!("#{r:02X}{g:02X}{b:02X}"))
-            .expect("a colour from bytes")
-            .alpha(alpha)
-    };
-    let color = rgb(look.color, alpha);
-    let font = theme::sized((look.font_size as f32 * scale).max(1.0));
-    // Export draws one line with single spaces between words.
-    let active = look.highlight.and(title.active_word(playhead));
-    let (line, lit) = match (look.highlight, active) {
-        (Some(highlight), Some(active)) => {
-            let mut line = String::new();
-            let mut lit = None;
-            for (index, word) in title.name.split_whitespace().enumerate() {
-                if index > 0 {
-                    line.push(' ');
-                }
-                if index == active {
-                    lit = Some((line.len(), line.len() + word.len(), rgb(highlight, alpha)));
-                }
-                line.push_str(word);
-            }
-            (line, lit)
-        }
-        _ => (title.name.clone(), None),
-    };
-    let label = |color: Color, lit: Option<(usize, usize, Color)>| {
-        let spans = lit
-            .map(|(start, end, lit)| vec![Span::new(start, end).color(lit)])
-            .unwrap_or_default();
-        rich(line.clone(), spans)
-            .font(font)
-            .color(color)
-            .single_line()
-    };
-    let border = look.border as f32 * scale;
-    let mut block = el().key("monitor-title").padding(border);
-    match look.box_alpha {
-        Some(box_alpha) => block = block.fill(Color::BLACK.alpha(box_alpha * alpha)),
-        None => {
-            // No box: a black outline from four offset copies.
-            let outline = Color::BLACK.alpha(0.8 * alpha);
-            for (x, y) in [
-                (0.0, border),
-                (2.0 * border, border),
-                (border, 0.0),
-                (border, 2.0 * border),
-            ] {
-                block = block.child(label(outline, None).absolute(x, y));
-            }
-        }
-    }
-    let id = title.id;
-    let block = block
-        .child(label(color, lit))
-        .cursor(Cursor::Text)
-        .help("Double-click to edit this text")
-        .on_double_press(move |ui: &mut Ui| {
-            ui.editor.selected = Some(id);
-            ui.show_inspector = true;
-            ui.focus_title = true;
-        });
-    let top = h - look.bottom as f32 * scale - border;
-    match look.left {
-        Some(left) => block.absolute(left as f32 * scale - border, top),
-        None => row().absolute(0.0, top).w(w).justify_center().child(block),
-    }
 }
 
 /// The thin whole-edit position track above the transport. Click or drag

@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TitleStyle, Transform,
-    MAX_SPEED, MIN_SPEED,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TextLook, TitleStyle,
+    Transform, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MIN_SPEED, MIN_TEXT_SIZE,
 };
 
 use super::super::details;
@@ -61,8 +61,15 @@ fn merged<T: serde::Serialize + serde::de::DeserializeOwned>(
         }
         fields.insert(key, change);
     }
-    serde_json::from_value(value)
-        .map_err(|error| format!("{command}: {error}; numbers must be finite"))
+    serde_json::from_value(value).map_err(|error| {
+        // JSON has no NaN or Infinity: JSON.stringify writes them as null.
+        let hint = if error.to_string().contains("null") {
+            "; numbers must be finite"
+        } else {
+            ""
+        };
+        format!("{command}: {error}{hint}")
+    })
 }
 
 /// `current` with the fields of the JSON object `changes`, or the identity
@@ -137,6 +144,21 @@ fn changed_color(current: ColorAdjust, changes: &str) -> Result<ColorAdjust, Str
         ));
     }
     Ok(color)
+}
+
+/// `current` with the fields of the JSON object `changes`, or the style's
+/// look for `null`.
+fn changed_text(current: TextLook, changes: &str) -> Result<TextLook, String> {
+    let Some(changes) = changes_object("setText", "{size: 1.5, color: '#FFD600'}", changes)? else {
+        return Ok(TextLook::default());
+    };
+    let text = merged("setText", current, changes)?;
+    if !text.is_valid() {
+        return Err(format!(
+            "setText takes a size of {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}, a boxOpacity of 0 to 1, an outline of 0 to {MAX_OUTLINE} and x and y from -{MAX_TEXT_OFFSET} to {MAX_TEXT_OFFSET}"
+        ));
+    }
+    Ok(text)
 }
 
 impl Editor {
@@ -274,6 +296,17 @@ impl Editor {
                 let transform = changed_transform(target.transform, &changes, canvas, source)?;
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.transform = transform;
+                }
+            }
+            ScriptCommand::SetText { clip, changes } => {
+                let text = match self.timeline.clip(clip) {
+                    Some(target) if target.kind == ClipKind::Title => {
+                        changed_text(target.text, &changes)?
+                    }
+                    _ => return Err(format!("setText needs a title; clip {clip} is not one")),
+                };
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.text = text;
                 }
             }
             ScriptCommand::SetColor { clip, changes } => {

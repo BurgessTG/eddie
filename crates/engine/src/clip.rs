@@ -3,6 +3,7 @@
 use crate::color::ColorAdjust;
 use crate::fit_fades;
 use crate::place::{Background, Transform};
+use crate::text::TextLook;
 
 pub type ClipId = u64;
 
@@ -144,6 +145,9 @@ pub struct Clip {
     /// no speed, but its file is a video, so readers seek to the picture.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub freeze: bool,
+    /// Titles only: size, colour, place, box and outline over the style's.
+    #[serde(default, skip_serializing_if = "TextLook::is_identity")]
+    pub text: TextLook,
 }
 
 /// The slowest and fastest a clip plays.

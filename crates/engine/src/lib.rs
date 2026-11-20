@@ -8,6 +8,7 @@ mod color;
 mod duck;
 mod fade;
 mod place;
+mod text;
 pub mod time_spec;
 mod timeline;
 
@@ -20,6 +21,10 @@ pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_
 pub use fade::{fade_gain, fade_shape, fit_fades};
 pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
+};
+pub use text::{
+    Rgb, TextLook, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE, MAX_OUTLINE, MAX_TEXT_OFFSET,
+    MAX_TEXT_SIZE, MIN_TEXT_SIZE,
 };
 pub use time_spec::format_timecode;
 pub use timeline::{

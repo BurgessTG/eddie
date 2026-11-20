@@ -45,6 +45,11 @@ fn inspect_reports_broken_and_suspicious_clips() {
     let end_b = 4.0 + 1.0 / fps;
     let c = timeline.add_media_clip("C", ClipKind::Video, 0, end_b + 1.0, 1.0, 9.5, "a.mp4");
     let card = timeline.add_clip("Day two", ClipKind::Title, 3, end_b + 2.0, 1.0, 0.0);
+    // Moved across, the card stays on the canvas; a title moved down past
+    // the bottom does not.
+    timeline.clip_mut(card).unwrap().text.x = 0.6;
+    let dropped = timeline.add_clip("Below", ClipKind::Title, 2, 0.0, 1.0, 0.0);
+    timeline.clip_mut(dropped).unwrap().text.y = 0.2;
     // Portrait on a landscape canvas is fine; moved off it, it shows black.
     let d = timeline.add_media_clip("D", ClipKind::Video, 0, end_b + 3.0, 1.0, 0.0, "tall.mp4");
     timeline.clip_mut(d).unwrap().transform.x = -0.7;
@@ -99,6 +104,7 @@ fn inspect_reports_broken_and_suspicious_clips() {
         ("on-screen-text", vec![b]),
         ("source-range", vec![c]),
         ("off-canvas", vec![d]),
+        ("off-canvas", vec![dropped]),
         ("missing-media", vec![missing]),
         ("flash-frame", vec![flash]),
         ("picture-gap", vec![]),

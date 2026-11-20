@@ -608,6 +608,81 @@ fn color_changes_only_what_is_asked_and_refuses_what_renderers_cannot_draw() {
 }
 
 #[test]
+fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
+    use openreel_engine::{Rgb, TextLook};
+    let mut app = Editor::headless();
+    app.assets.push(asset("wide.mp4", 20.0, true));
+    run(
+        &mut app,
+        "addAssetRange('wide.mp4', 0, 0, 5); addTitle('Hello', 0, 2)",
+    )
+    .unwrap();
+    let video = app.timeline.clips[0].id;
+    let title = app.timeline.clips[1].id;
+    let text = |app: &Editor| app.timeline.clip(title).unwrap().text;
+
+    run(
+        &mut app,
+        &format!("setText({title}, {{size: 1.5, color: '#ffd600', x: -0.25}})"),
+    )
+    .unwrap();
+    run(
+        &mut app,
+        &format!("setText({title}, {{boxColor: '#36F', outline: 0.1}})"),
+    )
+    .unwrap();
+    let t = text(&app);
+    assert_eq!(
+        (t.size, t.color, t.x, t.box_color, t.outline, t.y),
+        (
+            1.5,
+            Some(Rgb(255, 214, 0)),
+            -0.25,
+            Some(Rgb(0x33, 0x66, 0xFF)),
+            Some(0.1),
+            0.0
+        )
+    );
+    let read = run(&mut app, "return clips()[1].text").unwrap();
+    let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(
+        (read["color"].as_str(), read["boxOpacity"].is_null()),
+        (Some("#FFD600"), true)
+    );
+    // A field set to null goes back to the style's.
+    run(&mut app, &format!("setText({title}, {{color: null}})")).unwrap();
+    assert_eq!(text(&app).color, None);
+    assert_eq!(text(&app).size, 1.5, "the rest stay");
+
+    let before = app.timeline.clone();
+    for (code, says) in [
+        (format!("setText({title}, {{font: 'Arial'}})"), "no 'font'"),
+        (format!("setText({title}, {{size: 5}})"), "0.25 to 4"),
+        (
+            format!("setText({title}, {{outline: 0.5}})"),
+            "outline of 0 to 0.2",
+        ),
+        (format!("setText({title}, {{x: 1.5}})"), "-1 to 1"),
+        (format!("setText({title}, {{boxOpacity: NaN}})"), "finite"),
+        (format!("setText({title}, {{color: 'red'}})"), "'#RRGGBB'"),
+        (format!("setText({title}, 'big')"), "needs an object"),
+        (format!("setText({video}, {{size: 2}})"), "needs a title"),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(says), "{code}: {error}");
+        assert_eq!(app.timeline, before, "{code}");
+    }
+
+    // A styled title saves its text look; null resets it all.
+    let saved = serde_json::to_value(app.timeline.clip(title).unwrap()).unwrap();
+    assert_eq!(saved["text"]["boxColor"], "#3366FF");
+    run(&mut app, &format!("setText({title}, null)")).unwrap();
+    assert_eq!(text(&app), TextLook::default());
+    let saved = serde_json::to_value(app.timeline.clip(title).unwrap()).unwrap();
+    assert!(saved.get("text").is_none(), "{saved}");
+}
+
+#[test]
 fn speed_keeps_the_source_range_and_refuses_what_it_cannot_play() {
     let mut app = Editor::headless();
     app.assets.push(asset("wide.mp4", 20.0, true));

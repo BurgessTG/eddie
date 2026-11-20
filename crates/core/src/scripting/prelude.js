@@ -63,6 +63,7 @@ function help() {
     "tightenSilence(id, threshold?, minSilence?, padding?)  // removes pauses of minSilence (0.35 s) or more, keeping padding (0.08 s); no threshold uses the recording's own quiet level",
     "addTitle(text, at?, dur?, style?)  // defaults: playhead, 4 s, 'lower-third'",
     "setTitleStyle(id, style) addCaptionsForClip(id, style?)  // styles: lower-third caption pop-caption minimal-caption highlight-caption; captions default to 'caption'",
+    "setText(id, {size, color, boxColor, boxOpacity, outline, outlineColor, x, y})  // titles only, over the style; changes just the fields given, null resets all, a field set to null goes back to the style's. size 0.25 to 4 times the style's; colours '#RRGGBB'; boxOpacity 0 (none) to 1; outline 0 (none) to 0.2 of the text size; x, y move it from the style's place in canvas widths and heights (-1 to 1, right and down positive)",
     "addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)  // lands on the first lane free for its span",
     "  // adds, splits, duplicates and freezes return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
@@ -112,6 +113,18 @@ function setColor(id, changes) {
     throw new Error("setColor needs an object such as {saturation: 0.2, filter: 'warm'}, or null to reset");
   }
   __set_color(id, JSON.stringify(changes));
+}
+function setText(id, changes) {
+  if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
+    throw new Error("setText needs an object such as {size: 1.5, color: '#FFD600'}, or null to reset");
+  }
+  for (const key in changes || {}) {
+    // JSON writes NaN as null, which would quietly mean "the style's".
+    if (typeof changes[key] === "number" && !isFinite(changes[key])) {
+      throw new Error("setText " + key + " must be a finite number");
+    }
+  }
+  __set_text(id, JSON.stringify(changes));
 }
 function setFormat(name) { __set_format(String(name)); }
 function addTitle(text, at, dur, style) {

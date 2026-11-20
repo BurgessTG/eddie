@@ -290,7 +290,7 @@ struct SheetShot {
     /// The visible clip, its lane, source and the source time shown.
     video: Option<(ClipId, usize, Option<String>, f64, f32)>,
     /// The active title: its clip, text, style and opacity.
-    title: Option<(ClipId, String, openreel_engine::TitleStyle, f32)>,
+    title: Option<(ClipId, String, openreel_media::TitleLook, f32)>,
 }
 
 impl SheetShot {
@@ -316,7 +316,7 @@ impl SheetShot {
             title: self
                 .title
                 .as_ref()
-                .map(|(_, text, style, opacity)| (text.clone(), *style, *opacity)),
+                .map(|(_, text, look, opacity)| (text.clone(), *look, *opacity)),
             label: self.label(),
         }
     }
@@ -398,10 +398,10 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
                         clip.opacity,
                     )
                 }),
-                title: segment
-                    .title
-                    .and_then(|id| timeline.clip(id))
-                    .map(|clip| (clip.id, clip.name.clone(), clip.title_style, clip.opacity)),
+                title: segment.title.and_then(|id| timeline.clip(id)).map(|clip| {
+                    let look = openreel_media::clip_title_look(clip);
+                    (clip.id, clip.name.clone(), look, clip.opacity)
+                }),
             }
         })
         .collect();

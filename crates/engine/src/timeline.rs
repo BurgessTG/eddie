@@ -327,6 +327,7 @@ impl Timeline {
             transform: crate::Transform::default(),
             background: crate::Background::default(),
             color: crate::ColorAdjust::default(),
+            text: crate::TextLook::default(),
             speed: 1.0,
             photo: false,
             freeze: false,

@@ -28,8 +28,8 @@ mod video;
 
 pub use audio::LOUDNESS_TARGET;
 pub use settings::{ExportSettings, Quality, Resolution, FRAME_RATES};
+pub use titles::{clip_title_look, drawn_text, title_look, TitleLook};
 pub(crate) use titles::{filter_value, font_file};
-pub use titles::{title_look, TitleLook};
 
 fn f(value: f64) -> String {
     value.to_string()

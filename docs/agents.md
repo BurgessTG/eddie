@@ -186,10 +186,11 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed, photo, freeze`. A clip shows
+  transform, background, color, speed, photo, freeze, text`. A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
-  frame (`freeze`) the picture at `sourceIn`.
+  frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
+  `setText` changed; a `null` field follows the style.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -325,11 +326,23 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   and keeps `padding` seconds (0.08) at each cut. Leave `threshold` out
   to use the recording's own quiet level.
 - **Titles:** `addTitle(text, at?, dur?, style?)`, `setTitleStyle(id,
-  style)`, `renameClip(id, text)` (a title's name is its text),
-  `addCaptionsForClip(id, style?)`.
+  style)`, `setText(id, {...})`, `renameClip(id, text)` (a title's name
+  is its text), `addCaptionsForClip(id, style?)`.
   - Styles: `lower-third`, `caption`, `pop-caption`, `minimal-caption`
     and `highlight-caption`, which lights each word as it is spoken and
     needs word timing.
+  - `setText(id, {...})` changes a title's look over its style, and only
+    the fields you give. `size` is 0.25 to 4 times the style's size; the
+    text grows upward. `color`, `boxColor` and `outlineColor` are
+    `'#RRGGBB'`. `boxOpacity` runs from 0 (no box) to 1 (solid);
+    `outline` is the outline's thickness, from 0 (none) to 0.2 of the
+    text size. `x` and `y` move the text from where its style puts it, in
+    canvas widths and heights from -1 to 1, right and down positive.
+    - A field set to `null` goes back to the style's; `setText(id, null)`
+      resets them all. A box or outline colour on a style without one
+      turns it on (box at 0.6, outline at 0.06).
+    - A style change keeps these. Captions are separate titles, so style
+      each one: loop over the IDs `state()` gives.
   - `addTitle` defaults to the playhead, 4 seconds and `lower-third`;
     `addCaptionsForClip` to `caption`.
   - Title text cannot hold control characters. Line breaks are fine;
@@ -436,7 +449,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
 - `inspect()` findings are facts, not taste. A deliberate gap or flash
   can stay. The kinds are:
   - missing media;
-  - pictures moved entirely off the canvas;
+  - pictures moved entirely off the canvas, and titles moved off it;
   - source ranges outside their source;
   - fades longer than the clip;
   - placed on-screen text;

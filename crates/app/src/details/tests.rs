@@ -239,6 +239,57 @@ fn a_title_takes_its_text_as_typed_on_one_line_and_its_style_from_the_list() {
 }
 
 #[test]
+fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
+    use openreel_engine::{DEFAULT_OUTLINE, Rgb, TextLook};
+    let (mut rt, id) = window(ClipKind::Title);
+    let text = |rt: &Runtime<Ui>| clip(rt, id).text;
+    let drawn = |rt: &Runtime<Ui>| openreel_media::drawn_text(clip(rt, id));
+    let tap = |rt: &mut Runtime<Ui>, key: &str| {
+        reveal(rt, key);
+        click(rt, key);
+    };
+    let enter = |rt: &mut Runtime<Ui>, key: &str, typed: &str| {
+        tap(rt, key);
+        rt.paste(typed);
+        rt.frame(FRAME);
+        press(rt, Key::Enter);
+    };
+
+    tap(&mut rt, "details-text-yellow");
+    assert_eq!(text(&rt).color, Some(Rgb(255, 214, 0)));
+    enter(&mut rt, "details-text-color", "#36f");
+    assert_eq!(text(&rt).color, Some(Rgb(0x33, 0x66, 0xFF)));
+    assert_eq!(typed(&rt, Field::TextColor), "#3366FF");
+
+    // A lower third has a box: None takes it away, and a colour brings it
+    // back at the style's opacity.
+    tap(&mut rt, "details-box-none");
+    assert_eq!(drawn(&rt).box_opacity, Some(0.0));
+    tap(&mut rt, "details-box-red");
+    assert_eq!(text(&rt).box_color, Some(Rgb(255, 59, 48)));
+    assert_eq!(drawn(&rt).box_opacity, Some(0.55_f32 as f64));
+
+    // It has no outline: a colour draws one at the usual thickness.
+    assert_eq!(drawn(&rt).outline, Some(0.0));
+    tap(&mut rt, "details-outline-green");
+    assert_eq!(drawn(&rt).outline, Some(DEFAULT_OUTLINE));
+    assert_eq!(typed(&rt, Field::Outline), "6%");
+
+    enter(&mut rt, "details-text-size", "150");
+    enter(&mut rt, "details-text-x", "25");
+    enter(&mut rt, "details-text-y", "-300");
+    let t = text(&rt);
+    assert_eq!(
+        (t.size, t.x, t.y),
+        (1.5, 0.25, -1.0),
+        "y stops a canvas away"
+    );
+
+    tap(&mut rt, "details-text-reset");
+    assert_eq!(text(&rt), TextLook::default());
+}
+
+#[test]
 fn split_and_delete_act_on_the_selected_clip() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.editor.playhead = 3.0;
@@ -290,7 +341,30 @@ fn every_control_has_a_tooltip() {
                 "details-clean-voice",
             ],
         ),
-        (ClipKind::Title, &["details-title-box", "details-style"]),
+        (
+            ClipKind::Title,
+            &[
+                "details-title-box",
+                "details-style",
+                "details-text-size-slider",
+                "details-text-size",
+                "details-text-color",
+                "details-text-yellow",
+                "details-box-color",
+                "details-box-none",
+                "details-box-blue",
+                "details-box-opacity-slider",
+                "details-box-opacity",
+                "details-outline-color",
+                "details-outline-none",
+                "details-outline-red",
+                "details-outline-slider",
+                "details-outline",
+                "details-text-x",
+                "details-text-y",
+                "details-text-reset",
+            ],
+        ),
     ];
     for (kind, keys) in cases {
         let (mut rt, _) = window(kind);

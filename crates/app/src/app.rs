@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use eddie_core::shortcuts::{self, Chord, KeyName};
 use eddie_core::{Action, Editor, PreviewSink, Wake};
-use openreel_engine::{ClipId, Transform};
+use openreel_engine::{ClipId, TextLook, Transform};
 use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 
 use crate::dialogs::{Discard, PendingFileDialog};
@@ -39,6 +39,8 @@ pub struct Ui {
     pub monitor_picture: Rc<RefCell<monitor::Picture>>,
     /// The clip whose picture a drag on the monitor moves, and where it was.
     pub monitor_drag: Option<(ClipId, Transform)>,
+    /// Where the title a drag on the monitor moves was.
+    pub title_drag: Option<TextLook>,
     /// Filmstrip pictures by media path, taken from each finished import.
     pub thumbs: HashMap<String, Vec<Thumb>>,
 
@@ -157,6 +159,7 @@ impl Ui {
             monitor_size,
             monitor_picture,
             monitor_drag: None,
+            title_drag: None,
             thumbs: HashMap::new(),
             menu: None,
             show_media: true,

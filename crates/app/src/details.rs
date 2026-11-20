@@ -4,8 +4,9 @@
 //!
 //! `fields` is the typed values and when typing reaches the clip, `body`
 //! the cards for one clip, `transform` the card that places a picture,
-//! `color` the one that grades it and `filters` its filter tiles, `rows`
-//! the controls those cards are made of and `styles` the title-style lists.
+//! `color` the one that grades it and `filters` its filter tiles, `title_text`
+//! the one that styles a title's letters, `rows` the controls those cards
+//! are made of and `styles` the title-style lists.
 
 mod body;
 mod color;
@@ -13,6 +14,7 @@ mod fields;
 mod filters;
 mod rows;
 mod styles;
+mod title_text;
 mod transform;
 
 use openreel_engine::ClipId;

@@ -1549,6 +1549,160 @@ fn highlight_captions_light_only_the_word_being_spoken() {
     );
 }
 
+/// The box (left, top, right, bottom) of the pixels `matches` picks, and
+/// how many there are.
+fn pixel_box(
+    frame: &[u8],
+    width: usize,
+    matches: impl Fn(&[u8; 3]) -> bool,
+) -> ([usize; 4], usize) {
+    let (mut found, mut count) = ([usize::MAX, usize::MAX, 0, 0], 0);
+    for (index, rgb) in frame.as_chunks::<3>().0.iter().enumerate() {
+        if matches(rgb) {
+            let (x, y) = (index % width, index / width);
+            found = [
+                found[0].min(x),
+                found[1].min(y),
+                found[2].max(x + 1),
+                found[3].max(y + 1),
+            ];
+            count += 1;
+        }
+    }
+    (found, count)
+}
+
+#[test]
+fn titles_export_their_own_size_colours_box_outline_and_place() {
+    use openreel_engine::{Rgb, TextLook};
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "black.mp4",
+        "color=c=black:s=1280x720:r=10:d=2",
+        "null",
+        None,
+    );
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 1.5, 0.0);
+    let red = Rgb(255, 0, 0);
+    let looks = [
+        // Red on a solid blue box, a quarter right and well up.
+        (
+            TitleStyle::Caption,
+            1.0,
+            TextLook {
+                color: Some(red),
+                box_color: Some(Rgb(0, 0, 255)),
+                box_opacity: Some(1.0),
+                x: 0.25,
+                y: -0.4,
+                ..TextLook::default()
+            },
+        ),
+        // The same at half opacity: the box fades with the text.
+        (
+            TitleStyle::Caption,
+            0.5,
+            TextLook {
+                color: Some(red),
+                box_color: Some(Rgb(0, 0, 255)),
+                box_opacity: Some(1.0),
+                x: 0.25,
+                y: -0.4,
+                ..TextLook::default()
+            },
+        ),
+        // A green outline where the style has a black one.
+        (
+            TitleStyle::MinimalCaption,
+            1.0,
+            TextLook {
+                outline_color: Some(Rgb(0, 255, 0)),
+                outline: Some(0.15),
+                ..TextLook::default()
+            },
+        ),
+        // No box, then the same twice as large.
+        (
+            TitleStyle::Caption,
+            1.0,
+            TextLook {
+                color: Some(red),
+                box_opacity: Some(0.0),
+                ..TextLook::default()
+            },
+        ),
+        (
+            TitleStyle::Caption,
+            1.0,
+            TextLook {
+                color: Some(red),
+                box_opacity: Some(0.0),
+                size: 2.0,
+                ..TextLook::default()
+            },
+        ),
+    ];
+    for (index, (style, opacity, text)) in looks.into_iter().enumerate() {
+        let id = timeline.add_clip("MMMM", ClipKind::Title, 0, index as f64 * 0.3, 0.3, 0.0);
+        let title = timeline.clip_mut(id).unwrap();
+        (title.title_style, title.opacity, title.text) = (style, opacity, text);
+    }
+    let decoded = frames(&fixture.export("styled.mp4", &timeline));
+    assert_eq!(decoded.len(), 15);
+    let frame = |index: usize| &decoded[index * 3 + 1];
+    let is_red = |p: &[u8; 3]| p[0] > 200 && p[1] < 60 && p[2] < 60;
+
+    let (text, letters) = pixel_box(frame(0), 1280, is_red);
+    let (boxed, blue) = pixel_box(frame(0), 1280, |p| p[2] > 200 && p[0] < 60 && p[1] < 60);
+    eprintln!("moved: text {text:?} ({letters} px), box {boxed:?} ({blue} px)");
+    assert!(letters > 300 && blue > 3000);
+    let centre = (text[0] + text[2]) as f64 / 2.0;
+    assert!(
+        (centre - 960.0).abs() < 20.0,
+        "a quarter right of centre: {centre}"
+    );
+    // The caption's text top, 90 px up, moved 40% of 720 up.
+    assert!(
+        (text[1] as f64 - (720.0 - 90.0 - 288.0)).abs() < 12.0,
+        "{text:?}"
+    );
+    assert!(
+        boxed[0] < text[0] && boxed[1] < text[1] && boxed[2] > text[2] && boxed[3] > text[3],
+        "the box surrounds the text"
+    );
+    let no_white = |f: &[u8]| pixel_box(f, 1280, |p| p.iter().all(|&v| v > 200)).1 == 0;
+    assert!(no_white(frame(0)), "the text is red, not the style's white");
+
+    // Half opacity: the solid blue box is half blue over black.
+    let corner = (boxed[1] + 3) * 1280 + boxed[0] + 3;
+    let faded = &frame(1)[corner * 3..corner * 3 + 3];
+    assert!(
+        (100..=160).contains(&faded[2]) && faded[0] < 40,
+        "{faded:?}"
+    );
+
+    let is_green = |p: &[u8; 3]| p[1] > 200 && p[0] < 80 && p[2] < 80;
+    let (_, outlined) = pixel_box(frame(2), 1280, is_green);
+    assert!(outlined > 500, "a green outline: {outlined} px");
+    assert!(
+        pixel_box(frame(3), 1280, is_green).1 == 0,
+        "only where it was set"
+    );
+
+    let (small, _) = pixel_box(frame(3), 1280, is_red);
+    let (large, _) = pixel_box(frame(4), 1280, is_red);
+    let height = |b: [usize; 4]| (b[3] - b[1]) as f64;
+    let ratio = height(large) / height(small);
+    eprintln!("size 1 {small:?}, size 2 {large:?}, ratio {ratio:.2}");
+    assert!((1.8..=2.2).contains(&ratio), "twice as tall: {ratio}");
+    assert!(
+        large[3] <= small[3] + 2,
+        "it grows upward: {small:?} {large:?}"
+    );
+    assert!(no_white(frame(3)) && no_white(frame(4)), "and has no box");
+}
+
 #[test]
 fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
     // Halfway through a 1 s fade-in, a linear fade is at 0.5 and the

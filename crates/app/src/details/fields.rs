@@ -2,7 +2,7 @@
 //! and applies, and when what was typed reaches the clip.
 
 use eddie_core::Editor;
-use openreel_engine::{Clip, ClipId, ClipKind};
+use openreel_engine::{Clip, ClipId, ClipKind, Rgb};
 use rune::TextEdit;
 
 use super::one_line;
@@ -34,10 +34,18 @@ pub enum Field {
     Temperature,
     Tint,
     Strength,
+    TextSize,
+    TextColor,
+    BoxColor,
+    BoxOpacity,
+    OutlineColor,
+    Outline,
+    TextX,
+    TextY,
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 23] = [
+    pub(super) const ALL: [Self; 31] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -61,6 +69,14 @@ impl Field {
         Self::Temperature,
         Self::Tint,
         Self::Strength,
+        Self::TextSize,
+        Self::TextColor,
+        Self::BoxColor,
+        Self::BoxOpacity,
+        Self::OutlineColor,
+        Self::Outline,
+        Self::TextX,
+        Self::TextY,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -88,7 +104,20 @@ impl Field {
             Self::Temperature => "details-temperature",
             Self::Tint => "details-tint",
             Self::Strength => "details-strength",
+            Self::TextSize => "details-text-size",
+            Self::TextColor => "details-text-color",
+            Self::BoxColor => "details-box-color",
+            Self::BoxOpacity => "details-box-opacity",
+            Self::OutlineColor => "details-outline-color",
+            Self::Outline => "details-outline",
+            Self::TextX => "details-text-x",
+            Self::TextY => "details-text-y",
         }
+    }
+
+    /// A colour, shown and typed as `#RRGGBB`.
+    fn colour(self) -> bool {
+        matches!(self, Self::TextColor | Self::BoxColor | Self::OutlineColor)
     }
 
     fn percent(self) -> bool {
@@ -102,6 +131,9 @@ impl Field {
                 | Self::FadeOut
                 | Self::Rotation
                 | Self::Exposure
+                | Self::TextColor
+                | Self::BoxColor
+                | Self::OutlineColor
         )
     }
 
@@ -132,6 +164,21 @@ impl Field {
             Self::Temperature => clip.color.temperature * 100.0,
             Self::Tint => clip.color.tint * 100.0,
             Self::Strength => clip.color.strength * 100.0,
+            Self::TextSize => clip.text.size * 100.0,
+            Self::TextX => clip.text.x * 100.0,
+            Self::TextY => clip.text.y * 100.0,
+            Self::TextColor | Self::BoxColor | Self::OutlineColor => {
+                let drawn = openreel_media::drawn_text(clip);
+                let colour = match self {
+                    Self::TextColor => drawn.color,
+                    Self::BoxColor => drawn.box_color,
+                    _ => drawn.outline_color,
+                };
+                let Rgb(r, g, b) = colour.unwrap_or(Rgb::BLACK);
+                f64::from(u32::from_be_bytes([0, r, g, b]))
+            }
+            Self::BoxOpacity => openreel_media::drawn_text(clip).box_opacity.unwrap_or(0.0) * 100.0,
+            Self::Outline => openreel_media::drawn_text(clip).outline.unwrap_or(0.0) * 100.0,
         }
     }
 
@@ -139,7 +186,9 @@ impl Field {
         let value = self.value(clip);
         // Whole numbers, and no "-0%" from a hair left of centre.
         let whole = || if value.abs() < 0.5 { 0.0 } else { value };
-        if self.percent() {
+        if self.colour() {
+            format!("#{:06X}", value as u32)
+        } else if self.percent() {
             format!("{:.0}%", whole())
         } else if self == Self::Rotation {
             format!("{:.0}°", whole())
@@ -156,6 +205,10 @@ impl Field {
     /// A typed number, with or without the unit the field shows.
     fn parse(self, typed: &str) -> Option<f64> {
         let typed = typed.trim();
+        if self.colour() {
+            let Rgb(r, g, b) = Rgb::parse(typed)?;
+            return Some(f64::from(u32::from_be_bytes([0, r, g, b])));
+        }
         let number = if self.percent() {
             typed.strip_suffix('%').unwrap_or(typed)
         } else if self == Self::Rotation {
@@ -203,8 +256,37 @@ impl Field {
             Self::Temperature => editor.edit_clip_color(id, |c| c.temperature = value / 100.0),
             Self::Tint => editor.edit_clip_color(id, |c| c.tint = value / 100.0),
             Self::Strength => editor.edit_clip_color(id, |c| c.strength = value / 100.0),
+            Self::TextSize => editor.edit_title_text(id, |t| t.size = value / 100.0),
+            Self::TextX => editor.edit_title_text(id, |t| t.x = value / 100.0),
+            Self::TextY => editor.edit_title_text(id, |t| t.y = value / 100.0),
+            Self::BoxOpacity => editor.edit_title_text(id, |t| t.box_opacity = Some(value / 100.0)),
+            Self::Outline => editor.edit_title_text(id, |t| t.outline = Some(value / 100.0)),
+            Self::TextColor | Self::BoxColor | Self::OutlineColor => {
+                let [_, r, g, b] = (value as u32).to_be_bytes();
+                set_colour(editor, id, self, Rgb(r, g, b));
+            }
         }
     }
+}
+
+/// Give a title's text, box or outline (`field`) a colour. A box or outline
+/// turned off comes back on to show it.
+pub(super) fn set_colour(editor: &mut Editor, id: ClipId, field: Field, colour: Rgb) {
+    editor.edit_title_text(id, |t| match field {
+        Field::BoxColor => {
+            t.box_color = Some(colour);
+            if t.box_opacity == Some(0.0) {
+                t.box_opacity = None;
+            }
+        }
+        Field::OutlineColor => {
+            t.outline_color = Some(colour);
+            if t.outline == Some(0.0) {
+                t.outline = None;
+            }
+        }
+        _ => t.color = Some(colour),
+    });
 }
 
 /// A value field and the text it was last filled with, so only a field the

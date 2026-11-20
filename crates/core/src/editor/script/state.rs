@@ -39,6 +39,7 @@ impl Editor {
                     "transform": c.transform,
                     "background": c.background.as_str(),
                     "color": c.color,
+                    "text": c.text,
                 })
             })
             .collect()

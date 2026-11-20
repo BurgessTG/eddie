@@ -553,7 +553,10 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
     let cell = |picture: Option<f64>, opacity: f32, title: Option<&str>| SheetCell {
         picture: picture.map(|time| (path.clone(), time)),
         opacity,
-        title: title.map(|text| (text.to_owned(), openreel_engine::TitleStyle::Caption, 1.0)),
+        title: title.map(|text| {
+            let look = openreel_media::title_look(openreel_engine::TitleStyle::Caption);
+            (text.to_owned(), look, 1.0)
+        }),
         label: "cell".to_owned(),
     };
     let cells = [

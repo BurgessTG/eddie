@@ -3,8 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Transform, MAX_SCALE, MAX_SPEED,
-    MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, TextLook, Transform, MAX_SCALE,
+    MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
 };
 
 use super::Editor;
@@ -223,6 +223,20 @@ impl Editor {
             let mut color = clip.color;
             edit(&mut color);
             clip.color = color.clamped();
+        }
+    }
+
+    /// The Text card: change a title's size, colours, box, outline or
+    /// place, each moved into its range.
+    pub fn edit_title_text(&mut self, id: ClipId, edit: impl FnOnce(&mut TextLook)) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Title)
+        {
+            let mut text = clip.text;
+            edit(&mut text);
+            clip.text = text.clamped();
         }
     }
 

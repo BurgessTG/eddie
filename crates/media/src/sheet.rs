@@ -7,10 +7,8 @@ use std::io::{Read, Write};
 use std::process::Stdio;
 use std::thread;
 
-use openreel_engine::TitleStyle;
-
 use crate::export::{filter_value, font_file};
-use crate::{scaled_height, title_look, MediaResult, RawFrame, VideoDecoder};
+use crate::{scaled_height, MediaResult, RawFrame, TitleLook, VideoDecoder};
 
 /// Strip under each cell holding its label.
 const LABEL_H: usize = 26;
@@ -26,8 +24,8 @@ pub struct SheetCell {
     pub picture: Option<(String, f64)>,
     /// The picture's opacity; it fades against black.
     pub opacity: f32,
-    /// The active title's text, style and opacity.
-    pub title: Option<(String, TitleStyle, f32)>,
+    /// The active title's text, look ([`crate::clip_title_look`]) and opacity.
+    pub title: Option<(String, TitleLook, f32)>,
     pub label: String,
 }
 
@@ -196,29 +194,25 @@ fn text_filters(cells: &[SheetCell], labels: &[String], grid: &Grid, canvas: (u3
             x0 + 6,
             y0 + cell_h + 6,
         ));
-        let Some((text, style, opacity)) = &cell.title else {
+        let Some((text, look, opacity)) = &cell.title else {
             continue;
         };
-        let look = title_look(*style);
-        let (r, g, b) = look.color;
-        let border = ((look.border as f32 * scale).round() as u32).max(1);
-        let box_options = match look.box_alpha {
-            Some(alpha) => format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={border}"),
-            None => format!("box=0:borderw={border}:bordercolor=black@0.8"),
-        };
-        let x = look.left.map_or_else(
-            || format!("{x0}+({cell_w}-text_w)/2"),
-            |left| format!("{}", x0 + (left as f32 * scale).round() as usize),
+        let mut look = look.scaled(f64::from(scale));
+        look.font_size = look.font_size.max(6);
+        let (dx, dy) = (
+            (look.offset.0 * cell_w as f64).round() as isize,
+            (look.offset.1 * cell_h as f64).round() as isize,
         );
-        let y = y0 + cell_h - (look.bottom as f32 * scale).round() as usize;
+        let x = match look.left {
+            Some(left) => format!("{}", x0 as isize + left as isize + dx),
+            None => format!("{x0}+({cell_w}-text_w)/2{dx:+}"),
+        };
+        let y = y0 as isize + cell_h as isize - look.bottom as isize + dy;
         filters.push(format!(
-            "drawtext=fontfile={font}:expansion=none:text={}:\
-             fontcolor=0x{r:02X}{g:02X}{b:02X}@{:.2}:\
-             fontsize={}:{box_options}:x={x}:y={y}",
+            "drawtext=fontfile={font}:expansion=none:text={}:{}:x={x}:y={y}",
             // One line, as export draws it.
             filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-            opacity.clamp(0.0, 1.0),
-            ((look.font_size as f32 * scale).round() as u32).max(6),
+            look.drawtext_options(*opacity),
         ));
     }
     filters.join(",")

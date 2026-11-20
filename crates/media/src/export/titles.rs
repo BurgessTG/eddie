@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use openreel_engine::{Clip, TitleStyle};
+use openreel_engine::{Clip, Rgb, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE};
 
 use super::video::{enabled_frames, VideoClock};
 
@@ -90,21 +90,12 @@ impl Titles<'_> {
                 if ranges.is_empty() {
                     continue;
                 }
-                let look = title_look(clip.title_style).scaled(self.scale);
-                let (r, g, b) = look.color;
-                let font_size = look.font_size;
-                let font_color = format!("0x{r:02X}{g:02X}{b:02X}");
-                let box_options = match look.box_alpha {
-                    Some(alpha) => {
-                        format!("box=1:boxcolor=black@{alpha:.2}:boxborderw={}", look.border)
-                    }
-                    None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
-                };
+                let look = clip_title_look(clip).scaled(self.scale);
+                let options = look.drawtext_options(clip.opacity);
                 let x = look
                     .left
                     .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
-                let y = format!("h-{}", look.bottom);
-                let alpha = clip.opacity.clamp(0.0, 1.0);
+                let y = look.y();
                 let words: Vec<&str> = clip.name.split_whitespace().collect();
                 let highlight = look
                     .highlight
@@ -112,32 +103,28 @@ impl Titles<'_> {
                     .filter(|_| !words.is_empty());
                 // Every highlight layer starts at the same left edge, so
                 // drawtext lays out each prefix exactly as in the full line.
-                let x = match (&highlight, look.left, &self.font_data) {
+                let x = look.x(match (&highlight, look.left, &self.font_data) {
                     (Some(_), None, Some(data)) => {
-                        text_width(data, &words.join(" "), font_size as f32)
+                        text_width(data, &words.join(" "), look.font_size as f32)
                             .map_or(x, |width| format!("(w-{width:.1})/2"))
                     }
                     _ => x,
-                };
+                });
                 filters.push(format!(
                     "[{current}]drawtext=fontfile={font}:expansion=none:text={}:\
-                     fontcolor={font_color}@{alpha:.2}:\
-                     fontsize={font_size}:{box_options}:x={x}:y={y}:\
-                     enable='{}'[t{i}]",
+                     {options}:x={x}:y={y}:enable='{}'[t{i}]",
                     filter_value(&words.join(" ")),
                     enabled_frames(&ranges),
                 ));
                 current = format!("t{i}");
-                let Some(((hr, hg, hb), times)) = highlight else {
+                let Some((lit, times)) = highlight else {
                     continue;
                 };
                 // Word n lights while it is spoken: the words through it in
                 // the highlight colour, then the words before it back in the
                 // text colour on top. No box: the base layer drew it.
-                let outline = match look.box_alpha {
-                    Some(_) => "box=0".to_owned(),
-                    None => format!("box=0:borderw={}:bordercolor=black@0.8", look.border),
-                };
+                let alpha = clip.opacity.clamp(0.0, 1.0);
+                let outline = look.outline_options(alpha);
                 for (n, &from) in times.iter().enumerate() {
                     let to = times.get(n + 1).copied().unwrap_or(clip.end());
                     let (a, b) = (self.clock.boundary(from), self.clock.boundary(to));
@@ -152,17 +139,18 @@ impl Titles<'_> {
                         continue;
                     }
                     let enable = enabled_frames(&active);
-                    let mut layers =
-                        vec![(words[..=n].join(" "), format!("0x{hr:02X}{hg:02X}{hb:02X}"))];
+                    let mut layers = vec![(words[..=n].join(" "), lit)];
                     if n > 0 {
-                        layers.push((words[..n].join(" "), font_color.clone()));
+                        layers.push((words[..n].join(" "), look.color));
                     }
                     for (layer, (text, color)) in layers.into_iter().enumerate() {
                         let text = filter_value(&text);
                         filters.push(format!(
                             "[{current}]drawtext=fontfile={font}:expansion=none:text={text}:\
-                             fontcolor={color}@{alpha:.2}:fontsize={font_size}:{outline}:\
-                             x={x}:y={y}:enable='{enable}'[t{i}w{n}l{layer}]"
+                             fontcolor={}@{alpha:.2}:fontsize={}:box=0{outline}:\
+                             x={x}:y={y}:enable='{enable}'[t{i}w{n}l{layer}]",
+                            ffmpeg_color(color),
+                            look.font_size,
                         ));
                         current = format!("t{i}w{n}l{layer}");
                     }
@@ -174,87 +162,235 @@ impl Titles<'_> {
     }
 }
 
-/// How export draws one title style, in output-canvas pixels. The program
-/// monitor reads the same table and scales it to its frame, so titles
-/// preview at the size and place they export.
+/// How a title is drawn, in output-canvas pixels. The program monitor and
+/// contact sheets read the same look and scale it to their frame, so
+/// titles preview at the size and place they export.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TitleLook {
     pub font_size: u32,
-    pub color: (u8, u8, u8),
-    /// Black box opacity behind the text; `None` draws a black outline.
-    pub box_alpha: Option<f32>,
-    /// Box padding, or outline width when there is no box.
-    pub border: u32,
-    /// Text left edge; `None` centers the text.
+    pub color: Rgb,
+    /// The box behind the text: its colour and opacity. `None` draws none.
+    pub text_box: Option<(Rgb, f32)>,
+    /// Space between the text and the edge of its box.
+    pub padding: u32,
+    /// The outline round each letter: width, colour and opacity.
+    pub outline: Option<(u32, Rgb, f32)>,
+    /// Text left edge; `None` centres the text.
     pub left: Option<u32>,
     /// Distance from the canvas bottom to the text top.
     pub bottom: u32,
+    /// Moved from that place by shares of the canvas width and height.
+    pub offset: (f64, f64),
     /// Colour of the word being spoken, for titles with word timing.
-    pub highlight: Option<(u8, u8, u8)>,
+    pub highlight: Option<Rgb>,
 }
 
 impl TitleLook {
     /// The look on a canvas `scale` times as large.
-    fn scaled(self, scale: f64) -> Self {
+    pub fn scaled(self, scale: f64) -> Self {
         let px = |value: u32| (f64::from(value) * scale).round() as u32;
         Self {
             font_size: px(self.font_size).max(1),
-            border: px(self.border),
+            padding: px(self.padding),
+            outline: self
+                .outline
+                .map(|(width, color, alpha)| (px(width).max(1), color, alpha)),
             left: self.left.map(px),
             bottom: px(self.bottom),
             ..self
         }
     }
+
+    /// drawtext's size, colour, box and outline options for this look on
+    /// a title at `opacity`, which fades the box and outline too.
+    pub(crate) fn drawtext_options(&self, opacity: f32) -> String {
+        let alpha = opacity.clamp(0.0, 1.0);
+        let mut options = format!(
+            "fontcolor={}@{alpha:.2}:fontsize={}:{}",
+            ffmpeg_color(self.color),
+            self.font_size,
+            self.box_options(alpha)
+        );
+        options.push_str(&self.outline_options(alpha));
+        options
+    }
+
+    fn box_options(&self, alpha: f32) -> String {
+        match self.text_box {
+            Some((color, opacity)) => format!(
+                "box=1:boxcolor={}@{:.2}:boxborderw={}",
+                ffmpeg_color(color),
+                opacity * alpha,
+                self.padding
+            ),
+            None => "box=0".to_owned(),
+        }
+    }
+
+    fn outline_options(&self, alpha: f32) -> String {
+        match self.outline {
+            Some((width, color, opacity)) if width > 0 => format!(
+                ":borderw={width}:bordercolor={}@{:.2}",
+                ffmpeg_color(color),
+                opacity * alpha
+            ),
+            _ => String::new(),
+        }
+    }
+
+    /// drawtext's `x` for text whose own left edge is `x`, moved by the
+    /// look's offset.
+    fn x(&self, x: String) -> String {
+        match self.offset.0 {
+            0.0 => x,
+            share => format!("{x}{share:+.5}*w"),
+        }
+    }
+
+    /// drawtext's `y`: the text top, moved by the look's offset.
+    fn y(&self) -> String {
+        match self.offset.1 {
+            0.0 => format!("h-{}", self.bottom),
+            share => format!("h-{}{share:+.5}*h", self.bottom),
+        }
+    }
 }
 
+/// FFmpeg's `0xRRGGBB`.
+fn ffmpeg_color(Rgb(r, g, b): Rgb) -> String {
+    format!("0x{r:02X}{g:02X}{b:02X}")
+}
+
+/// The look a title style gives, before a title's own changes.
 pub fn title_look(style: TitleStyle) -> TitleLook {
-    let white = (255, 255, 255);
+    let white = Rgb::WHITE;
+    let boxed = |opacity| Some((Rgb::BLACK, opacity));
     match style {
         TitleStyle::LowerThird => TitleLook {
             font_size: 44,
             color: white,
-            box_alpha: Some(0.55),
-            border: 14,
+            text_box: boxed(0.55),
+            padding: 14,
+            outline: None,
             left: Some(42),
             bottom: 110,
+            offset: (0.0, 0.0),
             highlight: None,
         },
         TitleStyle::Caption => TitleLook {
             font_size: 38,
             color: white,
-            box_alpha: Some(0.65),
-            border: 12,
+            text_box: boxed(0.65),
+            padding: 12,
+            outline: None,
             left: None,
             bottom: 90,
+            offset: (0.0, 0.0),
             highlight: None,
         },
         TitleStyle::PopCaption => TitleLook {
             font_size: 48,
-            color: (255, 255, 0),
-            box_alpha: Some(0.75),
-            border: 14,
+            color: Rgb(255, 255, 0),
+            text_box: boxed(0.75),
+            padding: 14,
+            outline: None,
             left: None,
             bottom: 100,
+            offset: (0.0, 0.0),
             highlight: None,
         },
         TitleStyle::MinimalCaption => TitleLook {
             font_size: 34,
             color: white,
-            box_alpha: None,
-            border: 2,
+            text_box: None,
+            padding: 2,
+            outline: Some((2, Rgb::BLACK, 0.8)),
             left: None,
             bottom: 70,
+            offset: (0.0, 0.0),
             highlight: None,
         },
         TitleStyle::HighlightCaption => TitleLook {
             font_size: 44,
             color: white,
-            box_alpha: Some(0.65),
-            border: 12,
+            text_box: boxed(0.65),
+            padding: 12,
+            outline: None,
             left: None,
             bottom: 96,
-            highlight: Some((255, 214, 0)),
+            offset: (0.0, 0.0),
+            highlight: Some(Rgb(255, 214, 0)),
         },
+    }
+}
+
+/// `title`'s [`TextLook`] with every choice made: its own where it has
+/// one, else its style's. A box or outline it does not draw is 0.
+pub fn drawn_text(title: &Clip) -> TextLook {
+    let style = title_look(title.title_style);
+    let text = title.text;
+    let style_outline = style
+        .outline
+        .map(|(width, ..)| f64::from(width) / f64::from(style.font_size));
+    TextLook {
+        color: Some(text.color.unwrap_or(style.color)),
+        box_opacity: Some(
+            text.box_opacity
+                .or(style.text_box.map(|(_, opacity)| f64::from(opacity)))
+                .or(text.box_color.map(|_| DEFAULT_BOX_OPACITY))
+                .unwrap_or(0.0),
+        ),
+        box_color: Some(
+            text.box_color
+                .or(style.text_box.map(|(color, _)| color))
+                .unwrap_or(Rgb::BLACK),
+        ),
+        outline: Some(
+            text.outline
+                .or(style_outline)
+                .or(text.outline_color.map(|_| DEFAULT_OUTLINE))
+                .unwrap_or(0.0),
+        ),
+        outline_color: Some(
+            text.outline_color
+                .or(style.outline.map(|(_, color, _)| color))
+                .unwrap_or(Rgb::BLACK),
+        ),
+        ..text
+    }
+}
+
+/// How `title` is drawn: its style's look with the title's own size,
+/// colours, box, outline and place laid over it ([`TextLook`]).
+pub fn clip_title_look(title: &Clip) -> TitleLook {
+    let style = title_look(title.title_style);
+    let drawn = drawn_text(title);
+    let font_size = (f64::from(style.font_size) * drawn.size).round().max(1.0) as u32;
+    let box_opacity = drawn.box_opacity.unwrap_or(0.0);
+    let outline = drawn.outline.unwrap_or(0.0);
+    // The style's outline keeps its own opacity; a chosen colour is solid.
+    let outline_opacity = match (title.text.outline_color, style.outline) {
+        (None, Some((_, _, opacity))) => opacity,
+        _ => 1.0,
+    };
+    TitleLook {
+        font_size,
+        color: drawn.color.unwrap_or(style.color),
+        text_box: (box_opacity > 0.0)
+            .then(|| (drawn.box_color.unwrap_or(Rgb::BLACK), box_opacity as f32)),
+        padding: (f64::from(style.padding) * drawn.size).round() as u32,
+        outline: (outline > 0.0).then(|| {
+            let width = (outline * f64::from(font_size)).round().max(1.0) as u32;
+            (
+                width,
+                drawn.outline_color.unwrap_or(Rgb::BLACK),
+                outline_opacity,
+            )
+        }),
+        // The text grows upward from its lower edge.
+        bottom: (style.bottom + font_size).saturating_sub(style.font_size),
+        offset: (drawn.x, drawn.y),
+        ..style
     }
 }
 

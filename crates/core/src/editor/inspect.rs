@@ -75,6 +75,7 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     };
     for clip in &timeline.clips {
         inspection.media(clip);
+        inspection.title(clip);
     }
     let segments = program_segments(timeline);
     let mut runs: Vec<Run> = Vec::new();
@@ -123,6 +124,29 @@ impl<'a> Inspection<'a> {
             start,
             end,
         });
+    }
+
+    /// A title moved off the canvas: the middle of its line (its left end,
+    /// when its style starts text at the left) outside the picture.
+    fn title(&mut self, clip: &Clip) {
+        if clip.kind != ClipKind::Title || (clip.text.x == 0.0 && clip.text.y == 0.0) {
+            return;
+        }
+        let look = openreel_media::clip_title_look(clip);
+        let (w, h) = self.canvas;
+        let x = look.left.map_or(w / 2.0, f64::from) + look.offset.0 * w;
+        let y = h - f64::from(look.bottom) + f64::from(look.font_size) / 2.0 + look.offset.1 * h;
+        if (0.0..=w).contains(&x) && (0.0..=h).contains(&y) {
+            return;
+        }
+        self.report(
+            "off-canvas",
+            "warning",
+            format!("Title {}'s text is moved off the canvas.", clip.id),
+            vec![clip.id],
+            clip.start,
+            clip.end(),
+        );
     }
 
     /// A clip against the file it plays: in the bin, its picture on the

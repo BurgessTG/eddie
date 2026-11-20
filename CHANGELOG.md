@@ -43,6 +43,12 @@
   (F), which holds the picture at the playhead for 3 seconds. They are in
   the Edit menu, a new right-click menu on clips and the timeline toolbar.
   Scripts use `rippleDelete`, `duplicateClip` and `freezeFrame`.
+- A Text card in Details for titles: size, text colour, a box behind the
+  text with its colour and opacity, an outline with its colour and
+  thickness, and position, each over the title's style, from colour
+  swatches or a typed `#RRGGBB`. Drag a title on the monitor to move it.
+  Scripts use `setText`, `state()` gives each title's `text`, and
+  `inspect()` reports a title moved off the canvas.
 
 ### Changed
 
@@ -56,6 +62,8 @@
   kept that look only on the first piece; every piece keeps it now.
 - The Keyboard shortcuts window scrolls when the Eddie window is too short
   to show the whole list.
+- A title below full opacity now fades its box and outline in export and
+  contact sheets too, as the monitor showed it; they stayed solid before.
 
 ## 0.2.0 (2026-11-13)
 

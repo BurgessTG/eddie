@@ -67,6 +67,12 @@ pub enum ScriptCommand {
         clip: u64,
         changes: String,
     },
+    /// `changes` is a JSON object of `TextLook` fields to change, or
+    /// `null` to reset.
+    SetText {
+        clip: u64,
+        changes: String,
+    },
     SetVolume {
         clip: u64,
         value: f32,
@@ -176,6 +182,7 @@ impl ScriptCommand {
             | Self::SetTransform { clip, .. }
             | Self::SetBackground { clip, .. }
             | Self::SetColor { clip, .. }
+            | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
             | Self::SetSpeed { clip, .. }
             | Self::SetFade { clip, .. }
@@ -276,6 +283,7 @@ impl ScriptCommand {
             | Self::SetTransform { .. }
             | Self::SetBackground { .. }
             | Self::SetColor { .. }
+            | Self::SetText { .. }
             | Self::SetFormat(_)
             | Self::CloseGaps
             | Self::Log(_) => true,
