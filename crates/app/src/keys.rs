@@ -2,7 +2,8 @@
 //! in two columns grouped like the menus.
 
 use eddie_core::shortcuts::{BINDINGS, GROUPS, keycaps};
-use rune::{Cursor, El, Shape, col, el, row, text};
+use rune::{Cursor, El, ScrollSpec, Shape, col, el, row, text};
+use rune_kit::{ScrollBar, ScrollBarStyle};
 
 use crate::app::Ui;
 use crate::theme::{self, c};
@@ -77,6 +78,16 @@ pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
             }
             column
         }));
+    // In a window too short for the list, the list scrolls under its title.
+    let columns = col()
+        .key("shortcuts-scroll")
+        .shrink()
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(columns)
+        .scroll_bar_styled(ScrollBarStyle::native(c.border_strong, c.subtle_fg).inside());
     let card = col()
         .key("shortcuts")
         // The border draws over the padding.
@@ -87,14 +98,17 @@ pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
         .shadow(8.0, 24.0, rune::Color::BLACK.alpha(140.0 / 255.0))
         .label("Keyboard shortcuts")
         .modal(true, close)
+        .shrink()
+        .min_h(0.0)
         .child(title)
         .child(theme::divider())
         .child(columns);
     overlays.push(
-        row()
+        col()
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
+            .padding(PAD)
             .center()
             .child(card),
     );
@@ -161,10 +175,10 @@ fn keycap(chord: String) -> El {
 
 #[cfg(test)]
 mod tests {
-    use rune::Key;
+    use rune::{Env, Key, Runtime};
 
-    use crate::app::Ui;
-    use crate::testing::{click, press, shown, tooltip, window};
+    use crate::app::{self, Ui};
+    use crate::testing::{click, frames, press, shown, tooltip, window};
 
     #[test]
     fn f1_opens_it_and_f1_escape_or_the_cross_close_it() {
@@ -186,6 +200,26 @@ mod tests {
         );
         click(&mut rt, "shortcuts-close");
         assert!(!shown(&rt, "shortcuts"), "the cross closes it");
+    }
+
+    /// The list is taller than the smallest window; it scrolls inside it.
+    #[test]
+    fn the_list_fits_the_smallest_window() {
+        let mut rt = Runtime::new(
+            Ui::headless(),
+            app::view,
+            (1024.0, 640.0),
+            Env::new(true, 1.0),
+        );
+        rt.on_key = Some(app::on_key);
+        frames(&mut rt, 3);
+        press(&mut rt, Key::Function(1));
+        let ([_, y, _, h], _) = rt.presented("shortcuts").expect("the list is open");
+        assert!(
+            y >= 0.0 && y + h <= 640.0,
+            "the list runs from {y} to {}",
+            y + h
+        );
     }
 
     #[test]

@@ -937,3 +937,182 @@ fn room_after_start_stops_at_the_next_clip_on_either_lane_of_a_pair() {
     assert_eq!(tl.room_after_start(id), 3.0);
     assert_eq!(tl.room_after_start(audio), 3.0);
 }
+
+#[test]
+fn copies_keep_their_pair_linked_and_take_a_free_lane() {
+    let mut tl = Timeline::empty_project();
+    let v = tl.add_media_clip("v", ClipKind::Video, 0, 1.0, 2.0, 5.0, "/m/a.mp4");
+    let a = tl.detach_audio(v).unwrap();
+    tl.add_media_clip("blocker", ClipKind::Video, 0, 4.0, 2.0, 0.0, "/m/b.mp4");
+    let pair = [tl.clip(v).unwrap().clone(), tl.clip(a).unwrap().clone()];
+
+    let ids = tl.place_copies(&pair, 3.5);
+    let (picture, sound) = (tl.clip(ids[0]).unwrap(), tl.clip(ids[1]).unwrap());
+    // Video lane 0 is taken from 4 s, so the picture goes to a new lane;
+    // sound lane 0 is free from 3.5 s, so the sound keeps its lane.
+    assert_eq!(
+        (
+            picture.start,
+            picture.track,
+            picture.duration,
+            picture.source_in
+        ),
+        (3.5, 1, 2.0, 5.0)
+    );
+    assert_eq!((sound.start, sound.track), (3.5, 0));
+    assert!(
+        !picture.embedded_audio,
+        "the copy is still a detached picture"
+    );
+    assert_eq!(
+        (picture.linked_clip, sound.linked_clip),
+        (Some(ids[1]), Some(ids[0]))
+    );
+    assert_eq!(tl.clip(v).unwrap().linked_clip, Some(a));
+    tl.move_clip(ids[0], 7.0);
+    assert_eq!(
+        tl.clip(ids[1]).unwrap().start,
+        7.0,
+        "the copies move together"
+    );
+
+    // The first lands at `start` and the rest keep their offset, but none
+    // goes before zero.
+    let mut early = pair.clone();
+    early[1].start = 0.5;
+    let ids = tl.place_copies(&early, 0.2);
+    let starts: Vec<f64> = ids.iter().map(|id| tl.clip(*id).unwrap().start).collect();
+    assert_eq!(starts, [0.5, 0.0]);
+    assert!(tl.lane_overlaps().is_empty());
+}
+
+#[test]
+fn ripple_delete_closes_the_gap_on_every_lane_that_has_room() {
+    let mut tl = Timeline::empty_project();
+    let media = |tl: &mut Timeline, kind, track, start: f64, end: f64| {
+        tl.add_media_clip("m", kind, track, start, end - start, 0.0, "/m/a.mp4")
+    };
+    let v1 = media(&mut tl, ClipKind::Video, 0, 0.0, 2.0);
+    let v2 = media(&mut tl, ClipKind::Video, 0, 2.0, 5.0);
+    let v3 = media(&mut tl, ClipKind::Video, 0, 5.0, 7.0);
+    let music = media(&mut tl, ClipKind::Audio, 0, 0.0, 10.0);
+    let next_song = media(&mut tl, ClipKind::Audio, 0, 10.0, 12.0);
+    let effect = media(&mut tl, ClipKind::Audio, 1, 6.0, 6.5);
+    let v2_sound = tl.detach_audio(v2).unwrap();
+    let over_v2 = tl.add_clip("said in v2", ClipKind::Title, 0, 2.5, 2.0, 0.0);
+    let over_v3 = tl.add_clip("said in v3", ClipKind::Title, 0, 5.5, 1.0, 0.0);
+    let into_v2 = tl.add_clip("from v1 into v2", ClipKind::Title, 0, 1.0, 1.4, 0.0);
+    let out_of_v2 = tl.add_clip("from v2 into v3", ClipKind::Title, 0, 4.6, 0.8, 0.0);
+    assert_eq!(
+        tl.clip(v2_sound).unwrap().track,
+        1,
+        "under v2, beside the music"
+    );
+
+    let ripple = tl.ripple_delete(v2).unwrap();
+    // v2's sound and the title over it go, and titles across its edges
+    // lose the part over it; the music runs across the gap, so its lane,
+    // and the song after it, stay where they were.
+    assert_eq!(
+        ripple,
+        Ripple {
+            titles: 1,
+            lanes_kept: 1
+        }
+    );
+    for gone in [v2, v2_sound, over_v2] {
+        assert!(tl.clip(gone).is_none());
+    }
+    let start = |tl: &Timeline, id| tl.clip(id).unwrap().start;
+    assert_eq!(
+        [v1, v3, over_v3, effect, music, next_song].map(|id| start(&tl, id)),
+        [0.0, 2.0, 2.5, 3.0, 0.0, 10.0]
+    );
+    let span = |tl: &Timeline, id| {
+        let c = tl.clip(id).unwrap();
+        [c.start, c.duration, c.source_in].map(|t| (t * 1000.0).round() / 1000.0)
+    };
+    assert_eq!(span(&tl, into_v2), [1.0, 1.0, 0.0]);
+    assert_eq!(
+        span(&tl, out_of_v2),
+        [2.0, 0.4, 0.4],
+        "its words keep their times"
+    );
+    assert!(tl.lane_overlaps().is_empty());
+
+    // Over a cutaway the base still shows, so its titles stay.
+    let mut tl = Timeline::empty_project();
+    let base = media(&mut tl, ClipKind::Video, 1, 0.0, 10.0);
+    let cutaway = media(&mut tl, ClipKind::Video, 0, 2.0, 4.0);
+    let line = tl.add_clip("said over the base", ClipKind::Title, 0, 2.5, 1.0, 0.0);
+    let ripple = tl.ripple_delete(cutaway).unwrap();
+    assert_eq!(
+        ripple,
+        Ripple {
+            titles: 0,
+            lanes_kept: 0
+        }
+    );
+    assert_eq!((start(&tl, base), start(&tl, line)), (0.0, 2.5));
+}
+
+#[test]
+fn a_freeze_frame_holds_the_picture_at_the_playhead_and_moves_later_clips() {
+    let mut tl = Timeline::empty_project();
+    let v = tl.add_media_clip("v", ClipKind::Video, 0, 1.0, 4.0, 10.0, "/m/a.mp4");
+    assert!(tl.set_speed(v, 2.0));
+    let v_sound = tl.detach_audio(v).unwrap();
+    let after = tl.add_media_clip("after", ClipKind::Video, 0, 3.0, 1.0, 0.0, "/m/b.mp4");
+    let music = tl.add_media_clip("music", ClipKind::Audio, 1, 0.0, 8.0, 0.0, "/m/c.mp3");
+    let across = tl.add_clip("across", ClipKind::Title, 0, 1.5, 1.0, 0.0);
+    let later = tl.add_clip("later", ClipKind::Title, 0, 3.2, 0.4, 0.0);
+
+    // 0.4 of a frame past 2 s: the frame on screen started at 2 s, when the
+    // 2x clip shows source second 10 + (2 - 1) * 2 = 12.
+    let freeze = tl.freeze_frame(v, 2.0 + 0.4 / 30.0, 3.0).unwrap();
+    let f = tl.clip(freeze).unwrap().clone();
+    assert!(f.freeze && f.still() && !f.embedded_audio && f.linked_clip.is_none());
+    assert_eq!(
+        (f.start, f.duration, f.source_in, f.speed, f.track),
+        (2.0, 3.0, 12.0, 1.0, 0)
+    );
+    assert_eq!(f.source_at(4.9), 12.0);
+    let clip = |tl: &Timeline, id| tl.clip(id).unwrap().clone();
+    assert_eq!((clip(&tl, v).start, clip(&tl, v).end()), (1.0, 2.0));
+    let right = tl
+        .clips
+        .iter()
+        .find(|c| c.name == "v" && c.start == 5.0)
+        .unwrap();
+    assert_eq!(
+        (right.source_in, right.speed, right.end()),
+        (12.0, 2.0, 6.0)
+    );
+    let right_sound = tl.clip(right.linked_clip.unwrap()).unwrap();
+    assert_eq!((right_sound.start, right_sound.source_in), (5.0, 12.0));
+    assert_eq!(clip(&tl, v_sound).end(), 2.0);
+    // Later clips move on every lane; those running across stay whole.
+    assert_eq!(
+        [after, later, music, across].map(|id| (clip(&tl, id).start, clip(&tl, id).duration)),
+        [(6.0, 1.0), (6.2, 0.4), (0.0, 8.0), (1.5, 1.0)]
+    );
+    assert!(tl.lane_overlaps().is_empty());
+
+    // A still splits into the same picture, and does not freeze again.
+    let piece = tl.split_at(freeze, 3.0).unwrap();
+    assert_eq!(clip(&tl, piece).source_in, 12.0);
+    assert_eq!(tl.freeze_frame(freeze, 2.5, 1.0), None);
+    let title = tl.add_clip("t", ClipKind::Title, 1, 0.0, 1.0, 0.0);
+    assert_eq!(tl.freeze_frame(title, 0.5, 1.0), None);
+    assert_eq!(tl.freeze_frame(after, 9.0, 1.0), None, "outside the clip");
+
+    // At a clip's first frame nothing splits: the hold goes before it.
+    let before = tl.clips.len();
+    let first = tl.freeze_frame(after, 6.0, 1.0).unwrap();
+    assert_eq!(tl.clips.len(), before + 1);
+    assert_eq!(
+        (clip(&tl, first).start, clip(&tl, first).source_in),
+        (6.0, 0.0)
+    );
+    assert_eq!(clip(&tl, after).start, 7.0);
+}

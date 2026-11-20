@@ -28,7 +28,8 @@ const DRAG_START: f32 = 6.0;
 /// 60 Hz frame, which sets the scroll speed.
 const AUTOSCROLL_EVERY: Duration = Duration::from_millis(16);
 const HELP: &str = "Click to move the playhead. Drag clips to move, drag edges to trim. \
-                    Ctrl+scroll zooms. F1 lists shortcuts.";
+                    Right-click a clip for copy, paste and more. Ctrl+scroll zooms. \
+                    F1 lists shortcuts.";
 
 /// The pointer over the lanes, kept between frames.
 #[derive(Default)]
@@ -288,6 +289,15 @@ fn view(ui: &Ui) -> El {
         .on_wheel(wheel)
         .on_pointer_move_local(|ui: &mut Ui, at: PointerEvent, _| {
             ui.lanes.hover = Some([at.x, at.y]);
+        })
+        .on_secondary_press_local(move |ui: &mut Ui, at: PointerEvent, _| {
+            // A right-click selects the clip under it, as a click does, but
+            // leaves the playhead where it is.
+            let port = &ui.editor.viewport;
+            let hit = lanes::hover_clip(port, &ui.editor.timeline, rect, [at.x, at.y]);
+            ui.editor.selected = hit.map(|(clip, _)| clip.id);
+            let press = at.window();
+            ui.clip_menu = Some([press.x, press.y]);
         })
         .on_hover_change(|ui: &mut Ui, hovered, _| {
             if !hovered && !ui.lanes.held() {

@@ -152,6 +152,17 @@ pub const BINDINGS: &[Binding] = &[
         "Delete clip",
         &[plain(KeyName::Delete), plain(KeyName::Backspace)],
     ),
+    bind(
+        Action::RippleDelete,
+        "Edit",
+        "Ripple delete",
+        &[shift(KeyName::Delete), shift(KeyName::Backspace)],
+    ),
+    bind(Action::Copy, "Edit", "Copy clip", &[cmd('c')]),
+    bind(Action::Cut, "Edit", "Cut clip", &[cmd('x')]),
+    bind(Action::Paste, "Edit", "Paste at playhead", &[cmd('v')]),
+    bind(Action::Duplicate, "Edit", "Duplicate clip", &[cmd('d')]),
+    bind(Action::FreezeFrame, "Edit", "Freeze frame", &[letter('f')]),
     bind(Action::AddTitle, "Edit", "Add title", &[letter('t')]),
     bind(
         Action::ToggleMagnet,

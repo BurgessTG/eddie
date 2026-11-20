@@ -1128,6 +1128,30 @@ fn a_photo_is_held_for_its_whole_clip_and_letterboxed() {
 }
 
 /// `jpeg` with an EXIF block saying how to turn it for display.
+#[test]
+fn a_freeze_frame_holds_the_picture_its_point_shows() {
+    let fixture = Fixture::new();
+    // Each frame three levels brighter than the last, so a neighbour fails
+    // the comparison.
+    let source = fixture.video(
+        "ramp.mp4",
+        "nullsrc=s=64x36:r=30:d=2.5",
+        "geq=lum='20+3*N':cb=128:cr=128",
+        None,
+    );
+    let original = frames(Path::new(&source));
+    let mut timeline = Timeline::new(30.0);
+    let id = video(&mut timeline, &source, 0, 0.0, 2.0, 0.0);
+    // Past the first second, so export seeks before it takes the picture.
+    // 0.4 of a frame past 1.5 s, frame 45 is on screen.
+    timeline.freeze_frame(id, 1.5 + 0.4 / 30.0, 0.2).unwrap();
+    let exported = frames(&fixture.export("freeze.mp4", &timeline));
+    let mut expected: Vec<&[u8]> = original[..45].iter().map(Vec::as_slice).collect();
+    expected.extend(std::iter::repeat_n(original[45].as_slice(), 6));
+    expected.extend(original[45..60].iter().map(Vec::as_slice));
+    assert_frames("frame 45 held for 6 frames", &exported, &expected);
+}
+
 fn with_orientation(jpeg: &[u8], orientation: u8) -> Vec<u8> {
     let mut exif = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
     // Tag 0x0112 (Orientation), SHORT, one value; then no next IFD.

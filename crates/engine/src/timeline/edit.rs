@@ -3,6 +3,16 @@
 use super::{Timeline, EDGE_EPSILON};
 use crate::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED};
 
+/// What [`Timeline::ripple_delete`] took with the clip and left in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ripple {
+    /// Titles that lay wholly over the deleted picture.
+    pub titles: usize,
+    /// Lanes with clips after the gap that kept their place, because a
+    /// clip on them runs into the deleted time.
+    pub lanes_kept: usize,
+}
+
 impl Timeline {
     /// Move a clip. Start is clamped to >= 0 and snapped to a frame.
     /// A linked detach partner moves by the same amount.
@@ -115,9 +125,9 @@ impl Timeline {
         }
         // Generated clips have no media to run out of: a title's edge can
         // move earlier, and its source clock goes negative so word timings
-        // stay where they were. A photo has no source range to run out of.
+        // stay where they were. A still has no source range to run out of.
         let generated = clip.kind == ClipKind::Title;
-        let min_start = if generated || clip.photo {
+        let min_start = if generated || clip.still() {
             0.0
         } else {
             clip.time_at(0.0).max(0.0)
@@ -135,7 +145,7 @@ impl Timeline {
         let delta = desired - clip.start;
         if let Some(clip) = self.clip_mut(id) {
             clip.start = desired;
-            if !clip.photo {
+            if !clip.still() {
                 clip.source_in += delta * clip.speed;
             }
             if !generated {
@@ -248,11 +258,11 @@ impl Timeline {
     /// Play a media clip at `speed` source seconds per second. It keeps its
     /// source range, so its length becomes that range at the new speed; a
     /// linked partner changes with it. False, and nothing changes, for a
-    /// title, a photo, a clip without a source or a speed outside
+    /// title, a still, a clip without a source or a speed outside
     /// [`MIN_SPEED`]..=[`MAX_SPEED`].
     pub fn set_speed(&mut self, id: ClipId, speed: f64) -> bool {
         let media = self.clip(id).is_some_and(|clip| {
-            clip.kind != ClipKind::Title && clip.source.is_some() && !clip.photo
+            clip.kind != ClipKind::Title && clip.source.is_some() && !clip.still()
         });
         if !media || !(MIN_SPEED..=MAX_SPEED).contains(&speed) {
             return false;
@@ -323,12 +333,150 @@ impl Timeline {
                 self.split_at(id, at);
             }
         }
+        self.push_later(at, seconds);
+    }
+
+    /// Move every clip that starts at `at` or later, on every lane, later
+    /// by `seconds`. Clips that run across `at` stay where they are.
+    pub fn push_later(&mut self, at: f64, seconds: f64) {
         let frame = 1.0 / self.fps;
         for clip in &mut self.clips {
             if clip.start >= at - frame / 2.0 {
                 clip.start += seconds;
             }
         }
+    }
+
+    /// Hold the picture video clip `id` shows at `time` for `seconds`, as
+    /// CapCut's Freeze does: the clip and its linked sound split at that
+    /// frame, a freeze frame of it fills the new time on the clip's lane,
+    /// and every clip that starts from there on, on every lane, moves later
+    /// by `seconds` so pictures, sound and titles after it stay together.
+    /// Clips on other lanes that run across the point stay whole, so a
+    /// music bed plays on under the hold. Returns the freeze frame. `None`,
+    /// and nothing changes, unless the clip is video from a file, not
+    /// already a still, and `time` is inside it, more than half a frame
+    /// before its end.
+    pub fn freeze_frame(&mut self, id: ClipId, time: f64, seconds: f64) -> Option<ClipId> {
+        let clip = self.clip(id)?.clone();
+        let frame = 1.0 / self.fps;
+        if clip.kind != ClipKind::Video
+            || clip.source.is_none()
+            || clip.still()
+            || !clip.contains(time)
+            || !seconds.is_finite()
+        {
+            return None;
+        }
+        // The frame on screen at `time` starts at the grid line before it.
+        let mut at = self.snap_at_or_before(time).max(clip.start);
+        if at > clip.end() - frame / 2.0 {
+            return None;
+        }
+        if at > clip.start + frame / 2.0 {
+            self.split_at(id, at)?;
+        } else {
+            at = clip.start;
+        }
+        let picture = clip.source_at(at);
+        let seconds = self.snap(seconds).max(frame);
+        self.push_later(at, seconds);
+        let freeze = self.next_id;
+        self.next_id += 1;
+        self.clips.push(Clip {
+            id: freeze,
+            start: at,
+            duration: seconds,
+            source_in: picture,
+            embedded_audio: false,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            linked_clip: None,
+            duck: false,
+            clean_voice: false,
+            smooth_fades: false,
+            speed: 1.0,
+            freeze: true,
+            ..clip
+        });
+        Some(freeze)
+    }
+
+    /// Delete clip `id` with its linked partner and close the time they
+    /// leave: on every lane, clips that start at or after its end move left
+    /// by its length, so pictures, sound and titles after it stay together.
+    /// A deleted picture takes the titles lying wholly over its time with
+    /// it and cuts that time out of titles across its edges, unless other
+    /// video still shows there. A lane where a clip that stays still runs
+    /// into that time, such as a music bed, keeps its place. `None` when
+    /// there is no clip `id`.
+    pub fn ripple_delete(&mut self, id: ClipId) -> Option<Ripple> {
+        let clip = self.clip(id)?.clone();
+        let (start, end) = (clip.start, clip.end());
+        let slack = 0.5 / self.fps;
+        let mut gone: Vec<ClipId> = [Some(id), self.linked_id(id)]
+            .into_iter()
+            .flatten()
+            .collect();
+        // Overlaps under half a frame come from off-grid media edges.
+        let shown_elsewhere = self.clips.iter().any(|other| {
+            other.kind == ClipKind::Video
+                && !gone.contains(&other.id)
+                && other.start < end - slack
+                && start < other.end() - slack
+        });
+        let partners = gone.len();
+        let closes_titles = clip.kind == ClipKind::Video && !shown_elsewhere;
+        if closes_titles {
+            gone.extend(
+                self.clips
+                    .iter()
+                    .filter(|title| {
+                        title.kind == ClipKind::Title
+                            && title.start >= start - slack
+                            && title.end() <= end + slack
+                    })
+                    .map(|title| title.id),
+            );
+        }
+        let titles = gone.len() - partners;
+        for id in gone {
+            self.remove_clip(id);
+        }
+        let later = |other: &Clip| other.start >= end - slack;
+        let crosses = |other: &Clip| !later(other) && other.end() > start + slack;
+        let mut held: Vec<(ClipKind, usize)> = self
+            .clips
+            .iter()
+            .filter(|other| crosses(other) && !(closes_titles && other.kind == ClipKind::Title))
+            .map(|other| (other.kind, other.track))
+            .collect();
+        held.sort_by_key(|&(kind, track)| self.row(kind, track));
+        held.dedup();
+        for other in &mut self.clips {
+            if closes_titles && other.kind == ClipKind::Title && crosses(other) {
+                // A title across an edge of the deleted picture loses the
+                // part over it, so the captions after it stay in step.
+                let before = (start - other.start).max(0.0);
+                let after = (other.end() - end).max(0.0);
+                if other.start > start {
+                    other.source_in += end - other.start;
+                    other.start = start;
+                }
+                other.duration = before + after;
+            } else if later(other) && !held.contains(&(other.kind, other.track)) {
+                other.start = (other.start - (end - start)).max(0.0);
+            }
+        }
+        let lanes_kept = held
+            .iter()
+            .filter(|lane| {
+                self.clips
+                    .iter()
+                    .any(|other| later(other) && (other.kind, other.track) == **lane)
+            })
+            .count();
+        Some(Ripple { titles, lanes_kept })
     }
 
     /// Magnetic main-track behavior: shift clips on `track` left so no

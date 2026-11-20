@@ -37,6 +37,12 @@
   same transform, background and colour as video. `state()` marks photo
   assets and clips `photo`. Import's file list shows `IMG_0001.HEIC` and
   other upper-case names on Linux too.
+- Edit tools: Copy, Cut and Paste (Ctrl+C, Ctrl+X, Ctrl+V, Cmd on a Mac;
+  a paste lands at the playhead), Duplicate (Ctrl+D), Ripple delete
+  (Shift+Delete), which closes the gap on every lane, and Freeze frame
+  (F), which holds the picture at the playhead for 3 seconds. They are in
+  the Edit menu, a new right-click menu on clips and the timeline toolbar.
+  Scripts use `rippleDelete`, `duplicateClip` and `freezeFrame`.
 
 ### Changed
 
@@ -48,6 +54,8 @@
 
 - Splitting a moved, cropped or graded clip, or removing silence from one,
   kept that look only on the first piece; every piece keeps it now.
+- The Keyboard shortcuts window scrolls when the Eddie window is too short
+  to show the whole list.
 
 ## 0.2.0 (2026-11-13)
 

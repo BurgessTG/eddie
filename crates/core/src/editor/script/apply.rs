@@ -179,6 +179,47 @@ impl Editor {
                     self.selected = None;
                 }
             }
+            ScriptCommand::RippleDelete(id) => {
+                let ripple = self.timeline.ripple_delete(id);
+                if self
+                    .selected
+                    .is_some_and(|id| self.timeline.clip(id).is_none())
+                {
+                    self.selected = None;
+                }
+                let mut notes = Vec::new();
+                if let Some(ripple) = ripple.filter(|ripple| ripple.titles > 0) {
+                    notes.push(format!("removed {} title(s) over it", ripple.titles));
+                }
+                if let Some(ripple) = ripple.filter(|ripple| ripple.lanes_kept > 0) {
+                    notes.push(format!(
+                        "{} lane(s) kept their place under a clip across the gap",
+                        ripple.lanes_kept
+                    ));
+                }
+                if !notes.is_empty() {
+                    return Ok(Some(format!("rippleDelete({id}): {}", notes.join("; "))));
+                }
+            }
+            ScriptCommand::DuplicateClip { clip, handle } => {
+                let copy = self
+                    .duplicate_clip(clip)
+                    .ok_or_else(|| format!("no clip {clip}"))?;
+                self.selected = Some(copy);
+                created.extend(handle.map(|handle| (handle, copy)));
+            }
+            ScriptCommand::FreezeFrame {
+                clip,
+                at,
+                seconds,
+                handle,
+            } => {
+                let freeze = self
+                    .freeze_frame(clip, at, seconds)
+                    .map_err(|why| format!("freezeFrame: clip {clip}: {why}"))?;
+                self.selected = Some(freeze);
+                created.extend(handle.map(|handle| (handle, freeze)));
+            }
             ScriptCommand::MoveClip { clip, start } => {
                 from_zero("moveClip", "start", start)?;
                 self.timeline.move_clip(clip, start);
@@ -201,7 +242,7 @@ impl Editor {
                 if let Some(right) = right {
                     let mut end = self.timeline.snap(right);
                     if let Some(c) = self.timeline.clip(clip) {
-                        let source = c.source.as_ref().filter(|_| !c.photo);
+                        let source = c.source.as_ref().filter(|_| !c.still());
                         if let Some(asset) = source.and_then(|s| self.asset(s)) {
                             end = end.min(c.time_at(asset.info.duration).max(c.start));
                         }
@@ -269,9 +310,14 @@ impl Editor {
                         "setSpeed needs a video or audio clip; clip {clip} is not one"
                     ));
                 }
-                if target.photo {
+                if target.still() {
+                    let what = if target.photo {
+                        "photo"
+                    } else {
+                        "freeze frame"
+                    };
                     return Err(format!(
-                        "setSpeed: clip {clip} is a photo; trim it to change how long it shows"
+                        "setSpeed: clip {clip} is a {what}; trim it to change how long it shows"
                     ));
                 }
                 self.timeline.set_speed(clip, speed);

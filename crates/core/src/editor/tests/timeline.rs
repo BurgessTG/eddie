@@ -424,3 +424,111 @@ fn adding_a_music_bed_range_starts_muted() {
         "an added music track is never muted as a music bed"
     );
 }
+
+/// Copy, paste, duplicate, cut, ripple delete and freeze frame as keys and
+/// menus ask for them: each says what it did and undoes as one step.
+#[test]
+fn clip_edit_tools_report_themselves_and_undo_as_one_step() {
+    let mut app = Editor::headless();
+    app.assets.push(BinAsset {
+        info: MediaInfo {
+            path: "a.mp4".to_owned(),
+            name: "a.mp4".to_owned(),
+            duration: 60.0,
+            width: 320,
+            height: 180,
+            fps: 30.0,
+            has_video: true,
+            has_audio: true,
+            photo: false,
+        },
+        size_bytes: 0,
+        state: AssetState::Ready,
+        peaks: Vec::new(),
+        beats: None,
+        thumbs: Vec::new(),
+        sweep: sweep::SweepData::default(),
+    });
+    let v = app
+        .timeline
+        .add_media_clip("a.mp4", ClipKind::Video, 0, 0.0, 4.0, 1.0, "a.mp4");
+    app.timeline.detach_audio(v).unwrap();
+    let step = |app: &mut Editor| app.commit_history();
+    step(&mut app);
+
+    app.perform(Action::Copy);
+    assert_eq!(app.status, "Select a clip to copy.");
+    assert!(!app.can_paste());
+    app.selected = Some(v);
+    app.perform(Action::Copy);
+    assert!(app.can_paste());
+    app.playhead = 10.0;
+    app.perform(Action::Paste);
+    assert_eq!(app.status, "Clip pasted at the playhead.");
+    let copy = app.timeline.clip(app.selected.unwrap()).unwrap().clone();
+    assert_eq!(
+        (copy.start, copy.source_in, copy.kind),
+        (10.0, 1.0, ClipKind::Video)
+    );
+    let sound = app.timeline.clip(copy.linked_clip.unwrap()).unwrap();
+    assert_eq!((sound.start, sound.kind), (10.0, ClipKind::Audio));
+    step(&mut app);
+    app.perform(Action::Undo);
+    assert_eq!(app.timeline.clips.len(), 2, "the pair pastes as one step");
+
+    app.selected = Some(v);
+    app.perform(Action::Duplicate);
+    let dup = app.selected.unwrap();
+    assert_eq!(app.timeline.clip(dup).unwrap().start, 4.0, "right after it");
+    assert_eq!(app.timeline.clips.len(), 4);
+    app.perform(Action::Cut);
+    assert_eq!(
+        (app.timeline.clips.len(), app.selected, app.status.as_str()),
+        (2, None, "Clip cut.")
+    );
+    app.assets.clear();
+    app.perform(Action::Paste);
+    assert_eq!(app.status, "a.mp4 is no longer in the media bin.");
+    assert_eq!(app.timeline.clips.len(), 2);
+    step(&mut app);
+
+    let w = app
+        .timeline
+        .add_clip("w", ClipKind::Video, 0, 4.0, 2.0, 0.0);
+    step(&mut app);
+    app.selected = Some(v);
+    app.perform(Action::RippleDelete);
+    assert_eq!(app.status, "Clip deleted; the gap closed.");
+    assert_eq!(app.timeline.clips.len(), 1, "its linked sound went too");
+    assert_eq!(app.timeline.clip(w).unwrap().start, 0.0);
+    step(&mut app);
+    app.perform(Action::Undo);
+    assert_eq!(app.timeline.clips.len(), 3);
+
+    app.selected = None;
+    app.playhead = 1.0;
+    app.perform(Action::FreezeFrame);
+    assert_eq!(app.status, "Frame frozen for 3 s.");
+    let freeze = app.timeline.clip(app.selected.unwrap()).unwrap().clone();
+    assert!(freeze.freeze);
+    assert_eq!((freeze.start, freeze.source_in), (1.0, 2.0));
+    assert_eq!(app.timeline.clip(w).unwrap().start, 7.0);
+    app.perform(Action::FreezeFrame);
+    assert_eq!(
+        app.status,
+        "Cannot freeze this clip: it is already a still picture."
+    );
+    step(&mut app);
+    app.perform(Action::Undo);
+    assert_eq!(app.timeline.clips.len(), 3, "the freeze undoes as one step");
+    assert_eq!(app.timeline.clip(w).unwrap().start, 4.0);
+
+    // With w right after it, a duplicated picture moves w along to make room.
+    app.selected = Some(v);
+    app.perform(Action::Duplicate);
+    let dup = app.timeline.clip(app.selected.unwrap()).unwrap().clone();
+    assert_eq!((dup.start, dup.track), (4.0, 0));
+    assert_eq!(app.timeline.clip(w).unwrap().start, 8.0);
+    let dup_sound = app.timeline.clip(dup.linked_clip.unwrap()).unwrap();
+    assert_eq!((dup_sound.start, dup_sound.track), (4.0, 0));
+}

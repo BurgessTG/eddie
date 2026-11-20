@@ -46,6 +46,9 @@ function help() {
     "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' (request-time clips); time(spec) timeRange('a..b' | 'clip:7')",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
+    "rippleDelete(id)  // deletes the clip and its linked sound and moves later clips up on every lane that has room; a deleted picture takes the titles over it, and titles across its edges lose that part",
+    "duplicateClip(id)  // a copy (and its linked sound) right after the clip; a video clip moves later clips along to make room, a title or sound takes the first lane free there",
+    "freezeFrame(id, at?, seconds?)  // splits a video clip at at (the playhead), holds that picture for seconds (3), silent, and moves everything starting from at later",
     "moveClip(id, start) setClipLane(id, lane)",
     "trimClip(id, left, right)  // the clip's new start and end as timeline times; null or -1 keeps an edge",
     "renameClip(id, name) setOpacity(id, 0..1) setVolume(id, gain)  // linear gain 0..2; 0.5 is about 6 dB quieter",
@@ -61,7 +64,7 @@ function help() {
     "addTitle(text, at?, dur?, style?)  // defaults: playhead, 4 s, 'lower-third'",
     "setTitleStyle(id, style) addCaptionsForClip(id, style?)  // styles: lower-third caption pop-caption minimal-caption highlight-caption; captions default to 'caption'",
     "addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)  // lands on the first lane free for its span",
-    "  // adds and splits return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
+    "  // adds, splits, duplicates and freezes return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
     "return reports back as `output` (JSON text); console.log lines and command reports land in `notes`. The in-app console keeps variables between lines; each eddie run starts fresh."
@@ -87,6 +90,9 @@ function split(at) {
   return __split_clip(s.selected, at === undefined ? s.playhead : __t(at));
 }
 function splitClip(id, at) { return __split_clip(id, __t(at)); }
+function freezeFrame(id, at, seconds) {
+  return __freeze_frame(id, at === undefined ? state().playhead : __t(at), seconds === undefined ? 3 : seconds);
+}
 function deleteClip(id) {
   if (id === undefined) {
     id = state().selected;

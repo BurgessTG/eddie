@@ -20,6 +20,20 @@ pub enum ScriptCommand {
         handle: Option<u64>,
     },
     DeleteClip(u64),
+    /// Delete a clip and close its gap (`Timeline::ripple_delete`).
+    RippleDelete(u64),
+    /// A copy right after the clip; the handle names the copy.
+    DuplicateClip {
+        clip: u64,
+        handle: Option<u64>,
+    },
+    /// Hold the picture at `at` for `seconds`; the handle names the freeze.
+    FreezeFrame {
+        clip: u64,
+        at: f64,
+        seconds: f64,
+        handle: Option<u64>,
+    },
     MoveClip {
         clip: u64,
         start: f64,
@@ -151,8 +165,10 @@ impl ScriptCommand {
     /// The clip this command targets, if any.
     pub fn target_mut(&mut self) -> Option<&mut u64> {
         match self {
-            Self::SelectClip(id) | Self::DeleteClip(id) => Some(id),
+            Self::SelectClip(id) | Self::DeleteClip(id) | Self::RippleDelete(id) => Some(id),
             Self::SplitClip { clip, .. }
+            | Self::DuplicateClip { clip, .. }
+            | Self::FreezeFrame { clip, .. }
             | Self::MoveClip { clip, .. }
             | Self::TrimClip { clip, .. }
             | Self::RenameClip { clip, .. }
@@ -207,7 +223,9 @@ impl ScriptCommand {
             Self::SetFade {
                 fade_in, fade_out, ..
             } => fade_in.is_finite() && fade_out.is_finite(),
-            Self::InsertTime { at, seconds } => at.is_finite() && seconds.is_finite(),
+            Self::InsertTime { at, seconds } | Self::FreezeFrame { at, seconds, .. } => {
+                at.is_finite() && seconds.is_finite()
+            }
             Self::TrimClip { left, right, .. } => {
                 left.iter().chain(right).all(|value| value.is_finite())
             }
@@ -238,6 +256,8 @@ impl ScriptCommand {
             | Self::StepFrames(_)
             | Self::SelectClip(_)
             | Self::DeleteClip(_)
+            | Self::RippleDelete(_)
+            | Self::DuplicateClip { .. }
             | Self::RenameClip { .. }
             | Self::DetachAudio { .. }
             | Self::UnlinkClip { .. }

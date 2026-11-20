@@ -84,14 +84,15 @@ impl Timeline {
 
     /// Enable or disable a video clip's own embedded sound. It
     /// cannot be re-enabled while a detached partner exists, which
-    /// would otherwise play the same source audio twice.
+    /// would otherwise play the same source audio twice, nor on a
+    /// freeze frame, which holds one picture in silence.
     pub fn set_embedded_audio(&mut self, id: ClipId, enabled: bool) -> bool {
         let Some(clip) = self.clip(id).cloned() else {
             return false;
         };
         if clip.kind != ClipKind::Video
             || clip.source.is_none()
-            || (enabled && self.linked_id(id).is_some())
+            || (enabled && (self.linked_id(id).is_some() || clip.freeze))
         {
             return false;
         }

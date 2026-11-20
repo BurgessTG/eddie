@@ -99,6 +99,28 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
         q.borrow_mut().push(0, || ScriptCommand::DeleteClip(clip))
     })?;
     let q = api.queue();
+    api.set("rippleDelete", move |Whole(clip): Whole| {
+        q.borrow_mut().push(0, || ScriptCommand::RippleDelete(clip))
+    })?;
+    let q = api.queue();
+    api.set("duplicateClip", move |Whole(clip): Whole| {
+        q.borrow_mut()
+            .push_addition(0, |handle| ScriptCommand::DuplicateClip { clip, handle })
+    })?;
+    let q = api.queue();
+    api.set(
+        "__freeze_frame",
+        move |Whole(clip): Whole, at: f64, seconds: f64| {
+            q.borrow_mut()
+                .push_addition(0, |handle| ScriptCommand::FreezeFrame {
+                    clip,
+                    at,
+                    seconds,
+                    handle,
+                })
+        },
+    )?;
+    let q = api.queue();
     api.set("__move_clip", move |Whole(clip): Whole, start: f64| {
         q.borrow_mut()
             .push(0, || ScriptCommand::MoveClip { clip, start })

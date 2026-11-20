@@ -139,6 +139,11 @@ pub struct Clip {
     /// so either edge trims as far as it likes, and it has no speed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub photo: bool,
+    /// Video only: a freeze frame, the source picture at `source_in` held
+    /// for the clip's whole length. Like a photo it has no source range and
+    /// no speed, but its file is a video, so readers seek to the picture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub freeze: bool,
 }
 
 /// The slowest and fastest a clip plays.
@@ -166,10 +171,15 @@ impl Clip {
         time >= self.start && time < self.end()
     }
 
-    /// The source time shown or heard at timeline `time`. A photo shows
+    /// One picture held for the whole clip: a photo or a freeze frame.
+    pub fn still(&self) -> bool {
+        self.photo || self.freeze
+    }
+
+    /// The source time shown or heard at timeline `time`. A still shows
     /// its one picture throughout.
     pub fn source_at(&self, time: f64) -> f64 {
-        if self.photo {
+        if self.still() {
             return self.source_in;
         }
         self.source_in + (time - self.start) * self.speed

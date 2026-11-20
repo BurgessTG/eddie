@@ -1,5 +1,5 @@
-//! The bar over the lanes: Split, Delete and the magnet on the left, the
-//! zoom buttons and slider on the right.
+//! The bar over the lanes: the magnet, Title, Split, Duplicate, Freeze and
+//! Delete on the left, the zoom buttons and slider on the right.
 
 use eddie_core::editor::viewport::MAX_ZOOM;
 use eddie_core::{Action, shortcuts};
@@ -131,6 +131,20 @@ pub(super) fn toolbar(ui: &Ui) -> El {
             false,
             "Split the clip under the playhead",
             Action::SplitSelected,
+        ))
+        .child(tool_button(
+            "tool-duplicate",
+            Tool::Duplicate,
+            false,
+            "Duplicate: put a copy of the selected clip right after it",
+            Action::Duplicate,
+        ))
+        .child(tool_button(
+            "tool-freeze",
+            Tool::Freeze,
+            false,
+            "Freeze frame: hold the picture at the playhead for 3 seconds",
+            Action::FreezeFrame,
         ))
         .child(tool_button(
             "tool-delete",

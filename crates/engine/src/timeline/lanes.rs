@@ -105,14 +105,17 @@ impl Timeline {
         *count = (*count).max(track + 1);
     }
 
+    /// Whether lane `track` of `kind` has something on it from `start` to
+    /// `end`.
+    pub fn lane_taken(&self, kind: ClipKind, track: usize, start: f64, end: f64) -> bool {
+        self.clips.iter().any(|clip| {
+            clip.kind == kind && clip.track == track && clip.start < end && start < clip.end()
+        })
+    }
+
     /// The first lane of `kind` with nothing on it from `start` to `end`.
     pub fn first_free_lane(&self, kind: ClipKind, start: f64, end: f64) -> Option<usize> {
-        let taken = |track: usize| {
-            self.clips.iter().any(|clip| {
-                clip.kind == kind && clip.track == track && clip.start < end && start < clip.end()
-            })
-        };
-        (0..self.lanes.count(kind)).find(|track| !taken(*track))
+        (0..self.lanes.count(kind)).find(|track| !self.lane_taken(kind, *track, start, end))
     }
 
     /// The first lane of `kind` with nothing on it from `start` to `end`,

@@ -2,10 +2,12 @@
 
 use crate::{time_spec, Clip, ClipId, ClipKind, TitleStyle};
 
+mod copies;
 mod edit;
 mod lanes;
 mod linked;
 
+pub use edit::Ripple;
 pub use lanes::{Lanes, LANE_KINDS};
 
 /// Longest supported timeline, about 11.5 days. Loudness measurement and
@@ -327,6 +329,7 @@ impl Timeline {
             color: crate::ColorAdjust::default(),
             speed: 1.0,
             photo: false,
+            freeze: false,
         });
         id
     }

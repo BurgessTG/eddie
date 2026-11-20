@@ -85,6 +85,8 @@ fn seg(shape: Shape, a: P, b: P, width: f32, color: Color) -> Shape {
 pub enum Tool {
     Magnet,
     Split,
+    Duplicate,
+    Freeze,
     Delete,
     ZoomIn,
     ZoomOut,
@@ -138,6 +140,36 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
                 1.4,
                 theme::c().destructive,
             )
+        }
+        Tool::Duplicate => {
+            // The copy in front, the original's corner showing behind it.
+            let behind = vec![
+                at(-4.0, 3.5),
+                at(-8.0, 3.5),
+                at(-8.0, -8.0),
+                at(3.5, -8.0),
+                at(3.5, -4.0),
+            ];
+            let mut shape = shape.stroke_with(behind, false, 1.6, LineCap::Round, fg);
+            shape = outline(shape, cx - 4.0, cy - 4.0, 12.5, 12.5, 2.0, 1.6, fg);
+            shape = seg(shape, at(-0.6, 2.25), at(5.1, 2.25), 1.4, fg);
+            seg(shape, at(2.25, -0.6), at(2.25, 5.1), 1.4, fg)
+        }
+        Tool::Freeze => {
+            // A snowflake: three strokes through the centre, a V on each arm.
+            let mut shape = shape;
+            for i in 0..6 {
+                let angle = PI / 2.0 + TAU * i as f32 / 6.0;
+                let (x, y) = (angle.cos(), angle.sin());
+                shape = shape.line(at(0.0, 0.0), at(x * 8.5, y * 8.5), 1.5, LineCap::Round, fg);
+                for turn in [-0.8_f32, 0.8] {
+                    let (bx, by) = ((angle + turn).cos(), (angle + turn).sin());
+                    let base = at(x * 4.8, y * 4.8);
+                    let tip = [base[0] + bx * 3.0, base[1] + by * 3.0];
+                    shape = shape.line(base, tip, 1.3, LineCap::Round, fg);
+                }
+            }
+            shape
         }
         Tool::Delete => {
             let mut shape = seg(shape, at(-7.0, -5.0), at(7.0, -5.0), 1.6, fg);

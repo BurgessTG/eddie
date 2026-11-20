@@ -81,8 +81,8 @@ fn timing(ui: &Ui, id: ClipId, clip: &Clip, has_source: bool, value_w: f32) -> V
             "How long the clip plays",
         ),
     ];
-    // A photo has no source range and no speed: its length is all there is.
-    let ranged = has_source && !clip.photo;
+    // A still has no source range and no speed: its length is all there is.
+    let ranged = has_source && !clip.still();
     if ranged {
         timing.push(seconds_row(
             ui,

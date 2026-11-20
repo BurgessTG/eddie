@@ -77,8 +77,14 @@ fn filmstrip(
         if x + tile.w < 0.0 || x > w {
             continue;
         }
+        // A freeze frame shows its one picture in every tile.
+        let time = if clip.still() {
+            clip.source_in
+        } else {
+            tile.center_source
+        };
         let index = thumbs
-            .partition_point(|thumb| thumb.time <= tile.center_source)
+            .partition_point(|thumb| thumb.time <= time)
             .saturating_sub(1);
         // A tile cut by the clip's edge hangs over it; the body clips it.
         body = body.child(

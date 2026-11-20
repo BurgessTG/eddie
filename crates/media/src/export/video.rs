@@ -110,8 +110,11 @@ pub(super) struct VideoLayer<'a> {
     /// `speed * timeline + source_offset`.
     source_offset: i64,
     speed: f64,
-    /// A photo: one picture, held.
+    /// The file is a photo, read from the top.
     photo: bool,
+    /// One picture held: a photo, or a freeze frame of the source picture
+    /// at `source_offset`.
+    still: bool,
     ranges: Vec<(i64, i64)>,
 }
 
@@ -154,6 +157,8 @@ pub(super) fn plan_video<'a>(
         };
         let source_offset = if clip.photo {
             0
+        } else if clip.freeze {
+            (clip.source_in * tick_rate as f64).round() as i64
         } else if clip.speed == 1.0 {
             // In whole ticks from the clip's first frame, so a source frame
             // on a timeline frame stays on it.
@@ -167,6 +172,7 @@ pub(super) fn plan_video<'a>(
             layer.source == source
                 && layer.speed == clip.speed
                 && layer.source_offset == source_offset
+                && layer.still == clip.still()
                 && layer.opacity == clip.opacity
                 && layer.transform == clip.transform
                 && layer.background == clip.background
@@ -184,6 +190,7 @@ pub(super) fn plan_video<'a>(
                 source_offset,
                 speed: clip.speed,
                 photo: clip.photo,
+                still: clip.still(),
                 ranges: ranges.clone(),
             });
         }
@@ -391,8 +398,11 @@ pub(super) fn batch_command(
             })
             .collect();
         let first = ranges.iter().map(|range| range.0).min().unwrap();
-        let source_time =
-            clock.time(start + first) * layer.speed + layer.source_offset as f64 / tick_rate as f64;
+        let source_time = if layer.still {
+            0.0
+        } else {
+            clock.time(start + first) * layer.speed
+        } + layer.source_offset as f64 / tick_rate as f64;
         let last_seek = infos
             .get(layer.source)
             .map(|info| (info.duration - 1.0).max(0.0))
@@ -473,14 +483,24 @@ pub(super) fn batch_command(
             "tpad=stop_mode=clone:stop=-1,fps={rate}:round=up:start_time=0,\
              trim=end_frame={layer_frames},setpts=PTS+{first}"
         );
-        if layer.photo {
-            // Lay the photo out once and hold the result, rather than scale
-            // the same picture again for every output frame.
+        if layer.still {
+            // Lay the picture out once and hold the result, rather than
+            // scale the same picture again for every output frame.
             let picture = picture
                 .strip_suffix(&format!("[seg{index}]"))
                 .expect("a picture chain ends at its segment");
+            // A freeze frame keeps the source picture showing at its time,
+            // the first frame a clip starting there would show.
+            let first_picture = if layer.photo {
+                String::new()
+            } else {
+                format!(
+                    "setpts=PTS-({}),fps={rate}:round=up:start_time=0,trim=end_frame=1,",
+                    layer.source_offset - seek * tick_rate
+                )
+            };
             filters.push(format!(
-                "{}settb=1/{tick_rate},setpts=PTS-STARTPTS{picture}[photo{index}]",
+                "{}settb=1/{tick_rate},{first_picture}setpts=PTS-STARTPTS{picture}[photo{index}]",
                 layer.read.head(index)
             ));
             filters.push(format!("[photo{index}]{hold}[seg{index}]"));

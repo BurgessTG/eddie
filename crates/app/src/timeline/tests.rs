@@ -252,3 +252,48 @@ fn the_magnet_butts_clips_together_only_while_it_is_on() {
         }
     }
 }
+
+/// A right-click selects the clip under it without moving the playhead and
+/// opens its menu; keys do the same edits.
+#[test]
+fn a_right_click_opens_a_clips_menu_and_keys_copy_and_paste() {
+    use crate::testing::{chord, click, input_arrives, shown};
+    use rune::Key;
+    let (mut rt, id) = window();
+    rt.on_key = Some(app::on_key);
+    rt.state.editor.playhead = 1.0;
+    let point = at(&rt, 3.0, 0);
+    input_arrives();
+    rt.pointer_move(point.0, point.1);
+    rt.frame(FRAME);
+    rt.secondary_down(point.0, point.1);
+    rt.frame(FRAME);
+    rt.secondary_up(point.0, point.1);
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    assert_eq!(rt.state.editor.selected, Some(id));
+    assert_eq!(rt.state.editor.playhead, 1.0);
+    assert!(shown(&rt, "clip-menu"));
+    click(&mut rt, "menu-item-Duplicate");
+    assert!(!shown(&rt, "clip-menu"), "an entry closes the menu");
+    let copy = rt.state.editor.selected.unwrap();
+    assert_ne!(copy, id);
+    assert_eq!(rt.state.editor.timeline.clip(copy).unwrap().start, 5.0);
+
+    let command = Mods {
+        cmd: true,
+        ..Mods::default()
+    };
+    chord(&mut rt, Key::Command('c'), command);
+    rt.state.editor.playhead = 9.0;
+    chord(&mut rt, Key::Command('v'), command);
+    let pasted = rt.state.editor.selected.unwrap();
+    assert_eq!(rt.state.editor.timeline.clip(pasted).unwrap().start, 9.0);
+    let shift = Mods {
+        shift: true,
+        ..Mods::default()
+    };
+    chord(&mut rt, Key::Delete, shift);
+    assert!(rt.state.editor.timeline.clip(pasted).is_none());
+    assert_eq!(rt.state.editor.status, "Clip deleted; the gap closed.");
+}

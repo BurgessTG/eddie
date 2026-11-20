@@ -186,9 +186,10 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed, photo`. A clip shows source
-  `sourceIn` to `sourceIn + duration * speed`; a photo clip (`photo`)
-  shows its one picture for its whole length.
+  transform, background, color, speed, photo, freeze`. A clip shows
+  source `sourceIn` to `sourceIn + duration * speed`; a photo clip
+  (`photo`) shows its one picture for its whole length, and a freeze
+  frame (`freeze`) the picture at `sourceIn`.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -241,9 +242,25 @@ Arguments out of range are errors, never moved into range: a clip ID or
 lane that is not a whole number, a negative time, a length of 0 or less.
 
 - **Select and cut:** `selectClip(id)`, `split(at)` (the selected clip),
-  `splitClip(id, at)`, `deleteClip(id?)`, `clearTimeline()`. Without an
-  ID, `deleteClip` deletes the selected clip and fails when there is
-  none.
+  `splitClip(id, at)`, `deleteClip(id?)`, `rippleDelete(id)`,
+  `clearTimeline()`. Without an ID, `deleteClip` deletes the selected
+  clip and fails when there is none. `deleteClip` leaves a gap.
+  - `rippleDelete(id)` deletes the clip and its linked sound and moves
+    every clip after it earlier by its length, on every lane. Deleting a
+    picture also deletes the titles over it, and cuts that time out of
+    titles across its edges, unless other video shows there. A lane
+    where a remaining clip runs into the deleted time, such as a music
+    bed, does not move; `notes` says how many lanes stayed.
+- **Copy:** `duplicateClip(id)` puts a copy, with its linked sound, right
+  after the clip. When that time is taken on a video clip's lane, every
+  clip from there on, on every lane, moves later to make room; a title or
+  sound copy goes to the first free lane of its kind instead.
+- **Freeze frame:** `freezeFrame(id, at?, seconds?)` splits a video clip
+  at `at` (default: the playhead) and holds the picture shown there for
+  `seconds` (3 by default), silent. Every clip that starts at `at` or
+  later, on every lane, moves later by that length; clips running across
+  `at` on other lanes, such as music, stay whole. A freeze frame has no
+  speed or source range, like a photo.
 - **Place:** `addAsset(nameOrPath, at?)`, `addAssetRange(nameOrPath, at,
   sourceIn, dur)`. A new clip lands on the first lane of its kind that is
   free for its whole span. Read its lane as `track` in the next `state()`,
@@ -333,9 +350,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
 **Clip IDs**
 
 - Never compute or guess a clip ID. `addAsset`, `addAssetRange`,
-  `addTitle`, `split` and `splitClip` return a handle for the clip they
-  create (for a split, the right-hand piece). Pass that handle to later
-  calls in the same script.
+  `addTitle`, `split`, `splitClip`, `duplicateClip` and `freezeFrame`
+  return a handle for the clip they create (for a split, the right-hand
+  piece). Pass that handle to later calls in the same script.
 - Handles from an earlier run are invalid. Read the new IDs from `run`'s
   `handles`.
 

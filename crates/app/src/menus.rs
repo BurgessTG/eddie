@@ -71,16 +71,26 @@ fn row_frame(key: &str, tooltip: String, enabled: bool) -> El {
 
 /// A menu entry with a right-aligned shortcut hint. It closes the menu.
 fn item(label: &str, tooltip: &str, enabled: bool, action: Action) -> El {
+    entry(
+        label,
+        tooltip,
+        (!enabled).then_some("Select a clip first"),
+        action,
+    )
+}
+
+/// [`item`], disabled for the reason `off` gives.
+fn entry(label: &str, tooltip: &str, off: Option<&str>, action: Action) -> El {
     let c = c();
+    let enabled = off.is_none();
     let fg = if enabled {
         c.foreground
     } else {
         c.foreground.alpha(0.45)
     };
-    let tooltip = if enabled {
-        tooltip.to_owned()
-    } else {
-        format!("{tooltip}. Select a clip first")
+    let tooltip = match off {
+        None => tooltip.to_owned(),
+        Some(why) => format!("{tooltip}. {why}"),
     };
     let mut entry = row_frame(&format!("menu-item-{action:?}"), tooltip, enabled)
         .child(
@@ -103,6 +113,7 @@ fn item(label: &str, tooltip: &str, enabled: bool, action: Action) -> El {
     if enabled {
         entry.on_press(move |ui: &mut Ui| {
             ui.menu = None;
+            ui.clip_menu = None;
             ui.act(action);
         })
     } else {
@@ -256,10 +267,54 @@ fn file(ui: &Ui) -> Vec<El> {
 }
 
 fn edit(ui: &Ui) -> Vec<El> {
-    let has_selection = ui.editor.selected.is_some();
-    vec![
+    let mut entries = vec![
         item("Undo", "Undo the last timeline edit", true, Action::Undo),
         item("Redo", "Redo the edit you undid", true, Action::Redo),
+        separator(),
+    ];
+    entries.extend(clip_entries(ui));
+    entries.extend([
+        separator(),
+        item(
+            "Add title",
+            "Add a title clip at the playhead",
+            true,
+            Action::AddTitle,
+        ),
+    ]);
+    entries
+}
+
+/// What the Edit menu and a clip's right-click menu can do to a clip.
+fn clip_entries(ui: &Ui) -> Vec<El> {
+    let editor = &ui.editor;
+    let has_selection = editor.selected.is_some();
+    let video_here = editor.timeline.active_video(editor.playhead).is_some();
+    vec![
+        item(
+            "Cut",
+            "Copy the selected clip and its linked sound, then delete them",
+            has_selection,
+            Action::Cut,
+        ),
+        item(
+            "Copy",
+            "Copy the selected clip and its linked sound",
+            has_selection,
+            Action::Copy,
+        ),
+        entry(
+            "Paste",
+            "Put a copy of the copied clip at the playhead",
+            (!editor.can_paste()).then_some("Copy a clip first"),
+            Action::Paste,
+        ),
+        item(
+            "Duplicate",
+            "Put a copy of the selected clip right after it",
+            has_selection,
+            Action::Duplicate,
+        ),
         separator(),
         item(
             "Split at playhead",
@@ -267,18 +322,24 @@ fn edit(ui: &Ui) -> Vec<El> {
             has_selection,
             Action::SplitSelected,
         ),
-        item(
-            "Delete clip",
-            "Delete the selected clip",
-            has_selection,
-            Action::DeleteSelected,
+        entry(
+            "Freeze frame",
+            "Hold the picture at the playhead for 3 seconds; later clips move along",
+            (!video_here).then_some("Move the playhead over a video clip first"),
+            Action::FreezeFrame,
         ),
         separator(),
         item(
-            "Add title",
-            "Add a title clip at the playhead",
-            true,
-            Action::AddTitle,
+            "Delete clip",
+            "Delete the selected clip and leave its gap",
+            has_selection,
+            Action::DeleteSelected,
+        ),
+        item(
+            "Ripple delete",
+            "Delete the selected clip and move later clips up to close the gap",
+            has_selection,
+            Action::RippleDelete,
         ),
     ]
 }
@@ -348,8 +409,22 @@ fn view(ui: &Ui) -> Vec<El> {
     ]
 }
 
-/// The open menu, hung under its menu bar button. A press outside closes it.
+/// The open menu, hung under its menu bar button, or a clip's right-click
+/// menu at the pointer. A press outside closes it.
 pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
+    if let Some([x, y]) = ui.clip_menu {
+        let close = |ui: &mut Ui| ui.clip_menu = None;
+        overlays.push(rune_kit::scrim("clip-menu-scrim", close));
+        // Hung from the press point, it opens upward over the timeline
+        // when the window has no room below.
+        overlays.push(el().key("clip-menu-point").absolute(x, y).size(0.0, 0.0));
+        overlays.push(
+            frame("clip-menu")
+                .children(clip_entries(ui))
+                .anchored("clip-menu-point", Side::Bottom, Align::Start, 0.0)
+                .modal(true, close),
+        );
+    }
     let Some(menu) = ui.menu else {
         return;
     };

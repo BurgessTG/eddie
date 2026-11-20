@@ -532,3 +532,63 @@ fn a_photo_holds_its_picture_while_playback_runs_through_it() {
     assert!(next.r() > 240 && next.b() < 10, "next: {next:?}");
     app.set_playing(false);
 }
+
+/// A freeze frame holds its picture while playback runs through it, and
+/// the clip after it, the same file from the same point, plays on.
+#[test]
+fn a_freeze_frame_holds_its_picture_and_playback_resumes_after_it() {
+    let fixture = Fixture::new();
+    let (mut app, monitor) = watched_editor();
+    add_asset(&mut app, &fixture.path);
+    // Red for the file's first second, blue after.
+    let id = app
+        .timeline
+        .add_media_clip("Clip", ClipKind::Video, 0, 0.0, 2.0, 0.0, &fixture.path);
+    let freeze = app.timeline.freeze_frame(id, 0.9, 0.5).unwrap();
+    assert_eq!(app.timeline.clip(freeze).unwrap().source_in, 0.9);
+    app.playhead = 0.9;
+    app.last_now = Some(0.0);
+    app.set_playing(true);
+    let first = await_picture(&mut app, &monitor);
+    assert!(first.r() > 240 && first.b() < 10, "freeze: {first:?}");
+
+    // Played on, source 0.9 + 0.4 would be blue by now.
+    for now in [0.1, 0.25, 0.45] {
+        app.advance_playback(now);
+        app.poll_frames();
+        app.sync_playback();
+        assert!(
+            (app.playhead - (0.9 + now)).abs() < 1e-9,
+            "{}",
+            app.playhead
+        );
+        assert!(
+            monitor
+                .take()
+                .iter()
+                .all(|seen| seen.r() > 240 && seen.b() < 10),
+            "the freeze stays red"
+        );
+    }
+    // The clip after it reaches the file's blue second 0.1 s in.
+    app.advance_playback(0.65);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut now = 0.65;
+    loop {
+        app.poll_frames();
+        app.sync_playback();
+        if monitor
+            .take()
+            .iter()
+            .any(|seen| seen.b() > 240 && seen.r() < 10)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no blue: {}", app.status);
+        now += 0.01;
+        app.advance_playback(now);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.playhead > 1.5, "{}", app.playhead);
+    app.set_playing(false);
+}

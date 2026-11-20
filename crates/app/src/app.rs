@@ -66,6 +66,8 @@ pub struct Ui {
     pub media_w: f32,
     pub bin_drag: Option<media::BinDrag>,
     pub bin_menu: Option<media::BinMenu>,
+    /// Where a clip's right-click menu opened, in window points.
+    pub clip_menu: Option<[f32; 2]>,
     /// The Details panel's fields, open list and width.
     pub details: details::State,
     /// The Gallery's search box, open list and card pictures.
@@ -173,6 +175,7 @@ impl Ui {
             media_w: media::DEFAULT_W,
             bin_drag: None,
             bin_menu: None,
+            clip_menu: None,
             details: details::State::default(),
             gallery,
             timeline_rect: None,
@@ -359,6 +362,7 @@ impl Ui {
             Action::Deselect if self.details.select.is_some() => self.details.select = None,
             Action::Deselect if self.gallery.popup.is_some() => self.gallery.popup = None,
             Action::Deselect if self.bin_menu.is_some() => self.bin_menu = None,
+            Action::Deselect if self.clip_menu.is_some() => self.clip_menu = None,
             Action::Deselect if self.settings.providers_open => {
                 self.settings.providers_open = false;
             }

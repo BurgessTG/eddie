@@ -22,4 +22,6 @@ pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
 };
 pub use time_spec::format_timecode;
-pub use timeline::{orientation_name, Format, Lanes, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS};
+pub use timeline::{
+    orientation_name, Format, Lanes, Ripple, Timeline, LANE_KINDS, MAX_TIMELINE_SECONDS,
+};

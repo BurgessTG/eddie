@@ -56,11 +56,12 @@ impl Editor {
         let Some(before) = self.timeline.clip(id).cloned() else {
             return;
         };
+        // A still has no source range to run out of.
         let source_duration = before
             .source
             .as_deref()
+            .filter(|_| !before.still())
             .and_then(|source| self.asset(source))
-            .filter(|asset| !asset.info.photo)
             .map(|asset| asset.info.duration);
         if let Some(longest) = source_duration {
             source_in = source_in.min(longest.max(0.0));
@@ -96,7 +97,10 @@ impl Editor {
         let Some(clip) = self.timeline.clip(id) else {
             return;
         };
-        if !speed.is_finite() || clip.kind == ClipKind::Title || clip.source.is_none() || clip.photo
+        if !speed.is_finite()
+            || clip.kind == ClipKind::Title
+            || clip.source.is_none()
+            || clip.still()
         {
             return;
         }
@@ -293,7 +297,13 @@ impl Editor {
     /// What Details offers for a clip beyond its fields.
     pub fn clip_details(&self, id: ClipId) -> Option<ClipDetails> {
         let clip = self.timeline.clip(id)?;
-        let asset = clip.source.as_deref().and_then(|source| self.asset(source));
+        // A freeze frame is a silent picture: its file's sound and
+        // transcript are not its own.
+        let asset = clip
+            .source
+            .as_deref()
+            .filter(|_| !clip.freeze)
+            .and_then(|source| self.asset(source));
         let source_has_audio = asset.is_some_and(|asset| asset.info.has_audio);
         let video_audio = clip.kind == ClipKind::Video && source_has_audio;
         let linked = clip
@@ -316,7 +326,7 @@ impl Editor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipDetails {
     pub has_source: bool,
-    /// Its file has sound, so Volume does something (not for a photo).
+    /// Its file has sound, so Volume does something (not for a still).
     pub has_sound: bool,
     /// A video clip whose own sound can be switched on and off.
     pub embedded_audio_choice: bool,

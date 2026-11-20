@@ -738,3 +738,57 @@ fn a_photo_lasts_three_seconds_and_trims_to_any_length() {
     assert_eq!(reopened.timeline, app.timeline);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn scripts_duplicate_freeze_and_ripple_delete_through_handles() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("a.mp4", 20.0, true));
+    run(
+        &mut app,
+        "var a = addAssetRange('a.mp4', 0, 2, 4); var b = duplicateClip(a); \
+         var f = freezeFrame(b, '5s', 1); setOpacity(f, 0.5); addTitle('Over a', 1, 2);",
+    )
+    .unwrap();
+    let find = |app: &Editor, test: &dyn Fn(&Clip) -> bool| {
+        let mut found: Vec<Clip> = app
+            .timeline
+            .clips
+            .iter()
+            .filter(|c| test(c))
+            .cloned()
+            .collect();
+        found.sort_by(|x, y| x.start.total_cmp(&y.start));
+        found
+    };
+    let freeze = &find(&app, &|c| c.freeze)[0];
+    // The copy runs 4..8 from source 2, so 5 s shows source 3.
+    assert_eq!(
+        (freeze.start, freeze.source_in, freeze.opacity),
+        (5.0, 3.0, 0.5)
+    );
+    let pictures = find(&app, &|c| c.kind == ClipKind::Video && !c.freeze);
+    let spans: Vec<(f64, f64)> = pictures.iter().map(|c| (c.start, c.end())).collect();
+    assert_eq!(spans, [(0.0, 4.0), (4.0, 5.0), (6.0, 9.0)]);
+
+    let first = pictures[0].id;
+    let (notes, _) = {
+        let mut engine = ScriptEngine::new().unwrap();
+        let (_, commands) = engine
+            .eval_checked(&format!("rippleDelete({first})"), &app.script_state_json())
+            .unwrap();
+        app.apply_edit(commands).unwrap()
+    };
+    assert!(
+        notes.iter().any(|note| note.contains("removed 1 title")),
+        "{notes:?}"
+    );
+    let spans: Vec<(f64, f64)> = find(&app, &|c| c.kind == ClipKind::Video)
+        .iter()
+        .map(|c| (c.start, c.end()))
+        .collect();
+    assert_eq!(spans, [(0.0, 1.0), (1.0, 2.0), (2.0, 5.0)]);
+
+    let freeze = find(&app, &|c| c.freeze)[0].id;
+    let error = run(&mut app, &format!("freezeFrame({freeze}, 1.5)")).unwrap_err();
+    assert!(error.contains("already a still"), "{error}");
+}

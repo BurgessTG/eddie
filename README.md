@@ -49,6 +49,9 @@ offers the newest build.
   dragging a clip past the first or last lane of its kind creates another.
   Move, trim, split, swap adjacent clips and move clips between lanes of
   their kind. The magnet snaps edges while dragging.
+- Copy, cut, paste and duplicate clips, ripple delete (the gap closes on
+  every lane) and freeze frame, from the Edit menu, a clip's right-click
+  menu, the toolbar or their keys.
 - Any video on any canvas: the first video's shape, 16:9, 9:16, 1:1,
   4:5, 4:3 or 21:9 (Settings → Format). Scale, move, rotate, flip and crop
   each picture in Details or by dragging it on the monitor, over black or

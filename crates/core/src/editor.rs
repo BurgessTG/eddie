@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use openreel_engine::{ClipId, ClipKind, Timeline, TitleStyle};
+use openreel_engine::{Clip, ClipId, ClipKind, Timeline, TitleStyle};
 use openreel_media::{AudioEngine, AudioSegment, FrameStream, Loudness, RawFrame, StillDecoder};
 
 use crate::scripting::ScriptEngine;
@@ -18,6 +18,7 @@ mod audio;
 mod captions;
 pub mod commands;
 pub mod details;
+mod edits;
 mod export;
 pub mod gallery;
 mod headless;
@@ -119,6 +120,12 @@ pub enum Action {
     ClearTimeline,
     SplitSelected,
     DeleteSelected,
+    RippleDelete,
+    Copy,
+    Cut,
+    Paste,
+    Duplicate,
+    FreezeFrame,
     AddTitle,
     ZoomIn,
     ZoomOut,
@@ -153,6 +160,8 @@ pub struct Editor {
     pub shuttle: f64,
     last_now: Option<f64>,
     pub selected: Option<ClipId>,
+    /// What Copy or Cut took: a clip and its linked partner.
+    clipboard: Vec<Clip>,
 
     pub assets: Vec<BinAsset>,
     pub selected_asset: Option<String>,
@@ -345,6 +354,7 @@ impl Editor {
             shuttle: 0.0,
             last_now: None,
             selected: None,
+            clipboard: Vec::new(),
             assets: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
@@ -420,54 +430,6 @@ impl Editor {
         }
     }
 
-    /// Split at the playhead: the selected clip when the playhead is
-    /// inside it, otherwise the topmost clip under the playhead.
-    /// Clicking the timeline parks the playhead first, so the flow
-    /// is click, then split (button, S, or B).
-    pub fn split_at_playhead(&mut self) {
-        let playhead = self.playhead;
-        let target = self
-            .selected
-            .filter(|id| {
-                self.timeline
-                    .clip(*id)
-                    .map(|c| c.contains(playhead))
-                    .unwrap_or(false)
-            })
-            .or_else(|| {
-                self.timeline
-                    .clips
-                    .iter()
-                    .filter(|c| c.contains(playhead))
-                    .min_by_key(|c| self.timeline.row(c.kind, c.track))
-                    .map(|c| c.id)
-            });
-        let Some(id) = target else {
-            self.status = "No clip under the playhead.".to_owned();
-            return;
-        };
-        match self.timeline.split_at(id, playhead) {
-            Some(new_id) => {
-                self.selected = Some(new_id);
-                self.status = "Clip split at playhead.".to_owned();
-            }
-            None => {
-                self.status = "Playhead is too close to a clip edge.".to_owned();
-            }
-        }
-    }
-
-    /// Delete a clip from a user action (menu, key, toolbar,
-    /// inspector). The gap stays; the magnet only snaps while
-    /// dragging and never moves clips on its own. Scripts close
-    /// gaps only via the explicit CloseGaps command.
-    pub fn delete_clip(&mut self, id: ClipId) {
-        self.timeline.remove_clip(id);
-        if self.selected == Some(id) {
-            self.selected = None;
-        }
-    }
-
     /// Make the timeline as it stands an undo step now, without waiting for
     /// the frame to end. A script's edit is one step, apart from whatever
     /// the user was in the middle of.
@@ -537,6 +499,12 @@ impl Editor {
                     self.status = "Clip deleted.".to_owned();
                 }
             }
+            Action::RippleDelete => self.ripple_delete_selected(),
+            Action::Copy => self.copy_selected(),
+            Action::Cut => self.cut_selected(),
+            Action::Paste => self.paste(),
+            Action::Duplicate => self.duplicate_selected(),
+            Action::FreezeFrame => self.freeze_at_playhead(),
             Action::AddTitle => {
                 let track =
                     self.timeline
