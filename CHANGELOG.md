@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-11-20)
+
+### Fixed
+
+- Eddie builds again on Arch Linux, which moved to FFmpeg 9.1: the AUR
+  package stopped in `hwcontext_cuda.h` while generating FFmpeg's
+  bindings. Nothing else changed.
+
 ## 0.2.0 (2026-11-13)
 
 Eddie no longer has an AI inside. It is an editor that any agent drives
