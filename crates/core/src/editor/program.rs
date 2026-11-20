@@ -79,9 +79,9 @@ impl<'a> Stack<'a> {
         clip.source.is_some() && hides_below(clip, self.canvas, size, alpha)
     }
 
-    /// Where `clip`'s picture lands on the canvas.
-    pub(crate) fn placement(&self, clip: &Clip) -> Placement {
-        place(self.canvas, self.file(clip).0, &clip.transform)
+    /// Where `clip`'s picture lands on the canvas at `time`.
+    pub(crate) fn placement(&self, clip: &Clip, time: f64) -> Placement {
+        place(self.canvas, self.file(clip).0, &clip.transform_at(time))
     }
 
     /// The pictures showing at `time`, bottom first.
@@ -178,7 +178,7 @@ impl Editor {
         pictures
             .iter()
             .rev()
-            .find(|picture| stack.placement(picture.clip).contains(point))
+            .find(|picture| stack.placement(picture.clip, self.playhead).contains(point))
             .or(pictures.last())
             .map(|picture| picture.clip.id)
     }

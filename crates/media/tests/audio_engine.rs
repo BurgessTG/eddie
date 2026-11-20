@@ -77,6 +77,7 @@ fn segment(path: &Path, start: f64, duration: f64, source_in: f64, volume: f32) 
         duration,
         source_in,
         volume,
+        volume_keys: Vec::new(),
         fade_in: 0.0,
         fade_out: 0.0,
         duck: Vec::new(),

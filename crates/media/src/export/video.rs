@@ -6,10 +6,12 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use openreel_engine::{hides_below, Background, Clip, ClipId, ColorAdjust, Timeline, Transform};
+use openreel_engine::{
+    hides_below, Background, Clip, ClipId, ColorAdjust, Keyframes, Timeline, Transform,
+};
 
 use super::frames::{enabled_frames, visible_frames, VideoClock};
-use super::picture::picture;
+use super::picture::{picture, Motion, Spot};
 use super::scratch::FilterGraphFile;
 use super::source::Source;
 use super::transition::{self, TransitionPlan};
@@ -32,7 +34,7 @@ pub(super) struct VideoLayer<'a> {
     /// How the picture is read: its stream, and a cheaper exact
     /// matrix/range conversion applied after resizing.
     read: &'a Source,
-    opacity: f32,
+    pub(super) opacity: f32,
     pub(super) transform: Transform,
     pub(super) background: Background,
     pub(super) color: ColorAdjust,
@@ -50,6 +52,9 @@ pub(super) struct VideoLayer<'a> {
     /// Frames a transition draws it on, past its own: decoded, but drawn
     /// only through the transition.
     extents: Vec<(i64, i64)>,
+    /// Its clip's start and keys, when keys move or fade its picture. Such
+    /// a layer is one clip's.
+    keys: Option<(f64, &'a Keyframes)>,
 }
 
 /// One bounded batch of output frames: `[start, end)` drawn from at most
@@ -102,7 +107,11 @@ pub(super) fn plan_video<'a>(
         };
         let ranges = visible.get(&clip.id).unwrap_or(&none);
         let extent = extents.get(&clip.id).unwrap_or(&none);
-        if (ranges.is_empty() && extent.is_empty()) || clip.opacity <= 0.0 {
+        let faded = match clip.keyframes.opacity.as_slice() {
+            [] => clip.opacity <= 0.0,
+            keys => keys.iter().all(|key| key.value <= 0.0),
+        };
+        if (ranges.is_empty() && extent.is_empty()) || faded {
             continue;
         }
         let Some(read) = sources.get(source) else {
@@ -122,8 +131,14 @@ pub(super) fn plan_video<'a>(
             ((clip.source_in - clip.start * clip.speed) * tick_rate as f64).round() as i64
         };
         let over = over.contains(&clip.id);
+        let keys = clip
+            .keyframes
+            .moves_picture()
+            .then_some((clip.start, &clip.keyframes));
         let same = layers.iter().position(|layer| {
-            layer.source == source
+            keys.is_none()
+                && layer.keys.is_none()
+                && layer.source == source
                 && layer.lane == clip.track
                 && layer.over == over
                 && layer.speed == clip.speed
@@ -156,6 +171,7 @@ pub(super) fn plan_video<'a>(
                     still: clip.still(),
                     ranges: ranges.clone(),
                     extents: extent.clone(),
+                    keys,
                 });
                 layers.len() - 1
             }
@@ -272,7 +288,7 @@ pub(super) fn batch_command(
             .collect()
     };
     // Where each transition's two pictures sit on the canvas.
-    let mut sides = vec![[None; 2]; batch.transitions.len()];
+    let mut sides: Vec<[Option<Spot>; 2]> = vec![[None, None]; batch.transitions.len()];
     // Lanes draw bottom first (the inputs are in that order), each lane's
     // transitions over its pictures.
     let mut lanes: Vec<usize> = batch
@@ -355,20 +371,20 @@ pub(super) fn batch_command(
                     String::new(),
                 ),
             };
-            let alpha = if layer.opacity < 0.999 {
-                format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
-            } else {
-                String::new()
-            };
             let source_size = infos
                 .get(layer.source)
                 .map_or((width, height), |info| (info.width, info.height));
-            let (picture, x, y) = picture(
+            let motion = layer.keys.map(|(clip_start, keys)| Motion {
+                keys,
+                offset: clip_start - clock.time(start),
+            });
+            let picture = picture(
                 index,
                 layer,
                 canvas,
                 source_size,
-                (&resize, &convert, &alpha),
+                (&resize, &convert),
+                motion.as_ref(),
             );
             // Input seeking retains keyframe preroll with timestamps relative
             // to the requested seek. Preserve that phase for VFR frame holds.
@@ -384,11 +400,8 @@ pub(super) fn batch_command(
             );
             if layer.still {
                 // Lay the picture out once and hold the result, rather than
-                // scale the same picture again for every output frame.
-                let picture = picture
-                    .strip_suffix(&format!("[seg{index}]"))
-                    .expect("a picture chain ends at its segment");
-                // A freeze frame keeps the source picture showing at its time,
+                // scale the same picture again for every output frame. A
+                // freeze frame keeps the source picture showing at its time,
                 // the first frame a clip starting there would show.
                 let first_picture = if layer.photo {
                     String::new()
@@ -398,17 +411,19 @@ pub(super) fn batch_command(
                         layer.source_offset - seek * tick_rate
                     )
                 };
-                filters.push(format!(
-                "{}settb=1/{tick_rate},{first_picture}setpts=PTS-STARTPTS{picture}[photo{index}]",
-                layer.read.head(index)
-            ));
-                filters.push(format!("[photo{index}]{hold}[seg{index}]"));
-            } else {
-                filters.push(format!(
-                    "{}settb=1/{tick_rate},setpts={timestamps},{hold}{picture}",
+                let lead = format!(
+                    "{}settb=1/{tick_rate},{first_picture}setpts=PTS-STARTPTS",
                     layer.read.head(index)
-                ));
+                );
+                filters.extend(picture.filters(index, &lead, Some(&hold)));
+            } else {
+                let lead = format!(
+                    "{}settb=1/{tick_rate},setpts={timestamps},{hold}",
+                    layer.read.head(index)
+                );
+                filters.extend(picture.filters(index, &lead, None));
             }
+            let spot = picture.spot();
             // The transitions in this batch that draw this picture, by side.
             let uses: Vec<(usize, usize)> = batch
                 .transitions
@@ -437,14 +452,15 @@ pub(super) fn batch_command(
                     uses.len() + usize::from(shows)
                 ));
                 for &(t, side) in &uses {
-                    sides[t][side] = Some((x, y));
+                    sides[t][side] = Some(spot.clone());
                 }
                 format!("own{index}")
             };
             if shows {
                 filters.push(format!(
-                    "[{current}][{own}]overlay={x}:{y}:eof_action=repeat:ts_sync_mode=default:\
+                    "[{current}][{own}]overlay={}:eof_action=repeat:ts_sync_mode=default:\
                  enable='{}'[v{index}]",
+                    spot.overlay(0.0),
                     enabled_frames(&ranges),
                 ));
                 current = format!("v{index}");
@@ -460,7 +476,7 @@ pub(super) fn batch_command(
                 start,
                 canvas,
                 clock,
-                sides[index],
+                &sides[index],
                 &current,
             );
             filters.extend(drawn);

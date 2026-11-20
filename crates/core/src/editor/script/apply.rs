@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, TextLook, TitleStyle,
-    Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET, MAX_TEXT_SIZE,
-    MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, Property, TextLook,
+    TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET,
+    MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
 };
 
 use super::super::details;
@@ -281,7 +281,20 @@ impl Editor {
             ScriptCommand::SetOpacity { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.opacity = value.clamp(0.0, 1.0);
+                    c.keyframes.clear(Property::Opacity);
                 }
+            }
+            ScriptCommand::SetKeyframe {
+                clip,
+                property,
+                at,
+                value,
+            } => self.set_keyframe(clip, &property, at, value)?,
+            ScriptCommand::RemoveKeyframe { clip, property, at } => {
+                self.remove_keyframe(clip, &property, at)?;
+            }
+            ScriptCommand::ClearKeyframes { clip, property } => {
+                self.clear_keyframes(clip, &property)?;
             }
             ScriptCommand::SetTransform { clip, changes } => {
                 let canvas = self.canvas();
@@ -295,8 +308,29 @@ impl Editor {
                         (f64::from(asset.info.width), f64::from(asset.info.height))
                     });
                 let transform = changed_transform(target.transform, &changes, canvas, source)?;
+                // A field it sets is one value for the whole clip again.
+                let set: Vec<Property> = match serde_json::from_str(&changes) {
+                    Ok(serde_json::Value::Object(fields)) => [
+                        Property::X,
+                        Property::Y,
+                        Property::Scale,
+                        Property::Rotation,
+                    ]
+                    .into_iter()
+                    .filter(|p| fields.contains_key(p.as_str()))
+                    .collect(),
+                    _ => vec![
+                        Property::X,
+                        Property::Y,
+                        Property::Scale,
+                        Property::Rotation,
+                    ],
+                };
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.transform = transform;
+                    for property in set {
+                        target.keyframes.clear(property);
+                    }
                 }
             }
             ScriptCommand::SetText { clip, changes } => {
@@ -359,6 +393,7 @@ impl Editor {
             ScriptCommand::SetVolume { clip, value } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.volume = value.clamp(0.0, details::MAX_VOLUME);
+                    c.keyframes.clear(Property::Volume);
                 }
             }
             ScriptCommand::SetSpeed { clip, speed } => {

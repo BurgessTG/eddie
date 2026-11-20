@@ -20,6 +20,7 @@ use scratch::ScratchDir;
 use titles::Titles;
 use video::{batch_command, encode_segment, plan_video};
 
+mod animate;
 mod audio;
 mod frames;
 mod picture;

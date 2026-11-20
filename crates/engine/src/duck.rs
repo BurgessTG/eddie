@@ -68,7 +68,7 @@ impl Timeline {
         for clip in &self.clips {
             let audible = clip.kind == ClipKind::Audio
                 || (clip.kind == ClipKind::Video && clip.embedded_audio);
-            if clip.id == target.id || clip.duck || !audible || clip.volume <= 0.0 {
+            if clip.id == target.id || clip.duck || !audible || clip.muted() {
                 continue;
             }
             let Some(spans) = clip.source.as_ref().and_then(|source| speech.get(source)) else {

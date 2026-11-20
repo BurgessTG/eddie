@@ -251,9 +251,23 @@ impl<'a> Inspection<'a> {
         };
         let info = &asset.info;
         let source = (f64::from(info.width), f64::from(info.height));
+        // A moving picture is off the canvas only when it is at every key
+        // and everywhere between.
+        let mut moments: Vec<f64> = (0..=16)
+            .map(|step| clip.start + clip.duration * f64::from(step) / 16.0)
+            .collect();
+        moments.extend(
+            clip.keyframes
+                .times()
+                .into_iter()
+                .filter(|at| (0.0..=clip.duration).contains(at))
+                .map(|at| clip.start + at),
+        );
         if clip.kind == ClipKind::Video
             && info.has_video
-            && !place(self.canvas, source, &clip.transform).on_canvas(self.canvas)
+            && moments.iter().all(|&time| {
+                !place(self.canvas, source, &clip.transform_at(time)).on_canvas(self.canvas)
+            })
         {
             self.report(
                 "off-canvas",
@@ -454,7 +468,7 @@ impl<'a> Inspection<'a> {
                 // A voice kept under a cutaway is covered on purpose; say what
                 // still plays so the reader can tell that from a lost picture.
                 let heard = clip.embedded_audio
-                    && clip.volume > 0.0
+                    && !clip.muted()
                     && clip
                         .source
                         .as_deref()

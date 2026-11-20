@@ -1396,3 +1396,50 @@ fn a_transition_frame_follows_xfade_arithmetic() {
         (0.0, 1.0, Some((false, 0.5)))
     );
 }
+
+#[test]
+fn keys_stay_on_their_moment_of_the_content_through_edits() {
+    let mut tl = Timeline::new(30.0);
+    let id = tl.add_media_clip("a", ClipKind::Video, 0, 1.0, 10.0, 0.0, "a.mp4");
+    // Opacity from 0 at timeline 3 to 1 at timeline 7; volume 2 at 5.
+    let clip = tl.clip_mut(id).unwrap();
+    clip.keyframes.set(Property::Opacity, 2.0, 0.0);
+    clip.keyframes.set(Property::Opacity, 6.0, 1.0);
+    clip.keyframes.set(Property::Volume, 4.0, 2.0);
+    let opacity = |tl: &Timeline, id, at| tl.clip(id).unwrap().opacity_at(at);
+    assert_eq!(opacity(&tl, id, 4.0), 0.25);
+    // A left trim moves the start, not the content.
+    tl.trim_left(id, 3.0);
+    assert_eq!(opacity(&tl, id, 4.0), 0.25);
+    assert_eq!(tl.clip(id).unwrap().keyframes.opacity[0].at, 0.0);
+    // Both halves of a split keep the curve.
+    let right = tl.split_at(id, 6.0).unwrap();
+    assert_eq!(opacity(&tl, id, 5.0), 0.5);
+    assert_eq!(opacity(&tl, right, 6.0), 0.75);
+    assert_eq!(opacity(&tl, right, 6.5), 0.875);
+    // Twice as fast, the moment at timeline 7 comes at 6.5.
+    assert!(tl.set_speed(right, 2.0));
+    assert_eq!(opacity(&tl, right, 6.5), 1.0);
+    assert_eq!(opacity(&tl, right, 6.25), 0.875);
+    // A freeze holds the look it froze, without keys.
+    let freeze = tl.freeze_frame(id, 4.0, 2.0).unwrap();
+    let held = tl.clip(freeze).unwrap();
+    assert!(held.keyframes.is_empty());
+    assert_eq!(held.opacity, 0.25);
+    // Detached sound takes the volume keys; the picture keeps its own.
+    let sound = tl.detach_audio(id).unwrap();
+    assert!(tl.clip(id).unwrap().keyframes.volume.is_empty());
+    assert!(!tl.clip(id).unwrap().keyframes.opacity.is_empty());
+    let sound = tl.clip(sound).unwrap();
+    assert_eq!(sound.volume_at(5.0), 2.0);
+    // Sounding early under a transition does not move the volume curve.
+    let mut early = sound.clone();
+    early.keyframes.set(Property::Volume, 0.0, 0.5);
+    let cross = Crossfade {
+        head: 0.5,
+        ..Crossfade::default()
+    };
+    for at in [2.5, 3.0, 3.7, 5.0] {
+        assert_eq!(early.sounding(cross).volume_at(at), early.volume_at(at));
+    }
+}

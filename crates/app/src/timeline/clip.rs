@@ -62,7 +62,12 @@ fn filmstrip(
         16.0 / 9.0
     };
     let tile_w = (h * aspect).max(12.0);
-    let opacity = clip.opacity.clamp(0.0, 1.0) * 230.0 / 255.0;
+    // A picture fading by key shows at its most opaque.
+    let most = match clip.keyframes.opacity.as_slice() {
+        [] => clip.opacity,
+        keys => keys.iter().map(|key| key.value as f32).fold(0.0, f32::max),
+    };
+    let opacity = most.clamp(0.0, 1.0) * 230.0 / 255.0;
     // Tiles sit on the source clock: a faster clip packs more source into
     // each point.
     let per_source = px_per_sec / clip.speed as f32;
@@ -199,6 +204,7 @@ pub(super) fn clip_el(
         ClipKind::Title => {}
     }
     art = edges(art, hover, left, full_w, (w, h));
+    art = key_marks(art, clip, port.px_per_sec, left, (w, h));
     body = body.child(el().absolute(0.0, 0.0).size(w, h).shape(art));
 
     if full_w > 40.0 {
@@ -300,6 +306,25 @@ fn edges(
             LineCap::Butt,
             c.foreground,
         );
+    }
+    art
+}
+
+/// A small diamond along the clip's foot at each of its keys.
+fn key_marks(mut art: Shape, clip: &Clip, px_per_sec: f32, left: f32, (w, h): (f32, f32)) -> Shape {
+    let y = h - 6.0;
+    for at in clip.keyframes.times() {
+        if !(0.0..=clip.duration).contains(&at) {
+            continue;
+        }
+        let x = left + at as f32 * px_per_sec;
+        if x < -5.0 || x > w + 5.0 {
+            continue;
+        }
+        let diamond = |r: f32| vec![[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
+        art = art
+            .fill(diamond(4.5), black(200))
+            .fill(diamond(3.2), white(235));
     }
     art
 }

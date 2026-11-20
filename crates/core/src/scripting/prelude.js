@@ -54,6 +54,8 @@ function help() {
     "renameClip(id, name) setOpacity(id, 0..1) setVolume(id, gain)  // linear gain 0..2; 0.5 is about 6 dB quieter",
     "setTransform(id, {scale, x, y, rotation, flipH, flipV, cropLeft, cropTop, cropRight, cropBottom})  // video only; changes just the fields given, null resets. scale 1 fits the canvas, 'fill' covers it; x and y move by canvas widths and heights (right and down); rotation is clockwise degrees; crops are shares of the source",
     "setBackground(id, 'black' | 'blur')  // what fills the canvas around a video picture",
+    "setKeyframe(id, property, at, value)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run in a straight line from key to key and hold before the first and after the last; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
+    "removeKeyframe(id, property, at) clearKeyframes(id, property?)  // clearing keeps the value at the clip's start; no property clears them all. setOpacity, setVolume and setTransform set one value for the whole clip and remove that property's keys",
     "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
     "setTransition(id, kind, seconds?)  // video only: how the picture passes from the clip right before it on its lane, centred on the cut. kinds: mix dip-black dip-white wipe-left wipe-right wipe-up wipe-down slide-left slide-right slide-up slide-down; seconds 0.1 to 5 (0.5); null removes it",
@@ -107,6 +109,14 @@ function setTransform(id, changes) {
     throw new Error("setTransform needs an object such as {scale: 1.5, x: 0.25}, or null to reset");
   }
   __set_transform(id, JSON.stringify(changes));
+}
+function setKeyframe(id, property, at, value) {
+  if (typeof value !== "number" || !isFinite(value)) throw new Error("setKeyframe needs a finite number for the value");
+  __set_keyframe(id, String(property), __t(at), value);
+}
+function removeKeyframe(id, property, at) { __remove_keyframe(id, String(property), __t(at)); }
+function clearKeyframes(id, property) {
+  __clear_keyframes(id, property === undefined || property === null ? "" : String(property));
 }
 function setBackground(id, name) { __set_background(id, String(name)); }
 function setTransition(id, kind, seconds) {

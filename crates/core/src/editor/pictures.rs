@@ -335,8 +335,8 @@ impl SheetShot {
                 Some(SheetLayer {
                     path: clip.source.clone()?,
                     time: clip.source_at(self.time),
-                    placement: Some((stack.placement(clip), stack.file(clip).0)),
-                    opacity: clip.opacity,
+                    placement: Some((stack.placement(clip, self.time), stack.file(clip).0)),
+                    opacity: clip.opacity_at(self.time),
                     blur: clip.background == Background::Blur,
                 })
             })

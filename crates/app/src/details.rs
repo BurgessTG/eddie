@@ -12,6 +12,7 @@ mod body;
 mod color;
 mod fields;
 mod filters;
+mod keys;
 mod rows;
 mod styles;
 mod title_text;
@@ -129,7 +130,7 @@ pub fn panel(ui: &Ui) -> El {
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
-                .child(body::body(ui, id, clip))
+                .child(body::body(ui, id, &clip.posed_at(ui.editor.playhead)))
                 .scroll_bar_styled(ScrollBarStyle::native(c.border_strong, c.subtle_fg).inside()),
         ),
         None => content

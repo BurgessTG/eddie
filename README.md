@@ -60,6 +60,9 @@ offers the newest build.
   and tint, and nine filters with a strength. The monitor shows the grade
   export renders.
 - Speed per clip from 0.25× to 4×, with the sound kept at its pitch.
+- Keyframes: position, scale, rotation, opacity and volume change from
+  key to key, set from the diamonds in Details or by dragging the picture
+  on the monitor, and play the same in preview and export.
 - Transitions between clips: mix, dip to black or white, and wipes and
   slides in four directions, from 0.1 to 5 seconds, picked from tiles in
   Details that picture each one, with the sound crossfading under them.

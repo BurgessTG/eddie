@@ -51,6 +51,23 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
+    /// `property` (a `Property` name) is `value` at timeline time `at`.
+    SetKeyframe {
+        clip: u64,
+        property: String,
+        at: f64,
+        value: f64,
+    },
+    RemoveKeyframe {
+        clip: u64,
+        property: String,
+        at: f64,
+    },
+    /// Every key of `property`, or of every property when it is empty.
+    ClearKeyframes {
+        clip: u64,
+        property: String,
+    },
     /// `changes` is a JSON object of `Transform` fields to change, or
     /// `null` to reset; `scale` may be `"fit"` or `"fill"`.
     SetTransform {
@@ -186,6 +203,9 @@ impl ScriptCommand {
             | Self::TrimClip { clip, .. }
             | Self::RenameClip { clip, .. }
             | Self::SetOpacity { clip, .. }
+            | Self::SetKeyframe { clip, .. }
+            | Self::RemoveKeyframe { clip, .. }
+            | Self::ClearKeyframes { clip, .. }
             | Self::SetTransform { clip, .. }
             | Self::SetBackground { clip, .. }
             | Self::SetColor { clip, .. }
@@ -247,6 +267,8 @@ impl ScriptCommand {
             Self::SetOpacity { value, .. }
             | Self::SetVolume { value, .. }
             | Self::SetZoom(value) => value.is_finite(),
+            Self::SetKeyframe { at, value, .. } => at.is_finite() && value.is_finite(),
+            Self::RemoveKeyframe { at, .. } => at.is_finite(),
             Self::SetSpeed { speed, .. } => speed.is_finite(),
             Self::SetTransition { seconds, .. } => seconds.is_finite(),
             Self::TightenSilence {
@@ -290,6 +312,7 @@ impl ScriptCommand {
             | Self::SetMagnet(_)
             | Self::SetMusicBedMuted(_)
             | Self::SetTransform { .. }
+            | Self::ClearKeyframes { .. }
             | Self::SetBackground { .. }
             | Self::SetColor { .. }
             | Self::SetText { .. }

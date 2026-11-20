@@ -3,7 +3,7 @@
 
 use eddie_core::editor::details::{ClipDetails, MAX_VOLUME};
 use eddie_core::{Action, Editor, shortcuts};
-use openreel_engine::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED};
+use openreel_engine::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED, Property};
 use rune::{El, Key, col, el, row};
 
 use super::fields::Field;
@@ -13,7 +13,7 @@ use super::rows::{
 };
 use super::styles::{Select, select};
 use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
-use super::{color, title_text, transform, transition};
+use super::{color, keys, title_text, transform, transition};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
 
@@ -32,6 +32,7 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
     if clip.kind == ClipKind::Title {
         look.push(title_style(ui, clip));
     }
+    look.extend(keys::navigation(ui, id, clip, card_inner));
     look.extend(links(id, clip, &info, card_inner));
     if info.can_caption {
         look.push(captions(ui, id));
@@ -139,17 +140,33 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
     let is_audio = clip.kind == ClipKind::Audio;
     let mut look = Vec::new();
     if !is_audio {
-        let row = slider_row(
+        // A title's opacity is one value; a picture's can change by key.
+        let video = clip.kind == ClipKind::Video;
+        let mut row = slider_row(
             ui,
             id,
             "Opacity",
             Field::Opacity,
             clip.opacity,
             0.0..=1.0,
-            value_w,
+            if video {
+                value_w - keys::KEY_SPACE
+            } else {
+                value_w
+            },
             Editor::set_clip_opacity,
             "Fades the picture against black",
         );
+        if video {
+            row = row.child(keys::button(
+                ui,
+                id,
+                clip,
+                &[Property::Opacity],
+                "details-key-opacity",
+                "opacity",
+            ));
+        }
         look.push(if has_sound { row } else { last_slider(row) });
     }
     if has_sound {
@@ -160,10 +177,18 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
             Field::Volume,
             clip.volume,
             0.0..=MAX_VOLUME,
-            value_w,
+            value_w - keys::KEY_SPACE,
             Editor::set_clip_volume,
             "Clip gain; 100% is unity",
-        );
+        )
+        .child(keys::button(
+            ui,
+            id,
+            clip,
+            &[Property::Volume],
+            "details-key-volume",
+            "volume",
+        ));
         look.push(if is_audio { row } else { last_slider(row) });
     }
     look

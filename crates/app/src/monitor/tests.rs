@@ -1,4 +1,4 @@
-use openreel_engine::ClipKind;
+use openreel_engine::{ClipKind, Property};
 use rune::{Key, Runtime};
 
 use crate::app::Ui;
@@ -245,6 +245,70 @@ fn a_moved_scaled_turned_picture_previews_where_export_puts_it() {
     let whole = share(&rt, "monitor-lane0-picture");
     assert!(close(boxed, [0.625, 0.0, 0.25, 0.5]), "{boxed:?}");
     assert!(close(whole, [0.375, 0.0, 0.5, 0.5]), "{whole:?}");
+}
+
+/// Scale and position keys: the monitor draws the picture where the keys
+/// put it under the playhead, and a drag on a keyed picture sets a key
+/// there that Esc takes back.
+#[test]
+fn a_keyed_picture_moves_with_the_playhead_and_a_drag_keys_it() {
+    let footage = Footage::new();
+    let path = footage.path();
+    let mut ui = Ui::headless();
+    ui.editor.spawn_import(vec![path.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the import", |ui| {
+        ui.editor.asset(&path).is_some() && !ui.editor.importing()
+    });
+    let editor = &mut rt.state.editor;
+    editor.add_asset_to_timeline(&path, None, 0.0);
+    let id = editor.timeline.clips[0].id;
+    let clip = editor.timeline.clip_mut(id).unwrap();
+    clip.keyframes.set(Property::Scale, 0.0, 0.5);
+    clip.keyframes.set(Property::Scale, 1.0, 1.0);
+    clip.keyframes.set(Property::X, 0.0, -0.25);
+    clip.keyframes.set(Property::X, 1.0, 0.25);
+    editor.playhead = 0.25;
+    until(&mut rt, "the picture", |ui| ui.editor.preview_is_current());
+
+    let share = |rt: &Runtime<Ui>| {
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let ([x, y, w, h], _) = rt.presented("monitor-lane0-placed").unwrap();
+        [(x - fx) / fw, (y - fy) / fh, w / fw, h / fh]
+    };
+    let close =
+        |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01);
+    // A quarter of the way: 62.5% wide, centred 12.5% left of the middle.
+    let quarter = share(&rt);
+    assert!(
+        close(quarter, [0.0625, 0.1875, 0.625, 0.625]),
+        "{quarter:?}"
+    );
+    rt.state.editor.playhead = 0.5;
+    frames(&mut rt, 2);
+    let half = share(&rt);
+    assert!(close(half, [0.125, 0.125, 0.75, 0.75]), "{half:?}");
+
+    // Dragging the picture right by a tenth of the monitor keys x there.
+    let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+    let (x, y) = (fx + fw / 2.0, fy + fh / 2.0);
+    crate::testing::input_arrives();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x + fw * 0.1, y);
+    rt.frame(FRAME);
+    let keys = &rt.state.editor.timeline.clip(id).unwrap().keyframes;
+    assert_eq!(keys.x.len(), 3);
+    assert!((keys.x[1].value - 0.1).abs() < 0.01, "{:?}", keys.x);
+    // Esc puts back the keys as they were.
+    press(&mut rt, Key::Escape);
+    rt.pointer_up(x + fw * 0.1, y);
+    frames(&mut rt, 2);
+    assert_eq!(
+        rt.state.editor.timeline.clip(id).unwrap().keyframes.x.len(),
+        2
+    );
 }
 
 /// A half-size clip on video lane 0 over a whole-canvas clip on lane 1:

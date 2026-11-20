@@ -362,6 +362,7 @@ pub fn sync(ui: &mut Ui) {
 /// Show the clip's values. A field being typed in keeps its text unless
 /// `all` (another clip is now shown); the name goes to the clip as typed.
 fn fill(ui: &mut Ui, id: ClipId, all: bool) {
+    let playhead = ui.editor.playhead;
     let Some(clip) = ui.editor.timeline.clip_mut(id) else {
         return;
     };
@@ -374,12 +375,14 @@ fn fill(ui: &mut Ui, id: ClipId, all: bool) {
     } else if name.text.as_str() != clip.name {
         name.replace_text(clip.name.clone());
     }
+    // Keyed values as they are under the playhead.
+    let clip = clip.posed_at(playhead);
     for field in Field::ALL {
         let entry = &mut ui.details.entries[field as usize];
         if entry.edit.focused && !all {
             continue;
         }
-        let shown = field.show(clip);
+        let shown = field.show(&clip);
         if entry.filled != shown || entry.edit.text.as_str() != shown {
             entry.edit.replace_text(shown.clone());
             entry.filled = shown;
@@ -407,7 +410,7 @@ pub(super) fn commit(ui: &mut Ui, field: Field) {
         }
     }
     if let Some(clip) = ui.editor.timeline.clip(id) {
-        let shown = field.show(clip);
+        let shown = field.show(&clip.posed_at(ui.editor.playhead));
         let entry = ui.details.entry_mut(field);
         entry.edit.replace_text(shown.clone());
         entry.filled = shown;

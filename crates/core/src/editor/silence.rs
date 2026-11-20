@@ -183,11 +183,15 @@ impl Editor {
         let source_offset = template.source_in - target.source_in;
         let start = self.timeline.snap(place.at + timeline_offset);
         let source_in = (range.start + source_offset).max(0.0);
+        // Keys stay on their moment of the recording (the clip plays at 1x).
+        let mut keyframes = template.keyframes.clone();
+        keyframes.shift(template.source_in - source_in);
         if place.first {
             if let Some(clip) = self.timeline.clip_mut(template.id) {
                 clip.start = start;
                 clip.duration = range.duration();
                 clip.source_in = source_in;
+                clip.keyframes = keyframes;
                 if !place.last {
                     clip.fade_out = 0.0;
                 }
@@ -226,6 +230,7 @@ impl Editor {
                 linked_clip: None,
                 // The cuts between phrases have none.
                 transition: None,
+                keyframes,
                 ..template.clone()
             };
         }

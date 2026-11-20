@@ -20,9 +20,12 @@ pub struct LanePicture<'a> {
 
 /// Whether `clip`'s picture hides everything under it: fully opaque, from
 /// a file with no `alpha`, and filling a `canvas` sized frame (its file
-/// `source` sized) or drawn over its own blurred copy, which does.
+/// `source` sized) or drawn over its own blurred copy, which does. A
+/// picture whose keys move or fade it may uncover the lanes under it, so it
+/// never hides them.
 pub fn hides_below(clip: &Clip, canvas: (f64, f64), source: (f64, f64), alpha: bool) -> bool {
     clip.opacity >= 1.0
+        && !clip.keyframes.moves_picture()
         && !alpha
         && (clip.background == Background::Blur
             || place(canvas, source, &clip.transform).covers(canvas))

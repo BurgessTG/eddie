@@ -2,6 +2,7 @@
 
 use crate::color::ColorAdjust;
 use crate::fit_fades;
+use crate::keyframe::{Keyframes, Property};
 use crate::place::{Background, Transform};
 use crate::text::TextLook;
 use crate::transition::Transition;
@@ -156,6 +157,12 @@ pub struct Clip {
     /// [`Timeline::transitions`]: crate::Timeline::transitions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
+    /// Position, scale, rotation, opacity and volume changing over the
+    /// clip; a property with keys ignores its plain value. Read the values
+    /// at a time with [`Clip::transform_at`], [`Clip::opacity_at`] and
+    /// [`Clip::volume_at`].
+    #[serde(default, skip_serializing_if = "Keyframes::is_empty")]
+    pub keyframes: Keyframes,
 }
 
 /// The slowest and fastest a clip plays.
@@ -212,6 +219,69 @@ impl Clip {
     /// together they exceed it, both scale down to meet.
     pub fn fade_lengths(&self) -> (f64, f64) {
         fit_fades(self.duration, self.fade_in, self.fade_out)
+    }
+
+    /// The value a keyed property has at timeline `time`.
+    fn keyed(&self, property: Property, time: f64) -> Option<f64> {
+        self.keyframes.value(property, time - self.start)
+    }
+
+    /// Where the picture sits at timeline `time`: its transform with any
+    /// keyed position, scale and rotation in place.
+    pub fn transform_at(&self, time: f64) -> Transform {
+        let mut t = self.transform;
+        if self.keyframes.moves_transform() {
+            t.x = self.keyed(Property::X, time).unwrap_or(t.x);
+            t.y = self.keyed(Property::Y, time).unwrap_or(t.y);
+            t.scale = self.keyed(Property::Scale, time).unwrap_or(t.scale);
+            t.rotation = self.keyed(Property::Rotation, time).unwrap_or(t.rotation);
+        }
+        t
+    }
+
+    pub fn opacity_at(&self, time: f64) -> f32 {
+        self.keyed(Property::Opacity, time)
+            .map_or(self.opacity, |v| v as f32)
+    }
+
+    pub fn volume_at(&self, time: f64) -> f32 {
+        self.keyed(Property::Volume, time)
+            .map_or(self.volume, |v| v as f32)
+    }
+
+    /// This clip with its keyed values at timeline `time` as its plain
+    /// ones: what a panel shows for the moment under the playhead.
+    pub fn posed_at(&self, time: f64) -> Clip {
+        let mut clip = self.clone();
+        clip.transform = self.transform_at(time);
+        clip.opacity = self.opacity_at(time);
+        clip.volume = self.volume_at(time);
+        clip
+    }
+
+    /// Never heard: its volume is 0, or every volume key is.
+    pub fn muted(&self) -> bool {
+        match self.keyframes.keys(Property::Volume) {
+            [] => self.volume <= 0.0,
+            keys => keys.iter().all(|key| key.value <= 0.0),
+        }
+    }
+
+    /// A property's plain value, or its value at timeline `time` when keyed.
+    pub fn property_at(&self, property: Property, time: f64) -> f64 {
+        let t = self.transform_at(time);
+        match property {
+            Property::X => t.x,
+            Property::Y => t.y,
+            Property::Scale => t.scale,
+            Property::Rotation => t.rotation,
+            Property::Opacity => self
+                .keyed(Property::Opacity, time)
+                .unwrap_or_else(|| crate::widen(self.opacity)),
+            Property::Volume => self
+                .keyed(Property::Volume, time)
+                .unwrap_or_else(|| crate::widen(self.volume)),
+        }
     }
 
     /// Word start times on the timeline, when there is one per word of the

@@ -1,6 +1,8 @@
 //! One script as one edit, the path `eddie run` and the live server take:
 //! the request-time state, then every command or none. Also the console.
 
+use openreel_engine::Property;
+
 use super::*;
 
 fn asset(path: &str, duration: f64, video: bool) -> BinAsset {
@@ -963,4 +965,88 @@ fn a_transition_needs_a_clip_before_it_and_inspect_says_where_it_falls_short() {
             "Clip {e}'s transition has no clip right before it on its lane, so it does not play."
         )]
     );
+}
+
+#[test]
+fn keyframes_animate_by_script_and_by_the_details_fields() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("a.mp4", 20.0, true));
+    run(&mut app, "addAssetRange('a.mp4', 2, 0, 4);").unwrap();
+    let id = app.timeline.clips[0].id;
+    // Keys at timeline times on the clip, in setTransform's units.
+    run(
+        &mut app,
+        &format!(
+            "setKeyframe({id}, 'scale', 2, 0.5); setKeyframe({id}, 'scale', '4s', 1.5); \
+             setKeyframe({id}, 'opacity', 3, 0.2); setKeyframe({id}, 'volume', 'clip:{id}@end', 2);"
+        ),
+    )
+    .unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.transform_at(3.0).scale, 1.0);
+    assert_eq!(clip.opacity_at(5.0), 0.2);
+    assert_eq!(clip.keyframes.volume[0].at, 4.0);
+    let read = run(&mut app, "return clips()[0].keyframes.scale[1]").unwrap();
+    assert_eq!(read, r#"{"at":2,"value":1.5}"#);
+
+    // Out of range, off the clip, or a property the clip has not: refused.
+    for (code, why) in [
+        (
+            format!("setKeyframe({id}, 'scale', 3, 0)"),
+            "out of range for scale",
+        ),
+        (
+            format!("setKeyframe({id}, 'opacity', 7, 1)"),
+            "is not on clip",
+        ),
+        (
+            format!("setKeyframe({id}, 'size', 3, 1)"),
+            "unknown property 'size'",
+        ),
+        (
+            format!("removeKeyframe({id}, 'scale', 3)"),
+            "no scale key at 3",
+        ),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(why), "{code}: {error}");
+    }
+
+    // A field edited at the playhead sets the key there once the property
+    // has keys; without keys it sets the clip's one value.
+    app.seek(3.0);
+    app.edit_clip_transform(id, |t| {
+        t.scale = 2.0;
+        t.y = 0.1;
+    });
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.scale.len(), 3);
+    assert_eq!(clip.transform_at(3.0).scale, 2.0);
+    assert_eq!(clip.transform.y, 0.1);
+    assert!(clip.keyframes.y.is_empty());
+
+    // The key button holds the value under the playhead, then takes it away.
+    app.toggle_keys(id, &[Property::X, Property::Y]);
+    assert_eq!(app.timeline.clip(id).unwrap().keyframes.y[0].value, 0.1);
+    assert!(app.keyed_here(id, &[Property::X, Property::Y]));
+    app.toggle_keys(id, &[Property::X, Property::Y]);
+    assert!(app.timeline.clip(id).unwrap().keyframes.y.is_empty());
+    assert_eq!(app.timeline.clip(id).unwrap().transform.y, 0.1);
+    assert!(app.seek_key(id, true));
+    assert_eq!(app.playhead, 4.0);
+    assert!(app.seek_key(id, true));
+    assert_eq!(app.playhead, 6.0);
+    assert!(!app.seek_key(id, true));
+
+    // A plain setter is one value for the whole clip again; clearing keeps
+    // the value at the clip's start.
+    run(
+        &mut app,
+        &format!("setOpacity({id}, 0.6); clearKeyframes({id}, 'scale')"),
+    )
+    .unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert!(clip.keyframes.opacity.is_empty() && clip.keyframes.scale.is_empty());
+    assert_eq!((clip.opacity, clip.transform.scale), (0.6, 0.5));
+    assert_eq!(clip.keyframes.volume.len(), 1);
 }

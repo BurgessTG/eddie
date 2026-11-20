@@ -188,6 +188,7 @@ impl Timeline {
                     && clip.color.is_valid()
                     && (crate::MIN_SPEED..=crate::MAX_SPEED).contains(&clip.speed)
                     && clip.transition.is_none_or(|t| t.is_valid())
+                    && clip.keyframes.is_valid()
             })
     }
 
@@ -333,6 +334,7 @@ impl Timeline {
             photo: false,
             freeze: false,
             transition: None,
+            keyframes: crate::Keyframes::default(),
         });
         id
     }

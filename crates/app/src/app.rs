@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use eddie_core::shortcuts::{self, Chord, KeyName};
 use eddie_core::{Action, Editor, PreviewSink, Wake};
-use openreel_engine::{ClipId, TextLook, Transform};
+use openreel_engine::{Clip, TextLook, Transform};
 use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 
 use crate::dialogs::{Discard, PendingFileDialog};
@@ -33,8 +33,9 @@ pub struct Ui {
     handle: Option<AppHandle<Ui>>,
     /// The pictures the program monitor holds, one pair per video lane.
     pub pictures: monitor::Pictures,
-    /// The clip whose picture a drag on the monitor moves, and where it was.
-    pub monitor_drag: Option<(ClipId, Transform)>,
+    /// The clip whose picture a drag on the monitor moves, as it was, and
+    /// where its picture was at the playhead.
+    pub monitor_drag: Option<(Clip, Transform)>,
     /// Where the title a drag on the monitor moves was.
     pub title_drag: Option<TextLook>,
     /// Filmstrip pictures by media path, taken from each finished import.

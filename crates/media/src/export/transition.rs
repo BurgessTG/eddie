@@ -13,6 +13,7 @@
 use openreel_engine::{ClipId, Timeline, TransitionKind};
 
 use super::frames::{enabled_frames, FrameRanges, VideoClock};
+use super::picture::Spot;
 use super::video::{VIDEO_COLOR_RANGE, VIDEO_COLOR_SPACE};
 
 /// One transition in output frames, and the layers that draw its clips.
@@ -143,7 +144,7 @@ pub(super) fn filters(
     batch_start: i64,
     (width, height): (u32, u32),
     clock: VideoClock,
-    sides: [Option<(i64, i64)>; 2],
+    sides: &[Option<Spot>; 2],
     current: &str,
 ) -> (Vec<String>, String) {
     let rate = clock.rate;
@@ -188,12 +189,15 @@ pub(super) fn filters(
                 to - from
             )
         };
-        filters.push(match sides[side] {
-            Some((x, y)) => format!(
+        filters.push(match &sides[side] {
+            // Trimmed to start at `from`, so a moving picture's clock is
+            // that far behind the batch's.
+            Some(spot) => format!(
                 "[tw{index}_{side}]trim=start_pts={from}:end_pts={to},setpts=PTS-STARTPTS[tp{label}];\
                  {ground}[tb{label}];\
-                 [tb{label}][tp{label}]overlay={x}:{y}:eof_action=repeat:format=yuv444,\
-                 settb=1/{ticks}[{label}]"
+                 [tb{label}][tp{label}]overlay={}:eof_action=repeat:format=yuv444,\
+                 settb=1/{ticks}[{label}]",
+                spot.overlay(clock.time(from))
             ),
             None => format!("{ground},settb=1/{ticks}[{label}]"),
         });

@@ -146,6 +146,7 @@ impl Editor {
                             duration: c.duration,
                             source_in: c.source_in,
                             volume: c.volume,
+                            volume_keys: c.keyframes.volume.clone(),
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
                             duck: self.timeline.duck_ranges(&c, &speech),

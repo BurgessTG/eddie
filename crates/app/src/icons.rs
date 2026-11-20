@@ -184,6 +184,19 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
     .view_box(30.0, 30.0)
 }
 
+/// A keyframe diamond in a 30×30 box: filled when a key is there, an
+/// outline when one could be added.
+pub fn key(filled: bool, fg: Color) -> Shape {
+    let diamond = vec![[15.0, 9.0], [21.0, 15.0], [15.0, 21.0], [9.0, 15.0]];
+    let shape = Shape::new();
+    if filled {
+        shape.fill(diamond, fg)
+    } else {
+        shape.stroke_with(diamond, true, 1.5, LineCap::Round, fg)
+    }
+    .view_box(30.0, 30.0)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Transport {
     ToStart,

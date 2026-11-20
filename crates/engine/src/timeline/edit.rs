@@ -145,6 +145,7 @@ impl Timeline {
         let delta = desired - clip.start;
         if let Some(clip) = self.clip_mut(id) {
             clip.start = desired;
+            clip.keyframes.shift(-delta);
             if !clip.still() {
                 clip.source_in += delta * clip.speed;
             }
@@ -238,11 +239,15 @@ impl Timeline {
             clip.source_at(at),
             clip.source.as_deref(),
         );
+        let mut keyframes = clip.keyframes.clone();
+        keyframes.shift(-left_duration);
         if let Some(right_clip) = self.clip_mut(right) {
-            // Everything else carries over: look, sound, speed and words. A
+            // Everything else carries over: look, sound, speed, words and
+            // keys, which stay on the moments they were on. A
             // title extended earlier keeps its negative source clock, which
             // adding a clip would clamp and so shift its word timing.
             *right_clip = Clip {
+                keyframes,
                 id: right,
                 start: at,
                 duration: clip.end() - at,
@@ -272,6 +277,7 @@ impl Timeline {
         for id in [Some(id), self.linked_id(id)].into_iter().flatten() {
             if let Some(clip) = self.clip_mut(id) {
                 clip.duration = clip.duration * clip.speed / speed;
+                clip.keyframes.stretch(clip.speed / speed);
                 clip.speed = speed;
             }
         }
@@ -381,6 +387,8 @@ impl Timeline {
             at = clip.start;
         }
         let picture = clip.source_at(at);
+        // The held picture keeps the place and opacity it had there, still.
+        let (transform, opacity) = (clip.transform_at(at), clip.opacity_at(at));
         let seconds = self.snap(seconds).max(frame);
         self.push_later(at, seconds);
         let freeze = self.next_id;
@@ -400,6 +408,9 @@ impl Timeline {
             speed: 1.0,
             freeze: true,
             transition: None,
+            transform,
+            opacity,
+            keyframes: crate::Keyframes::default(),
             ..clip
         });
         Some(freeze)

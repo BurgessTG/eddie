@@ -190,13 +190,17 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed, photo, freeze, text, transition`.
-  A clip shows
+  transform, background, color, speed, photo, freeze, text, transition,
+  keyframes`. A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
   `setText` changed; a `null` field follows the style. `transition` is
-  `{kind, duration}` or `null`.
+  `{kind, duration}` or `null`. `keyframes` holds `x`, `y`, `scale`,
+  `rotation`, `opacity` and `volume` keys as `[{at, value}]`, `at` in
+  seconds from the clip's start; a property without keys is left out, and
+  a keyed property's plain value (`opacity`, `transform.scale`, …) is not
+  what plays.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -340,6 +344,23 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     from each edge, before any flip.
   - `setBackground(id, 'blur')` fills the canvas around the picture with
     a blurred, enlarged copy of it; `'black'` is the default.
+- **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
+  `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
+  `volume` on video or audio, in the units of `setTransform`,
+  `setOpacity` and `setVolume`. `at` is a timeline time on the clip.
+  - The value runs in a straight line from each key to the next, and
+    holds before the first key and after the last. A key at the time of
+    another replaces it. Rotation keys may pass 360 to keep turning.
+  - Keys move with the clip and stay on the same moment of its footage
+    through trims, splits and speed changes. A freeze frame holds the
+    look at its point, without keys.
+  - `removeKeyframe(id, property, at)` takes one key away.
+    `clearKeyframes(id, property?)` takes away a property's keys, or
+    every property's, keeping the value at the clip's start.
+  - `setOpacity`, `setVolume` and `setTransform` set one value for the
+    whole clip and remove the keys of each property they set.
+  - A picture that moves or fades by key never hides the lanes under it.
+    A sheet shows each picture where its keys put it at the cell's time.
 - **Colour:** `setColor(id, {...})` grades a video clip. It changes only
   the fields you give; `null` resets them all. `brightness`, `contrast`,
   `saturation`, `temperature` (warm is positive) and `tint` (magenta is

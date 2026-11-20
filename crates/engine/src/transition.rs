@@ -363,6 +363,7 @@ impl Clip {
         let mut clip = self.clone();
         clip.start -= cross.head;
         clip.source_in -= cross.head * self.speed;
+        clip.keyframes.shift(cross.head);
         clip.duration += cross.head + cross.tail;
         clip
     }

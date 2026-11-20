@@ -75,6 +75,7 @@ fn samples_probe_decode_and_export_end_to_end() {
             duration: 1.0,
             source_in: 4.0,
             volume: 1.0,
+            volume_keys: Vec::new(),
             fade_in: 0.0,
             fade_out: 0.0,
             duck: Vec::new(),

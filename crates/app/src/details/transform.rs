@@ -3,11 +3,12 @@
 //! place the picture with `openreel_engine::place`.
 
 use eddie_core::Editor;
-use openreel_engine::{Background, Clip, ClipId, Transform};
+use openreel_engine::{Background, Clip, ClipId, Property, Transform};
 use rune::{El, row};
 
 use super::BUTTON_GAP;
 use super::fields::Field;
+use super::keys::{self, KEY_SPACE};
 use super::rows::{button_row, checkbox, prop_row, section, slider_row, value_field};
 use crate::app::Ui;
 use crate::theme::{self, Variant};
@@ -17,6 +18,7 @@ const SLIDER_MAX: f32 = 4.0;
 
 pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f32) -> El {
     let t = clip.transform;
+    let key = |properties, key, what| keys::button(ui, id, clip, properties, key, what);
     section(
         "Transform",
         vec![
@@ -27,12 +29,21 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
                 Field::Scale,
                 t.scale as f32,
                 0.0..=SLIDER_MAX,
-                value_w,
+                value_w - KEY_SPACE,
                 set_scale,
                 "Size of the picture; 100% fits it inside the canvas",
-            ),
-            position(ui, value_w),
-            rotation(ui, id, t, value_w),
+            )
+            .child(key(&[Property::Scale], "details-key-scale", "scale")),
+            position(ui, value_w - KEY_SPACE).child(key(
+                &[Property::X, Property::Y],
+                "details-key-position",
+                "position",
+            )),
+            rotation(ui, id, t, value_w - KEY_SPACE).child(key(
+                &[Property::Rotation],
+                "details-key-rotation",
+                "rotation",
+            )),
             crop(ui, value_w),
             checkbox(
                 id,
@@ -102,7 +113,7 @@ fn rotation(ui: &Ui, id: ClipId, t: Transform, value_w: f32) -> El {
                 value_field(
                     ui,
                     Field::Rotation,
-                    "Clockwise degrees, 0 to 360".to_owned(),
+                    "Clockwise degrees; a keyed turn may pass 360 to keep turning".to_owned(),
                 )
                 .w(half),
             )
@@ -210,10 +221,15 @@ fn fit_buttons(id: ClipId, card_inner: f32) -> El {
                 "details-transform-reset",
                 "Reset",
                 Variant::Secondary,
-                "Put the picture back: fitted, centred, upright, unflipped and uncropped",
+                "Put the picture back: fitted, centred, upright, unflipped and uncropped, without position, scale or rotation keys",
                 true,
             )
             .on_press(move |ui: &mut Ui| {
+                if let Some(clip) = ui.editor.timeline.clip_mut(id) {
+                    for property in [Property::X, Property::Y, Property::Scale, Property::Rotation] {
+                        clip.keyframes.clear(property);
+                    }
+                }
                 ui.editor
                     .edit_clip_transform(id, |t| *t = Transform::default());
             }),

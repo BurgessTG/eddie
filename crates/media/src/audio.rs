@@ -46,6 +46,9 @@ pub struct AudioSegment {
     /// Source time at `start`, seconds from the container origin.
     pub source_in: f64,
     pub volume: f32,
+    /// Volume keys on the clip's clock (`openreel_engine::Keyframes`); when
+    /// there are any they set the volume and `volume` is ignored.
+    pub volume_keys: Vec<openreel_engine::Key>,
     /// Linear fade lengths, seconds; fitted with `openreel_engine::fit_fades`.
     pub fade_in: f64,
     pub fade_out: f64,
@@ -297,6 +300,13 @@ impl AudioEngine {
                     .store(segment.volume.to_bits(), Ordering::Relaxed);
                 handle.segment.volume = segment.volume;
                 handle.fades.store(pack_fades(segment), Ordering::Relaxed);
+                if handle.segment.volume_keys != segment.volume_keys {
+                    handle.segment.volume_keys = segment.volume_keys.clone();
+                    let _ = self.commands.send(Command::VolumeKeys(
+                        *id,
+                        segment.volume_keys.as_slice().into(),
+                    ));
+                }
                 if handle.segment.duck != segment.duck {
                     handle.segment.duck = segment.duck.clone();
                     let _ = self
@@ -331,6 +341,7 @@ impl AudioEngine {
                 volume: Arc::clone(&volume),
                 fades: Arc::clone(&fades),
                 duck: segment.duck.as_slice().into(),
+                volume_keys: segment.volume_keys.as_slice().into(),
                 smooth_fades: segment.smooth_fades,
                 crossfade: (sample(segment.crossfade.0), sample(segment.crossfade.1)),
                 chunks,

@@ -1,9 +1,12 @@
 //! One clip's picture in export: cropped, scaled, graded, flipped, turned
 //! and moved where [`place`] puts it on the canvas, over black or its own
-//! blurred copy, as the preview draws it.
+//! blurred copy, as the preview draws it. A clip with keys lays its picture
+//! out once at a fixed size, then fades, resizes, turns and moves it every
+//! frame along its keys.
 
-use openreel_engine::{place, Background, ColorAdjust};
+use openreel_engine::{place, Background, ColorAdjust, Keyframes, Property, Transform};
 
+use super::animate::{commands, curve};
 use super::video::VideoLayer;
 
 /// Even and at least 2, as yuv420p and the colorspace filter need.
@@ -57,32 +60,195 @@ fn color_filters(color: &ColorAdjust) -> String {
     out
 }
 
+/// A layer's keys on its batch's clock.
+pub(super) struct Motion<'a> {
+    pub(super) keys: &'a Keyframes,
+    /// The clip's start, in seconds after the batch's first frame.
+    pub(super) offset: f64,
+}
+
+impl Motion<'_> {
+    /// `property`'s keys as (seconds on the batch's clock, value).
+    fn keys(&self, property: Property) -> Vec<(f64, f64)> {
+        self.keys
+            .keys(property)
+            .iter()
+            .map(|key| (key.at + self.offset, key.value))
+            .collect()
+    }
+}
+
+/// Where a layer's picture goes on the canvas: a fixed top-left corner, or
+/// a centre that moves along keys (seconds on the batch's clock, canvas
+/// pixels), which overlay reads every frame.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Spot {
+    At(i64, i64),
+    Moving {
+        x: Vec<(f64, f64)>,
+        y: Vec<(f64, f64)>,
+    },
+}
+
+impl Spot {
+    /// overlay's options that put the picture there, for frames whose time
+    /// is `offset` seconds before the batch's clock.
+    pub(super) fn overlay(&self, offset: f64) -> String {
+        match self {
+            Self::At(x, y) => format!("{x}:{y}"),
+            Self::Moving { x, y } => {
+                let t = format!("(t+{offset:.6})");
+                format!(
+                    "x='floor({}-overlay_w/2+0.5)':y='floor({}-overlay_h/2+0.5)':eval=frame",
+                    curve(x, &t),
+                    curve(y, &t)
+                )
+            }
+        }
+    }
+}
+
+/// One layer's picture as filters, each starting with a comma.
+pub(super) struct Picture {
+    /// Lays out what does not change: run once on a still's one picture.
+    fixed: String,
+    /// Its opacity, after `fixed`, or over the whole canvas with a
+    /// `background`.
+    alpha: String,
+    /// Resizes and turns each frame as its keys say.
+    moving: String,
+    /// For a keyed picture over its blurred copy: the filters from the
+    /// frames to that copy filling the canvas.
+    background: Option<String>,
+    spot: Spot,
+}
+
+impl Picture {
+    /// The filters from `lead`, a chain that ends on the layer's frames
+    /// (for a still, its one picture, which `hold` then holds), to
+    /// `[seg{index}]`.
+    pub(super) fn filters(&self, index: usize, lead: &str, hold: Option<&str>) -> Vec<String> {
+        let Self {
+            fixed,
+            alpha,
+            moving,
+            background,
+            spot,
+        } = self;
+        let Some(background) = background else {
+            return match hold {
+                None => vec![format!("{lead}{fixed}{alpha}{moving}[seg{index}]")],
+                Some(hold) => vec![
+                    format!("{lead}{fixed}[photo{index}]"),
+                    format!("[photo{index}]{hold}{alpha}{moving}[seg{index}]"),
+                ],
+            };
+        };
+        let held = hold.map(|hold| format!(",{hold}")).unwrap_or_default();
+        vec![
+            format!("{lead},split[pic{index}][bgin{index}]"),
+            format!("[bgin{index}]{background}{held}[bg{index}]"),
+            format!("[pic{index}]null{fixed}{held}{moving}[fg{index}]"),
+            format!(
+                "[bg{index}][fg{index}]overlay={}{alpha}[seg{index}]",
+                spot.overlay(0.0)
+            ),
+        ]
+    }
+
+    /// Where `[seg{index}]` goes on the canvas.
+    pub(super) fn spot(&self) -> Spot {
+        if self.background.is_some() {
+            Spot::At(0, 0)
+        } else {
+            self.spot.clone()
+        }
+    }
+}
+
+/// The same frames, filling the canvas and blurred: scaled to an eighth
+/// first, so the blur costs little at any canvas size. They flip with the
+/// picture, as the preview's do.
+fn blurred(canvas: (u32, u32), t: &Transform, resize: &str, convert: &str, color: &str) -> String {
+    let (width, height) = canvas;
+    let (bw, bh) = (
+        even(f64::from(width) / 8.0).max(8),
+        even(f64::from(height) / 8.0).max(8),
+    );
+    let radius = ((f64::from(bw) * 0.025).round() as u32).clamp(1, (bw.min(bh) / 4).max(1));
+    let flips = match (t.flip_h, t.flip_v) {
+        (true, true) => ",hflip,vflip",
+        (true, false) => ",hflip",
+        (false, true) => ",vflip",
+        (false, false) => "",
+    };
+    format!(
+        "scale={bw}:{bh}:force_original_aspect_ratio=increase:flags={resize},\
+         crop={bw}:{bh}{convert}{color}{flips},boxblur={radius}:2,\
+         scale={width}:{height}:flags=bilinear,setsar=1"
+    )
+}
+
+fn flips(t: &Transform) -> String {
+    let mut out = String::new();
+    if t.flip_h {
+        out.push_str(",hflip");
+    }
+    if t.flip_v {
+        out.push_str(",vflip");
+    }
+    out
+}
+
 /// The filters that turn one layer's frames into its picture on the canvas,
-/// ending in `[seg{index}]`, and where that picture overlays the canvas.
-/// [`place`] decides the geometry, as it does for the preview. An untouched
-/// clip on black keeps the resize-and-pad chain export always had, unless
-/// it is drawn over another lane, which must show around it.
+/// and where that picture goes. [`place`] decides the geometry, as it does
+/// for the preview. An untouched clip on black keeps the resize-and-pad
+/// chain export always had, unless it is drawn over another lane, which
+/// must show around it. `motion` is the layer's keys, when it has any.
 pub(super) fn picture(
     index: usize,
     layer: &VideoLayer<'_>,
     canvas: (u32, u32),
     source: (u32, u32),
-    (resize, convert, alpha): (&str, &str, &str),
-) -> (String, i64, i64) {
+    (resize, convert): (&str, &str),
+    motion: Option<&Motion<'_>>,
+) -> Picture {
     let (width, height) = canvas;
     let color = color_filters(&layer.color);
+    let alpha = if layer.opacity < 0.999 {
+        format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
+    } else {
+        String::new()
+    };
+    if let Some(motion) = motion {
+        return moving(
+            index,
+            layer,
+            canvas,
+            source,
+            (resize, convert),
+            &color,
+            motion,
+        );
+    }
+    let still = |fixed: String, spot: Spot| Picture {
+        fixed,
+        alpha: String::new(),
+        moving: String::new(),
+        background: None,
+        spot,
+    };
     if layer.transform.is_identity()
         && layer.background == Background::Black
         && color.is_empty()
         && !layer.over
     {
-        return (
+        return still(
             format!(
                 ",scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
-                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}[seg{index}]"
+                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}"
             ),
-            0,
-            0,
+            Spot::At(0, 0),
         );
     }
     let canvas_f = (f64::from(width), f64::from(height));
@@ -95,20 +261,15 @@ pub(super) fn picture(
     }
     let (pw, ph) = (even(p.size[0]), even(p.size[1]));
     chain.push_str(&format!(
-        "scale={pw}:{ph}:flags={resize}{convert}{color},setsar=1"
+        "scale={pw}:{ph}:flags={resize}{convert}{color},setsar=1{}",
+        flips(t)
     ));
-    if t.flip_h {
-        chain.push_str(",hflip");
-    }
-    if t.flip_v {
-        chain.push_str(",vflip");
-    }
     let (mut out_w, mut out_h) = (f64::from(pw), f64::from(ph));
     if t.rotation.rem_euclid(360.0) != 0.0 {
         let [rw, rh] = p.turned_size();
         let (rw, rh) = (rw.round().max(1.0), rh.round().max(1.0));
         chain.push_str(&format!(
-            ",format=rgba,rotate=a={:.9}:ow={rw}:oh={rh}:c=none",
+            ",format=rgba,rotate=a={:.9}:ow={rw}:oh={rh}:c=black@0",
             t.rotation.to_radians()
         ));
         (out_w, out_h) = (rw, rh);
@@ -116,29 +277,129 @@ pub(super) fn picture(
     let x = (p.center[0] - out_w / 2.0).round() as i64;
     let y = (p.center[1] - out_h / 2.0).round() as i64;
     if layer.background == Background::Blur && !p.covers(canvas_f) {
-        // The same frames, filling the canvas and blurred: scaled to an
-        // eighth first, so the blur costs little at any canvas size. They
-        // flip with the picture, as the preview's do.
-        let (bw, bh) = (even(canvas_f.0 / 8.0).max(8), even(canvas_f.1 / 8.0).max(8));
-        let radius = ((f64::from(bw) * 0.025).round() as u32).clamp(1, (bw.min(bh) / 4).max(1));
-        let flips = match (t.flip_h, t.flip_v) {
-            (true, true) => ",hflip,vflip",
-            (true, false) => ",hflip",
-            (false, true) => ",vflip",
-            (false, false) => "",
-        };
-        return (
+        let background = blurred(canvas, t, resize, convert, &color);
+        return still(
             format!(
-                ",split[pic{index}][bgin{index}];\
-                 [bgin{index}]scale={bw}:{bh}:force_original_aspect_ratio=increase:flags={resize},\
-                 crop={bw}:{bh}{convert}{color}{flips},boxblur={radius}:2,scale={width}:{height}:flags=bilinear,\
-                 setsar=1[bg{index}];\
+                ",split[pic{index}][bgin{index}];[bgin{index}]{background}[bg{index}];\
                  [pic{index}]{chain}[fg{index}];\
-                 [bg{index}][fg{index}]overlay={x}:{y}{alpha}[seg{index}]"
+                 [bg{index}][fg{index}]overlay={x}:{y}{alpha}"
             ),
-            0,
-            0,
+            Spot::At(0, 0),
         );
     }
-    (format!(",{chain}{alpha}[seg{index}]"), x, y)
+    still(format!(",{chain}{alpha}"), Spot::At(x, y))
+}
+
+/// A keyed layer's picture. It is laid out once at the largest size its
+/// keys reach (never past the source's own pixels, which would only be
+/// blown up), then each frame is faded, sized, turned on a square any turn
+/// fits, and moved along the keys, which the preview follows too.
+fn moving(
+    index: usize,
+    layer: &VideoLayer<'_>,
+    canvas: (u32, u32),
+    source: (u32, u32),
+    (resize, convert): (&str, &str),
+    color: &str,
+    motion: &Motion<'_>,
+) -> Picture {
+    let canvas_f = (f64::from(canvas.0), f64::from(canvas.1));
+    let t = &layer.transform;
+    let unit = place(
+        canvas_f,
+        (f64::from(source.0), f64::from(source.1)),
+        &Transform { scale: 1.0, ..*t },
+    );
+    let [unit_w, unit_h] = unit.size;
+    let scales = motion.keys(Property::Scale);
+    let turns = motion.keys(Property::Rotation);
+    let fades = motion.keys(Property::Opacity);
+    let mut fixed = String::from(",");
+    if t.has_crop() {
+        let [x, y, w, h] = unit.crop.map(|v| v.round() as i64);
+        fixed.push_str(&format!("crop={}:{}:{x}:{y},", w.max(2), h.max(2)));
+    }
+    let largest = if scales.is_empty() {
+        t.scale
+    } else {
+        scales.iter().map(|key| key.1).fold(0.0, f64::max)
+    };
+    let shrink = if scales.is_empty() {
+        1.0
+    } else {
+        (unit.crop[2] / (unit_w * largest)).min(1.0)
+    };
+    let (fw, fh) = (
+        even(unit_w * largest * shrink),
+        even(unit_h * largest * shrink),
+    );
+    fixed.push_str(&format!(
+        "scale={fw}:{fh}:flags={resize}{convert}{color},setsar=1{}",
+        flips(t)
+    ));
+    let mut moving = String::new();
+    let (most_w, most_h) = (
+        f64::from(even(unit_w * largest)),
+        f64::from(even(unit_h * largest)),
+    );
+    if !scales.is_empty() {
+        let s = curve(&scales, "t");
+        moving.push_str(&format!(
+            ",format=rgba,scale=w='2*max(1,floor({unit_w:.6}*({s})/2+0.5))':\
+             h='2*max(1,floor({unit_h:.6}*({s})/2+0.5))':eval=frame:flags=bicubic"
+        ));
+    }
+    if !turns.is_empty() || t.rotation.rem_euclid(360.0) != 0.0 {
+        let angle = if turns.is_empty() {
+            format!("{:.9}", t.rotation.to_radians())
+        } else {
+            format!("'({})*PI/180'", curve(&turns, "t"))
+        };
+        // Even, so a picture of even size sits on whole pixels at its centre.
+        let side = even(most_w.hypot(most_h).ceil()) + 2;
+        if !scales.is_empty() {
+            moving.push_str(&format!(
+                ",pad=w={side}:h={side}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame"
+            ));
+        }
+        moving.push_str(&format!(
+            ",format=rgba,rotate=a={angle}:ow={side}:oh={side}:c=black@0"
+        ));
+    }
+    let alpha = if fades.is_empty() {
+        if layer.opacity < 0.999 {
+            format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
+        } else {
+            String::new()
+        }
+    } else {
+        let mixer = format!("colorchannelmixer@op{index}");
+        format!(
+            ",format=rgba,sendcmd=c='{}',{mixer}=aa=1",
+            commands(&mixer, "aa", &fades)
+        )
+    };
+    let centre = |property: Property, plain: f64, size: f64| {
+        let keys = motion.keys(property);
+        if keys.is_empty() {
+            vec![(0.0, size / 2.0 + plain * size)]
+        } else {
+            keys.into_iter()
+                .map(|(at, v)| (at, size / 2.0 + v * size))
+                .collect()
+        }
+    };
+    let spot = Spot::Moving {
+        x: centre(Property::X, t.x, canvas_f.0),
+        y: centre(Property::Y, t.y, canvas_f.1),
+    };
+    let background =
+        (layer.background == Background::Blur).then(|| blurred(canvas, t, resize, convert, color));
+    Picture {
+        fixed,
+        alpha,
+        moving,
+        background,
+        spot,
+    }
 }

@@ -192,13 +192,15 @@ pub fn placed(
         .and_then(|path| ui.editor.asset(path))
         .map_or(decoded, |asset| (asset.info.width, asset.info.height));
     let (sw, sh) = (f64::from(source.0.max(1)), f64::from(source.1.max(1)));
-    let t = &clip.transform;
+    // Keyed values as they are under the playhead.
+    let time = ui.editor.playhead;
+    let t = &clip.transform_at(time);
     let p = place((cw, ch), (sw, sh), t);
     let k = f64::from(w) / cw;
     let mut layer = el()
         .absolute(0.0, 0.0)
         .size(w, h)
-        .opacity(clip.opacity.clamp(0.0, 1.0))
+        .opacity(clip.opacity_at(time).clamp(0.0, 1.0))
         .instant_changes();
     if clip.background == Background::Blur && !p.covers((cw, ch)) {
         // Rune blurs in transparency past an element's edges, which darkens
@@ -265,20 +267,26 @@ pub fn draggable(frame: El) -> El {
                 let clip = editor
                     .picture_at(point)
                     .and_then(|id| editor.timeline.clip(id));
-                ui.monitor_drag = clip.map(|clip| (clip.id, clip.transform));
-                if let Some((id, _)) = ui.monitor_drag {
-                    editor.selected = Some(id);
+                let playhead = editor.playhead;
+                ui.monitor_drag = clip.map(|clip| (clip.clone(), clip.transform_at(playhead)));
+                if let Some((clip, _)) = &ui.monitor_drag {
+                    editor.selected = Some(clip.id);
                 }
             }
             Phase::Up => {
-                if let Some((id, before)) = ui.monitor_drag.take().filter(|_| drag.cancelled()) {
-                    editor.edit_clip_transform(id, |t| *t = before);
+                // A key the drag added or moved goes too.
+                if let Some((before, _)) = ui.monitor_drag.take().filter(|_| drag.cancelled())
+                    && let Some(clip) = editor.timeline.clip_mut(before.id)
+                {
+                    clip.transform = before.transform;
+                    clip.keyframes = before.keyframes;
                 }
             }
             _ => {
-                let Some((id, before)) = ui.monitor_drag else {
+                let Some((clip, before)) = &ui.monitor_drag else {
                     return;
                 };
+                let (id, before) = (clip.id, *before);
                 let along = |start: f64, travel: f32, size: f32| {
                     let moved = start * f64::from(size) + f64::from(travel);
                     if moved.abs() < f64::from(CENTRE_SNAP) {

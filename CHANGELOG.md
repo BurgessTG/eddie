@@ -67,6 +67,16 @@
   `eddie sheet` draws each picture moved, scaled and turned as export
   does, over the lanes it does not hide, and each cell lists them as
   `under`.
+- Keyframes for position, scale, rotation, opacity and volume. In
+  Details, the diamond beside each adds a key at the playhead or takes one
+  away; once a value has keys, changing it there, or dragging the picture
+  on the monitor, sets a key at the playhead. Values run in a straight
+  line from key to key, the same in preview and export, and keys stay on
+  their moment of the footage through trims, splits and speed changes.
+  Previous key and Next key move the playhead between them, and the
+  timeline marks them on the clip. Scripts use `setKeyframe`,
+  `removeKeyframe` and `clearKeyframes`, and `state()` gives each clip's
+  `keyframes`.
 
 ### Changed
 
@@ -85,6 +95,9 @@
   to show the whole list.
 - A title below full opacity now fades its box and outline in export and
   contact sheets too, as the monitor showed it; they stayed solid before.
+- Export now fills the corners around a turned picture with
+  transparency; it left them unpainted, so they could show leftover
+  pixels.
 
 ## 0.2.1 (2026-11-20)
 

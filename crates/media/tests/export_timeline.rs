@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 
 use openreel_engine::{
-    Background, ClipKind, Format, Timeline, TitleStyle, Transform, Transition, TransitionKind,
+    Background, ClipKind, Format, Property, Timeline, TitleStyle, Transform, Transition,
+    TransitionKind,
 };
 use openreel_media::{
     export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution, VideoDecoder,
@@ -1151,6 +1152,111 @@ fn blurred_background_fills_the_bars_with_the_picture() {
 }
 
 /// The quadrants as one 320x180 picture, written by FFmpeg as `name`.
+/// A 2 s quadrants picture on lane 0 over blue on lane 1, keyed by `keys`
+/// (property, clip time, value); the colours of frame `frame` (10 fps) at
+/// each point.
+fn keyed(
+    keys: &[(Property, f64, f64)],
+    sample: &[(usize, &[(usize, usize)])],
+) -> Vec<Vec<[u8; 3]>> {
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=10:d=3",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        None,
+    );
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &blue, 1, 0.0, 2.0, 0.0);
+    let id = video(&mut timeline, &source, 0, 0.0, 2.0, 0.0);
+    let clip = timeline.clip_mut(id).unwrap();
+    for &(property, at, value) in keys {
+        clip.keyframes.set(property, at, value);
+    }
+    let frames = frames(&fixture.export("keyed.mp4", &timeline));
+    sample
+        .iter()
+        .map(|&(frame, points)| colors_at(&frames[frame], 320, points))
+        .collect()
+}
+
+/// Scale from half to whole and position from a quarter left to a quarter
+/// right over the first second, then held: each frame between keys sits
+/// where the straight line between them puts it.
+#[test]
+fn keyed_scale_and_position_move_the_picture_between_keys() {
+    let got = keyed(
+        &[
+            (Property::Scale, 0.0, 0.5),
+            (Property::Scale, 1.0, 1.0),
+            (Property::X, 0.0, -0.25),
+            (Property::X, 1.0, 0.25),
+        ],
+        &[
+            // 160x90 centred at x 80: x 0-160, y 45-135.
+            (0, &[(40, 67), (120, 112), (240, 90)]),
+            // 0.5 s: 240x135 centred: x 40-280, y 22-157.
+            (5, &[(60, 40), (260, 140), (20, 90), (300, 90), (160, 10)]),
+            // Held after the last key: 320x180 centred at x 240.
+            (15, &[(100, 20), (300, 160), (40, 90)]),
+        ],
+    );
+    assert_colors("start", &got[0], &[TL, BR, BLUE]);
+    assert_colors("halfway", &got[1], &[TL, BR, BLUE, BLUE, BLUE]);
+    assert_colors("held", &got[2], &[TL, BR, BLUE]);
+}
+
+/// Rotation from 0 to 90 degrees over the first second: 45 degrees
+/// halfway turns the canvas corner off the picture, and the held quarter
+/// turn puts the top-left quadrant top right.
+#[test]
+fn keyed_rotation_turns_the_picture_between_keys() {
+    let got = keyed(
+        &[
+            (Property::Rotation, 0.0, 0.0),
+            (Property::Rotation, 1.0, 90.0),
+        ],
+        &[
+            (0, &[(5, 5), (315, 175)]),
+            // (5, 5) is 155 left and 85 up of the centre: at 45 degrees
+            // the picture's left edge passes 10 points inside it. The top
+            // left quadrant's (-40, -20) turns to (-14, -42).
+            (5, &[(5, 5), (146, 48)]),
+            // 320x180 turned a quarter: x 70-250.
+            (15, &[(200, 50), (120, 130), (30, 90)]),
+        ],
+    );
+    assert_colors("upright", &got[0], &[TL, BR]);
+    assert_colors("45 degrees", &got[1], &[BLUE, TL]);
+    assert_colors("turned", &got[2], &[TL, BR, BLUE]);
+}
+
+/// Opacity from 0 to 1 over the first second: each frame mixes the picture
+/// and the blue under it by the straight line's value at its time.
+#[test]
+fn keyed_opacity_fades_the_picture_between_keys() {
+    let points: &[(usize, usize)] = &[(80, 45)];
+    let got = keyed(
+        &[(Property::Opacity, 0.0, 0.0), (Property::Opacity, 1.0, 1.0)],
+        &[(2, points), (5, points), (8, points), (15, points)],
+    );
+    for (sample, a) in got.iter().zip([0.2_f64, 0.5, 0.8, 1.0]) {
+        let want: Vec<u8> = TL
+            .iter()
+            .zip(BLUE)
+            .map(|(&p, b)| (f64::from(p) * a + f64::from(b) * (1.0 - a)).round() as u8)
+            .collect();
+        let error = sample[0]
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(error <= 6, "opacity {a}: {:?}, want {want:?}", sample[0]);
+    }
+}
+
 fn quadrant_photo(fixture: &Fixture, name: &str) -> PathBuf {
     let path = fixture.0.join(name);
     run(Command::new("ffmpeg")
@@ -1819,6 +1925,7 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
                 duration: 2.0,
                 source_in: 0.0,
                 volume: 1.0,
+                volume_keys: Vec::new(),
                 fade_in: 1.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
@@ -1846,6 +1953,62 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
             (preview_mid - want).abs() < 0.02,
             "preview {preview_mid} vs {want}"
         );
+    }
+}
+
+/// Volume keys at 1.0 then 0.25 a second later: halfway the sound is at
+/// 0.625, and after the last key at 0.25, in preview and in export alike.
+#[test]
+fn keyed_volume_follows_its_keys_in_preview_and_export() {
+    let fixture = Fixture::new();
+    let source = fixture.color("tone.mp4", "black", Some(440));
+    let rms = |samples: &[f32], from: f64, to: f64| {
+        let part = &samples[(from * 48_000.0) as usize..(to * 48_000.0) as usize];
+        (part.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / part.len() as f64).sqrt()
+    };
+    let mut timeline = Timeline::new(30.0);
+    let id = video(&mut timeline, &source, 0, 0.0, 2.0, 0.0);
+    let clip = timeline.clip_mut(id).unwrap();
+    clip.keyframes.set(Property::Volume, 0.2, 1.0);
+    clip.keyframes.set(Property::Volume, 1.2, 0.25);
+    let keys = clip.keyframes.volume.clone();
+    let exported = audio_samples(&fixture.export("volume-keys.mp4", &timeline));
+
+    let mut engine = openreel_media::AudioEngine::manual();
+    engine.seek(0.0);
+    engine.set_limit(2.0);
+    engine.set_running(true);
+    engine.set_voices(&[(
+        id,
+        openreel_media::AudioSegment {
+            path: source.clone(),
+            start: 0.0,
+            duration: 2.0,
+            source_in: 0.0,
+            volume: 1.0,
+            volume_keys: keys,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            duck: Vec::new(),
+            clean_voice: false,
+            smooth_fades: false,
+            speed: 1.0,
+            crossfade: (0.0, 0.0),
+        },
+    )]);
+    let mut preview = Vec::new();
+    while preview.len() < 2 * 48_000 {
+        let block = engine.render(1024);
+        assert!(!block.is_empty(), "preview clock stopped");
+        preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
+    }
+    for (name, samples) in [("export", &exported), ("preview", &preview)] {
+        let full = rms(samples, 0.05, 0.15);
+        let halfway = rms(samples, 0.69, 0.71) / full;
+        let held = rms(samples, 1.5, 1.9) / full;
+        eprintln!("{name}: halfway {halfway:.3}, held {held:.3}");
+        assert!((halfway - 0.625).abs() < 0.02, "{name} halfway {halfway}");
+        assert!((held - 0.25).abs() < 0.01, "{name} held {held}");
     }
 }
 
@@ -1881,6 +2044,7 @@ fn sound_crossfades_under_a_transition_in_preview_and_export() {
                 duration: clip.duration,
                 source_in: clip.source_in,
                 volume: 1.0,
+                volume_keys: Vec::new(),
                 fade_in: 0.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
@@ -1999,6 +2163,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             duration: 3.0,
             source_in: 0.0,
             volume: 1.0,
+            volume_keys: Vec::new(),
             fade_in: 0.0,
             fade_out: 0.0,
             duck: Vec::new(),
@@ -2576,6 +2741,7 @@ fn speed_keeps_the_pitch_and_preview_matches_export() {
                 duration,
                 source_in,
                 volume: 1.0,
+                volume_keys: Vec::new(),
                 fade_in: 0.0,
                 fade_out: 0.0,
                 duck: Vec::new(),

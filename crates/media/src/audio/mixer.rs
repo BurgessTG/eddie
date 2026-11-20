@@ -23,6 +23,8 @@ pub(super) struct Voice {
     pub(super) volume: Arc<AtomicU32>,
     pub(super) fades: Arc<AtomicU64>,
     pub(super) duck: Arc<[(f64, f64)]>,
+    /// Volume keys on the clip's clock; they replace `volume` when present.
+    pub(super) volume_keys: Arc<[openreel_engine::Key]>,
     pub(super) smooth_fades: bool,
     /// Equal-power fades in and out under transitions, in samples.
     pub(super) crossfade: (u64, u64),
@@ -95,6 +97,7 @@ impl Voice {
         let (start, clip_end) = (self.start, self.end);
         // Shared, so pulling chunks below can borrow the voice mutably.
         let duck = Arc::clone(&self.duck);
+        let keys = Arc::clone(&self.volume_keys);
         // Ramps over the fitted fades; unity in between.
         let smooth = self.smooth_fades;
         let (cross_in, cross_out) = self.crossfade;
@@ -118,7 +121,10 @@ impl Voice {
             if !duck.is_empty() {
                 gain *= openreel_engine::duck_gain((at - start) as f64 / RATE, &duck);
             }
-            gain * volume
+            match openreel_engine::key_value(&keys, (at - start) as f64 / RATE) {
+                Some(keyed) => gain * keyed as f32,
+                None => gain * volume,
+            }
         };
         let end = (from + frames as u64).min(self.end);
         let mut at = from.max(self.start);
@@ -142,6 +148,7 @@ impl Voice {
                         && cross_in == 0
                         && cross_out == 0
                         && duck.is_empty()
+                        && keys.is_empty()
                     {
                         for (dst, src) in out[target..target + count]
                             .iter_mut()
@@ -180,6 +187,7 @@ pub(super) enum Command {
     Add(Box<Voice>),
     Remove(u64),
     Duck(u64, Arc<[(f64, f64)]>),
+    VolumeKeys(u64, Arc<[openreel_engine::Key]>),
 }
 
 pub(super) struct Shared {
@@ -250,6 +258,11 @@ impl Mixer {
                 Command::Duck(id, duck) => {
                     if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
                         voice.duck = duck;
+                    }
+                }
+                Command::VolumeKeys(id, keys) => {
+                    if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+                        voice.volume_keys = keys;
                     }
                 }
             }

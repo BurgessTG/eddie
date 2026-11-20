@@ -25,6 +25,7 @@ mod headless;
 pub mod history;
 mod incoming;
 pub mod inspect;
+pub mod keys;
 pub mod lanes;
 pub mod media;
 pub mod pictures;

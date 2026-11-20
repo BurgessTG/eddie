@@ -37,6 +37,7 @@ impl Editor {
                     "linkedClip": c.linked_clip,
                     "titleStyle": c.title_style.as_str(),
                     "transform": c.transform,
+                    "keyframes": c.keyframes,
                     "background": c.background.as_str(),
                     "color": c.color,
                     "text": c.text,

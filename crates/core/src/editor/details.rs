@@ -3,8 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, TextLook, Transform, Transition,
-    MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
+    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Property, TextLook, Transform,
+    Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
 };
 
 use super::Editor;
@@ -117,22 +117,20 @@ impl Editor {
     }
 
     /// The Opacity slider and its field: 0 is black, 1 the whole picture.
+    /// Once opacity has keys, this sets the key at the playhead.
     pub fn set_clip_opacity(&mut self, id: ClipId, opacity: f32) {
-        if !opacity.is_finite() {
-            return;
-        }
-        if let Some(clip) = self.timeline.clip_mut(id) {
-            clip.opacity = opacity.clamp(0.0, 1.0);
+        if opacity.is_finite() {
+            let value = openreel_engine::widen(opacity.clamp(0.0, 1.0));
+            self.write_property(id, Property::Opacity, value);
         }
     }
 
-    /// The Volume slider and its field: 1 is unity gain.
+    /// The Volume slider and its field: 1 is unity gain. Once volume has
+    /// keys, this sets the key at the playhead.
     pub fn set_clip_volume(&mut self, id: ClipId, volume: f32) {
-        if !volume.is_finite() {
-            return;
-        }
-        if let Some(clip) = self.timeline.clip_mut(id) {
-            clip.volume = volume.clamp(0.0, MAX_VOLUME);
+        if volume.is_finite() {
+            let value = openreel_engine::widen(volume.clamp(0.0, MAX_VOLUME));
+            self.write_property(id, Property::Volume, value);
         }
     }
 
@@ -152,30 +150,73 @@ impl Editor {
     /// The Transform card: change a video clip's place on the canvas, kept
     /// inside what preview and export draw. Scale stays 5-2000%, position
     /// within ten canvases, rotation 0-360 and each crop leaves 5% of the
-    /// picture.
+    /// picture. `edit` sees the transform at the playhead; a position,
+    /// scale or rotation with keys gets a key there when it changes, and
+    /// keyed rotation may turn past 360.
     pub fn edit_clip_transform(&mut self, id: ClipId, edit: impl FnOnce(&mut Transform)) {
         let Some(clip) = self
             .timeline
-            .clip_mut(id)
+            .clip(id)
             .filter(|clip| clip.kind == ClipKind::Video)
         else {
             return;
         };
-        let mut t = clip.transform;
+        let here = clip.transform_at(self.playhead);
+        let keys = clip.keyframes.clone();
+        let mut t = here;
         edit(&mut t);
         t.scale = t.scale.clamp(MIN_SCALE, MAX_SCALE);
         t.x = t.x.clamp(-10.0, 10.0);
         t.y = t.y.clamp(-10.0, 10.0);
-        t.rotation = t.rotation.rem_euclid(360.0);
+        t.rotation = if keys.rotation.is_empty() {
+            t.rotation.rem_euclid(360.0)
+        } else {
+            t.rotation.clamp(-MAX_ROTATION, MAX_ROTATION)
+        };
         // A hair under the limit, so the sum stays inside it after rounding.
         let most = |other: f64| (1.0 - MIN_CROP_KEEP - other - 1e-9).max(0.0);
         t.crop_left = t.crop_left.clamp(0.0, most(t.crop_right));
         t.crop_right = t.crop_right.clamp(0.0, most(t.crop_left));
         t.crop_top = t.crop_top.clamp(0.0, most(t.crop_bottom));
         t.crop_bottom = t.crop_bottom.clamp(0.0, most(t.crop_top));
-        if t.is_valid() {
-            clip.transform = t;
+        if !t.is_valid() {
+            return;
         }
+        let at = self.clip_time(id).unwrap_or(0.0);
+        let Some(clip) = self.timeline.clip_mut(id) else {
+            return;
+        };
+        let mut plain = t;
+        let moved = [
+            (Property::X, here.x, t.x, &mut plain.x, clip.transform.x),
+            (Property::Y, here.y, t.y, &mut plain.y, clip.transform.y),
+            (
+                Property::Scale,
+                here.scale,
+                t.scale,
+                &mut plain.scale,
+                clip.transform.scale,
+            ),
+            (
+                Property::Rotation,
+                here.rotation,
+                t.rotation,
+                &mut plain.rotation,
+                clip.transform.rotation,
+            ),
+        ];
+        for (property, before, after, field, kept) in moved {
+            if keys.keys(property).is_empty() {
+                continue;
+            }
+            // A keyed property keeps its plain value and changes by key,
+            // only when this edit changed it.
+            *field = kept;
+            if after != before {
+                clip.keyframes.set(property, at, after);
+            }
+        }
+        clip.transform = plain;
     }
 
     /// Fit and Fill: centre the picture, whole inside the canvas or

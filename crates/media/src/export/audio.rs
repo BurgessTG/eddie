@@ -118,6 +118,8 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
             *cross == Crossfade::default()
                 && last.source == clip.source
                 && last.volume == clip.volume
+                && last.keyframes.volume.is_empty()
+                && clip.keyframes.volume.is_empty()
                 && !last.duck
                 && !clip.duck
                 && last.clean_voice == clip.clean_voice
@@ -186,6 +188,24 @@ fn branch(
     } else {
         String::new()
     };
+    // Volume keys on clip-local time, as the preview mixer reads them per
+    // sample. Each 256-sample frame takes the curve's value at its middle,
+    // so along a straight step it carries the same energy.
+    let volume = if clip.keyframes.volume.is_empty() {
+        format!("volume={:.3}", clip.volume)
+    } else {
+        let middle = 128.0 / 48_000.0;
+        let keys: Vec<(f64, f64)> = clip
+            .keyframes
+            .volume
+            .iter()
+            .map(|key| (key.at - middle, key.value))
+            .collect();
+        format!(
+            "asetnsamples=n=256:p=0,volume=volume='{}':eval=frame",
+            super::animate::curve(&keys, "t")
+        )
+    };
     // The preview mixer's `duck_gain` on clip-local time: raised-cosine
     // ramps in decibels. Merged ranges never share a ramp, so their
     // amounts add. Short frames keep each step under 6 ms so the ramps
@@ -230,10 +250,9 @@ fn branch(
     };
     format!(
         "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{tempo}{cleanup},\
-         volume={:.3}{fades},adelay=delays={delay}S:all=1[{label}]",
+         {volume}{fades},adelay=delays={delay}S:all=1[{label}]",
         f(clip.source_in),
         f(source_end),
-        clip.volume,
     )
 }
 

@@ -43,6 +43,7 @@ impl Timeline {
         // Everything that shaped the embedded sound goes with it.
         if let Some(sound) = self.clip_mut(audio) {
             sound.volume = clip.volume;
+            sound.keyframes.volume = clip.keyframes.volume.clone();
             sound.fade_in = clip.fade_in;
             sound.fade_out = clip.fade_out;
             sound.smooth_fades = clip.smooth_fades;
@@ -57,6 +58,7 @@ impl Timeline {
             picture.smooth_fades = false;
             picture.clean_voice = false;
             picture.duck = false;
+            picture.keyframes.volume.clear();
         }
         self.link_pair(id, audio);
         Some(audio)

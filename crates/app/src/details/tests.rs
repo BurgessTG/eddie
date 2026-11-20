@@ -324,6 +324,11 @@ fn every_control_has_a_tooltip() {
                 "details-opacity",
                 "details-volume-slider",
                 "details-volume",
+                "details-key-opacity",
+                "details-key-volume",
+                "details-key-scale",
+                "details-key-position",
+                "details-key-rotation",
                 "details-embedded-audio",
                 "details-detach",
                 "details-remove-silence",
@@ -639,4 +644,37 @@ fn the_transition_card_shows_after_a_cut_and_sets_the_kind_and_length() {
     click(&mut rt, "details-transition-none");
     assert_eq!(transition(&rt), None);
     assert!(rt.find("details-transition-length").is_none());
+}
+
+#[test]
+fn key_buttons_and_fields_animate_a_clip_from_the_playhead() {
+    let (mut rt, id) = window(ClipKind::Video);
+    // The clip runs 2 s to 6 s; a key goes at the playhead.
+    rt.state.editor.playhead = 3.0;
+    rt.frame(FRAME);
+    click(&mut rt, "details-key-opacity");
+    assert_eq!(clip(&rt, id).keyframes.opacity.len(), 1);
+    assert_eq!(rt.state.editor.status, "Key added.");
+    // Once opacity has keys, a value typed at another moment is a key there.
+    rt.state.editor.playhead = 5.0;
+    rt.frame(FRAME);
+    click(&mut rt, "details-opacity");
+    rt.paste("30");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    let keys = &clip(&rt, id).keyframes.opacity;
+    assert_eq!((keys.len(), keys[1].at, keys[1].value), (2, 3.0, 0.3));
+    assert_eq!(clip(&rt, id).opacity, 1.0);
+    // Between them the field shows the value under the playhead.
+    rt.state.editor.playhead = 4.0;
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    assert_eq!(typed(&rt, Field::Opacity), "65%");
+    reveal(&mut rt, "details-previous-key");
+    click(&mut rt, "details-previous-key");
+    assert_eq!(rt.state.editor.playhead, 3.0);
+    // On a key the diamond takes it away.
+    reveal(&mut rt, "details-key-opacity");
+    click(&mut rt, "details-key-opacity");
+    assert_eq!(clip(&rt, id).keyframes.opacity.len(), 1);
 }
