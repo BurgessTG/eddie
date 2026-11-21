@@ -3,8 +3,8 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Property, TextLook, Transform,
-    Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
+    fill_scale, Background, BlendMode, ClipId, ClipKind, ColorAdjust, Property, TextLook,
+    Transform, Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
 };
 
 use super::Editor;
@@ -250,6 +250,17 @@ impl Editor {
             .filter(|clip| clip.kind == ClipKind::Video)
         {
             clip.background = background;
+        }
+    }
+
+    /// How a video clip's picture mixes with the lanes under it.
+    pub fn set_clip_blend(&mut self, id: ClipId, blend: BlendMode) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            clip.blend = blend;
         }
     }
 

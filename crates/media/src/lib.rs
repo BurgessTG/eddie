@@ -9,6 +9,7 @@
 mod audio;
 mod beats;
 mod cli;
+mod composite;
 mod decode;
 mod evidence;
 mod export;
@@ -31,6 +32,7 @@ pub use audio::{AudioEngine, AudioSegment, AUDIO_RATE};
 pub use beats::{beat_grid, BeatGrid};
 pub(crate) use cli::run;
 pub use cli::{ffmpeg, ffmpeg_available};
+pub use composite::{Canvas, Image, Layer};
 /// The decoder itself and its filmstrip, for the tests in `tests/`.
 #[doc(hidden)]
 pub use decode::{filmstrip_stills, VideoDecoder};

@@ -4,7 +4,7 @@ use eddie_core::editor::sweep::SweepData;
 use openreel_engine::{Clip, ClipKind, TitleStyle};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::styles::option_key;
+use super::styles::{blend_key, option_key};
 use super::*;
 use crate::app;
 
@@ -193,6 +193,10 @@ fn detach_links_a_sound_clip_and_unlink_frees_it() {
     assert!(!clip(&rt, id).embedded_audio);
     assert!(rt.find("details-detach").is_none());
     assert!(rt.find("details-linked").is_some());
+    // The buttons under the changed rows fade in.
+    for _ in 0..30 {
+        rt.frame(FRAME);
+    }
     click(&mut rt, "details-unlink");
     assert_eq!(clip(&rt, id).linked_clip, None);
     assert_eq!(clip(&rt, partner).linked_clip, None);
@@ -237,6 +241,24 @@ fn a_title_takes_its_text_as_typed_on_one_line_and_its_style_from_the_list() {
     click(&mut rt, &option_key(style));
     assert_eq!(clip(&rt, id).title_style, style);
     assert_eq!(rt.state.details.select, None);
+}
+
+#[test]
+fn a_pictures_blend_mode_comes_from_its_list() {
+    use openreel_engine::BlendMode;
+    let (mut rt, id) = window(ClipKind::Video);
+    assert_eq!(clip(&rt, id).blend, BlendMode::Normal);
+    click(&mut rt, "details-blend");
+    assert_eq!(rt.state.details.select, Some(Select::Blend));
+    for mode in BlendMode::ALL {
+        assert!(rt.find(&blend_key(mode)).is_some(), "{mode:?} is listed");
+    }
+    click(&mut rt, &blend_key(BlendMode::Screen));
+    assert_eq!(clip(&rt, id).blend, BlendMode::Screen);
+    assert_eq!(rt.state.details.select, None);
+    // A title has none.
+    let (rt, _) = window(ClipKind::Title);
+    assert!(rt.find("details-blend").is_none());
 }
 
 #[test]
@@ -322,6 +344,7 @@ fn every_control_has_a_tooltip() {
                 "details-speed",
                 "details-opacity-slider",
                 "details-opacity",
+                "details-blend",
                 "details-volume-slider",
                 "details-volume",
                 "details-key-opacity",

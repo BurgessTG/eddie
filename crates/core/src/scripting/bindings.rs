@@ -233,6 +233,16 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
         },
     )?;
     let q = api.queue();
+    api.set(
+        "__set_blend",
+        move |Whole(clip): Whole, name: CString<'_>| {
+            q.borrow_mut().push(name.len(), || ScriptCommand::SetBlend {
+                clip,
+                name: name.as_str().to_owned(),
+            })
+        },
+    )?;
+    let q = api.queue();
     api.set("setVolume", move |Whole(clip): Whole, value: f32| {
         q.borrow_mut()
             .push(0, || ScriptCommand::SetVolume { clip, value })

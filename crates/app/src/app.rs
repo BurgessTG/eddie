@@ -33,6 +33,8 @@ pub struct Ui {
     handle: Option<AppHandle<Ui>>,
     /// The pictures the program monitor holds, one pair per video lane.
     pub pictures: monitor::Pictures,
+    /// The lanes under a blended picture at the playhead, laid as one.
+    pub composite: monitor::Composite,
     /// The clip whose picture a drag on the monitor moves, as it was, and
     /// where its picture was at the playhead.
     pub monitor_drag: Option<(Clip, Transform)>,
@@ -150,6 +152,7 @@ impl Ui {
             handle,
             pictures,
             monitor_drag: None,
+            composite: monitor::Composite::default(),
             title_drag: None,
             thumbs: HashMap::new(),
             menu: None,
@@ -223,6 +226,7 @@ impl Ui {
             let incoming = layer.transition.and_then(|span| timeline.clip(span.to));
             slots.incoming.want(monitor::look(incoming));
         }
+        monitor::compose(self);
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported

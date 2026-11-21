@@ -12,9 +12,11 @@ use crate::gallery;
 use crate::icons::{self, Transport};
 use crate::theme::{self, c};
 
+mod blend;
 mod picture;
 mod title;
 mod transition;
+pub use blend::{Composite, compose};
 pub use picture::{Pictures, Sink, look};
 pub(crate) use transition::layers as transition_layers;
 
@@ -160,10 +162,16 @@ pub(crate) fn lane_key(lane: usize) -> String {
 /// The pictures of `layers` (bottom first) that the monitor holds, each
 /// over the ones before it. A mix or dip passes between whole frames, so
 /// each of its sides carries the lanes under it, and they are not drawn
-/// again on their own.
+/// again on their own. Lanes under a blended picture come laid as one.
 fn lanes(ui: &Ui, layers: &[ProgramLayer], canvas: (u32, u32), size: (f32, f32)) -> Vec<El> {
     let editor = &ui.editor;
     let mut drawn = Vec::new();
+    // Up to a blended picture, the lanes are one picture laid on the CPU.
+    let mut layers = layers;
+    if let Some((laid, holds)) = blend::view(ui, layers, size) {
+        drawn.push(laid);
+        layers = &layers[holds..];
+    }
     for layer in layers {
         let slots = ui.pictures.lane(layer.lane);
         let (Some(clip), Some(decoded)) = (

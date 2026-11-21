@@ -78,6 +78,11 @@ pub enum ScriptCommand {
         clip: u64,
         name: String,
     },
+    /// `name` is a blend mode, such as `screen`.
+    SetBlend {
+        clip: u64,
+        name: String,
+    },
     /// `changes` is a JSON object of `ColorAdjust` fields to change, or
     /// `null` to reset.
     SetColor {
@@ -208,6 +213,7 @@ impl ScriptCommand {
             | Self::ClearKeyframes { clip, .. }
             | Self::SetTransform { clip, .. }
             | Self::SetBackground { clip, .. }
+            | Self::SetBlend { clip, .. }
             | Self::SetColor { clip, .. }
             | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
@@ -314,6 +320,7 @@ impl ScriptCommand {
             | Self::SetTransform { .. }
             | Self::ClearKeyframes { .. }
             | Self::SetBackground { .. }
+            | Self::SetBlend { .. }
             | Self::SetColor { .. }
             | Self::SetText { .. }
             | Self::SetFormat(_)

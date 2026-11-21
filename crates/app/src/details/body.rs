@@ -167,7 +167,15 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
                 "opacity",
             ));
         }
-        look.push(if has_sound { row } else { last_slider(row) });
+        // A picture's Blend list, a shorter row, comes next.
+        look.push(if has_sound && !video {
+            row
+        } else {
+            last_slider(row)
+        });
+        if video {
+            look.push(blend(ui, clip));
+        }
     }
     if has_sound {
         let row = slider_row(
@@ -192,6 +200,27 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
         look.push(if is_audio { row } else { last_slider(row) });
     }
     look
+}
+
+/// How a picture mixes with the lanes under it.
+fn blend(ui: &Ui, clip: &Clip) -> El {
+    let help =
+        "How the picture mixes with the lanes under it: Screen drops black, Multiply drops white";
+    prop_row(
+        "Blend",
+        help,
+        select(
+            "details-blend",
+            clip.blend.label(),
+            help,
+            Select::Blend,
+            ui.details.select == Some(Select::Blend),
+        )
+        .grow(1.0)
+        .min_w(0.0),
+    )
+    .h(FIELD_H + 1.0)
+    .pb(1.0)
 }
 
 /// An audio clip's fades and the switches that shape its sound.

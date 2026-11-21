@@ -7,8 +7,9 @@ use std::io::{Read, Write};
 use std::process::Stdio;
 use std::thread;
 
-use openreel_engine::Placement;
+use openreel_engine::{BlendMode, Placement};
 
+use crate::composite::{Canvas, Layer};
 use crate::export::{filter_value, font_file};
 use crate::{scaled_height, MediaResult, RawFrame, TitleLook, VideoDecoder};
 
@@ -22,9 +23,6 @@ const STRIP_QUALITY: u32 = 7;
 /// Decoders a sheet keeps open, so cells that go back and forth between a
 /// picture and the one under it do not reopen either.
 const OPEN_DECODERS: usize = 4;
-/// The blurred background's spread, as a share of the frame's width: the
-/// monitor's sigma.
-const BLUR_SHARE: f64 = 0.021;
 
 /// One cell: the pictures shown at a program time, as preview and export
 /// compose them, and the label drawn under it.
@@ -48,6 +46,8 @@ pub struct SheetLayer {
     pub opacity: f32,
     /// Drawn over a blurred copy of itself that fills the canvas.
     pub blur: bool,
+    /// How it mixes with the pictures under it.
+    pub blend: BlendMode,
 }
 
 impl SheetLayer {
@@ -59,6 +59,7 @@ impl SheetLayer {
             placement: None,
             opacity: 1.0,
             blur: false,
+            blend: BlendMode::Normal,
         }
     }
 }
@@ -105,21 +106,25 @@ fn render(
     let mut decoders = Decoders::default();
     let size = (f64::from(canvas.0), f64::from(canvas.1));
     for (index, cell) in cells.iter().enumerate() {
-        grid.black(&mut sheet, index);
+        let mut picture = Canvas::new(grid.cell_w, grid.cell_h, size);
         for layer in &cell.layers {
             let drawn = match layer.placement {
                 None => decoders
                     .fitted(&layer.path, layer.time, &grid)
-                    .map(|frame| grid.paint(&mut sheet, index, &frame, layer.opacity)),
+                    .map(|frame| fit(&mut picture, &frame, layer.opacity)),
                 Some((placement, source)) => decoders
                     .placed(layer, &placement, source, &grid, size)
                     .map(|frame| {
-                        let picture = Picture {
-                            frame: &frame,
-                            placement: &placement,
+                        picture.draw(&Layer {
+                            image: (&frame).into(),
                             source,
-                        };
-                        grid.layer(&mut sheet, index, &picture, layer, size);
+                            placement,
+                            opacity: layer.opacity,
+                            blur: layer.blur,
+                            blend: layer.blend,
+                            shift: [0.0, 0.0],
+                            window: None,
+                        })
                     }),
             };
             if drawn.is_err() {
@@ -127,6 +132,7 @@ fn render(
                 break;
             }
         }
+        grid.put(&mut sheet, index, &picture);
     }
     let filters = text_filters(cells, &labels, &grid, canvas);
     encode(sheet, &grid, &filters, quality)
@@ -164,214 +170,34 @@ impl Grid {
         )
     }
 
-    /// Fill cell `index` with black, what a cell without a picture shows.
-    fn black(&self, sheet: &mut [u8], index: usize) {
+    /// Copy cell `index`'s picture onto the sheet.
+    fn put(&self, sheet: &mut [u8], index: usize, picture: &Canvas) {
         let (x0, y0) = self.origin(index);
-        for row in 0..self.cell_h {
+        let line = self.cell_w * 4;
+        for (row, src) in picture.rgba.chunks_exact(line).enumerate() {
             let start = ((y0 + row) * self.width + x0) * 4;
-            for pixel in sheet[start..start + self.cell_w * 4].as_chunks_mut::<4>().0 {
-                pixel.copy_from_slice(&[0, 0, 0, 255]);
-            }
-        }
-    }
-
-    /// Centre `frame` in cell `index`, faded against black by `opacity`.
-    fn paint(&self, sheet: &mut [u8], index: usize, frame: &RawFrame, opacity: f32) {
-        let (x0, y0) = self.origin(index);
-        let (cell_w, cell_h) = (self.cell_w, self.cell_h);
-        let (w, h) = (frame.width as usize, frame.height as usize);
-        let (dx, dy) = (x0 + (cell_w - w) / 2, y0 + (cell_h - h.min(cell_h)) / 2);
-        let gain = opacity.clamp(0.0, 1.0);
-        for row in 0..h.min(cell_h) {
-            let src = &frame.rgba[row * w * 4..(row + 1) * w * 4];
-            let start = ((dy + row) * self.width + dx) * 4;
-            for (dst, src) in sheet[start..start + w * 4]
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(src.as_chunks::<4>().0)
-            {
-                for channel in 0..3 {
-                    dst[channel] = (f32::from(src[channel]) * gain).round() as u8;
-                }
-            }
+            sheet[start..start + line].copy_from_slice(src);
         }
     }
 }
 
-/// A decoded picture, the whole of a `source` sized file, and where it
-/// lands on the canvas.
-struct Picture<'a> {
-    frame: &'a RawFrame,
-    placement: &'a Placement,
-    source: (f64, f64),
-}
-
-impl Grid {
-    /// Draw `layer` over cell `index` where its placement puts it on a
-    /// `canvas` sized frame, over its blurred copy when it has one.
-    fn layer(
-        &self,
-        sheet: &mut [u8],
-        index: usize,
-        picture: &Picture,
-        layer: &SheetLayer,
-        canvas: (f64, f64),
-    ) {
-        let (x0, y0) = self.origin(index);
-        let at = |row: usize, col: usize| ((y0 + row) * self.width + x0 + col) * 4;
-        if layer.blur && !picture.placement.covers(canvas) {
-            let (sw, sh) = picture.source;
-            let k = (canvas.0 / sw).max(canvas.1 / sh);
-            let fill = Placement {
-                crop: [0.0, 0.0, sw, sh],
-                size: [sw * k, sh * k],
-                center: [canvas.0 / 2.0, canvas.1 / 2.0],
-                rotation: 0.0,
-                ..*picture.placement
-            };
-            let fill = Picture {
-                placement: &fill,
-                ..*picture
-            };
-            let mut background = vec![0_u8; self.cell_w * self.cell_h * 4];
-            self.sample(&fill, canvas, |row, col, rgba, alpha| {
-                let i = (row * self.cell_w + col) * 4;
-                for channel in 0..3 {
-                    background[i + channel] = (rgba[channel] * alpha).round() as u8;
-                }
-            });
-            let radius = (1.22 * BLUR_SHARE * self.cell_w as f64).round() as usize;
-            box_blur(&mut background, self.cell_w, self.cell_h, radius);
-            let gain = layer.opacity.clamp(0.0, 1.0);
-            for row in 0..self.cell_h {
-                for col in 0..self.cell_w {
-                    let (i, j) = (at(row, col), (row * self.cell_w + col) * 4);
-                    for channel in 0..3 {
-                        let (under, over) = (
-                            f32::from(sheet[i + channel]),
-                            f32::from(background[j + channel]),
-                        );
-                        sheet[i + channel] = (under + (over - under) * gain).round() as u8;
-                    }
-                }
-            }
-        }
-        let gain = layer.opacity.clamp(0.0, 1.0);
-        self.sample(picture, canvas, |row, col, rgba, alpha| {
-            let i = at(row, col);
-            let alpha = alpha * gain;
-            for channel in 0..3 {
-                let under = f32::from(sheet[i + channel]);
-                sheet[i + channel] = (under + (rgba[channel] - under) * alpha).round() as u8;
-            }
-        });
-    }
-
-    /// Call `put(row, col, rgba, alpha)` for each pixel of a cell that
-    /// `picture` covers on a `canvas` sized frame, with the picture's
-    /// colour there (bilinear) and its own alpha from 0 to 1.
-    fn sample(
-        &self,
-        picture: &Picture,
-        canvas: (f64, f64),
-        mut put: impl FnMut(usize, usize, [f32; 4], f32),
-    ) {
-        let p = picture.placement;
-        let frame = picture.frame;
-        let (sin, cos) = (-p.rotation.to_radians()).sin_cos();
-        let (kx, ky) = (canvas.0 / self.cell_w as f64, canvas.1 / self.cell_h as f64);
-        let (fx, fy) = (
-            f64::from(frame.width) / picture.source.0,
-            f64::from(frame.height) / picture.source.1,
-        );
-        let [crop_x, crop_y, crop_w, crop_h] = p.crop;
-        for row in 0..self.cell_h {
-            for col in 0..self.cell_w {
-                let dx = (col as f64 + 0.5) * kx - p.center[0];
-                let dy = (row as f64 + 0.5) * ky - p.center[1];
-                let (u, v) = (
-                    (dx * cos - dy * sin) / p.size[0] + 0.5,
-                    (dx * sin + dy * cos) / p.size[1] + 0.5,
-                );
-                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-                    continue;
-                }
-                // The crop is of the unflipped source; the flip mirrors it.
-                let u = if p.flip_h { 1.0 - u } else { u };
-                let v = if p.flip_v { 1.0 - v } else { v };
-                let rgba = bilinear(
-                    frame,
-                    (crop_x + u * crop_w) * fx,
-                    (crop_y + v * crop_h) * fy,
-                );
-                put(row, col, rgba, rgba[3] / 255.0);
-            }
-        }
-    }
-}
-
-/// `frame`'s colour at pixel position `(x, y)`, pixel centres at halves.
-fn bilinear(frame: &RawFrame, x: f64, y: f64) -> [f32; 4] {
+/// Centre `frame` on `picture`, faded against black by `opacity`.
+fn fit(picture: &mut Canvas, frame: &RawFrame, opacity: f32) {
+    let (cell_w, cell_h) = (picture.width, picture.height);
     let (w, h) = (frame.width as usize, frame.height as usize);
-    let x = (x - 0.5).clamp(0.0, (w - 1) as f64);
-    let y = (y - 0.5).clamp(0.0, (h - 1) as f64);
-    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
-    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-    let (tx, ty) = ((x - x0 as f64) as f32, (y - y0 as f64) as f32);
-    let at = |x: usize, y: usize, channel: usize| f32::from(frame.rgba[(y * w + x) * 4 + channel]);
-    let mut rgba = [0.0; 4];
-    for (channel, value) in rgba.iter_mut().enumerate() {
-        let top = at(x0, y0, channel) + (at(x1, y0, channel) - at(x0, y0, channel)) * tx;
-        let bottom = at(x0, y1, channel) + (at(x1, y1, channel) - at(x0, y1, channel)) * tx;
-        *value = top + (bottom - top) * ty;
-    }
-    rgba
-}
-
-/// Blur a `w` by `h` RGBA picture with two box passes each way, about a
-/// Gaussian of sigma `radius / 1.22`. Edges average what is inside.
-fn box_blur(pixels: &mut [u8], w: usize, h: usize, radius: usize) {
-    if radius == 0 {
-        return;
-    }
-    for _ in 0..2 {
-        blur_lines(pixels, (w, 4), (h, w * 4), radius);
-        blur_lines(pixels, (h, w * 4), (w, 4), radius);
-    }
-}
-
-/// Box-blur `lines` lines of `len` pixels each, `step` bytes apart along a
-/// line and `stride` bytes between lines.
-fn blur_lines(
-    pixels: &mut [u8],
-    (len, step): (usize, usize),
-    (lines, stride): (usize, usize),
-    radius: usize,
-) {
-    let mut line = vec![[0.0_f32; 3]; len];
-    for index in 0..lines {
-        let base = index * stride;
-        for (i, value) in line.iter_mut().enumerate() {
-            let o = base + i * step;
-            *value = [
-                f32::from(pixels[o]),
-                f32::from(pixels[o + 1]),
-                f32::from(pixels[o + 2]),
-            ];
-        }
-        for i in 0..len {
-            let (first, last) = (i.saturating_sub(radius), (i + radius).min(len - 1));
-            let mut sum = [0.0_f32; 3];
-            for value in &line[first..=last] {
-                for channel in 0..3 {
-                    sum[channel] += value[channel];
-                }
-            }
-            let n = (last - first + 1) as f32;
-            let o = base + i * step;
+    let (dx, dy) = ((cell_w - w) / 2, (cell_h - h.min(cell_h)) / 2);
+    let gain = opacity.clamp(0.0, 1.0);
+    for row in 0..h.min(cell_h) {
+        let src = &frame.rgba[row * w * 4..(row + 1) * w * 4];
+        let start = ((dy + row) * cell_w + dx) * 4;
+        for (dst, src) in picture.rgba[start..start + w * 4]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src.as_chunks::<4>().0)
+        {
             for channel in 0..3 {
-                pixels[o + channel] = (sum[channel] / n).round() as u8;
+                dst[channel] = (f32::from(src[channel]) * gain).round() as u8;
             }
         }
     }

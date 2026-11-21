@@ -1,4 +1,4 @@
-use openreel_engine::{ClipKind, Property};
+use openreel_engine::{BlendMode, ClipKind, Property};
 use rune::{Key, Runtime};
 
 use crate::app::Ui;
@@ -163,6 +163,20 @@ impl Footage {
 
     fn path(&self) -> String {
         self.0.join("wide.mp4").to_string_lossy().into_owned()
+    }
+
+    /// Another 2 s 320x180 clip, all `color`.
+    fn color(&self, name: &str, color: &str) -> String {
+        let path = self.0.join(name);
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("color=c={color}:s=320x180:r=30:d=2"))
+            .args(["-c:v", "libx264", "-threads:v", "1", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .output()
+            .expect("generate footage");
+        assert!(output.status.success());
+        path.to_string_lossy().into_owned()
     }
 }
 
@@ -360,6 +374,69 @@ fn a_picture_in_picture_shows_over_the_lane_under_it() {
     let editor = &rt.state.editor;
     assert_eq!(editor.picture_at((240.0, 45.0)), Some(inset));
     assert_eq!(editor.picture_at((80.0, 135.0)), Some(base));
+}
+
+/// Blue screened over red in the top-right quarter: the monitor lays both
+/// lanes as one picture, magenta where they meet as export mixes them, and
+/// draws the lanes on their own again once the blend is normal.
+#[test]
+fn a_blended_picture_mixes_with_the_lane_under_it_on_the_monitor() {
+    let footage = Footage::new();
+    let red = footage.path();
+    let blue = footage.color("blue.mp4", "blue");
+    let mut ui = Ui::headless();
+    ui.editor
+        .spawn_import(vec![red.clone().into(), blue.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the imports", |ui| {
+        ui.editor.asset(&blue).is_some()
+            && ui.editor.asset(&red).is_some()
+            && !ui.editor.importing()
+    });
+    let editor = &mut rt.state.editor;
+    editor.timeline.lanes.video = 2;
+    editor
+        .timeline
+        .add_media_clip("Base", ClipKind::Video, 1, 0.0, 2.0, 0.0, &red);
+    let top = editor
+        .timeline
+        .add_media_clip("Light", ClipKind::Video, 0, 0.0, 2.0, 0.0, &blue);
+    editor.edit_clip_transform(top, |t| {
+        t.scale = 0.5;
+        t.x = 0.25;
+        t.y = -0.25;
+    });
+    editor.set_clip_blend(top, BlendMode::Screen);
+    editor.playhead = 0.5;
+    until(&mut rt, "both pictures", |ui| {
+        ui.editor.program_layers().len() == 2 && ui.editor.preview_is_current()
+    });
+    assert!(shown(&rt, "monitor-blended"), "the lanes are laid as one");
+    assert!(!shown(&rt, "monitor-lane0-placed"));
+    assert!(!shown(&rt, "monitor-lane1-placed"));
+    let laid = super::blend::laid(&rt.state).expect("a laid picture");
+    assert_eq!(
+        (laid.width, laid.height),
+        (320, 180),
+        "the canvas's own size"
+    );
+    let at = |x: usize, y: usize| {
+        let i = (y * laid.width + x) * 4;
+        [laid.rgba[i], laid.rgba[i + 1], laid.rgba[i + 2]]
+    };
+    let [r, g, b] = at(240, 45);
+    assert!(r > 230 && g < 30 && b > 230, "screened: {:?}", [r, g, b]);
+    let [r, g, b] = at(80, 135);
+    assert!(
+        r > 230 && g < 30 && b < 30,
+        "the red around it: {:?}",
+        [r, g, b]
+    );
+
+    rt.state.editor.set_clip_blend(top, BlendMode::Normal);
+    frames(&mut rt, 2);
+    assert!(!shown(&rt, "monitor-blended"));
+    assert!(shown(&rt, "monitor-lane0-placed") && shown(&rt, "monitor-lane1-placed"));
 }
 
 #[test]

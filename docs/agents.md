@@ -190,8 +190,8 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, speed, photo, freeze, text, transition,
-  keyframes`. A clip shows
+  transform, background, color, blend, speed, photo, freeze, text,
+  transition, keyframes`. A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
@@ -344,6 +344,15 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     from each edge, before any flip.
   - `setBackground(id, 'blur')` fills the canvas around the picture with
     a blurred, enlarged copy of it; `'black'` is the default.
+- **Blend modes:** `setBlend(id, mode)` mixes a video clip's picture
+  with what the lanes under it show, as photo editors do: `normal` (the
+  default), `darken`, `multiply`, `color-burn`, `linear-burn`, `lighten`,
+  `screen`, `color-dodge`, `add`, `overlay`, `soft-light`, `hard-light`,
+  `difference` or `exclusion`. Opacity then mixes the result with the
+  lanes under it.
+  - A blended picture never hides the lanes under it. Over nothing it
+    blends with black, which `inspect()` reports.
+  - Inside a transition both sides draw without their blend modes.
 - **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
   `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
   `volume` on video or audio, in the units of `setTransform`,
@@ -426,9 +435,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   of that kind.
 - Video lanes stack: lane 0 draws on top, and each lane draws over the
   lanes with higher numbers. A picture hides everything under it only
-  when it is fully opaque, has no transparency of its own (a PNG with an
-  alpha channel shows through), and covers the canvas or has a `'blur'`
-  background. Anything else shows the lanes under it: a clip below full
+  when it is fully opaque, blends `normal`, has no transparency of its
+  own (a PNG with an alpha channel shows through), and covers the canvas
+  or has a `'blur'` background. Anything else shows the lanes under it: a clip below full
   opacity shows them through it, and around a picture made smaller with
   `setTransform` they show where its black background would be.
 - For picture-in-picture, put the inset on a lane above the base and
@@ -515,6 +524,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - clips that the lanes above always cover;
   - transitions that play shorter than set, have no clip before them, or
     run past a file's pictures.
+  - blended pictures with no picture under them.
 - `state()` doesn't show what the edit looks like. Before calling an edit
   done, open a `sheet` and compare each cell with what you meant to place
   there. Past 16 shots, sheet the timeline in ranges.

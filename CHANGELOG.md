@@ -77,6 +77,12 @@
   timeline marks them on the clip. Scripts use `setKeyframe`,
   `removeKeyframe` and `clearKeyframes`, and `state()` gives each clip's
   `keyframes`.
+- Blend modes for a picture over other lanes: Darken, Multiply, Colour
+  burn, Linear burn, Lighten, Screen, Colour dodge, Add, Overlay, Soft
+  light, Hard light, Difference and Exclusion, picked under Opacity in
+  Details. The monitor, export and `eddie sheet` mix the same colours.
+  Scripts use `setBlend`, `state()` gives each clip's `blend`, and
+  `inspect()` reports a blended picture with nothing under it.
 
 ### Changed
 

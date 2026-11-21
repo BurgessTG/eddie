@@ -1,8 +1,9 @@
 //! Video lanes in layers. Every video lane draws over the lanes under it
 //! (higher numbers, lower on the timeline), lane 0 on top, so a picture
 //! moved, scaled down or faded over another shows the other around or
-//! through it. A lane hides the lanes under it only where its picture is
-//! opaque and fills the canvas ([`hides_below`]).
+//! through it, and one with a blend mode mixes with them. A lane hides the
+//! lanes under it only where its picture is opaque, fills the canvas and
+//! blends normally ([`hides_below`]).
 
 use crate::{place, Background, Clip, ClipKind, Timeline, TransitionSpan};
 
@@ -21,10 +22,11 @@ pub struct LanePicture<'a> {
 /// Whether `clip`'s picture hides everything under it: fully opaque, from
 /// a file with no `alpha`, and filling a `canvas` sized frame (its file
 /// `source` sized) or drawn over its own blurred copy, which does. A
-/// picture whose keys move or fade it may uncover the lanes under it, so it
-/// never hides them.
+/// picture whose keys move or fade it may uncover the lanes under it, and
+/// one with a blend mode mixes with them, so neither hides them.
 pub fn hides_below(clip: &Clip, canvas: (f64, f64), source: (f64, f64), alpha: bool) -> bool {
     clip.opacity >= 1.0
+        && clip.blend.is_normal()
         && !clip.keyframes.moves_picture()
         && !alpha
         && (clip.background == Background::Blur

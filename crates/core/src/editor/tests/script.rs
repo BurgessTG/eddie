@@ -507,6 +507,17 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
         app.timeline.clip(video).unwrap().background,
         openreel_engine::Background::Blur
     );
+    run(&mut app, &format!("setBlend({video}, 'Soft light')")).unwrap();
+    let read = run(
+        &mut app,
+        &format!("return state().clips.find(c => c.id == {video}).blend"),
+    )
+    .unwrap();
+    assert_eq!(read, "soft-light");
+    assert_eq!(
+        app.timeline.clip(video).unwrap().blend,
+        openreel_engine::BlendMode::SoftLight
+    );
 
     // Refused whole: nothing before the failing command stays applied,
     // the format included.
@@ -530,6 +541,8 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
             "needs a video clip",
         ),
         (format!("setBackground({video}, 'pink')"), "black or blur"),
+        (format!("setBlend({video}, 'glow')"), "use normal, darken"),
+        (format!("setBlend({song}, 'screen')"), "needs a video clip"),
         ("setFormat('3:2')".to_owned(), "unknown format"),
     ] {
         let error = run(&mut app, &code).unwrap_err();

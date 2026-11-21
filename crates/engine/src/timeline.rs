@@ -335,6 +335,7 @@ impl Timeline {
             freeze: false,
             transition: None,
             keyframes: crate::Keyframes::default(),
+            blend: crate::BlendMode::Normal,
         });
         id
     }

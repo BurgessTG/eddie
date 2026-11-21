@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use eddie_core::PreviewSink;
 use openreel_engine::{Background, Clip, ColorAdjust, Transform, place};
@@ -47,7 +48,8 @@ pub struct Picture {
     want: Look,
     shown: Look,
     width: u32,
-    rgba: Vec<u8>,
+    /// Shared with the blend worker while it lays the frame.
+    rgba: Arc<Vec<u8>>,
     /// Counts decoded frames, so a reader can tell a new one arrived.
     frame: u64,
 }
@@ -67,6 +69,12 @@ impl Picture {
     /// pixels and number.
     pub fn upright(&self) -> (u32, &[u8], u64) {
         (self.width, &self.rgba, self.frame)
+    }
+
+    /// The held frame as [`Self::upright`] gives it, shared rather than
+    /// copied.
+    pub fn shared(&self) -> (u32, Arc<Vec<u8>>) {
+        (self.width, Arc::clone(&self.rgba))
     }
 
     fn show(&mut self, pixels: &Pixels) {
@@ -120,8 +128,14 @@ impl Slot {
     fn show(&self, frame: &RawFrame) {
         let mut picture = self.picture.borrow_mut();
         picture.width = frame.width;
-        picture.rgba.clear();
-        picture.rgba.extend_from_slice(&frame.rgba);
+        match Arc::get_mut(&mut picture.rgba) {
+            Some(rgba) => {
+                rgba.clear();
+                rgba.extend_from_slice(&frame.rgba);
+            }
+            // The blend worker still lays the last one.
+            None => picture.rgba = Arc::new(frame.rgba.clone()),
+        }
         picture.frame += 1;
         picture.show(&self.pixels);
         self.size.set(Some((frame.width, frame.height)));

@@ -597,6 +597,17 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
             rotation: 90.0,
             ..Transform::default()
         }),
+        // Blue screened over red, in the top-right quarter: magenta there.
+        {
+            let mut cell = layered(Transform {
+                scale: 0.5,
+                x: 0.25,
+                y: -0.25,
+                ..Transform::default()
+            });
+            cell.layers[1].blend = openreel_engine::BlendMode::Screen;
+            cell
+        },
     ];
     let jpeg = contact_sheet(&cells, (1920, 1080)).expect("contact sheet");
     let sheet = fixture.dir.join("sheet.jpg");
@@ -641,6 +652,12 @@ fn contact_sheet_shows_each_cells_picture_opacity_and_title() {
     assert_color(at(5, 0.45, 0.25), 0, "the base left of it");
     assert_color(at(6, 0.5, 0.1), 2, "the turned picture's top");
     assert_color(at(6, 0.3, 0.5), 0, "the base beside it");
+    let screened = at(7, 0.75, 0.25);
+    assert!(
+        screened.0 > 220.0 && screened.1 < 40.0 && screened.2 > 220.0,
+        "blue screened over red: {screened:?}"
+    );
+    assert_color(at(7, 0.25, 0.75), 0, "the base around the screened picture");
 }
 
 /// A source strip is the same grid at 192 px, eight to a row, so many

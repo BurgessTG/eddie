@@ -433,7 +433,8 @@ impl<'a> Inspection<'a> {
     }
 
     /// Video that the opaque, frame-filling pictures of the lanes above
-    /// cover for its whole length ([`Timeline::video_stack`]).
+    /// cover for its whole length ([`Timeline::video_stack`]), and blended
+    /// pictures that never have one under them.
     fn hidden_clips(&mut self) {
         let timeline = self.timeline;
         let spans = timeline.transitions();
@@ -456,11 +457,38 @@ impl<'a> Inspection<'a> {
         edges.sort_by(f64::total_cmp);
         edges.dedup();
         let mut shown = HashSet::new();
+        // Blended clips with a picture under them somewhere.
+        let mut over = HashSet::new();
         for pair in edges.windows(2) {
             let middle = (pair[0] + pair[1]) / 2.0;
-            for picture in timeline.video_stack(&spans, middle, &hides) {
+            let stack = timeline.video_stack(&spans, middle, &hides);
+            for (index, picture) in stack.iter().enumerate() {
                 shown.insert(picture.clip.id);
                 shown.extend(picture.transition.map(|span| span.to));
+                if index > 0 {
+                    over.insert(picture.clip.id);
+                }
+            }
+        }
+        for clip in &timeline.clips {
+            if clip.kind == ClipKind::Video
+                && !clip.blend.is_normal()
+                && shown.contains(&clip.id)
+                && !over.contains(&clip.id)
+            {
+                self.report(
+                    "blend-over-black",
+                    "warning",
+                    format!(
+                        "Clip {} blends ({}) with black: no lane under it shows a picture, \
+                         so the blend mode has nothing to mix with.",
+                        clip.id,
+                        clip.blend.as_str()
+                    ),
+                    vec![clip.id],
+                    clip.start,
+                    clip.end(),
+                );
             }
         }
         for clip in &timeline.clips {

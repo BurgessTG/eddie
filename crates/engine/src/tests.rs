@@ -1251,6 +1251,10 @@ fn lanes_stack_and_only_an_opaque_picture_filling_the_frame_hides_those_under_it
     // Over its own blurred copy a small picture fills the frame again.
     tl.clip_mut(top).unwrap().background = Background::Blur;
     assert_eq!(stack(&tl, 3.0), vec![top]);
+    // Unless it blends: then it mixes with what is under it.
+    tl.clip_mut(top).unwrap().blend = BlendMode::Screen;
+    assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
+    tl.clip_mut(top).unwrap().blend = BlendMode::Normal;
     // A file with transparency never hides what is under it.
     let pillarboxed = (1080.0, 1920.0);
     let middle_clip = tl.clip(middle).unwrap().clone();
@@ -1442,4 +1446,55 @@ fn keys_stay_on_their_moment_of_the_content_through_edits() {
     for at in [2.5, 3.0, 3.7, 5.0] {
         assert_eq!(early.sounding(cross).volume_at(at), early.volume_at(at));
     }
+}
+
+#[test]
+fn blend_modes_follow_the_w3c_formulas_with_the_lanes_under_deciding_overlay() {
+    let near = |mode: BlendMode, under: f64, over: f64, want: f64| {
+        let got = mode.apply(under, over);
+        assert!(
+            (got - want).abs() < 1e-12,
+            "{mode:?}({under}, {over}) = {got}, not {want}"
+        );
+    };
+    // Asymmetric pairs, so a swapped argument shows.
+    near(BlendMode::Normal, 0.25, 0.8, 0.8);
+    near(BlendMode::Multiply, 0.5, 0.4, 0.2);
+    near(BlendMode::Screen, 0.5, 0.4, 0.7);
+    near(BlendMode::Overlay, 0.25, 0.8, 0.4);
+    near(BlendMode::HardLight, 0.25, 0.8, 0.7);
+    near(BlendMode::Darken, 0.25, 0.8, 0.25);
+    near(BlendMode::Lighten, 0.25, 0.8, 0.8);
+    near(BlendMode::ColorBurn, 0.6, 0.8, 0.5);
+    near(BlendMode::ColorBurn, 1.0, 0.0, 1.0);
+    near(BlendMode::ColorDodge, 0.3, 0.4, 0.5);
+    near(BlendMode::ColorDodge, 0.0, 1.0, 0.0);
+    near(BlendMode::LinearBurn, 0.6, 0.7, 0.3);
+    near(BlendMode::Add, 0.6, 0.7, 1.0);
+    near(BlendMode::Difference, 0.25, 0.8, 0.55);
+    near(BlendMode::Exclusion, 0.25, 0.8, 0.65);
+    // Soft light on both sides of its bends.
+    near(BlendMode::SoftLight, 0.5, 0.25, 0.375);
+    near(BlendMode::SoftLight, 0.64, 0.75, 0.72);
+    near(BlendMode::SoftLight, 0.25, 1.0, 0.5);
+    // The table rounds each answer to the nearest level.
+    let table = BlendMode::Multiply.table();
+    assert_eq!(
+        table[128 * 256 + 64],
+        (255.0_f64 * (128.0 / 255.0) * (64.0 / 255.0)).round() as u8
+    );
+    assert_eq!(BlendMode::Screen.table()[255], 255);
+    assert_eq!(
+        BlendMode::from_name("Colour dodge"),
+        Some(BlendMode::ColorDodge)
+    );
+    assert_eq!(
+        BlendMode::from_name("soft light"),
+        Some(BlendMode::SoftLight)
+    );
+    assert_eq!(
+        BlendMode::from_name("linear-burn"),
+        Some(BlendMode::LinearBurn)
+    );
+    assert_eq!(BlendMode::from_name("glow"), None);
 }

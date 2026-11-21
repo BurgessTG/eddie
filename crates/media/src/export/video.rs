@@ -7,9 +7,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use openreel_engine::{
-    hides_below, Background, Clip, ClipId, ColorAdjust, Keyframes, Timeline, Transform,
+    hides_below, Background, BlendMode, Clip, ClipId, ColorAdjust, Keyframes, Timeline, Transform,
 };
 
+use super::blend;
 use super::frames::{enabled_frames, visible_frames, VideoClock};
 use super::picture::{picture, Motion, Spot};
 use super::scratch::FilterGraphFile;
@@ -38,6 +39,8 @@ pub(super) struct VideoLayer<'a> {
     pub(super) transform: Transform,
     pub(super) background: Background,
     pub(super) color: ColorAdjust,
+    /// How it mixes with the lanes under it.
+    blend: BlendMode,
     /// Source ticks at timeline tick zero: the source clock is
     /// `speed * timeline + source_offset`.
     source_offset: i64,
@@ -148,6 +151,7 @@ pub(super) fn plan_video<'a>(
                 && layer.transform == clip.transform
                 && layer.background == clip.background
                 && layer.color == clip.color
+                && layer.blend == clip.blend
         });
         let index = match same {
             Some(index) => {
@@ -165,6 +169,7 @@ pub(super) fn plan_video<'a>(
                     transform: clip.transform,
                     background: clip.background,
                     color: clip.color,
+                    blend: clip.blend,
                     source_offset,
                     speed: clip.speed,
                     photo: clip.photo,
@@ -457,12 +462,25 @@ pub(super) fn batch_command(
                 format!("own{index}")
             };
             if shows {
-                filters.push(format!(
-                    "[{current}][{own}]overlay={}:eof_action=repeat:ts_sync_mode=default:\
-                 enable='{}'[v{index}]",
-                    spot.overlay(0.0),
-                    enabled_frames(&ranges),
-                ));
+                let (place, enable) = (spot.overlay(0.0), enabled_frames(&ranges));
+                if layer.blend.is_normal() {
+                    filters.push(format!(
+                        "[{current}][{own}]overlay={place}:eof_action=repeat:\
+                         ts_sync_mode=default:enable='{enable}'[v{index}]"
+                    ));
+                } else {
+                    filters.extend(blend::filters(
+                        layer.blend,
+                        index,
+                        &current,
+                        &own,
+                        &place,
+                        &enable,
+                        canvas,
+                        rate,
+                        count,
+                    ));
+                }
                 current = format!("v{index}");
             }
         }

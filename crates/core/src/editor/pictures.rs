@@ -338,6 +338,7 @@ impl SheetShot {
                     placement: Some((stack.placement(clip, self.time), stack.file(clip).0)),
                     opacity: clip.opacity_at(self.time),
                     blur: clip.background == Background::Blur,
+                    blend: clip.blend,
                 })
             })
             .collect();

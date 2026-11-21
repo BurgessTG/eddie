@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use openreel_engine::{
-    fill_scale, Background, ClipId, ClipKind, ColorAdjust, Filter, Format, Property, TextLook,
-    TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET,
-    MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
+    fill_scale, Background, BlendMode, ClipId, ClipKind, ColorAdjust, Filter, Format, Property,
+    TextLook, TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED,
+    MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
 };
 
 use super::super::details;
@@ -356,6 +356,17 @@ impl Editor {
                 self.video_clip(clip, "setBackground")?;
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.background = background;
+                }
+            }
+            ScriptCommand::SetBlend { clip, name } => {
+                let blend = BlendMode::from_name(&name).ok_or_else(|| {
+                    let known: Vec<&str> =
+                        BlendMode::ALL.iter().map(|mode| mode.as_str()).collect();
+                    format!("unknown blend mode '{name}'; use {}", known.join(", "))
+                })?;
+                self.video_clip(clip, "setBlend")?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.blend = blend;
                 }
             }
             ScriptCommand::SetTransition {

@@ -1478,9 +1478,16 @@ const PATCHES: [[u8; 3]; 8] = [
     [250, 240, 90],
 ];
 
-fn patch_source(fixture: &Fixture) -> String {
+/// `name`, 320x180 at 10 fps for 1 s: eight 80x90 patches, patch `i`
+/// showing `PATCHES[(i + shift) % 8]`.
+fn patch_source(fixture: &Fixture, name: &str, shift: usize) -> String {
     let pick = |c: usize| {
-        let at = |i: usize| format!("if(eq(floor(X/80)+4*floor(Y/90),{i}),{},", PATCHES[i][c]);
+        let at = |i: usize| {
+            format!(
+                "if(eq(floor(X/80)+4*floor(Y/90),{i}),{},",
+                PATCHES[(i + shift) % 8][c]
+            )
+        };
         let mut e: String = (0..8).map(at).collect();
         e.push('0');
         e.push_str(&")".repeat(8));
@@ -1492,14 +1499,84 @@ fn patch_source(fixture: &Fixture) -> String {
         pick(1),
         pick(2)
     );
-    fixture.video("patches.mp4", "nullsrc=s=320x180:r=10:d=1", &filter, None)
+    fixture.video(name, "nullsrc=s=320x180:r=10:d=1", &filter, None)
+}
+
+/// The middle of patch `i` in a 320x180 RGB frame.
+fn patch(frame: &[u8], i: usize) -> [u8; 3] {
+    let (x, y) = (40 + 80 * (i % 4), 45 + 90 * (i / 4));
+    let at = (y * 320 + x) * 3;
+    [frame[at], frame[at + 1], frame[at + 2]]
+}
+
+/// Every blend mode mixes a picture with the lane under it as the preview
+/// does. Patches lie over patches in another order, so each patch meets a
+/// different colour; one mode runs at 60% opacity. Export carries each
+/// picture through the canvas's YUV, so its answer may be that of inputs
+/// two levels off.
+#[test]
+fn blend_modes_mix_a_picture_with_the_lane_under_it_as_the_preview_does() {
+    use openreel_engine::BlendMode;
+    let fixture = Fixture::new();
+    let under = patch_source(&fixture, "under.mp4", 0);
+    let over = patch_source(&fixture, "over.mp4", 3);
+    let (under_rgb, over_rgb) = (
+        frames(Path::new(&under))[1].clone(),
+        frames(Path::new(&over))[1].clone(),
+    );
+    let modes = &BlendMode::ALL[1..];
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &under, 1, 0.0, 0.3 * modes.len() as f64, 0.0);
+    let faded = 3;
+    for (index, &mode) in modes.iter().enumerate() {
+        let id = video(&mut timeline, &over, 0, index as f64 * 0.3, 0.3, 0.0);
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.blend = mode;
+        if index == faded {
+            clip.opacity = 0.6;
+        }
+    }
+    let exported = frames(&fixture.export("blend.mp4", &timeline));
+    let mut worst = 0;
+    for (index, &mode) in modes.iter().enumerate() {
+        let alpha = if index == faded { 0.6 } else { 1.0 };
+        let table = mode.table();
+        let mix = |u: i32, o: i32| {
+            let (u, o) = (u.clamp(0, 255) as usize, o.clamp(0, 255) as usize);
+            let blended = f64::from(table[u * 256 + o]);
+            (u as f64 + alpha * (blended - u as f64)).round() as i32
+        };
+        for i in 0..8 {
+            let (u, o) = (patch(&under_rgb, i), patch(&over_rgb, i));
+            let got = patch(&exported[index * 3 + 1], i);
+            for c in 0..3 {
+                let (u, o) = (i32::from(u[c]), i32::from(o[c]));
+                let near: Vec<i32> = (-2..=2)
+                    .flat_map(|du| (-2..=2).map(move |dov| (du, dov)))
+                    .map(|(du, dov)| mix(u + du, o + dov))
+                    .collect();
+                let (low, high) = (*near.iter().min().unwrap(), *near.iter().max().unwrap());
+                let got = i32::from(got[c]);
+                let off = (low - got).max(got - high).max(0);
+                worst = worst.max(off);
+                // An encode moves a flat patch by up to 3 levels.
+                assert!(
+                    off <= 4,
+                    "{mode:?}, patch {i}, channel {c}: under {u}, over {o}, export {got}, \
+                     preview {} ({low} to {high} near it)",
+                    mix(u, o)
+                );
+            }
+        }
+    }
+    eprintln!("blend patches: worst {worst} levels past the preview's range");
 }
 
 #[test]
 fn graded_clips_export_as_the_preview_grades_them() {
     use openreel_engine::{ColorAdjust, Filter};
     let fixture = Fixture::new();
-    let source = patch_source(&fixture);
+    let source = patch_source(&fixture, "patches.mp4", 0);
     let decoded = &frames(Path::new(&source))[1];
     let centre = |frame: &[u8], i: usize| {
         let (x, y) = (40 + 80 * (i % 4), 45 + 90 * (i / 4));

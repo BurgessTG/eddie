@@ -3,6 +3,7 @@
 //! Times are seconds (`f64`). Media placement preserves source intervals;
 //! generated clips and explicit move/trim/split edits use the project frame grid.
 
+mod blend;
 mod clip;
 mod color;
 mod duck;
@@ -18,6 +19,7 @@ mod transition;
 #[cfg(test)]
 mod tests;
 
+pub use blend::BlendMode;
 pub use clip::{Clip, ClipId, ClipKind, TitleStyle, MAX_SPEED, MIN_SPEED};
 pub use color::{ColorAdjust, Filter, MAX_EXPOSURE};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};

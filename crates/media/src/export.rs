@@ -22,6 +22,7 @@ use video::{batch_command, encode_segment, plan_video};
 
 mod animate;
 mod audio;
+mod blend;
 mod frames;
 mod picture;
 mod scratch;

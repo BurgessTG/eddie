@@ -54,6 +54,7 @@ function help() {
     "renameClip(id, name) setOpacity(id, 0..1) setVolume(id, gain)  // linear gain 0..2; 0.5 is about 6 dB quieter",
     "setTransform(id, {scale, x, y, rotation, flipH, flipV, cropLeft, cropTop, cropRight, cropBottom})  // video only; changes just the fields given, null resets. scale 1 fits the canvas, 'fill' covers it; x and y move by canvas widths and heights (right and down); rotation is clockwise degrees; crops are shares of the source",
     "setBackground(id, 'black' | 'blur')  // what fills the canvas around a video picture",
+    "setBlend(id, mode)  // video only: how the picture mixes with the lanes under it. modes: normal darken multiply color-burn linear-burn lighten screen color-dodge add overlay soft-light hard-light difference exclusion",
     "setKeyframe(id, property, at, value)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run in a straight line from key to key and hold before the first and after the last; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
     "removeKeyframe(id, property, at) clearKeyframes(id, property?)  // clearing keeps the value at the clip's start; no property clears them all. setOpacity, setVolume and setTransform set one value for the whole clip and remove that property's keys",
     "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
@@ -119,6 +120,7 @@ function clearKeyframes(id, property) {
   __clear_keyframes(id, property === undefined || property === null ? "" : String(property));
 }
 function setBackground(id, name) { __set_background(id, String(name)); }
+function setBlend(id, mode) { __set_blend(id, String(mode)); }
 function setTransition(id, kind, seconds) {
   if (kind === undefined) throw new Error("setTransition needs a kind such as 'mix', or null to remove it");
   __set_transition(id, kind === null ? "" : String(kind), seconds === undefined ? 0.5 : seconds);

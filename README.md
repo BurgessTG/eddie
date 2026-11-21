@@ -70,7 +70,8 @@ offers the newest build.
 - Picture-in-picture and overlays: video lanes stack, the top lane over
   the ones under it, so a shrunk picture, a clip below full opacity or a
   PNG with transparency shows what is beneath. A bin file's right-click
-  menu adds it as an overlay at the playhead.
+  menu adds it as an overlay at the playhead. Blend modes (multiply,
+  screen, overlay and eleven more) mix a picture with the lanes under it.
 - Photos (PNG, JPEG, WebP, HEIC) as clips: 3 seconds when added, any
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and
