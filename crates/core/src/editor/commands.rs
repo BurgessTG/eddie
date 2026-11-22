@@ -72,7 +72,7 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
             serde_json::from_str(&app.script_state_json()).map_err(|error| error.to_string())?,
         )),
         "inspect" => Reply::Done(Outcome::read(json!({
-            "findings": inspect::inspect(&app.timeline, &app.assets),
+            "findings": inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics)),
         }))),
         "run" => run(app, params)?,
         "undo" | "redo" => {
@@ -249,7 +249,7 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
         Value::Bool(dry_run) => *dry_run,
         _ => return Err("dryRun is true or false".to_owned()),
     };
-    let findings = inspect::inspect(&app.timeline, &app.assets);
+    let findings = inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics));
     // Whatever the user had just changed is its own step, not this one's.
     app.commit_history();
     let before = app.edit_snapshot();
@@ -269,10 +269,11 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     }
     let (notes, handles) = applied?;
     let changed = app.differs_from(&before);
-    let introduced: Vec<_> = inspect::inspect(&app.timeline, &app.assets)
-        .into_iter()
-        .filter(|finding| !findings.contains(finding))
-        .collect();
+    let introduced: Vec<_> =
+        inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics))
+            .into_iter()
+            .filter(|finding| !findings.contains(finding))
+            .collect();
     let mut value = json!({
         "changed": changed,
         "saved": false,

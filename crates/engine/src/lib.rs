@@ -9,6 +9,7 @@ mod clip;
 mod color;
 mod duck;
 mod fade;
+mod graphic;
 mod keyframe;
 mod marker;
 mod mask;
@@ -28,6 +29,10 @@ pub use clip::{Clip, ClipId, ClipKind, TitleStyle, MAX_SPEED, MIN_SPEED};
 pub use color::{ColorAdjust, Filter, MAX_EXPOSURE};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};
+pub use graphic::{
+    Graphic, Shape, ShapeKind, MAX_SHAPE_OUTLINE, MAX_SHAPE_RATIO, MIN_SHAPE_OUTLINE,
+    MIN_SHAPE_RATIO,
+};
 pub use keyframe::{
     key_value, widen, Key, Keyframes, Property, KEY_TOLERANCE, MAX_KEYS, MAX_ROTATION,
 };

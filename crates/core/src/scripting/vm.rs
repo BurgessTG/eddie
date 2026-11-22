@@ -51,6 +51,8 @@ impl Vm {
             .with(|ctx| -> rquickjs::Result<()> {
                 bindings::install(&ctx, &queue)?;
                 ctx.globals().set("__state_json", "{}")?;
+                let stickers: Vec<&str> = openreel_media::STICKERS.iter().map(|s| s.name).collect();
+                ctx.globals().set("__sticker_names", stickers)?;
                 ctx.eval::<(), _>(PRELUDE)?;
                 Ok(())
             })

@@ -63,7 +63,8 @@ fn export_error(stderr: &str) -> String {
 }
 
 /// Canvas for the project format: its shape, with a short side as long as
-/// the largest video source's (at most 1080), or 720 without one.
+/// the largest video source's (at most 1080), or 720 without one. Shapes
+/// and stickers do not count.
 /// `Format::Original` takes the shape of the picture that starts first
 /// (lane 0 first on a tie), or 16:9. `size` gives a source's displayed
 /// size. Every clip fits this canvas by its transform; the program monitor
@@ -82,7 +83,9 @@ pub fn output_canvas(
     let mut pictures: Vec<(&Clip, (u32, u32))> = timeline
         .clips
         .iter()
-        .filter(|clip| clip.kind == ClipKind::Video)
+        // A shape or sticker sits on the canvas; it never sets its shape
+        // or size.
+        .filter(|clip| clip.kind == ClipKind::Video && clip.graphic.is_none())
         .filter_map(|clip| Some((clip, size(clip.source.as_deref()?)?)))
         .collect();
     pictures.sort_by(|(a, _), (b, _)| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));

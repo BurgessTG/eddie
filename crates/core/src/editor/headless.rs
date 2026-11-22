@@ -373,6 +373,7 @@ impl Session {
         let mut app = Editor::headless_with(wake, Box::new(NoPreview));
         app.settings = Settings::load();
         app.curation_dir = super::sweep::default_curation_dir();
+        app.graphics_dir = super::graphics::default_dir();
         app.model_dir = transcribe::installed_model_dir();
         app.make_thumbnails = false;
         Self {

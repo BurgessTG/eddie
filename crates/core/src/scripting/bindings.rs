@@ -369,7 +369,7 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     Ok(())
 }
 
-/// Titles, captions and media placed on the timeline.
+/// Titles, captions, shapes, stickers and media placed on the timeline.
 fn additions(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     let q = api.queue();
     api.set(
@@ -406,6 +406,43 @@ fn additions(api: &Api<'_, '_>) -> rquickjs::Result<()> {
                 .push(style.len(), || ScriptCommand::AddCaptionsForClip {
                     clip,
                     style: style.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
+        "__add_shape",
+        move |look: CString<'_>, at: f64, duration: f64| {
+            q.borrow_mut()
+                .push_addition(look.len(), |handle| ScriptCommand::AddShape {
+                    look: look.as_str().to_owned(),
+                    at,
+                    duration,
+                    handle,
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
+        "__add_sticker",
+        move |name: CString<'_>, at: f64, duration: f64| {
+            q.borrow_mut()
+                .push_addition(name.len(), |handle| ScriptCommand::AddSticker {
+                    name: name.as_str().to_owned(),
+                    at,
+                    duration,
+                    handle,
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
+        "__set_shape",
+        move |Whole(clip): Whole, changes: CString<'_>| {
+            q.borrow_mut()
+                .push(changes.len(), || ScriptCommand::SetShape {
+                    clip,
+                    changes: changes.as_str().to_owned(),
                 })
         },
     )?;

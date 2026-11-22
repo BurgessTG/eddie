@@ -172,9 +172,11 @@ plutil -replace CFBundleShortVersionString -string "$version" "$plist"
 plutil -replace CFBundleVersion -string "$version" "$plist"
 plutil -replace LSMinimumSystemVersion -string "$minimum" "$plist"
 
-# The licences go with the app: Eddie's, and those of FFmpeg and the
-# libraries built into it, with the list of the sources they came from.
+# The licences go with the app: Eddie's, its built-in stickers' (Fluent
+# Emoji, MIT), and those of FFmpeg and the libraries built into it, with
+# the list of the sources they came from.
 cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$resources/licenses/"
+cp "$root/crates/media/src/graphic/stickers/LICENSE" "$resources/licenses/LICENSE-fluent-emoji"
 cp -R "$ffmpeg_home/licenses/." "$resources/licenses/"
 
 # icns <1024 px png> <name>: writes Resources/<name>.icns. iconutil wants

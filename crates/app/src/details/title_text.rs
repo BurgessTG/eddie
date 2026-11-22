@@ -13,7 +13,7 @@ use crate::app::Ui;
 use crate::theme::{self, Variant, c};
 
 /// The colours a swatch row offers, as CapCut's text palette starts.
-const PALETTE: [(&str, Rgb); 10] = [
+pub(super) const PALETTE: [(&str, Rgb); 10] = [
     ("White", Rgb(255, 255, 255)),
     ("Black", Rgb(0, 0, 0)),
     ("Yellow", Rgb(255, 214, 0)),
@@ -26,7 +26,7 @@ const PALETTE: [(&str, Rgb); 10] = [
     ("Green", Rgb(34, 197, 94)),
 ];
 
-const SWATCH_GAP: f32 = 6.0;
+pub(super) const SWATCH_GAP: f32 = 6.0;
 
 pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f32) -> El {
     let drawn = openreel_media::drawn_text(clip);
@@ -184,7 +184,7 @@ fn field_key(field: Field) -> &'static str {
 }
 
 /// One colour to pick, or none (a slashed empty square).
-fn swatch(key: String, side: f32, colour: Option<Rgb>, current: bool, help: &str) -> El {
+pub(super) fn swatch(key: String, side: f32, colour: Option<Rgb>, current: bool, help: &str) -> El {
     let c = c();
     let mut swatch = el()
         .key(key)

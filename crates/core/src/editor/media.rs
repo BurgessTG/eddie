@@ -72,8 +72,12 @@ pub enum ImportMsg {
 }
 
 impl Editor {
+    /// The imported file, or the shape's or sticker's drawing, at `path`.
     pub fn asset(&self, path: &str) -> Option<&BinAsset> {
-        self.assets.iter().find(|a| a.info.path == path)
+        self.assets
+            .iter()
+            .chain(&self.graphics)
+            .find(|a| a.info.path == path)
     }
 
     /// The asset a script or command names, by path or by file name. Two

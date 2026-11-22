@@ -71,6 +71,9 @@ function help() {
     "addTitle(text, at?, dur?, style?)  // defaults: playhead, 4 s, 'lower-third'",
     "setTitleStyle(id, style) addCaptionsForClip(id, style?)  // styles: lower-third caption pop-caption minimal-caption highlight-caption; captions default to 'caption'",
     "setText(id, {size, color, boxColor, boxOpacity, outline, outlineColor, x, y})  // titles only, over the style; changes just the fields given, null resets all, a field set to null goes back to the style's. size 0.25 to 4 times the style's; colours '#RRGGBB'; boxOpacity 0 (none) to 1; outline 0 (none) to 0.2 of the text size; x, y move it from the style's place in canvas widths and heights (-1 to 1, right and down positive)",
+    "addShape(shape?, at?, dur?)  // a shape drawn as a picture on the lane above the video there, a third of the canvas, for 3 s at the playhead; it takes setTransform, keys, blends, masks and transitions like a photo. shape is a kind (rectangle circle triangle star heart arrow bubble; arrow points right, bubble is a speech bubble) or {kind, fill, outline, thickness, round, ratio}: fill and outline '#RRGGBB' or null for none (white fill, no outline); thickness 0.005 to 0.25 of the shape's shorter side (0.05), inside its edge; round 0 to 1, rectangle and bubble corners; ratio width over height, 0.1 to 10 (the kind's own)",
+    "setShape(id, {kind, fill, outline, thickness, round, ratio})  // changes just the fields given; a new kind takes its own ratio unless one is given; null is plain white",
+    "addSticker(name, at?, dur?)  // a built-in emoji sticker, placed as addShape places a shape. stickers() lists the names, such as thumbs-up, fire, red-heart, party-popper",
     "addAsset(nameOrPath, at?) addAssetRange(nameOrPath, at, sourceIn, dur)  // lands on the first lane free for its span",
     "  // adds, splits, duplicates and freezes return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
@@ -147,6 +150,29 @@ function setMask(id, changes) {
     }
   }
   __set_mask(id, JSON.stringify(changes));
+}
+
+function __look(name, look, example) {
+  if (look === null || typeof look !== "object" || Array.isArray(look)) {
+    throw new Error(name + " needs an object such as " + example);
+  }
+  for (const key in look) {
+    if (typeof look[key] === "number" && !isFinite(look[key])) {
+      throw new Error(name + " " + key + " must be a finite number");
+    }
+  }
+  return JSON.stringify(look);
+}
+function addShape(shape, at, dur) {
+  const look = shape === undefined ? {} : typeof shape === "string" ? { kind: shape } : shape;
+  return __add_shape(__look("addShape", look, "{kind: 'arrow', fill: '#FFD600'} or a shape name such as 'circle'"), at === undefined ? state().playhead : __t(at), dur === undefined ? 3 : dur);
+}
+function addSticker(name, at, dur) {
+  return __add_sticker(String(name), at === undefined ? state().playhead : __t(at), dur === undefined ? 3 : dur);
+}
+function stickers() { return __sticker_names.slice(); }
+function setShape(id, changes) {
+  __set_shape(id, changes === null ? "null" : __look("setShape", changes, "{fill: '#FF3B30', outline: null}, or null for a plain white shape"));
 }
 
 function setChroma(id, changes) {

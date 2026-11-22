@@ -2558,6 +2558,8 @@ dependencies = [
  "cpal",
  "ffmpeg-next",
  "openreel-engine",
+ "png 0.17.16",
+ "resvg",
  "serde",
  "serde_json",
 ]

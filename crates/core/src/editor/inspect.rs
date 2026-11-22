@@ -64,14 +64,20 @@ pub fn program_segments(timeline: &Timeline) -> Vec<Segment> {
 /// titles change over it: its start, its end and the clip.
 type Run = (f64, f64, Option<ClipId>);
 
-pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
+/// What can go wrong on `timeline`, reading its files from `assets` (the
+/// bin and the graphics' drawings).
+pub fn inspect<'a>(
+    timeline: &Timeline,
+    assets: impl IntoIterator<Item = &'a BinAsset>,
+) -> Vec<Finding> {
+    let assets: Vec<&BinAsset> = assets.into_iter().collect();
     let canvas = openreel_media::export_canvas(timeline, |path| {
         let asset = assets.iter().find(|asset| asset.info.path == path)?;
         Some((asset.info.width, asset.info.height))
     });
     let mut inspection = Inspection {
         timeline,
-        assets,
+        assets: &assets,
         frame: 1.0 / timeline.fps.max(1.0),
         canvas: (f64::from(canvas.0), f64::from(canvas.1)),
         findings: Vec::new(),
@@ -99,7 +105,7 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
 /// One pass over a timeline: what it reads and what it has found.
 struct Inspection<'a> {
     timeline: &'a Timeline,
-    assets: &'a [BinAsset],
+    assets: &'a [&'a BinAsset],
     /// One project frame, in seconds.
     frame: f64,
     /// The canvas preview and export draw on, in pixels.
@@ -109,7 +115,10 @@ struct Inspection<'a> {
 
 impl<'a> Inspection<'a> {
     fn asset(&self, source: &str) -> Option<&'a BinAsset> {
-        self.assets.iter().find(|asset| asset.info.path == source)
+        self.assets
+            .iter()
+            .find(|asset| asset.info.path == source)
+            .copied()
     }
 
     fn report(

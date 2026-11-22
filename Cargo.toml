@@ -17,6 +17,25 @@ rust-version = "1.89"
 debug = 0
 incremental = false
 
+# Shapes and stickers are drawn while a script's edit runs, which has a
+# 250 ms budget: unoptimised, one 2160-pixel drawing took 500 ms.
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+[profile.dev.package.resvg]
+opt-level = 3
+[profile.dev.package.usvg]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

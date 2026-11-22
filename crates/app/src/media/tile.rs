@@ -85,6 +85,7 @@ pub(super) fn tile(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
                 if ui.bin_drag.is_some() || drag.dx.hypot(drag.dy) >= DRAG_START {
                     ui.bin_drag = Some(BinDrag {
                         path: drag_path.clone(),
+                        graphic: None,
                         at: drag.window_point(),
                         size: [w, h],
                     });

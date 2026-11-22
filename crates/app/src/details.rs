@@ -5,7 +5,7 @@
 //! `fields` is the typed values and when typing reaches the clip, `body`
 //! the cards for one clip, `transform` the card that places a picture,
 //! `chroma` the one that keys out a screen colour, `mask` the one that
-//! keeps a shape of it,
+//! keeps a shape of it, `shape` the one that draws a shape clip,
 //! `color` the one that grades it and `filters` its filter tiles, `title_text`
 //! the one that styles a title's letters, `rows` the controls those cards
 //! are made of and `styles` the title-style lists.
@@ -18,6 +18,7 @@ mod filters;
 mod keys;
 mod mask;
 mod rows;
+mod shape;
 mod styles;
 mod title_text;
 mod transform;

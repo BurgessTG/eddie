@@ -16,6 +16,7 @@ mod denoise;
 mod evidence;
 mod export;
 mod frame;
+mod graphic;
 mod loudness;
 mod microphone;
 mod playback;
@@ -50,6 +51,10 @@ pub use export::{
     ExportOptions, ExportSettings, Quality, Resolution, TitleLook, FRAME_RATES, LOUDNESS_TARGET,
 };
 pub use frame::{scaled_height, RawFrame};
+pub use graphic::{
+    draw_graphic, graphic_label, sticker, write_graphic, GraphicFile, Sticker, GRAPHIC_SIDE,
+    STICKERS,
+};
 pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use microphone::{Microphone, Recorded, Take};
 pub use playback::FrameStream;

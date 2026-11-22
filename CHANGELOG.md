@@ -118,6 +118,15 @@
   picture, and a blurred background stays whole around it. Scripts use
   `setMask`, `state()` gives each clip's `mask`, and `inspect()` reports a
   mask that keeps none of its picture.
+- Shapes and stickers: a Graphics page in the media dock with seven
+  shapes (rectangle, circle, triangle, star, heart, arrow and speech
+  bubble) and 53 emoji stickers (Microsoft's Fluent Emoji, MIT). A press
+  puts one at the playhead over the video; a drag puts it on a lane. A
+  Shape card in Details picks a shape's kind, fill and outline colours,
+  outline thickness, round corners and proportions. Like a photo, a shape
+  or sticker takes Transform, keyframes, blend modes, masks and
+  transitions. Scripts use `addShape`, `addSticker`, `setShape` and
+  `stickers()`, and `state()` gives each clip's `graphic`.
 
 ### Changed
 

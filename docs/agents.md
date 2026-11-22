@@ -191,10 +191,12 @@ return its parts.
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, blend, chroma, mask, speed, photo,
-  freeze, text, transition, keyframes`. `chroma` is the chroma key
+  transform, background, color, blend, chroma, mask, graphic, speed,
+  photo, freeze, text, transition, keyframes`. `chroma` is the chroma key
   `{color, strength, softness, spill}` or `null`; `mask` is `{shape, x,
-  y, width, height, rotation, feather, round, invert}` or `null`. A clip
+  y, width, height, rotation, feather, round, invert}` or `null`;
+  `graphic` is `{type: 'shape', kind, fill, outline, thickness, round,
+  ratio}`, `{type: 'sticker', name}` or `null`. A clip
   shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
@@ -401,6 +403,32 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     corners; `invert: true` keeps the outside instead.
   - A `'blur'` background stays whole: the mask clears only the picture
     over it. A sheet draws the mask.
+- **Shapes and stickers:** `addShape(shape?, at?, dur?)` and
+  `addSticker(name, at?, dur?)` draw a picture and place it on the lane
+  right above the video at `at` (the playhead) for `dur` (3 s), a third of
+  the canvas in size, and return a handle. The clip is a video clip
+  holding one picture, like a photo: `setTransform`, keys, `setBlend`,
+  `setMask` and `setTransition` work on it, and it never sets the
+  canvas's shape.
+  - `shape` is a kind, `rectangle`, `circle`, `triangle`, `star`,
+    `heart`, `arrow` (pointing right) or `bubble` (a speech bubble), or
+    `{kind, fill, outline, thickness, round, ratio}`. `fill` and
+    `outline` are `'#RRGGBB'` or `null` for none (a white fill and no
+    outline by default). `thickness` is the outline's, 0.005 to 0.25 of
+    the shape's shorter side, drawn inside its edge; `round` (0 to 1)
+    rounds a rectangle's or bubble's corners; `ratio` is width over
+    height (0.1 to 10, the kind's own by default). Turn an arrow with
+    `setTransform(id, {rotation: 90})`.
+  - `setShape(id, {...})` changes only the fields you give; a new `kind`
+    takes its own ratio unless you give one, and `null` makes the shape
+    plain white.
+  - `stickers()` lists the built-in emoji stickers, such as `thumbs-up`,
+    `fire`, `red-heart` and `party-popper`.
+  - Text on a shape is a title (`addTitle`) placed over it with `setText`;
+    titles draw over every lane.
+  - One edit draws at most 16 new shapes or stickers; add more in another
+    run. Drawings are kept outside the project, and a project opened on
+    another computer draws them again.
 - **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
   `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
   `volume` on video or audio, in the units of `setTransform`,

@@ -86,6 +86,7 @@ impl Editor {
         let infos: HashMap<String, MediaInfo> = self
             .assets
             .iter()
+            .chain(&self.graphics)
             .map(|a| (a.info.path.clone(), a.info.clone()))
             .collect();
         let (tx, rx) = channel::<ExportMsg>();

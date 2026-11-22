@@ -1912,6 +1912,143 @@ fn masks_clear_the_picture_outside_their_shape_as_the_preview_does() {
 }
 
 #[test]
+fn shapes_and_stickers_export_over_the_lanes_under_them_as_the_preview_draws_them() {
+    use openreel_engine::{place, BlendMode, Graphic, Rgb, Shape, ShapeKind};
+    use openreel_media::{draw_graphic, write_graphic, Canvas, Image, Layer};
+    let fixture = Fixture::new();
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let blue_frame: Vec<u8> = frames(Path::new(&blue))[1]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b]| [r, g, b, 255])
+        .collect();
+    let circle = Graphic::Shape(Shape {
+        fill: Some(Rgb(255, 214, 0)),
+        outline: Some(Rgb(20, 20, 20)),
+        thickness: 0.08,
+        ..Shape::new(ShapeKind::Circle)
+    });
+    let sticker = Graphic::Sticker {
+        name: "thumbs-up".to_owned(),
+    };
+    let cases = [
+        (
+            circle,
+            Transform {
+                scale: 0.5,
+                x: -0.2,
+                ..Transform::default()
+            },
+        ),
+        (
+            sticker,
+            Transform {
+                scale: 0.6,
+                x: 0.15,
+                rotation: 20.0,
+                ..Transform::default()
+            },
+        ),
+    ];
+    // Each graphic starts on lane 0 at the same time as the video under
+    // it, which would win the canvas's shape if graphics counted: the
+    // canvas stays the video's 320x180, not a 2160-pixel square.
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &blue, 1, 0.0, 1.0, 0.0);
+    let mut sources = Vec::new();
+    for (index, (graphic, transform)) in cases.iter().enumerate() {
+        let file = write_graphic(graphic, &fixture.0).unwrap();
+        let id = photo(&mut timeline, &file.path, index as f64 * 0.5, 0.5);
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.graphic = Some(graphic.clone());
+        clip.transform = *transform;
+        sources.push((f64::from(file.info.width), f64::from(file.info.height)));
+    }
+    let exported = fixture.export("graphics.mp4", &timeline);
+    let info = probe(exported.to_str().unwrap()).unwrap();
+    assert_eq!((info.width, info.height), (320, 180));
+    let exported = frames(&exported);
+    let size = (320.0, 180.0);
+    for (index, (graphic, transform)) in cases.iter().enumerate() {
+        let got = &exported[index * 5 + 2];
+        let drawing = draw_graphic(graphic, 540).unwrap();
+        let mut canvas = Canvas::new(320, 180, size);
+        let under = |rgba| Layer {
+            image: Image {
+                width: 320,
+                height: 180,
+                rgba,
+            },
+            source: size,
+            placement: place(size, size, &Transform::default()),
+            opacity: 1.0,
+            blur: false,
+            blend: BlendMode::Normal,
+            mask: None,
+            shift: [0.0, 0.0],
+            window: None,
+        };
+        canvas.draw(&under(&blue_frame));
+        canvas.draw(&Layer {
+            image: Image::from(&drawing),
+            source: sources[index],
+            placement: place(size, sources[index], transform),
+            ..under(&blue_frame)
+        });
+        let preview = canvas.rgba;
+        let rgb = |frame: &[u8], x: usize, y: usize| -> [u8; 3] {
+            let at = (y * 320 + x) * 4;
+            [frame[at], frame[at + 1], frame[at + 2]]
+        };
+        // Edges are drawn a pixel softer by export's scaling than by the
+        // compositor's sampling, so pixels within two of one are left out.
+        // A graphic drawn without its transparency covers its whole box,
+        // and a misplaced one differs over whole areas.
+        let near_edge = |x: usize, y: usize| {
+            let here = rgb(&preview, x, y);
+            (y.saturating_sub(2)..(y + 3).min(180)).any(|ny| {
+                (x.saturating_sub(2)..(x + 3).min(320)).any(|nx| {
+                    let there = rgb(&preview, nx, ny);
+                    (0..3).any(|c| here[c].abs_diff(there[c]) > 24)
+                })
+            })
+        };
+        let (mut total, mut counted, mut drawn) = (0.0, 0, 0);
+        for y in 0..180 {
+            for x in 0..320 {
+                if near_edge(x, y) {
+                    continue;
+                }
+                let want = rgb(&preview, x, y);
+                let have = &got[(y * 320 + x) * 3..][..3];
+                total += f64::from((0..3).map(|c| want[c].abs_diff(have[c])).max().unwrap());
+                counted += 1;
+                drawn += usize::from(want[2] < 128);
+            }
+        }
+        let mean = total / counted as f64;
+        eprintln!("graphic {index}: mean {mean:.2} levels over {counted} pixels, {drawn} drawn");
+        assert!(drawn > 1500, "graphic {index}: only {drawn} pixels drawn");
+        assert!(mean < 2.0, "graphic {index}: mean error {mean:.2}");
+        // The corner of the circle's box is clear: the blue shows there.
+        if index == 0 {
+            let p = place(size, sources[0], transform);
+            let corner = (
+                (p.center[0] - p.size[0] * 0.45) as usize,
+                (p.center[1] - p.size[1] * 0.45) as usize,
+            );
+            let at = (corner.1 * 320 + corner.0) * 3;
+            assert!(
+                got[at + 2] > 200 && got[at] < 40,
+                "box corner: {:?}",
+                &got[at..at + 3]
+            );
+        }
+    }
+}
+
+#[test]
 fn graded_clips_export_as_the_preview_grades_them() {
     use openreel_engine::{ColorAdjust, Filter};
     let fixture = Fixture::new();

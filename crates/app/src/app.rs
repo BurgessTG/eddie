@@ -72,6 +72,8 @@ pub struct Ui {
     /// The media bin's name filter.
     pub search: TextEdit,
     pub media_w: f32,
+    /// The dock shows its Graphics page (shapes and stickers), not media.
+    pub bin_graphics: bool,
     pub bin_drag: Option<media::BinDrag>,
     pub bin_menu: Option<media::BinMenu>,
     /// Where a clip's right-click menu opened, in window points.
@@ -180,6 +182,7 @@ impl Ui {
             scrub_hot: false,
             search: TextEdit::new(""),
             media_w: media::DEFAULT_W,
+            bin_graphics: false,
             bin_drag: None,
             bin_menu: None,
             clip_menu: None,
@@ -311,10 +314,11 @@ impl Ui {
         }
     }
 
-    /// Move finished imports' filmstrip stills into pictures, and drop the
-    /// pictures of media no longer in the bin.
+    /// Move finished imports' and new drawings' filmstrip stills into
+    /// pictures, and drop the pictures of media no longer in the bin.
     fn take_thumbnails(&mut self) {
-        for asset in &mut self.editor.assets {
+        let editor = &mut self.editor;
+        for asset in editor.assets.iter_mut().chain(&mut editor.graphics) {
             if asset.thumbs.is_empty() {
                 continue;
             }
@@ -334,10 +338,9 @@ impl Ui {
                 .collect();
             self.thumbs.insert(asset.info.path.clone(), thumbs);
         }
-        if self.thumbs.len() > self.editor.assets.len() {
-            let assets = &self.editor.assets;
-            self.thumbs
-                .retain(|path, _| assets.iter().any(|asset| asset.info.path == *path));
+        let editor = &self.editor;
+        if self.thumbs.len() > editor.assets.len() + editor.graphics.len() {
+            self.thumbs.retain(|path, _| editor.asset(path).is_some());
         }
     }
 

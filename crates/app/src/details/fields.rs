@@ -2,7 +2,9 @@
 //! and applies, and when what was typed reaches the clip.
 
 use eddie_core::Editor;
-use openreel_engine::{Clip, ClipId, ClipKind, DEFAULT_TRANSITION, Rgb, Transition};
+use openreel_engine::{
+    Clip, ClipId, ClipKind, DEFAULT_TRANSITION, Graphic, Rgb, Shape, Transition,
+};
 use rune::TextEdit;
 
 use super::one_line;
@@ -54,10 +56,15 @@ pub enum Field {
     MaskRotation,
     MaskFeather,
     MaskRound,
+    ShapeFill,
+    ShapeOutline,
+    ShapeThickness,
+    ShapeRound,
+    ShapeRatio,
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 43] = [
+    pub(super) const ALL: [Self; 48] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -101,6 +108,11 @@ impl Field {
         Self::MaskRotation,
         Self::MaskFeather,
         Self::MaskRound,
+        Self::ShapeFill,
+        Self::ShapeOutline,
+        Self::ShapeThickness,
+        Self::ShapeRound,
+        Self::ShapeRatio,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -148,6 +160,11 @@ impl Field {
             Self::MaskRotation => "details-mask-rotation",
             Self::MaskFeather => "details-mask-feather",
             Self::MaskRound => "details-mask-round",
+            Self::ShapeFill => "details-shape-fill",
+            Self::ShapeOutline => "details-shape-outline",
+            Self::ShapeThickness => "details-shape-thickness",
+            Self::ShapeRound => "details-shape-round",
+            Self::ShapeRatio => "details-shape-ratio",
         }
     }
 
@@ -155,8 +172,19 @@ impl Field {
     fn colour(self) -> bool {
         matches!(
             self,
-            Self::TextColor | Self::BoxColor | Self::OutlineColor | Self::KeyColor
+            Self::TextColor
+                | Self::BoxColor
+                | Self::OutlineColor
+                | Self::KeyColor
+                | Self::ShapeFill
+                | Self::ShapeOutline
         )
+    }
+
+    /// A colour that may be none, shown and typed as "None" (a value
+    /// below 0).
+    fn optional_colour(self) -> bool {
+        matches!(self, Self::ShapeFill | Self::ShapeOutline)
     }
 
     fn percent(self) -> bool {
@@ -176,6 +204,9 @@ impl Field {
                 | Self::BoxColor
                 | Self::OutlineColor
                 | Self::KeyColor
+                | Self::ShapeFill
+                | Self::ShapeOutline
+                | Self::ShapeRatio
         )
     }
 
@@ -238,6 +269,20 @@ impl Field {
             Self::MaskRotation => clip.mask.unwrap_or_default().rotation,
             Self::MaskFeather => clip.mask.unwrap_or_default().feather * 100.0,
             Self::MaskRound => clip.mask.unwrap_or_default().round * 100.0,
+            Self::ShapeFill | Self::ShapeOutline => {
+                let shape = shape(clip);
+                let colour = if self == Self::ShapeFill {
+                    shape.fill
+                } else {
+                    shape.outline
+                };
+                colour.map_or(-1.0, |Rgb(r, g, b)| {
+                    f64::from(u32::from_be_bytes([0, r, g, b]))
+                })
+            }
+            Self::ShapeThickness => shape(clip).thickness * 100.0,
+            Self::ShapeRound => shape(clip).round * 100.0,
+            Self::ShapeRatio => shape(clip).ratio,
         }
     }
 
@@ -245,8 +290,12 @@ impl Field {
         let value = self.value(clip);
         // Whole numbers, and no "-0%" from a hair left of centre.
         let whole = || if value.abs() < 0.5 { 0.0 } else { value };
-        if self.colour() {
+        if self.colour() && value < 0.0 {
+            "None".to_owned()
+        } else if self.colour() {
             format!("#{:06X}", value as u32)
+        } else if self == Self::ShapeRatio {
+            format!("{value:.2}")
         } else if self.percent() {
             format!("{:.0}%", whole())
         } else if matches!(self, Self::Rotation | Self::MaskRotation) {
@@ -264,11 +313,16 @@ impl Field {
     /// A typed number, with or without the unit the field shows.
     fn parse(self, typed: &str) -> Option<f64> {
         let typed = typed.trim();
+        if self.optional_colour() && typed.eq_ignore_ascii_case("none") {
+            return Some(-1.0);
+        }
         if self.colour() {
             let Rgb(r, g, b) = Rgb::parse(typed)?;
             return Some(f64::from(u32::from_be_bytes([0, r, g, b])));
         }
-        let number = if self.percent() {
+        let number = if self == Self::ShapeRatio {
+            typed
+        } else if self.percent() {
             typed.strip_suffix('%').unwrap_or(typed)
         } else if matches!(self, Self::Rotation | Self::MaskRotation) {
             typed.strip_suffix('°').unwrap_or(typed)
@@ -360,7 +414,27 @@ impl Field {
                     _ => mask.round = share,
                 }
             }),
+            Self::ShapeFill | Self::ShapeOutline => {
+                let [_, r, g, b] = (value.max(0.0) as u32).to_be_bytes();
+                let colour = (value >= 0.0).then_some(Rgb(r, g, b));
+                editor.edit_clip_shape(id, |shape| match self {
+                    Self::ShapeFill => shape.fill = colour,
+                    _ => shape.outline = colour,
+                });
+            }
+            Self::ShapeThickness => editor.edit_clip_shape(id, |s| s.thickness = value / 100.0),
+            Self::ShapeRound => editor.edit_clip_shape(id, |s| s.round = value / 100.0),
+            Self::ShapeRatio => editor.edit_clip_shape(id, |s| s.ratio = value),
         }
+    }
+}
+
+/// A shape clip's shape, or a plain rectangle for any other clip (whose
+/// Details has no Shape card).
+fn shape(clip: &Clip) -> Shape {
+    match &clip.graphic {
+        Some(Graphic::Shape(shape)) => *shape,
+        _ => Shape::default(),
     }
 }
 

@@ -4,6 +4,7 @@ use crate::blend::BlendMode;
 use crate::chroma::ChromaKey;
 use crate::color::ColorAdjust;
 use crate::fit_fades;
+use crate::graphic::Graphic;
 use crate::keyframe::{Keyframes, Property};
 use crate::mask::Mask;
 use crate::place::{Background, Transform};
@@ -181,6 +182,11 @@ pub struct Clip {
     /// Saved only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<Mask>,
+    /// Video only: a shape or sticker Eddie draws instead of a file's
+    /// picture. The drawing is a PNG `source` names, held like a photo
+    /// (`photo` is set). Saved only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphic: Option<Graphic>,
 }
 
 /// The slowest and fastest a clip plays.

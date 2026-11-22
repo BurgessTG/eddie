@@ -17,6 +17,7 @@ use crate::scripting::ScriptCommand;
 
 mod audio;
 mod curation;
+mod graphics;
 mod markers;
 mod playback;
 mod project;

@@ -415,6 +415,126 @@ fn the_mask_card_picks_a_shape_and_places_sizes_turns_and_inverts_it() {
 }
 
 #[test]
+fn the_shape_card_draws_a_shape_again_from_its_tiles_swatches_fields_and_sliders() {
+    use openreel_engine::{Graphic, Rgb, Shape, ShapeKind};
+    let dir = std::env::temp_dir().join(format!("eddie-shape-card-{}", std::process::id()));
+    let mut ui = Ui::headless();
+    ui.editor.graphics_dir = Some(dir.clone());
+    let rectangle = Graphic::Shape(Shape::new(ShapeKind::Rectangle));
+    let id = ui.editor.add_graphic(rectangle, None, 1.0, 3.0).unwrap();
+    let mut rt = Runtime::new(ui, app::view, (1400.0, 1200.0), Env::new(true, 1.0));
+    rt.poll = Some(app::poll);
+    for _ in 0..3 {
+        rt.frame(FRAME);
+    }
+    let shape = |rt: &Runtime<Ui>| match &clip(rt, id).graphic {
+        Some(Graphic::Shape(shape)) => *shape,
+        other => panic!("not a shape: {other:?}"),
+    };
+    let source = |rt: &Runtime<Ui>| clip(rt, id).source.clone().unwrap();
+    let tap = |rt: &mut Runtime<Ui>, key: &str| {
+        reveal(rt, key);
+        click(rt, key);
+    };
+    let enter = |rt: &mut Runtime<Ui>, key: &str, typed: &str| {
+        tap(rt, key);
+        rt.paste(typed);
+        rt.frame(FRAME);
+        press(rt, Key::Enter);
+    };
+
+    // Another kind brings its own proportions and keeps the paint, and its
+    // drawing is another file.
+    let first = source(&rt);
+    tap(&mut rt, "details-shape-fill-red");
+    tap(&mut rt, "details-shape-heart");
+    let heart = shape(&rt);
+    assert_eq!(
+        (heart.kind, heart.ratio, heart.fill),
+        (
+            ShapeKind::Heart,
+            ShapeKind::Heart.natural_ratio(),
+            Some(Rgb(255, 59, 48))
+        )
+    );
+    assert_ne!(source(&rt), first);
+    assert!(std::path::Path::new(&source(&rt)).is_file());
+    assert_eq!(
+        clip(&rt, id).name,
+        "Heart",
+        "the clip is called what it draws"
+    );
+
+    // The outline's thickness shows once there is an outline.
+    assert!(!shown(&rt, "details-shape-thickness"));
+    enter(&mut rt, "details-shape-outline", "#000000");
+    assert_eq!(shape(&rt).outline, Some(Rgb::BLACK));
+    enter(&mut rt, "details-shape-thickness", "10");
+    assert_eq!(shape(&rt).thickness, 0.1);
+    enter(&mut rt, "details-shape-fill", "none");
+    assert_eq!(shape(&rt).fill, None);
+    assert_eq!(typed(&rt, Field::ShapeFill), "None");
+    // Without a fill the outline is all there is: it cannot go too.
+    tap(&mut rt, "details-shape-outline-none");
+    assert_eq!(shape(&rt).outline, Some(Rgb::BLACK));
+    assert!(rt.state.editor.status.contains("fill or an outline"));
+
+    // Only a rectangle and a bubble round their corners.
+    assert!(!shown(&rt, "details-shape-round"));
+    tap(&mut rt, "details-shape-bubble");
+    assert_eq!(shape(&rt).round, 0.5);
+    enter(&mut rt, "details-shape-ratio", "2");
+    assert_eq!(shape(&rt).ratio, 2.0);
+    // The Ratio slider runs on a log scale, its right end ten to one.
+    reveal(&mut rt, "details-shape-ratio-slider");
+    let ([x, y, w, h], _) = rt.presented("details-shape-ratio-slider").unwrap();
+    let y = y + h / 2.0;
+    rt.pointer_move(x + w / 2.0, y);
+    rt.frame(FRAME);
+    rt.pointer_down(x + w / 2.0, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x + w, y);
+    rt.frame(FRAME);
+    rt.pointer_up(x + w, y);
+    rt.frame(FRAME);
+    assert_eq!(shape(&rt).ratio, 10.0);
+
+    rt.help_delay = 0.0;
+    for key in [
+        "details-shape-rectangle",
+        "details-shape-arrow",
+        "details-shape-fill",
+        "details-shape-fill-none",
+        "details-shape-fill-yellow",
+        "details-shape-outline",
+        "details-shape-outline-blue",
+        "details-shape-thickness-slider",
+        "details-shape-thickness",
+        "details-shape-round-slider",
+        "details-shape-round",
+        "details-shape-ratio-slider",
+        "details-shape-ratio",
+        "details-shape-reset",
+    ] {
+        reveal(&mut rt, key);
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is not shown"));
+        rt.pointer_move(700.0, 300.0);
+        rt.frame(FRAME);
+        rt.pointer_move(x, y);
+        rt.frame(FRAME);
+        rt.frame(FRAME);
+        let shown = rt.help_tooltip().map(|(words, _)| words.to_owned());
+        assert!(
+            shown.as_deref().is_some_and(|words| !words.is_empty()),
+            "{key} has no tooltip"
+        );
+    }
+    tap(&mut rt, "details-shape-reset");
+    assert_eq!(shape(&rt), Shape::new(ShapeKind::Bubble));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn split_and_delete_act_on_the_selected_clip() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.editor.playhead = 3.0;

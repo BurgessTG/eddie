@@ -43,6 +43,7 @@ impl Editor {
                     "blend": c.blend.as_str(),
                     "chroma": c.chroma,
                     "mask": c.mask,
+                    "graphic": c.graphic,
                     "color": c.color,
                     "text": c.text,
                     "transition": c.transition.map(|t| serde_json::json!({
@@ -100,7 +101,7 @@ impl Editor {
             "sweepCandidates": sweep_candidates,
             "sceneClips": scene_clips,
             "transcriptSegments": transcript_segments,
-            "inspection": inspect::inspect(&self.timeline, &self.assets),
+            "inspection": inspect::inspect(&self.timeline, self.assets.iter().chain(&self.graphics)),
             "audio": self.audio_report(),
         })
         .to_string()

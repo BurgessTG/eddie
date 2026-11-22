@@ -1,14 +1,18 @@
 //! The media bin: an image grid of imported files, with drag to the
-//! timeline and the Curate controls.
+//! timeline and the Curate controls, and a Graphics page of shapes and
+//! stickers.
 //!
-//! `tile` is one file in the grid and `curator` the card under it.
+//! `tile` is one file in the grid, `curator` the card under it and
+//! `graphics` the Graphics page.
 
 mod curator;
+pub(crate) mod graphics;
 mod tile;
 
 use eddie_core::Action;
+use eddie_core::editor::graphics::GRAPHIC_SECONDS;
 use eddie_core::editor::media::{AssetState, BinAsset};
-use openreel_engine::ClipKind;
+use openreel_engine::{ClipKind, Graphic};
 use rune::{Color, Cursor, El, Phase, ScrollSpec, SurfaceFit, col, el, row, spacer, text};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
@@ -29,9 +33,11 @@ const MIN_TILE_W: f32 = 112.0;
 /// Pointer travel that turns a press on a tile into a drag.
 const DRAG_START: f32 = 6.0;
 
-/// A bin tile on its way to the timeline.
+/// A bin tile on its way to the timeline: a file, or a shape or sticker.
 pub struct BinDrag {
     pub path: String,
+    /// A shape or sticker from the Graphics page; `path` is then empty.
+    pub graphic: Option<Graphic>,
     /// The pointer in window points.
     pub at: [f32; 2],
     /// The tile's size, which the picture under the pointer keeps.
@@ -55,21 +61,36 @@ fn grid(width: f32) -> (usize, f32, f32) {
 }
 
 fn header(ui: &Ui) -> El {
-    let c = c();
-    let mut header = row()
-        .h(28.0)
-        .gap(8.0)
-        .center_y()
-        .child(theme::panel_title("Media"));
-    if !ui.editor.assets.is_empty() {
-        header = header.child(
-            text(ui.editor.assets.len().to_string())
-                .font(theme::SMALL)
-                .color(c.subtle_fg)
-                .single_line(),
-        );
+    let media_help = match ui.editor.assets.len() {
+        0 => "Your imported files".to_owned(),
+        files => format!("Your imported files ({files})"),
+    };
+    let tabs = theme::segmented(
+        "bin-tabs",
+        vec![
+            (
+                "bin-tab-media".to_owned(),
+                "Media",
+                &media_help,
+                !ui.bin_graphics,
+            ),
+            (
+                "bin-tab-graphics".to_owned(),
+                "Graphics",
+                "Shapes and stickers to put over your video",
+                ui.bin_graphics,
+            ),
+        ],
+        |index, segment| {
+            let graphics = index == 1;
+            segment.on_press(move |ui: &mut Ui| ui.bin_graphics = graphics)
+        },
+    );
+    let header = row().gap(8.0).center_y().child(tabs).child(spacer());
+    if ui.bin_graphics {
+        return header;
     }
-    header.child(spacer()).child(
+    header.child(
         theme::button(
             "bin-import",
             "Import",
@@ -93,7 +114,9 @@ pub fn panel(ui: &Ui) -> El {
         .py(12.0)
         .child(header(ui));
 
-    if editor.assets.is_empty() {
+    if ui.bin_graphics {
+        content = content.child(el().h(14.0)).child(graphics::page(width));
+    } else if editor.assets.is_empty() {
         content = content
             .child(el().h(22.0))
             .child(empty())
@@ -234,16 +257,28 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
     let c = c();
     if let Some(drag) = &ui.bin_drag {
         // The lane of the file's kind it would land on; none when it would
-        // get a new lane.
+        // get a new lane. A graphic dropped off the video lanes goes over
+        // the video there, maybe on a new lane, so none shows either.
         let lands = timeline::drop_target(ui, drag.at).and_then(|(row, at)| {
-            let asset = ui.editor.asset(&drag.path)?;
-            let kind = if asset.info.has_video {
-                ClipKind::Video
-            } else {
-                ClipKind::Audio
-            };
             let timeline = &ui.editor.timeline;
-            let track = timeline.drop_lane(kind, row, at, at + asset.clip_length())?;
+            let (kind, length) = match &drag.graphic {
+                Some(_) => {
+                    timeline
+                        .lane_at_row(row)
+                        .filter(|(kind, _)| *kind == ClipKind::Video)?;
+                    (ClipKind::Video, GRAPHIC_SECONDS)
+                }
+                None => {
+                    let asset = ui.editor.asset(&drag.path)?;
+                    let kind = if asset.info.has_video {
+                        ClipKind::Video
+                    } else {
+                        ClipKind::Audio
+                    };
+                    (kind, asset.clip_length())
+                }
+            };
+            let track = timeline.drop_lane(kind, row, at, at + length)?;
             Some(timeline.row(kind, track))
         });
         if let Some([x, y, w, h]) = lands.and_then(|row| timeline::lane_rect(ui, row)) {
@@ -265,7 +300,9 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
             .radius(theme::R_MD)
             .fill(c.card)
             .inert();
-        if let Some(thumb) = ui.thumbs(&drag.path).first() {
+        if let Some(graphic) = &drag.graphic {
+            ghost = ghost.child(graphics::picture(graphic, w).opacity(220.0 / 255.0));
+        } else if let Some(thumb) = ui.thumbs(&drag.path).first() {
             ghost = ghost.child(
                 layer(w, h, theme::R_MD)
                     .pixels_fit(&thumb.pixels, SurfaceFit::Fill)

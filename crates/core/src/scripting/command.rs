@@ -184,6 +184,25 @@ pub enum ScriptCommand {
         clip: u64,
         style: String,
     },
+    /// `look` is a JSON object of `Shape` fields (`kind` among them).
+    AddShape {
+        look: String,
+        at: f64,
+        duration: f64,
+        handle: Option<u64>,
+    },
+    AddSticker {
+        name: String,
+        at: f64,
+        duration: f64,
+        handle: Option<u64>,
+    },
+    /// `changes` is a JSON object of `Shape` fields to change, or `null`
+    /// for a plain white shape of the same kind.
+    SetShape {
+        clip: u64,
+        changes: String,
+    },
     AddAsset {
         asset: String,
         at: f64,
@@ -245,6 +264,7 @@ impl ScriptCommand {
             | Self::SetBlend { clip, .. }
             | Self::SetChroma { clip, .. }
             | Self::SetMask { clip, .. }
+            | Self::SetShape { clip, .. }
             | Self::SetColor { clip, .. }
             | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
@@ -325,7 +345,9 @@ impl ScriptCommand {
                     && min_silence.is_finite()
                     && padding.is_finite()
             }
-            Self::AddTitle { at, duration, .. } => at.is_finite() && duration.is_finite(),
+            Self::AddTitle { at, duration, .. }
+            | Self::AddShape { at, duration, .. }
+            | Self::AddSticker { at, duration, .. } => at.is_finite() && duration.is_finite(),
             Self::AddAssetRange {
                 at,
                 source_in,
@@ -362,6 +384,7 @@ impl ScriptCommand {
             | Self::SetBlend { .. }
             | Self::SetChroma { .. }
             | Self::SetMask { .. }
+            | Self::SetShape { .. }
             | Self::SetColor { .. }
             | Self::SetText { .. }
             | Self::SetFormat(_)

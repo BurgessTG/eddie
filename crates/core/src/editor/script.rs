@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use openreel_engine::{ClipId, Timeline};
 
+use super::graphics::MAX_NEW_GRAPHICS;
 use crate::scripting::ScriptCommand;
 use crate::Editor;
 
@@ -42,6 +43,7 @@ impl Editor {
         let before = self.edit_snapshot();
         let overlaps_before = self.timeline.lane_overlaps();
         let started = Instant::now();
+        let drawn_before = self.drawing;
         let mut created = HashMap::new();
         let result = (|| {
             let mut notes = Vec::new();
@@ -54,7 +56,15 @@ impl Editor {
                 }
                 // Cooperative bound: individual native commands are not
                 // preemptible, but a long finite batch cannot run unchecked.
-                if started.elapsed() > Duration::from_millis(250) {
+                // New drawings of shapes and stickers are bounded by count
+                // instead, as each takes a while even in a release build.
+                if self.drawing.0 - drawn_before.0 > MAX_NEW_GRAPHICS {
+                    return Err(format!(
+                        "an edit draws at most {MAX_NEW_GRAPHICS} new shapes or stickers; add the rest in another run"
+                    ));
+                }
+                let drawing = self.drawing.1 - drawn_before.1;
+                if started.elapsed().saturating_sub(drawing) > Duration::from_millis(250) {
                     return Err("edit took too long; try a smaller batch".to_owned());
                 }
             }

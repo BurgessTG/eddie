@@ -21,6 +21,7 @@ pub mod details;
 mod edits;
 mod export;
 pub mod gallery;
+pub mod graphics;
 mod headless;
 pub mod history;
 mod incoming;
@@ -182,6 +183,9 @@ pub struct Editor {
     clipboard: Vec<Clip>,
 
     pub assets: Vec<BinAsset>,
+    /// Shapes' and stickers' drawings (`graphics`): found like media by
+    /// `Editor::asset`, never listed in the bin.
+    pub graphics: Vec<BinAsset>,
     pub selected_asset: Option<String>,
     /// User-selected add policy: ranges from baked-in music beds
     /// start silent when true, keep their score when false.
@@ -271,6 +275,12 @@ pub struct Editor {
     noise: noise::Noise,
     /// Saved curations; `None` keeps tests away from the user's config.
     pub curation_dir: Option<PathBuf>,
+    /// Shapes' and stickers' drawings; `None` keeps them in the system's
+    /// temporary folder.
+    pub graphics_dir: Option<PathBuf>,
+    /// Drawings made so far and the time they took, which a script's edit
+    /// keeps out of its time budget (`graphics::MAX_NEW_GRAPHICS`).
+    drawing: (usize, Duration),
     /// The user's installed whisper models; `None` keeps tests off them.
     pub model_dir: Option<PathBuf>,
     /// Imports decode filmstrip thumbnails; the command line has no bin.
@@ -334,6 +344,10 @@ impl Editor {
         editor.match_export_loudness = true;
         editor.initial_imports = initial_imports;
         editor.curation_dir = sweep::default_curation_dir();
+        editor.graphics_dir = graphics::default_dir();
+        if let Some(folder) = editor.graphics_dir.clone() {
+            std::thread::spawn(move || graphics::prune(&folder, graphics::KEEP_UNUSED));
+        }
         editor.model_dir = sweep::transcribe::installed_model_dir();
         editor.manual_audio = false;
         editor.listen = true;
@@ -373,6 +387,7 @@ impl Editor {
             selected: None,
             clipboard: Vec::new(),
             assets: Vec::new(),
+            graphics: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
             match_export_loudness: false,
@@ -423,6 +438,8 @@ impl Editor {
             settings,
             noise: Default::default(),
             curation_dir: None,
+            graphics_dir: None,
+            drawing: (0, Duration::ZERO),
             model_dir: None,
             make_thumbnails: true,
             project_path: None,

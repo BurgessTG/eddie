@@ -200,8 +200,15 @@ impl Editor {
             self.mute_music_beds = mute;
         }
 
+        // Shapes and stickers are drawn again here, not imported.
+        self.restore_graphics();
         let mut wanted = media;
-        for clip in &self.timeline.clips {
+        for clip in self
+            .timeline
+            .clips
+            .iter()
+            .filter(|clip| clip.graphic.is_none())
+        {
             if let Some(source) = &clip.source {
                 if !wanted.contains(source) {
                     wanted.push(source.clone());
