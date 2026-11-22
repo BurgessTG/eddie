@@ -52,6 +52,8 @@ pub struct Ui {
     pub show_export: bool,
     /// The Voiceover panel, which keeps the microphone open while it shows.
     pub show_voiceover: bool,
+    /// The marker whose popup is open.
+    pub marker_edit: timeline::markers::MarkerEdit,
     /// The Settings dialog's typed fields and open list.
     pub settings: settings::State,
     /// The console's input line and height.
@@ -165,6 +167,7 @@ impl Ui {
             show_shortcuts: false,
             show_export: false,
             show_voiceover: false,
+            marker_edit: Default::default(),
             settings: settings::State::default(),
             console: console::State::default(),
             jump: TextEdit::new(""),
@@ -230,6 +233,7 @@ impl Ui {
             slots.incoming.want(monitor::look(incoming));
         }
         monitor::compose(self);
+        timeline::markers::sync(self);
         // The microphone stays open only for the panel's meter or a take.
         if !self.show_voiceover {
             self.editor.close_microphone();
@@ -247,6 +251,7 @@ impl Ui {
             || self.gallery.typing()
             || self.settings.typing()
             || (self.show_console && self.console.typing())
+            || self.marker_edit.typing()
     }
 
     /// Where a spinner's arc is in its turn, 0 to 1 once a second.
@@ -369,6 +374,8 @@ impl Ui {
             Action::Deselect if self.editor.voiceover_busy() => {
                 self.editor.perform(action);
             }
+            Action::AddMarker | Action::AddMarkerNewColor => timeline::markers::add(self, action),
+            Action::Deselect if self.marker_edit.id.is_some() => timeline::markers::close(self),
             // Esc closes what is open before it deselects.
             Action::Deselect if self.jump_open => {
                 self.jump_open = false;
@@ -482,8 +489,10 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     true
 }
 
-/// The table's name for a pressed key with its modifiers.
-fn chord(event: &KeyEvent) -> Option<Chord> {
+/// The table's name for a pressed key with its modifiers. With Alt held
+/// a key names what it types alone (`base`, `Tx::key_base`), as Option+M
+/// types µ on a Mac.
+fn chord(event: &KeyEvent, base: Option<char>) -> Option<Chord> {
     let key = match &event.key {
         Key::Text(text) => {
             let mut chars = text.chars();
@@ -491,6 +500,10 @@ fn chord(event: &KeyEvent) -> Option<Chord> {
             if chars.next().is_some() {
                 return None;
             }
+            let first = match base {
+                Some(base) if event.mods.alt => base,
+                _ => first,
+            };
             match first {
                 ' ' => KeyName::Space,
                 other => KeyName::Char(other.to_ascii_lowercase()),
@@ -511,6 +524,7 @@ fn chord(event: &KeyEvent) -> Option<Chord> {
     };
     Some(Chord {
         command: event.mods.cmd,
+        alt: event.mods.alt,
         shift: event.mods.shift,
         key,
     })
@@ -526,7 +540,7 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
-    let Some(chord) = chord(event) else {
+    let Some(chord) = chord(event, tx.key_base()) else {
         return false;
     };
     let Some(action) = shortcuts::action_for(chord, ui.typing(), tx.key_repeat()) else {
@@ -595,6 +609,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     settings::overlays(ui, &mut overlays);
     export::overlays(ui, &mut overlays);
     voiceover::overlays(ui, &mut overlays);
+    timeline::markers::overlays(ui, &mut overlays);
     keys::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);

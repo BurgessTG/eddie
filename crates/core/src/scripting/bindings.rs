@@ -446,6 +446,38 @@ fn project(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     api.set("closeGaps", move || {
         q.borrow_mut().push(0, || ScriptCommand::CloseGaps)
     })?;
+    let q = api.queue();
+    api.set(
+        "__add_marker",
+        move |at: f64, name: CString<'_>, color: CString<'_>| {
+            q.borrow_mut()
+                .push(name.len() + color.len(), || ScriptCommand::AddMarker {
+                    at,
+                    name: name.as_str().to_owned(),
+                    color: color.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
+        "__set_marker",
+        move |Whole(marker): Whole, changes: CString<'_>| {
+            q.borrow_mut()
+                .push(changes.len(), || ScriptCommand::SetMarker {
+                    marker,
+                    changes: changes.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set("removeMarker", move |Whole(marker): Whole| {
+        q.borrow_mut()
+            .push(0, || ScriptCommand::RemoveMarker(marker))
+    })?;
+    let q = api.queue();
+    api.set("clearMarkers", move || {
+        q.borrow_mut().push(0, || ScriptCommand::ClearMarkers)
+    })?;
     Ok(())
 }
 
@@ -453,7 +485,13 @@ fn project(api: &Api<'_, '_>) -> rquickjs::Result<()> {
 fn helpers(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     api.set(
         "__resolve_time",
-        |ctx: rquickjs::Ctx<'_>, spec: String, fps: f64, end: f64, clips: Vec<f64>, range: bool| {
+        |ctx: rquickjs::Ctx<'_>,
+         spec: String,
+         fps: f64,
+         end: f64,
+         clips: Vec<f64>,
+         markers: Vec<f64>,
+         range: bool| {
             let index = openreel_engine::time_spec::TimeIndex {
                 fps,
                 end,
@@ -462,6 +500,12 @@ fn helpers(api: &Api<'_, '_>) -> rquickjs::Result<()> {
                     .0
                     .iter()
                     .map(|clip| (clip[0] as u64, clip[1], clip[2]))
+                    .collect(),
+                markers: markers
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|marker| (marker[0] as u64, marker[1]))
                     .collect(),
             };
             let resolved = if range {

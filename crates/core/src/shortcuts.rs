@@ -26,6 +26,9 @@ pub enum KeyName {
 pub struct Chord {
     /// Ctrl, or Cmd on macOS.
     pub command: bool,
+    /// Alt, or Option on macOS. A key held with it names the key's own
+    /// character, not the one Option types (µ for M on a Mac).
+    pub alt: bool,
     pub shift: bool,
     pub key: KeyName,
 }
@@ -33,6 +36,7 @@ pub struct Chord {
 const fn plain(key: KeyName) -> Chord {
     Chord {
         command: false,
+        alt: false,
         shift: false,
         key,
     }
@@ -40,17 +44,15 @@ const fn plain(key: KeyName) -> Chord {
 
 const fn shift(key: KeyName) -> Chord {
     Chord {
-        command: false,
         shift: true,
-        key,
+        ..plain(key)
     }
 }
 
 const fn cmd(key: char) -> Chord {
     Chord {
         command: true,
-        shift: false,
-        key: KeyName::Char(key),
+        ..plain(KeyName::Char(key))
     }
 }
 
@@ -58,7 +60,22 @@ const fn cmd_shift(key: char) -> Chord {
     Chord {
         command: true,
         shift: true,
-        key: KeyName::Char(key),
+        ..plain(KeyName::Char(key))
+    }
+}
+
+const fn alt(key: char) -> Chord {
+    Chord {
+        alt: true,
+        ..plain(KeyName::Char(key))
+    }
+}
+
+const fn alt_shift(key: char) -> Chord {
+    Chord {
+        alt: true,
+        shift: true,
+        ..plain(KeyName::Char(key))
     }
 }
 
@@ -170,11 +187,19 @@ pub const BINDINGS: &[Binding] = &[
         "Record voiceover",
         &[letter('r')],
     ),
+    // CapCut's keys: M for markers, N for snapping.
     bind(
         Action::ToggleMagnet,
         "Edit",
         "Magnet on or off",
-        &[letter('m')],
+        &[letter('n')],
+    ),
+    bind(Action::AddMarker, "Edit", "Add marker", &[letter('m')]),
+    bind(
+        Action::AddMarkerNewColor,
+        "Edit",
+        "Add marker in a new colour",
+        &[alt('m')],
     ),
     bind(
         Action::Deselect,
@@ -237,6 +262,18 @@ pub const BINDINGS: &[Binding] = &[
         "Next cut",
         &[plain(KeyName::Down), letter(']')],
     )),
+    repeating(bind(
+        Action::NextMarker,
+        "Playback",
+        "Next marker",
+        &[shift(KeyName::Char('m'))],
+    )),
+    repeating(bind(
+        Action::PrevMarker,
+        "Playback",
+        "Previous marker",
+        &[alt_shift('m')],
+    )),
     bind(
         Action::GoStart,
         "Playback",
@@ -288,11 +325,22 @@ pub const COMMAND: &str = if cfg!(target_os = "macos") {
     "Ctrl"
 };
 
+/// The Alt key's name: Option on a Mac.
+pub const ALT: &str = if cfg!(target_os = "macos") {
+    "Option"
+} else {
+    "Alt"
+};
+
 /// A chord as a menu or keycap shows it, such as `Ctrl+Shift+S`.
 pub fn format(chord: &Chord) -> String {
     let mut text = String::new();
     if chord.command {
         text.push_str(COMMAND);
+        text.push('+');
+    }
+    if chord.alt {
+        text.push_str(ALT);
         text.push('+');
     }
     if chord.shift {
@@ -408,5 +456,35 @@ mod tests {
         assert_eq!(keycaps(zoom_in), [format!("{m}++")]);
         let redo = binding(Action::Redo).expect("redo");
         assert_eq!(keycaps(redo), [format!("{m}+Shift+Z"), format!("{m}+Y")]);
+        assert_eq!(label(Action::PrevMarker), format!("{ALT}+Shift+M"));
+    }
+
+    /// CapCut's marker keys: M adds, Alt+M adds in a new colour, Shift+M
+    /// and Alt+Shift+M jump. Alt must match exactly, as Shift does.
+    #[test]
+    fn marker_keys_follow_capcut_and_alt_matches_exactly() {
+        let m = KeyName::Char('m');
+        assert_eq!(
+            action_for(letter('m'), false, false),
+            Some(Action::AddMarker)
+        );
+        assert_eq!(
+            action_for(alt('m'), false, false),
+            Some(Action::AddMarkerNewColor)
+        );
+        assert_eq!(action_for(shift(m), false, true), Some(Action::NextMarker));
+        assert_eq!(
+            action_for(alt_shift('m'), false, true),
+            Some(Action::PrevMarker)
+        );
+        assert_eq!(
+            action_for(alt('s'), false, false),
+            None,
+            "Alt+S is not split"
+        );
+        assert_eq!(
+            action_for(letter('n'), false, false),
+            Some(Action::ToggleMagnet)
+        );
     }
 }

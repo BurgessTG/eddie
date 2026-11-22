@@ -27,6 +27,7 @@ mod incoming;
 pub mod inspect;
 pub mod keys;
 pub mod lanes;
+mod markers;
 pub mod media;
 pub mod pictures;
 mod playback;
@@ -158,6 +159,10 @@ pub enum Action {
     ShuttleStop,
     ShuttleForward,
     RecordVoiceover,
+    AddMarker,
+    AddMarkerNewColor,
+    NextMarker,
+    PrevMarker,
 }
 
 pub struct Editor {
@@ -568,15 +573,23 @@ impl Editor {
                     "Magnet off.".to_owned()
                 };
             }
+            Action::AddMarker
+            | Action::AddMarkerNewColor
+            | Action::NextMarker
+            | Action::PrevMarker => self.marker_action(action),
             Action::Deselect => self.selected = None,
         }
         true
     }
 
-    /// Empty the timeline and keep the bin and the project's format.
+    /// Empty the timeline and keep the bin, the project's format and its
+    /// markers, which say where things should go.
     pub fn clear_timeline(&mut self) {
         self.set_playing(false);
-        self.timeline = Timeline::empty_project().with_format(self.timeline.format);
+        let mut cleared = Timeline::empty_project().with_format(self.timeline.format);
+        cleared.markers = std::mem::take(&mut self.timeline.markers);
+        cleared.ensure_fresh_ids();
+        self.timeline = cleared;
         self.selected = None;
         self.playhead = 0.0;
         self.forget_stills();

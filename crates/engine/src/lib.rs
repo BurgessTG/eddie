@@ -9,6 +9,7 @@ mod color;
 mod duck;
 mod fade;
 mod keyframe;
+mod marker;
 mod place;
 mod stack;
 mod text;
@@ -27,6 +28,7 @@ pub use fade::{fade_gain, fade_shape, fit_fades};
 pub use keyframe::{
     key_value, widen, Key, Keyframes, Property, KEY_TOLERANCE, MAX_KEYS, MAX_ROTATION,
 };
+pub use marker::{Marker, MarkerColor, MarkerId};
 pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
 };

@@ -95,6 +95,7 @@ fn entry(label: &str, tooltip: &str, off: Option<&str>, action: Action) -> El {
     let mut entry = row_frame(&format!("menu-item-{action:?}"), tooltip, enabled)
         .child(
             text(label.to_owned())
+                .key(format!("menu-label-{action:?}"))
                 .font(theme::BODY)
                 .color(fg)
                 .single_line(),
@@ -276,7 +277,7 @@ fn file(ui: &Ui) -> Vec<El> {
         separator(),
         destructive(
             "Clear timeline",
-            "Remove every clip from the timeline; imported media stays",
+            "Remove every clip from the timeline; imported media and markers stay",
             Action::ClearTimeline,
         ),
     ]
@@ -296,6 +297,18 @@ fn edit(ui: &Ui) -> Vec<El> {
             "Add a title clip at the playhead",
             true,
             Action::AddTitle,
+        ),
+        item(
+            "Add marker",
+            "Pin a marker to the playhead, in the colour last used; on a marker, edit it",
+            true,
+            Action::AddMarker,
+        ),
+        item(
+            "New-colour marker",
+            "Pin a marker to the playhead in the next colour",
+            true,
+            Action::AddMarkerNewColor,
         ),
     ]);
     entries
@@ -370,6 +383,12 @@ fn clip_entries(ui: &Ui) -> Vec<El> {
 }
 
 fn view(ui: &Ui) -> Vec<El> {
+    let no_markers = ui
+        .editor
+        .timeline
+        .markers
+        .is_empty()
+        .then_some("Add a marker first (M)");
     vec![
         check(
             "menu-check-media",
@@ -424,6 +443,18 @@ fn view(ui: &Ui) -> Vec<El> {
             true,
             Action::GoEnd,
         ),
+        entry(
+            "Previous marker",
+            "Move the playhead to the marker before it",
+            no_markers,
+            Action::PrevMarker,
+        ),
+        entry(
+            "Next marker",
+            "Move the playhead to the marker after it",
+            no_markers,
+            Action::NextMarker,
+        ),
         separator(),
         item(
             "Keyboard shortcuts",
@@ -465,14 +496,25 @@ pub fn overlay(ui: &Ui, overlays: &mut Vec<El>) {
 
 #[cfg(test)]
 mod tests {
-    use eddie_core::shortcuts::BINDINGS;
+    use eddie_core::shortcuts::{self, BINDINGS};
 
     use super::Menu;
     use crate::app::Ui;
     use crate::testing::{frames, window};
+    use crate::theme;
+
+    /// How much wider `hint` is as the other platform spells it ("Option"
+    /// for "Alt" and "Cmd" for "Ctrl" on a Mac), or 0 when narrower.
+    fn wider_elsewhere(hint: &str) -> f32 {
+        let width = |text: &str| rune::text::measure(text, &[], theme::BODY, None).0;
+        let mac = hint.replace("Ctrl", "Cmd").replace("Alt", "Option");
+        let other = hint.replace("Cmd", "Ctrl").replace("Option", "Alt");
+        (width(&mac).max(width(&other)) - width(hint)).max(0.0)
+    }
 
     /// At 210 points wide the "Save project as..." shortcut ran into its
-    /// row's padding, further with "Cmd" than with "Ctrl".
+    /// row's padding, further with "Cmd" than with "Ctrl". "Add marker in a
+    /// new colour" fitted with "Alt+M" but not with "Option+M".
     #[test]
     fn every_shortcut_hint_stays_inside_its_row() {
         let mut rt = window(Ui::headless());
@@ -483,8 +525,9 @@ mod tests {
             for binding in BINDINGS {
                 let action = binding.action;
                 let row = rt.presented(&format!("menu-item-{action:?}"));
+                let label = rt.presented(&format!("menu-label-{action:?}"));
                 let hint = rt.presented(&format!("menu-hint-{action:?}"));
-                let (Some((row, _)), Some((hint, _))) = (row, hint) else {
+                let (Some((row, _)), Some((label, _)), Some((hint, _))) = (row, label, hint) else {
                     continue;
                 };
                 hints += 1;
@@ -492,6 +535,14 @@ mod tests {
                 assert!(
                     past <= 0.0,
                     "{action:?}: the shortcut runs {past} points into the row's padding"
+                );
+                // Two 8-point gaps round the spacer, which may shrink to 0.
+                let room = hint[0] - (label[0] + label[2]) - 16.0;
+                let extra = wider_elsewhere(&shortcuts::label(action));
+                assert!(
+                    room >= extra,
+                    "{action:?}: the shortcut needs {extra} more points on the other \
+                     platform and has {room}"
                 );
             }
         }

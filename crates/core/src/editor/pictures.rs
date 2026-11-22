@@ -148,6 +148,8 @@ pub fn frames(
             .filter(|clip| clip.source.as_deref() == Some(info.path.as_str()))
             .map(|clip| (clip.id, clip.source_in, clip.source_end()))
             .collect(),
+        // Markers are timeline times, not source times.
+        markers: Vec::new(),
     };
     let (start, end, times) = frame_times(&index, range, every)?;
     let width = width.unwrap_or(FRAMES_WIDTH);

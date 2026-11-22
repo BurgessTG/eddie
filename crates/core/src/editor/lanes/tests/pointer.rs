@@ -165,3 +165,43 @@ fn a_click_on_a_trim_handle_selects_without_trimming_and_a_ruler_click_keeps_the
     assert_eq!(stage.selected, Some(id));
     assert!(!stage.gesture.is_interacting());
 }
+
+/// A marker's flag on the ruler: a click puts the playhead on it, a drag
+/// moves it and snaps it to a clip's edge with the magnet, and a dragged
+/// clip's edge snaps to it. A press beside it still scrubs.
+#[test]
+fn a_markers_flag_takes_clicks_and_drags_and_clip_edges_snap_to_it() {
+    let (mut stage, id) = clip_fixture();
+    let marker = stage
+        .timeline
+        .add_marker(12.0, "", openreel_engine::MarkerColor::Red);
+    let ruler = |stage: &Stage, time: f64| [stage.x(time), VIEW.top + RULER_H / 2.0];
+
+    // A click a few points off the flag lands on the marker's frame.
+    let near = [ruler(&stage, 12.0)[0] + 4.0, VIEW.top + 8.0];
+    stage.click(near);
+    assert_eq!(stage.playhead, 12.0);
+
+    // 7.95 s is within the snap of the clip's end at 8 s.
+    stage.drag_through(ruler(&stage, 12.0), &[ruler(&stage, 7.95)]);
+    assert_eq!(stage.timeline.marker(marker).unwrap().time, 8.0);
+    stage.port.magnet = false;
+    stage.drag_through(ruler(&stage, 8.0), &[ruler(&stage, 7.9)]);
+    assert!((stage.timeline.marker(marker).unwrap().time - 7.9).abs() < 1e-9);
+    assert_eq!(
+        stage.playhead, 12.0,
+        "dragging a marker leaves the playhead"
+    );
+
+    // The clip's end, carried to 7.95 s, lands on the marker at 7.9 s.
+    stage.port.magnet = true;
+    let grab = stage.center(id);
+    let to = [grab[0] - 0.05 * stage.port.px_per_sec, grab[1]];
+    stage.drag_through(grab, &[to]);
+    let clip = stage.timeline.clip(id).unwrap();
+    assert!((clip.end() - 7.9).abs() < 1e-9, "end {}", clip.end());
+
+    let away = ruler(&stage, 20.0);
+    stage.drag_through(away, &[ruler(&stage, 21.0)]);
+    assert_eq!(stage.playhead, 21.0, "the ruler beside a flag scrubs");
+}

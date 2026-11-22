@@ -585,6 +585,10 @@ impl Editor {
             ScriptCommand::CloseGaps => {
                 self.timeline.close_gaps();
             }
+            command @ (ScriptCommand::AddMarker { .. }
+            | ScriptCommand::SetMarker { .. }
+            | ScriptCommand::RemoveMarker(_)
+            | ScriptCommand::ClearMarkers) => return self.apply_marker_command(command),
             ScriptCommand::SetDuck { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.duck = enabled;

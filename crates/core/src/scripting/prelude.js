@@ -8,6 +8,7 @@ function state() {
   return s;
 }
 function clips() { return state().clips; }
+function markers() { return state().markers; }
 function assets() { return state().assets; }
 function sweepCandidates() { return state().sweepCandidates || []; }
 function sceneClips() { return state().sceneClips || []; }
@@ -40,10 +41,10 @@ function snapToSpeech(nameOrPath, start, end, handle) {
 }
 function help() {
   return [
-    "state() clips() assets() sweepCandidates() sceneClips() transcriptSegments() inspect() audioReport()",
+    "state() clips() markers() assets() sweepCandidates() sceneClips() transcriptSegments() inspect() audioReport()",
     "utterances(asset)  // [{start,end,text}] speech that should not be cut inside",
     "snapToSpeech(asset, start, end, handle?)  // {start,end} widened out of any utterance, 0.12s handles",
-    "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' (request-time clips); time(spec) timeRange('a..b' | 'clip:7')",
+    "Times: seconds, or a string such as '3.2s' '120f' '1:05.5' '50%' 'end' 'clip:7@end' 'clip:7@1.5s' 'marker:3' (request-time clips and markers); time(spec) timeRange('a..b' | 'clip:7')",
     "play() pause() toggle() seek(t) step(nFrames)",
     "selectClip(id) split(at?) splitClip(id, at) deleteClip(id?)",
     "rippleDelete(id)  // deletes the clip and its linked sound and moves later clips up on every lane that has room; a deleted picture takes the titles over it, and titles across its edges lose that part",
@@ -72,6 +73,8 @@ function help() {
     "  // adds, splits, duplicates and freezes return a handle for the new clip (a split's is its right piece); pass it to later calls in the same run",
     "importMedia(path) exportTo(path) clearTimeline()",
     "setMagnet(bool) setMusicBedMuted(bool) setZoom(pxPerSec) closeGaps()",
+    "addMarker(at?, name?, color?)  // a note pinned to a timeline time (the playhead); colors: yellow orange red pink purple blue cyan green, default the newest marker's. Its ID is in notes and in markers(); markers stay at their time when clips move",
+    "setMarker(id, {time, name, color})  // changes just the fields given. removeMarker(id) clearMarkers()",
     "return reports back as `output` (JSON text); console.log lines and command reports land in `notes`. The in-app console keeps variables between lines; each eddie run starts fresh."
   ].join("\n");
 }
@@ -79,7 +82,8 @@ var console = { log: (...a) => __log(a.map(String).join(" ")) };
 function __resolve(spec, range) {
   const s = state();
   const clips = (s.clips || []).flatMap((c) => [c.id, c.start, c.start + c.duration]);
-  return __resolve_time(String(spec), s.fps, s.duration, clips, range);
+  const marks = (s.markers || []).flatMap((m) => [m.id, m.time]);
+  return __resolve_time(String(spec), s.fps, s.duration, clips, marks, range);
 }
 function time(spec) { return typeof spec === "number" ? spec : __resolve(spec, false)[0]; }
 function timeRange(spec) { const r = __resolve(spec, true); return { start: r[0], end: r[1] }; }
@@ -144,6 +148,22 @@ function setText(id, changes) {
   __set_text(id, JSON.stringify(changes));
 }
 function setFormat(name) { __set_format(String(name)); }
+function addMarker(at, name, color) {
+  __add_marker(at === undefined || at === null ? state().playhead : __t(at),
+    name === undefined || name === null ? "" : String(name),
+    color === undefined || color === null ? "" : String(color));
+}
+function setMarker(id, changes) {
+  if (changes === null || typeof changes !== "object" || Array.isArray(changes)) {
+    throw new Error("setMarker needs an object such as {name: 'B-roll here', color: 'red'}");
+  }
+  const c = Object.assign({}, changes);
+  if (c.time !== undefined) {
+    c.time = __t(c.time);
+    if (typeof c.time !== "number" || !isFinite(c.time)) throw new Error("setMarker time must be a finite number or a time spec");
+  }
+  __set_marker(id, JSON.stringify(c));
+}
 function addTitle(text, at, dur, style) {
   return __add_title(String(text), at === undefined ? state().playhead : __t(at), dur === undefined ? 4 : dur, style === undefined ? "lower-third" : String(style));
 }

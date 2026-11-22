@@ -12,26 +12,31 @@
 //! | `start`, `end`             | the timeline's ends                       |
 //! | `clip:7`, `clip:7@end`     | a clip's start or end                     |
 //! | `clip:7@1.5s`, `clip:7@50%`| an offset into a clip (any time form)     |
+//! | `marker:3`                 | a marker's time                           |
 //!
 //! Ranges are half-open `a..b`, `a..`, `..b`, or `clip:7` for a whole clip.
 
 use crate::ClipId;
 
-/// What a spec resolves against: the project rate, the timeline end and
-/// each clip's `(id, start, end)`.
+/// What a spec resolves against: the project rate, the timeline end,
+/// each clip's `(id, start, end)` and each marker's `(id, time)`.
 pub struct TimeIndex {
     pub fps: f64,
     pub end: f64,
     pub clips: Vec<(ClipId, f64, f64)>,
+    pub markers: Vec<(crate::MarkerId, f64)>,
 }
 
 const FORMS: &str =
-    "use seconds (3.2s), a frame (120f), 1:05.5, 00:01:05:12, 50%, start, end or clip:7@end";
+    "use seconds (3.2s), a frame (120f), 1:05.5, 00:01:05:12, 50%, start, end, clip:7@end or marker:3";
 
 impl TimeIndex {
     /// The timeline time a spec names.
     pub fn time(&self, spec: &str) -> Result<f64, String> {
         let spec = spec.trim();
+        if let Some(id) = spec.strip_prefix("marker:") {
+            return self.marker(id);
+        }
         if let Some(rest) = spec.strip_prefix("clip:") {
             let (id, offset) = rest.split_once('@').unwrap_or((rest, "start"));
             let (start, end) = self.clip(id)?;
@@ -76,6 +81,27 @@ impl TimeIndex {
             ));
         }
         Ok((start, end))
+    }
+
+    fn marker(&self, id: &str) -> Result<f64, String> {
+        let wanted: crate::MarkerId = id
+            .trim()
+            .parse()
+            .map_err(|_| format!("\"marker:{id}\" needs a numeric marker id"))?;
+        self.markers
+            .iter()
+            .find(|marker| marker.0 == wanted)
+            .map(|&(_, time)| time)
+            .ok_or_else(|| {
+                let mut ids: Vec<crate::MarkerId> = self.markers.iter().map(|m| m.0).collect();
+                ids.sort_unstable();
+                let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+                if ids.is_empty() {
+                    format!("no marker {wanted}: the timeline has none")
+                } else {
+                    format!("no marker {wanted}; markers: {}", ids.join(", "))
+                }
+            })
     }
 
     fn clip(&self, id: &str) -> Result<(f64, f64), String> {
@@ -185,6 +211,7 @@ mod tests {
             fps: 30.0,
             end: 120.0,
             clips: vec![(7, 10.0, 14.0), (9, 14.0, 20.0)],
+            markers: vec![(2, 31.5), (5, 40.0)],
         }
     }
 
@@ -207,6 +234,8 @@ mod tests {
             ("clip:7@1.5s", 11.5),
             ("clip:7@50%", 12.0),
             ("clip:9@30f", 15.0),
+            ("marker:2", 31.5),
+            (" marker:5 ", 40.0),
         ] {
             let got = index.time(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
             assert!((got - expected).abs() < 1e-9, "{spec}: {got} vs {expected}");
@@ -221,6 +250,9 @@ mod tests {
         }
         let unknown = index.time("clip:8@end").unwrap_err();
         assert!(unknown.contains("clips: 7, 9"), "{unknown}");
+        let unknown = index.time("marker:3").unwrap_err();
+        assert!(unknown.contains("markers: 2, 5"), "{unknown}");
+        assert!(index.time("marker:x").is_err());
         assert!(index.time("later").unwrap_err().contains("clip:7@end"));
     }
 
@@ -232,6 +264,7 @@ mod tests {
         assert_eq!(index.range("clip:7..clip:9").unwrap(), (10.0, 20.0));
         assert_eq!(index.range("1:00..").unwrap(), (60.0, 120.0));
         assert_eq!(index.range("..2s").unwrap(), (0.0, 2.0));
+        assert_eq!(index.range("marker:2..marker:5").unwrap(), (31.5, 40.0));
         assert!(index
             .range("clip:9@end..clip:9")
             .unwrap_err()

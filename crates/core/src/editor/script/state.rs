@@ -85,6 +85,14 @@ impl Editor {
             "formats": Format::ALL.map(Format::as_str),
             "canvas": self.canvas(),
             "clips": self.script_clips(),
+            "markers": self.timeline.markers_in_order().into_iter().map(|marker| {
+                serde_json::json!({
+                    "id": marker.id,
+                    "time": marker.time,
+                    "name": marker.name,
+                    "color": marker.color.as_str(),
+                })
+            }).collect::<Vec<_>>(),
             "assets": self.assets.iter().map(asset_json).collect::<Vec<_>>(),
             "sweepCandidates": sweep_candidates,
             "sceneClips": scene_clips,

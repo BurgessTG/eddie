@@ -296,6 +296,7 @@ fn frame_times_follow_the_range_the_step_and_the_limits() {
         fps: 25.0,
         end: 60.0,
         clips: vec![(7, 12.0, 14.0)],
+        markers: Vec::new(),
     };
     let times = |range: &str, every: Option<f64>| frame_times(&index, range, every);
     assert_eq!(times("12.5", None), Ok((12.5, 12.5, vec![12.5])));

@@ -90,9 +90,19 @@
   WAV in a "<project> voiceovers" folder beside the project and lands on
   a free audio lane in step with the picture. The Mac app asks for
   microphone access the first time.
+- Markers: M puts a flag on the ruler at the playhead, Alt+M (Option+M
+  on a Mac) one in the next of eight colours, and Shift+M and Alt+Shift+M
+  jump to the next and previous marker (also in the View menu). Drag a
+  flag to move it; the magnet snaps it to clips, the playhead and other
+  markers, and clips to it. Double-click or right-click a flag, or press
+  M on one, to give it a note, recolour it or delete it. Markers keep
+  their time when clips move, and Clear timeline keeps them. Scripts use
+  `markers()`, `addMarker`, `setMarker`, `removeMarker` and
+  `clearMarkers`, `state()` lists `markers`, and times accept `marker:3`.
 
 ### Changed
 
+- The magnet's key is N, as in CapCut; M adds a marker.
 - A clip below full opacity, or a picture smaller than the canvas, shows
   the video lanes under it instead of black. A clip on a lane under a
   full-canvas, opaque picture is still covered.

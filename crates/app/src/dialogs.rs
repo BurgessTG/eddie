@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(rt.state.pending_discard, Some(Discard::New));
         // The prompt owns the keyboard: no shortcut reaches the editor.
         let magnet = rt.state.editor.viewport.magnet;
-        press(&mut rt, Key::Text("m".into()));
+        press(&mut rt, Key::Text("n".into()));
         assert_eq!(rt.state.editor.viewport.magnet, magnet);
         for key in ["unsaved-save", "unsaved-drop", "unsaved-cancel"] {
             assert!(

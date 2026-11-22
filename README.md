@@ -77,6 +77,9 @@ offers the newest build.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
   can duck under speech.
+- Markers: flags on the ruler in eight colours, each with a note, added
+  with M and jumped between with Shift+M and Alt+Shift+M; clips snap to
+  them.
 - Voiceover: record from the system's default input at the playhead (R
   or the toolbar's microphone) after a 3-second countdown. Takes are
   saved beside the project and land on their own audio lane, in step
@@ -357,7 +360,9 @@ macOS.
 | S or B | Split at the playhead |
 | T | Add title |
 | R | Record voiceover |
-| M | Toggle magnet |
+| M / Alt+M | Add marker / add one in a new colour (Option on macOS) |
+| Shift+M / Alt+Shift+M | Next / previous marker |
+| N | Toggle magnet |
 | Delete | Delete the selected clip |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+= / Ctrl+- / Shift+Z | Zoom in / out / fit timeline |

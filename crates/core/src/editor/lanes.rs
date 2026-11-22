@@ -3,7 +3,7 @@
 //! uses the engine's project frame grid; reorders and rollbacks retain
 //! exact existing intervals.
 
-use openreel_engine::{Clip, ClipId, ClipKind, Timeline};
+use openreel_engine::{Clip, ClipId, ClipKind, MarkerId, Timeline};
 
 use super::viewport::TimelineViewport;
 
@@ -22,6 +22,8 @@ pub const TRACK_GAP: f32 = 4.0;
 pub const EDGE_PX: f32 = 9.0;
 /// The part of a clip that always moves it; handles shrink first.
 pub const MOVE_BODY_PX: f32 = 12.0;
+/// How far either side of a marker's flag on the ruler a press takes it.
+pub const MARKER_HIT_PX: f32 = 6.0;
 /// Held this close to either end of the lanes, a drag scrolls them.
 const AUTOSCROLL_MARGIN: f32 = 36.0;
 const AUTOSCROLL_SPEED: f32 = 14.0;
@@ -287,6 +289,27 @@ pub fn hit_clip<'a>(
     outside_edge.map(|(_, clip, hit)| (clip, hit))
 }
 
+/// The marker whose flag is under a point on the ruler, the nearest when
+/// flags crowd. `None` below the ruler or over the headers.
+pub fn hit_marker(
+    port: &TimelineViewport,
+    timeline: &Timeline,
+    rect: ViewRect,
+    pos: Point,
+) -> Option<MarkerId> {
+    let [x, y] = pos;
+    if !(rect.top..rect.lanes_top()).contains(&y) || x < rect.content_left() {
+        return None;
+    }
+    let distance = |time: f64| (x_at(port, rect.content_left(), time) - x).abs();
+    timeline
+        .markers
+        .iter()
+        .filter(|marker| distance(marker.time) <= MARKER_HIT_PX)
+        .min_by(|a, b| distance(a.time).total_cmp(&distance(b.time)))
+        .map(|marker| marker.id)
+}
+
 /// The clip under a point the pointer rests on, for hover looks and the
 /// cursor. `None` outside the view and deep in the header gutter.
 pub fn hover_clip<'a>(
@@ -346,17 +369,24 @@ pub struct Scene<'a> {
 pub struct Gesture {
     drag: Option<(ClipId, DragMode)>,
     seeking: bool,
+    /// A marker's flag being dragged along the ruler.
+    marker: Option<MarkerId>,
 }
 
 impl Gesture {
-    /// True while the ruler is being scrubbed or a clip dragged.
+    /// True while the ruler is being scrubbed, a clip or a marker dragged.
     pub fn is_interacting(&self) -> bool {
-        self.seeking || self.drag.is_some()
+        self.seeking || self.drag.is_some() || self.marker.is_some()
     }
 
     /// The clip being moved or trimmed.
     pub fn dragged_clip(&self) -> Option<ClipId> {
         self.drag.map(|(id, _)| id)
+    }
+
+    /// The marker being moved.
+    pub fn dragged_marker(&self) -> Option<MarkerId> {
+        self.marker
     }
 
     /// Whether a press there starts anything. Presses deep in the
@@ -367,12 +397,18 @@ impl Gesture {
     }
 
     /// A press released where it began. On the ruler it moves the
-    /// playhead to `pos`; on the lanes it parks the playhead at the press
-    /// and selects the clip there, or clears the selection.
+    /// playhead to `pos`, or onto the marker there; on the lanes it parks
+    /// the playhead at the press and selects the clip there, or clears the
+    /// selection.
     pub fn click(&mut self, scene: &mut Scene<'_>, press: Point, pos: Point) {
         let content_left = scene.rect.content_left();
         if press[1] < scene.rect.lanes_top() {
-            let time = time_at(scene.port, content_left, pos[0]).max(0.0);
+            let marker = hit_marker(scene.port, scene.timeline, scene.rect, press)
+                .and_then(|id| scene.timeline.marker(id));
+            let time = match marker {
+                Some(marker) => marker.time,
+                None => time_at(scene.port, content_left, pos[0]).max(0.0),
+            };
             *scene.playhead = scene.timeline.snap(time);
             return;
         }
@@ -391,6 +427,11 @@ impl Gesture {
     pub fn begin(&mut self, scene: &mut Scene<'_>, press: Point, pos: Point) {
         let content_left = scene.rect.content_left();
         if press[1] < scene.rect.lanes_top() {
+            // A marker's flag drags the marker, not the playhead.
+            self.marker = hit_marker(scene.port, scene.timeline, scene.rect, press);
+            if self.marker.is_some() {
+                return;
+            }
             self.seeking = true;
             let time = time_at(scene.port, content_left, pos[0]).max(0.0);
             *scene.playhead = scene.timeline.snap(time);
@@ -455,15 +496,31 @@ impl Gesture {
             *scene.playhead = timeline.snap(time);
             return;
         }
-        let Some((id, mode)) = self.drag else {
-            return;
-        };
-        // Snap targets (magnet on): timeline start, playhead, other
+        // Snap targets (magnet on): timeline start, playhead, markers and
         // clip edges. Magnet off means free placement on frame grid.
         let threshold = 8.0 / scene.port.px_per_sec as f64;
         let mut candidates: Vec<f64> = Vec::new();
         if scene.port.magnet {
             candidates.extend([0.0, *scene.playhead]);
+            candidates.extend(
+                timeline
+                    .markers
+                    .iter()
+                    .filter(|marker| Some(marker.id) != self.marker)
+                    .map(|marker| marker.time),
+            );
+        }
+        if let Some(marker) = self.marker {
+            if scene.port.magnet {
+                candidates.extend(timeline.clips.iter().flat_map(|c| [c.start, c.end()]));
+            }
+            timeline.move_marker(marker, snap_to(time, &candidates, threshold));
+            return;
+        }
+        let Some((id, mode)) = self.drag else {
+            return;
+        };
+        if scene.port.magnet {
             let linked = timeline.clip(id).and_then(|c| c.linked_clip);
             for clip in timeline
                 .clips
@@ -609,6 +666,7 @@ impl Gesture {
         }
         self.drag = None;
         self.seeking = false;
+        self.marker = None;
     }
 }
 

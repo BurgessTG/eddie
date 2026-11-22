@@ -1,6 +1,6 @@
 //! The timeline: lanes of clips on the project frame grid.
 
-use crate::{time_spec, Clip, ClipId, ClipKind, TitleStyle};
+use crate::{time_spec, Clip, ClipId, ClipKind, Marker, MarkerId, TitleStyle};
 
 mod copies;
 mod edit;
@@ -143,6 +143,19 @@ pub struct Timeline {
     pub lanes: Lanes,
     pub clips: Vec<Clip>,
     next_id: ClipId,
+    /// Notes pinned to moments of the timeline (`marker.rs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+    #[serde(default = "first_marker", skip_serializing_if = "is_first_marker")]
+    pub(crate) next_marker: MarkerId,
+}
+
+fn first_marker() -> MarkerId {
+    1
+}
+
+fn is_first_marker(id: &MarkerId) -> bool {
+    *id == 1
 }
 
 impl Timeline {
@@ -153,6 +166,8 @@ impl Timeline {
             lanes: Lanes::default(),
             clips: Vec::new(),
             next_id: 1,
+            markers: Vec::new(),
+            next_marker: 1,
         }
     }
 
@@ -165,6 +180,11 @@ impl Timeline {
                 .clips
                 .iter()
                 .map(|clip| (clip.id, clip.start, clip.end()))
+                .collect(),
+            markers: self
+                .markers
+                .iter()
+                .map(|marker| (marker.id, marker.time))
                 .collect(),
         }
     }
@@ -190,6 +210,7 @@ impl Timeline {
                     && clip.transition.is_none_or(|t| t.is_valid())
                     && clip.keyframes.is_valid()
             })
+            && self.markers_in_range()
     }
 
     /// Pairs of clips that share a lane for a frame or more, lower ID
@@ -218,10 +239,13 @@ impl Timeline {
         pairs
     }
 
-    /// After loading a saved project: new clips never reuse a saved ID.
+    /// After loading a saved project: new clips and markers never reuse a
+    /// saved ID.
     pub fn ensure_fresh_ids(&mut self) {
         let next = self.clips.iter().map(|clip| clip.id + 1).max().unwrap_or(1);
         self.next_id = self.next_id.max(next);
+        let next = self.markers.iter().map(|m| m.id + 1).max().unwrap_or(1);
+        self.next_marker = self.next_marker.max(next);
     }
 
     /// Snap a time to the nearest frame boundary.

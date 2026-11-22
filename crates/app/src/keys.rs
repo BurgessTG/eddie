@@ -227,16 +227,16 @@ mod tests {
         let mut rt = window(Ui::headless());
         let magnet = rt.state.editor.viewport.magnet;
         press(&mut rt, Key::Function(1));
-        press(&mut rt, Key::Text("m".into()));
+        press(&mut rt, Key::Text("n".into()));
         assert_eq!(
             rt.state.editor.viewport.magnet, magnet,
-            "M under the window"
+            "N under the window"
         );
         press(&mut rt, Key::Escape);
-        press(&mut rt, Key::Text("m".into()));
+        press(&mut rt, Key::Text("n".into()));
         assert_ne!(
             rt.state.editor.viewport.magnet, magnet,
-            "M once it is closed"
+            "N once it is closed"
         );
     }
 }

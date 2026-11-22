@@ -188,6 +188,19 @@ pub enum ScriptCommand {
     SetFormat(String),
     SetZoom(f32),
     CloseGaps,
+    /// A marker at `at`; `color` is empty for the colour last used.
+    AddMarker {
+        at: f64,
+        name: String,
+        color: String,
+    },
+    /// `changes` is a JSON object with any of `time`, `name` and `color`.
+    SetMarker {
+        marker: u64,
+        changes: String,
+    },
+    RemoveMarker(u64),
+    ClearMarkers,
     Log(String),
 }
 
@@ -256,11 +269,17 @@ impl ScriptCommand {
                 return Err("clip names and title text cannot hold control characters".to_owned());
             }
         }
+        if let Self::AddMarker { name, .. } = self {
+            if name.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+                return Err("marker names cannot hold control characters".to_owned());
+            }
+        }
         let finite = match self {
             Self::Seek(value)
             | Self::SplitClip { at: value, .. }
             | Self::MoveClip { start: value, .. }
-            | Self::AddAsset { at: value, .. } => value.is_finite(),
+            | Self::AddAsset { at: value, .. }
+            | Self::AddMarker { at: value, .. } => value.is_finite(),
             Self::SetFade {
                 fade_in, fade_out, ..
             } => fade_in.is_finite() && fade_out.is_finite(),
@@ -325,6 +344,9 @@ impl ScriptCommand {
             | Self::SetText { .. }
             | Self::SetFormat(_)
             | Self::CloseGaps
+            | Self::SetMarker { .. }
+            | Self::RemoveMarker(_)
+            | Self::ClearMarkers
             | Self::Log(_) => true,
         };
         if finite {

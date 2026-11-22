@@ -181,11 +181,12 @@ fails, the project is left exactly as it was.
 ### Reading the project
 
 `state()` returns `{playhead, playing, selected, duration, fps, magnet,
-musicBedMuted, format, formats, canvas, clips, assets, sweepCandidates,
-sceneClips, transcriptSegments, inspection, audio}`. `canvas` is the
-picture size export renders, `[width, height]`. The shortcuts `clips()`,
-`assets()`, `sweepCandidates()`, `sceneClips()`, `transcriptSegments()`,
-`inspect()` and `audioReport()` return its parts.
+musicBedMuted, format, formats, canvas, clips, markers, assets,
+sweepCandidates, sceneClips, transcriptSegments, inspection, audio}`.
+`canvas` is the picture size export renders, `[width, height]`. The
+shortcuts `clips()`, `markers()`, `assets()`, `sweepCandidates()`,
+`sceneClips()`, `transcriptSegments()`, `inspect()` and `audioReport()`
+return its parts.
 
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
@@ -201,6 +202,9 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
   seconds from the clip's start; a property without keys is left out, and
   a keyed property's plain value (`opacity`, `transform.scale`, …) is not
   what plays.
+- **Markers:** `id, time, name, color`, in time order. The user drops
+  them while watching, often with a note such as "B-roll here"; read them
+  as their requests.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
@@ -242,9 +246,10 @@ picture size export renders, `[width, height]`. The shortcuts `clips()`,
 
 Every timeline time argument (`at`, `start`, `left`, `right`) takes
 seconds or a spec string: `'3.2s'`, `'120f'`, `'1:05.5'`, `'50%'`,
-`'end'`, `'clip:7@end'`, `'clip:7@1.5s'`, `'clip:7@50%'`. Ranges are
-`'a..b'` or `'clip:7'`. `time(spec)` and `timeRange(spec)` resolve them.
-Clip specs name the IDs in `state()`, not handles. Durations and source
+`'end'`, `'clip:7@end'`, `'clip:7@1.5s'`, `'clip:7@50%'`, `'marker:3'`.
+Ranges are `'a..b'` (such as `'marker:1..marker:2'`) or `'clip:7'`.
+`time(spec)` and `timeRange(spec)` resolve them. Clip and marker specs
+name the IDs in `state()`, not handles. Durations and source
 times (`dur`, `seconds`, `sourceIn`) are plain seconds.
 
 ### Editing
@@ -410,6 +415,16 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - `addCaptionsForClip` returns no handle. Its line in `notes` says how
     many captions it added; read their IDs from `state()` in the next
     run.
+- **Markers:** `addMarker(at?, name?, color?)` pins a note to a
+  timeline time (the playhead by default), on its frame. Colours are
+  `yellow`, `orange`, `red`, `pink`, `purple`, `blue`, `cyan` and
+  `green`; without one it takes the newest marker's. It returns no
+  handle: `notes` names the new marker's ID. `setMarker(id, {time, name,
+  color})` changes only the fields you give. `removeMarker(id)`,
+  `clearMarkers()`.
+  - A marker stays at its time when clips move, ripple or are cleared:
+    `clearTimeline()` keeps markers. Move them yourself after
+    `insertTime` or `rippleDelete` if they should follow the footage.
 - **Settings:** `setMagnet(bool)`, `setMusicBedMuted(bool)`.
 - **Transport and view:** `play()`, `pause()`, `toggle()`, `seek(t)`,
   `step(nFrames)`, `setZoom(pxPerSec)`. In the window these move the

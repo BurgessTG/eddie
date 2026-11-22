@@ -3,10 +3,12 @@
 //! What a press, drag or wheel means is decided once, in `eddie_core`'s
 //! `lanes`. This module draws the lanes and reports the pointer to it:
 //! `clip` is one clip's element, `chrome` the lane headers, ruler and
-//! playhead around the clips, and `toolbar` the bar above them.
+//! playhead around the clips, `markers` the flags on the ruler and their
+//! popup, and `toolbar` the bar above them.
 
 mod chrome;
 mod clip;
+pub mod markers;
 mod take;
 mod toolbar;
 
@@ -182,11 +184,17 @@ fn pointer(ui: &mut Ui, drag: &mut Drag, tx: &mut Tx) {
             let dragging = std::mem::take(&mut ui.lanes.dragging);
             ui.lanes.held_at = None;
             ui.lanes.scrolled = None;
+            // A double-click on a marker's flag opens it.
+            let flag = lanes::hit_marker(&ui.editor.viewport, &ui.editor.timeline, rect, press)
+                .filter(|_| !dragging && drag.clicks >= 2 && !drag.cancelled());
             let (mut scene, assets) = scene(&mut ui.editor, rect);
             let gesture = &mut ui.lanes.gesture;
             if !dragging {
                 if !drag.cancelled() {
                     gesture.click(&mut scene, press, pos);
+                }
+                if let Some(id) = flag {
+                    markers::open(ui, id);
                 }
             } else if drag.cancelled() {
                 // A lost press puts a moved clip back.
@@ -239,6 +247,10 @@ fn view(ui: &Ui) -> El {
         .hover
         .and_then(|at| lanes::hover_clip(port, timeline, rect, at))
         .map(|(clip, hit)| (clip.id, hit));
+    let flag = ui
+        .lanes
+        .hover
+        .and_then(|at| lanes::hit_marker(port, timeline, rect, at));
 
     let mut content = el()
         .key("timeline-lanes")
@@ -304,6 +316,9 @@ fn view(ui: &Ui) -> El {
             content = content.child(mark);
         }
     }
+    for marker in markers::flags(ui, lanes_w, height, flag) {
+        content = content.child(marker);
+    }
     let x = lanes::x_at(port, 0.0, ui.editor.playhead);
     if (0.0..=lanes_w).contains(&x) {
         content = content.child(chrome::playhead(x, height));
@@ -319,9 +334,14 @@ fn view(ui: &Ui) -> El {
             ui.lanes.hover = Some([at.x, at.y]);
         })
         .on_secondary_press_local(move |ui: &mut Ui, at: PointerEvent, _| {
+            let port = &ui.editor.viewport;
+            // On a marker's flag it opens the marker.
+            if let Some(id) = lanes::hit_marker(port, &ui.editor.timeline, rect, [at.x, at.y]) {
+                markers::open(ui, id);
+                return;
+            }
             // A right-click selects the clip under it, as a click does, but
             // leaves the playhead where it is.
-            let port = &ui.editor.viewport;
             let hit = lanes::hover_clip(port, &ui.editor.timeline, rect, [at.x, at.y]);
             ui.editor.selected = hit.map(|(clip, _)| clip.id);
             let press = at.window();
@@ -332,14 +352,17 @@ fn view(ui: &Ui) -> El {
                 ui.lanes.hover = None;
             }
         });
-    input = match hovered {
-        Some((_, ClipHit::Body)) => input.cursor(Cursor::Grab),
-        Some(_) => input.cursor(Cursor::ResizeColumn),
-        None => input,
+    input = match (flag, hovered) {
+        (Some(_), _) | (_, Some((_, ClipHit::Body))) => input.cursor(Cursor::Grab),
+        (_, Some(_)) => input.cursor(Cursor::ResizeColumn),
+        (None, None) => input,
     };
     if !ui.lanes.held() {
         // No tooltip over a clip while it is dragged.
-        input = input.help(HELP);
+        input = input.help(match flag {
+            Some(id) => markers::help(ui, id),
+            None => HELP.to_owned(),
+        });
     }
     view.child(content).child(input)
 }

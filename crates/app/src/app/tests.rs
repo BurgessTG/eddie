@@ -1,11 +1,22 @@
 use eddie_core::shortcuts::{BINDINGS, Chord, KeyName};
 use rune::{Key, KeyEvent, Mods};
 
+/// The letter a chord's key types alone, as the window reports it.
+fn base(chord: Chord) -> Option<char> {
+    match chord.key {
+        KeyName::Char(key) => Some(key),
+        KeyName::Space => Some(' '),
+        _ => None,
+    }
+}
+
 /// The event the window gets for a chord: Ctrl with a character
 /// arrives as a command, a plain character as the text it types.
 fn event(chord: Chord) -> KeyEvent {
     let key = match chord.key {
         KeyName::Char(key) if chord.command => Key::Command(key),
+        // What Option types on a Mac, never the letter itself.
+        KeyName::Char(_) if chord.alt => Key::Text("§".to_owned()),
         KeyName::Char(key) if chord.shift => Key::Text(key.to_uppercase().collect()),
         KeyName::Char(key) => Key::Text(key.to_string()),
         KeyName::Space => Key::Text(" ".to_owned()),
@@ -26,6 +37,7 @@ fn event(chord: Chord) -> KeyEvent {
             cmd: chord.command,
             ctrl: chord.command,
             shift: chord.shift,
+            alt: chord.alt,
             ..Mods::default()
         },
     }
@@ -92,7 +104,7 @@ fn every_bound_chord_is_one_the_window_can_read() {
     for binding in BINDINGS {
         for chord in binding.keys {
             assert_eq!(
-                super::chord(&event(*chord)),
+                super::chord(&event(*chord), base(*chord)),
                 Some(*chord),
                 "{:?} never reaches {:?}",
                 chord,
