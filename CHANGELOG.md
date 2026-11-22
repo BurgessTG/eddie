@@ -133,7 +133,12 @@
   to trim into, in the background; the status bar shows how far it has
   got, and pressing Reverse again stops it. Pressing it on a reversed
   clip plays it forwards again. Scripts use `setReverse`, and `state()`
-  gives each clip's `reversed`.
+  gives each clip's `remade`.
+- Stabilize: a Details list for video clips that steadies a shaking
+  camera at Minimal crop, Recommended or Most stable, each smoothing more
+  and cropping more. Eddie writes the steadied part in the background, as
+  for Reverse, and a clip can be both stabilized and reversed. Scripts
+  use `setStabilize`.
 
 ### Changed
 

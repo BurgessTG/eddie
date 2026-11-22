@@ -146,7 +146,7 @@ pub fn frames(
             .clips
             .iter()
             .filter_map(|clip| {
-                // A reversed clip shows a range of the original backwards.
+                // A remade clip shows a range of the original.
                 let (file, from, to) = clip.shown_range()?;
                 (file == info.path).then_some((clip.id, from, to))
             })

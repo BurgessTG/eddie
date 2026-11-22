@@ -331,7 +331,7 @@ impl Editor {
             .iter()
             .filter(|clip| {
                 clip.source.as_deref() == Some(path)
-                    || clip.reversed.as_ref().is_some_and(|r| r.original == path)
+                    || clip.remade.as_ref().is_some_and(|r| r.original == path)
             })
             .count();
         if used > 0 {

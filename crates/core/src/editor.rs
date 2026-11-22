@@ -36,7 +36,7 @@ pub mod pictures;
 mod playback;
 mod program;
 pub mod project;
-mod reverse;
+mod remake;
 mod script;
 #[cfg(unix)]
 pub mod server;
@@ -149,7 +149,7 @@ pub struct Editor {
 
     pub assets: Vec<BinAsset>,
     /// Files Eddie made for clips, the drawings of shapes and stickers
-    /// (`graphics`) and reversed clips (`reverse`): found like media by
+    /// (`graphics`) and reversed or stabilized clips (`remake`): found like media by
     /// `Editor::asset`, never listed in the bin or the project's media.
     pub made: Vec<BinAsset>,
     pub selected_asset: Option<String>,
@@ -244,11 +244,11 @@ pub struct Editor {
     /// Shapes' and stickers' drawings; `None` keeps them in the system's
     /// temporary folder.
     pub graphics_dir: Option<PathBuf>,
-    /// Reversed clips' files (`reverse`); `None` keeps them in the
-    /// system's temporary folder.
-    pub reversed_dir: Option<PathBuf>,
-    /// Reversed files being written, and the clips waiting for them.
-    reversals: reverse::Reversals,
+    /// Reversed and stabilized clips' files (`remake`); `None` keeps them
+    /// in the system's temporary folder.
+    pub remade_dir: Option<PathBuf>,
+    /// Those files being written, and the clips waiting for them.
+    remakes: remake::Remakes,
     /// Drawings made so far and the time they took, which a script's edit
     /// keeps out of its time budget (`graphics::MAX_NEW_GRAPHICS`).
     drawing: (usize, Duration),
@@ -316,8 +316,8 @@ impl Editor {
         editor.initial_imports = initial_imports;
         editor.curation_dir = sweep::default_curation_dir();
         editor.graphics_dir = graphics::default_dir();
-        editor.reversed_dir = reverse::default_dir();
-        let made = [editor.graphics_dir.clone(), editor.reversed_dir.clone()];
+        editor.remade_dir = remake::default_dir();
+        let made = [editor.graphics_dir.clone(), editor.remade_dir.clone()];
         std::thread::spawn(move || {
             for folder in made.iter().flatten() {
                 graphics::prune(folder, graphics::KEEP_UNUSED);
@@ -414,8 +414,8 @@ impl Editor {
             noise: Default::default(),
             curation_dir: None,
             graphics_dir: None,
-            reversed_dir: None,
-            reversals: Default::default(),
+            remade_dir: None,
+            remakes: Default::default(),
             drawing: (0, Duration::ZERO),
             model_dir: None,
             make_thumbnails: true,
@@ -605,7 +605,7 @@ impl Editor {
         self.poll_voiceover(now, dt);
         self.poll_imports();
         self.poll_noise();
-        self.poll_reversals();
+        self.poll_remakes();
         self.poll_frames();
         if openreel_media::take_hardware_failure().is_some() {
             self.status = "Hardware decode failed; playing on the CPU.".to_owned();

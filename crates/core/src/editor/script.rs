@@ -14,8 +14,9 @@ mod apply;
 mod state;
 
 /// The editor state a script's commands can change (`Editor::edit_snapshot`).
-/// Why an edit that reverses clips whose files are not made yet stops.
-const NOT_REVERSED_YET: &str = "reversed clips are not made yet; run the script again";
+/// Why an edit that reverses or stabilizes clips whose files are not made
+/// yet stops.
+const NOT_MADE_YET: &str = "reversed or stabilized clips are not made yet; run the script again";
 
 #[derive(Clone)]
 pub struct EditSnapshot {
@@ -44,7 +45,7 @@ impl Editor {
             command.validate()?;
         }
         let before = self.edit_snapshot();
-        self.reversals.wanted.clear();
+        self.remakes.wanted.clear();
         let overlaps_before = self.timeline.lane_overlaps();
         let started = Instant::now();
         let drawn_before = self.drawing;
@@ -72,9 +73,9 @@ impl Editor {
                     return Err("edit took too long; try a smaller batch".to_owned());
                 }
             }
-            // `run` makes the reversed files and runs the script again.
-            if !self.reversals.wanted.is_empty() {
-                return Err(NOT_REVERSED_YET.to_owned());
+            // `run` makes the files and runs the script again.
+            if !self.remakes.wanted.is_empty() {
+                return Err(NOT_MADE_YET.to_owned());
             }
             // Checked once the whole edit has run, so commands may pass
             // through an overlap on the way to a valid timeline.
@@ -114,8 +115,8 @@ impl Editor {
             }
             Err(error) => {
                 // Files only an edit that ran to the end may make.
-                if error != NOT_REVERSED_YET {
-                    self.reversals.wanted.clear();
+                if error != NOT_MADE_YET {
+                    self.remakes.wanted.clear();
                 }
                 self.restore_edit(before);
                 Err(error)
@@ -166,7 +167,7 @@ impl Editor {
     pub fn apply_script_commands(&mut self, commands: Vec<ScriptCommand>) -> Vec<String> {
         let mut notes = Vec::new();
         let mut created = HashMap::new();
-        self.reversals.wanted.clear();
+        self.remakes.wanted.clear();
         for command in commands {
             match self.apply_script_command(command, &mut created) {
                 Ok(Some(note)) => notes.push(note),
@@ -174,8 +175,8 @@ impl Editor {
                 Err(error) => notes.push(format!("error: {error}")),
             }
         }
-        if !self.make_wanted_reversals().is_empty() {
-            notes.push("reversing; run setReverse again once it is done".to_owned());
+        if !self.make_wanted_remakes().is_empty() {
+            notes.push("making the clip's file; run the command again once it is done".to_owned());
         }
         notes
     }

@@ -44,7 +44,13 @@ impl Editor {
                     "chroma": c.chroma,
                     "mask": c.mask,
                     "graphic": c.graphic,
-                    "reversed": c.reversed,
+                    "remade": c.remade.as_ref().map(|r| serde_json::json!({
+                        "original": r.original,
+                        "start": r.start,
+                        "end": r.end,
+                        "reverse": r.reverse,
+                        "stabilize": r.stabilize.map(|level| level.name()),
+                    })),
                     "color": c.color,
                     "text": c.text,
                     "transition": c.transition.map(|t| serde_json::json!({

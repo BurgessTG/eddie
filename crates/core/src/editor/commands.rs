@@ -266,11 +266,11 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     if applied.is_err() {
         // `apply_edit` has already put a refused edit back.
         app.rehearsing = false;
-        // It reversed clips whose files are not made yet: make them, then
-        // run it again.
-        let files = app.make_wanted_reversals();
+        // It reversed or stabilized clips whose files are not made yet:
+        // make them, then run it again.
+        let files = app.make_wanted_remakes();
         if !files.is_empty() {
-            return Ok(Reply::Later(Job::Reverse {
+            return Ok(Reply::Later(Job::Remake {
                 files,
                 params: params.clone(),
                 reported: 0.0,

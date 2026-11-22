@@ -208,17 +208,22 @@ pub fn status_bar(ui: &Ui) -> El {
                 progress.clamp(0.0, 1.0) as f32,
             ));
     }
-    if let Some(progress) = editor.reverse_progress() {
+    if let Some((progress, doing)) = editor.remake_progress() {
+        let help = if doing == "Reversing" {
+            "Writing the reversed clip; press Reverse on it to stop"
+        } else {
+            "Writing the steadied clip; set its Stabilize to Off to stop"
+        };
         bar = bar
             .child(
-                text("Reversing")
+                text(doing)
                     .font(theme::sized(12.0))
                     .color(c.muted_fg)
                     .single_line(),
             )
             .child(progress_bar(
-                "reverse-progress",
-                "Writing the reversed clip; press Reverse on it to stop",
+                "remake-progress",
+                help,
                 progress.clamp(0.0, 1.0) as f32,
             ))
             .child(el().w(8.0));
@@ -267,7 +272,7 @@ pub fn status_bar(ui: &Ui) -> El {
 fn lamp(ui: &Ui) -> El {
     let c = c();
     let editor = &ui.editor;
-    let busy = editor.importing() || editor.exporting() || editor.curating() || editor.reversing();
+    let busy = editor.importing() || editor.exporting() || editor.curating() || editor.remaking();
     let lamp = row().key("status-lamp").size(12.0, 12.0).center();
     if busy {
         lamp.child(

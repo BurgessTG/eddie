@@ -191,7 +191,7 @@ pub(super) fn clip_el(
             (body, art) = filmstrip(body, art, clip, thumbs, port.px_per_sec, left, (w, h));
         }
         ClipKind::Audio => {
-            // `asset` also finds a reversed clip's file.
+            // `asset` also finds a reversed or stabilized clip's file.
             let asset = source.and_then(|path| ui.editor.asset(path));
             if let Some(asset) = asset {
                 art = waveform(art, clip, asset, port.px_per_sec, left, full_w, (w, h));
@@ -329,7 +329,7 @@ fn key_marks(mut art: Shape, clip: &Clip, px_per_sec: f32, left: f32, (w, h): (f
 /// picture and sound are tied.
 fn name_chip(clip: &Clip, left: f32, full_w: f32) -> El {
     let linked = clip.linked_clip.is_some();
-    let reversed = clip.reversed.is_some();
+    let reversed = clip.remade.as_ref().is_some_and(|remade| remade.reverse);
     let link_w = if linked { 16.0 } else { 0.0 } + if reversed { 16.0 } else { 0.0 };
     let mut chip = row()
         .absolute(left + 3.0, 3.0)

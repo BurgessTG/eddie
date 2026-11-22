@@ -3,7 +3,7 @@
 
 use eddie_core::editor::details::{ClipDetails, MAX_VOLUME};
 use eddie_core::{Action, Editor, shortcuts};
-use openreel_engine::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED, Property};
+use openreel_engine::{Clip, ClipId, ClipKind, MAX_SPEED, MIN_SPEED, Property, Stabilize};
 use rune::{El, Key, col, el, row};
 
 use super::fields::Field;
@@ -184,6 +184,9 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
         });
         if video {
             look.push(blend(ui, clip));
+            if clip.source.is_some() && !clip.still() && clip.graphic.is_none() {
+                look.push(stabilize(ui, id, clip));
+            }
         }
     }
     if has_sound {
@@ -224,6 +227,43 @@ fn blend(ui: &Ui, clip: &Clip) -> El {
             help,
             Select::Blend,
             ui.details.select == Some(Select::Blend),
+        )
+        .grow(1.0)
+        .min_w(0.0),
+    )
+    .h(FIELD_H + 1.0)
+    .pb(1.0)
+}
+
+/// How hard a shaking camera is steadied. While the steadied file is made
+/// the list shows the level it is made for.
+fn stabilize(ui: &Ui, id: ClipId, clip: &Clip) -> El {
+    let pending = ui.editor.remake_pending(id);
+    let level = match pending {
+        Some(spec) => spec.stabilize,
+        None => clip.remade.as_ref().and_then(|remade| remade.stabilize),
+    };
+    let label = level.map_or("Off", Stabilize::label);
+    let (choice, help) = if pending.is_some() {
+        (
+            format!("{label}…"),
+            "Writing the steadied clip; pick Off to stop",
+        )
+    } else {
+        (
+            label.to_owned(),
+            "Steadies a shaking camera, cropping a little to hide the edges",
+        )
+    };
+    prop_row(
+        "Stabilize",
+        help,
+        select(
+            "details-stabilize",
+            &choice,
+            help,
+            Select::Stabilize,
+            ui.details.select == Some(Select::Stabilize),
         )
         .grow(1.0)
         .min_w(0.0),

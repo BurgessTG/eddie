@@ -1,8 +1,8 @@
 //! The pick lists in Details: the selected title's own style, the one
-//! generated captions get, and a picture's blend mode. Each is a closed
-//! field that opens a list under itself.
+//! generated captions get, a picture's blend mode and how it is steadied.
+//! Each is a closed field that opens a list under itself.
 
-use openreel_engine::{BlendMode, ClipId, TitleStyle};
+use openreel_engine::{BlendMode, ClipId, Stabilize, TitleStyle};
 use rune::{Align, Cx, El, Side};
 
 use crate::app::Ui;
@@ -17,6 +17,8 @@ pub enum Select {
     Captions,
     /// The selected picture's blend mode.
     Blend,
+    /// How hard the selected picture is steadied.
+    Stabilize,
 }
 
 /// A closed list: its choice and a down arrow.
@@ -55,7 +57,7 @@ fn option(which: Select, id: ClipId, style: TitleStyle, current: bool) -> El {
                 }
             }
             Select::Captions => ui.editor.caption_style = style,
-            Select::Blend => {}
+            Select::Blend | Select::Stabilize => {}
         }
         ui.details.select = None;
     })
@@ -73,6 +75,22 @@ fn blend_option(id: ClipId, mode: BlendMode, current: bool) -> El {
             ui.details.select = None;
         },
     )
+}
+
+pub(super) fn stabilize_key(level: Option<Stabilize>) -> String {
+    format!("details-stabilize-{}", level.map_or("off", Stabilize::name))
+}
+
+/// One stabilize level, or Off, in the open list.
+fn stabilize_option(id: ClipId, level: Option<Stabilize>, current: bool) -> El {
+    let (label, help) = match level {
+        Some(level) => (level.label(), level.help()),
+        None => ("Off", "Play the footage as shot"),
+    };
+    theme::option(stabilize_key(level), label, help, current).on_press(move |ui: &mut Ui| {
+        ui.editor.stabilize_clip(id, level);
+        ui.details.select = None;
+    })
 }
 
 /// The open list, hung under its field. A press outside closes it.
@@ -96,6 +114,20 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
                 .map(|mode| blend_option(id, mode, mode == clip.blend))
                 .collect(),
         ),
+        Select::Stabilize => {
+            let current = match ui.editor.remake_pending(id) {
+                Some(spec) => spec.stabilize,
+                None => clip.remade.as_ref().and_then(|remade| remade.stabilize),
+            };
+            let levels = std::iter::once(None).chain(Stabilize::ALL.map(Some));
+            (
+                "details-stabilize",
+                2.0,
+                levels
+                    .map(|level| stabilize_option(id, level, level == current))
+                    .collect(),
+            )
+        }
         Select::Title | Select::Captions => {
             let (anchor, current) = if which == Select::Title {
                 ("details-style", clip.title_style)

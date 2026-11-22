@@ -101,17 +101,20 @@ fn rule() -> El {
         .child(el().w(1.0).h_full().fill(c().border_strong))
 }
 
-/// Reverse: on while the selected clip plays backwards or waits for its
+/// Reverse: on while the selected clip plays backwards or waits for a
 /// reversed file.
 fn reverse(ui: &Ui) -> El {
     let editor = &ui.editor;
-    let on = editor.selected.is_some_and(|id| {
-        editor.reversing_clip(id)
-            || editor
+    let on = editor
+        .selected
+        .is_some_and(|id| match editor.remake_pending(id) {
+            Some(spec) => spec.reverse,
+            None => editor
                 .timeline
                 .clip(id)
-                .is_some_and(|clip| clip.reversed.is_some())
-    });
+                .and_then(|clip| clip.remade.as_ref())
+                .is_some_and(|remade| remade.reverse),
+        });
     tool_button(
         "tool-reverse",
         Tool::Reverse,

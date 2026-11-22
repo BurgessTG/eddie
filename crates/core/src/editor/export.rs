@@ -76,16 +76,17 @@ impl Editor {
             self.status = format!("Export cannot replace {used}, which this project uses.");
             return;
         }
-        if let Some(clip) = self.timeline.clips.iter().find(|clip| {
-            clip.reversed.is_some()
-                && clip
-                    .source
-                    .as_deref()
-                    .is_none_or(|file| !self.made.iter().any(|made| made.info.path == file))
+        if let Some((clip, spec)) = self.timeline.clips.iter().find_map(|clip| {
+            let spec = clip.remade.as_ref()?;
+            clip.source
+                .as_deref()
+                .is_none_or(|file| !self.made.iter().any(|made| made.info.path == file))
+                .then_some((clip, spec))
         }) {
             self.status = format!(
-                "{} is still being reversed; export when it is done.",
-                clip.name
+                "{} is still being made ({}); export when it is done.",
+                clip.name,
+                super::remake::doing(spec).to_lowercase()
             );
             return;
         }

@@ -38,8 +38,8 @@ pub enum Job {
         method: String,
         params: Value,
     },
-    /// A `run` that reverses clips, waiting for their files.
-    Reverse {
+    /// A `run` that reverses or stabilizes clips, waiting for their files.
+    Remake {
         files: Vec<String>,
         params: Value,
         /// The share last reported.
@@ -53,7 +53,7 @@ impl Job {
     pub fn edits_timeline(&self) -> bool {
         match self {
             Job::Measure { method, .. } => edits_timeline(method),
-            Job::Reverse { .. } => true,
+            Job::Remake { .. } => true,
             _ => false,
         }
     }
@@ -93,14 +93,14 @@ impl Job {
                     Err(error) => Some(Err(error)),
                 }
             }
-            Job::Reverse {
+            Job::Remake {
                 files,
                 params,
                 reported,
             } => {
-                let running: Vec<f64> = files
+                let running: Vec<(f64, &str)> = files
                     .iter()
-                    .filter_map(|file| app.reversal_running(file))
+                    .filter_map(|file| app.remake_running(file))
                     .collect();
                 if running.is_empty() {
                     // Made, or failed: the script says which when it runs.
@@ -114,10 +114,12 @@ impl Job {
                     };
                 }
                 let done = files.len() - running.len();
-                let share = (done as f64 + running.iter().sum::<f64>()) / files.len() as f64;
+                let share = (done as f64 + running.iter().map(|(share, _)| share).sum::<f64>())
+                    / files.len() as f64;
                 if share >= *reported + 0.1 {
                     *reported = share;
-                    notes.push(Note::Progress(format!("reversing: {:.0}%", share * 100.0)));
+                    let doing = running[0].1.to_lowercase();
+                    notes.push(Note::Progress(format!("{doing}: {:.0}%", share * 100.0)));
                 }
                 None
             }

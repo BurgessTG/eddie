@@ -202,7 +202,8 @@ impl Editor {
 
         // Shapes and stickers are drawn again here, not imported.
         self.restore_graphics();
-        // A reversed clip's file is made again from its original if gone.
+        // A reversed or stabilized clip's file is made again from its
+        // original if gone.
         let mut wanted = media;
         for clip in self
             .timeline
@@ -210,8 +211,8 @@ impl Editor {
             .iter()
             .filter(|clip| clip.graphic.is_none())
         {
-            let source = match &clip.reversed {
-                Some(reversed) => Some(&reversed.original),
+            let source = match &clip.remade {
+                Some(remade) => Some(&remade.original),
                 None => clip.source.as_ref(),
             };
             if let Some(source) = source {
@@ -237,7 +238,7 @@ impl Editor {
                 *source = moved;
             }
         }
-        self.restore_reversals();
+        self.restore_remakes();
         self.history.reset(&self.timeline);
         self.saved_timeline = self.timeline.clone();
         self.saved_mute_music_beds = self.mute_music_beds;
@@ -290,7 +291,7 @@ impl Editor {
                 .rewrite(|timeline| relink_clips(timeline, old, &new));
         }
         let count = found.len();
-        self.restore_reversals();
+        self.restore_remakes();
         self.spawn_import(found.into_iter().map(|(_, new)| new).collect());
         self.status = match self.missing_media.len() {
             0 => format!("Relinked {count} media file{}.", plural(count)),
@@ -345,8 +346,15 @@ fn read_project(path: &Path) -> Result<(serde_json::Value, Timeline), String> {
     if !matches!(version, Some(1 | VERSION)) {
         return Err(unreadable());
     }
-    let mut timeline: Timeline =
-        serde_json::from_value(value["timeline"].take()).map_err(|_| unreadable())?;
+    let mut saved = value["timeline"].take();
+    // Previews of 0.3.0 saved a reversed clip's file as `reversed`.
+    for clip in saved["clips"].as_array_mut().into_iter().flatten() {
+        if let Some(mut reversed) = clip.get_mut("reversed").map(serde_json::Value::take) {
+            reversed["reverse"] = true.into();
+            clip["remade"] = reversed;
+        }
+    }
+    let mut timeline: Timeline = serde_json::from_value(saved).map_err(|_| unreadable())?;
     if version == Some(1) {
         timeline.drop_empty_lanes();
     }
@@ -364,8 +372,8 @@ fn relink_clips(timeline: &mut Timeline, old: &str, new: &str) {
         if clip.source.as_deref() == Some(old) {
             clip.source = Some(new.to_owned());
         }
-        if let Some(reversed) = clip.reversed.as_mut().filter(|r| r.original == old) {
-            reversed.original = new.to_owned();
+        if let Some(remade) = clip.remade.as_mut().filter(|r| r.original == old) {
+            remade.original = new.to_owned();
         }
     }
 }

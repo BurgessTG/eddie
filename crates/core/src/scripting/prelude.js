@@ -65,6 +65,7 @@ function help() {
     "setTransition(id, kind, seconds?)  // video only: how the picture passes from the clip right before it on its lane, centred on the cut. kinds: mix dip-black dip-white wipe-left wipe-right wipe-up wipe-down slide-left slide-right slide-up slide-down; seconds 0.1 to 5 (0.5); null removes it",
     "setSpeed(id, 0.25..4)  // video or audio; keeps the source range, so the clip's length becomes it at that speed (a linked partner too); sound keeps its pitch",
     "setReverse(id, bool)  // video or audio; plays the clip (and a linked partner) backwards, or forwards again; the run waits while Eddie writes the reversed file",
+    "setStabilize(id, level)  // video only: steadies a shaking camera, the linked sound following; levels minimal-crop recommended most-stable (each smooths more and crops more), true for recommended, null or false plays it as shot; the run waits while Eddie writes the steadied file",
     "setFade(id, inSec, outSec) setDuck(id, bool) setReduceNoise(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool)",
@@ -131,6 +132,10 @@ function clearKeyframes(id, property) {
 }
 function setBackground(id, name) { __set_background(id, String(name)); }
 function setBlend(id, mode) { __set_blend(id, String(mode)); }
+function setStabilize(id, level) {
+  if (level === undefined) throw new Error("setStabilize needs a level such as 'recommended', or null to play the clip as shot");
+  __set_stabilize(id, level === null || level === false ? "" : level === true ? "recommended" : String(level));
+}
 function setTransition(id, kind, seconds) {
   if (kind === undefined) throw new Error("setTransition needs a kind such as 'mix', or null to remove it");
   __set_transition(id, kind === null ? "" : String(kind), seconds === undefined ? 0.5 : seconds);

@@ -1,15 +1,15 @@
 #!/bin/sh
-# Builds the FFmpeg that Eddie.app carries, from source, with the five
+# Builds the FFmpeg that Eddie.app carries, from source, with the six
 # libraries Eddie needs beyond FFmpeg's own code: x264 for export, FreeType
-# and HarfBuzz for titles (the drawtext filter), dav1d for AV1, and LAME,
-# the mp3 encoder Eddie's tests make their samples with, so the tests run
-# on the FFmpeg the app carries.
+# and HarfBuzz for titles (the drawtext filter), dav1d for AV1, vid.stab
+# for Stabilize, and LAME, the mp3 encoder Eddie's tests make their samples
+# with, so the tests run on the FFmpeg the app carries.
 #
 #   packaging/macos/ffmpeg.sh
 #
 # It prints the folder the build is installed in, target/ffmpeg-macos, and
 # builds only when that folder is not already this script's work. It needs
-# Xcode's command line tools, pkg-config, meson and ninja.
+# Xcode's command line tools, pkg-config, cmake, meson and ninja.
 #
 # Homebrew's FFmpeg is built for the macOS it is installed on and loads a
 # hundred libraries. This one is built for MACOSX_DEPLOYMENT_TARGET (11.0
@@ -31,7 +31,7 @@ die() {
 }
 
 # Name, version, the archive's sha256 and where it comes from. FFmpeg,
-# FreeType, HarfBuzz, dav1d and LAME are releases, with the checksums
+# FreeType, HarfBuzz, dav1d, vid.stab and LAME are releases, with the checksums
 # Homebrew records for the same files. x264 has no releases: this is the
 # commit Homebrew builds.
 sources() {
@@ -40,6 +40,7 @@ x264 r3222 6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224 http
 freetype 2.15.0 93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5 https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz
 harfbuzz 15.1.0 0fc7c565443a5f4be7da65ac5ee5bd737d9b158dc908708b7689a0a5796b0c8d https://github.com/harfbuzz/harfbuzz/releases/download/15.1.0/harfbuzz-15.1.0.tar.xz
 dav1d 1.5.4 2abfb0c89212e6e4733a54e0ae509ec00a5b845a6360946f918806e14aedb011 https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2
+vidstab 1.1.2 96db34d48a9e3aa13736a48744b56dfb76731ac9bb5193c716de8534c9fd709d https://github.com/georgmartius/vid.stab/archive/refs/tags/v1.1.2.tar.gz
 lame 4.0 3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz
 ffmpeg 9.0.2 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
 EOF
@@ -53,7 +54,7 @@ EOF
 # app has no use for a camera or a microphone and must not ask for one.
 configuration="--enable-shared --disable-static --enable-gpl \
 --enable-libx264 --enable-libfreetype --enable-libharfbuzz --enable-libdav1d \
---enable-libmp3lame \
+--enable-libvidstab --enable-libmp3lame \
 --disable-autodetect --enable-videotoolbox --enable-audiotoolbox \
 --enable-zlib --enable-bzlib \
 --disable-indevs --enable-indev=lavfi --disable-outdevs \
@@ -72,7 +73,7 @@ if [ "$(cat "$prefix/built-by" 2>/dev/null)" = "$key" ]; then
     exit 0
 fi
 
-for tool in clang make pkg-config meson ninja curl; do
+for tool in clang make pkg-config cmake meson ninja curl; do
     command -v "$tool" >/dev/null || die "Building FFmpeg needs $tool, which is not installed"
 done
 
@@ -125,7 +126,7 @@ licence() {
     done
 }
 
-# The five libraries are static, so they end up inside FFmpeg's own and
+# The six libraries are static, so they end up inside FFmpeg's own and
 # the app carries no file for them.
 fetch x264
 run x264 ./configure --prefix="$prefix" --enable-static --enable-pic --disable-cli --disable-opencl
@@ -150,6 +151,15 @@ run dav1d meson setup out --prefix="$prefix" --libdir=lib --buildtype=release \
     --default-library=static -Denable_tools=false -Denable_tests=false
 run dav1d ninja -C out install
 licence dav1d COPYING
+
+# Without OpenMP, which macOS's clang does not ship.
+fetch vidstab
+run vidstab cmake -S . -B out -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DUSE_OMP=OFF \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+run vidstab cmake --build out -j "$jobs"
+run vidstab cmake --install out
+licence vidstab LICENSE
 
 # LAME calls ID3 functions it never declares, which newer compilers refuse
 # and C23 forbids; Homebrew builds it with the same two settings.
@@ -192,6 +202,9 @@ has filters despill
 has filters movie
 has decoders pgm
 has devices lavfi
+# Stabilize: vid.stab measures the camera's motion, then steadies it.
+has filters vidstabdetect
+has filters vidstabtransform
 
 # The GPL asks that whoever gets the program can get its source: the app
 # carries this list beside the licences.

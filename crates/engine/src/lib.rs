@@ -14,6 +14,7 @@ mod keyframe;
 mod marker;
 mod mask;
 mod place;
+mod remade;
 mod stack;
 mod text;
 pub mod time_spec;
@@ -25,7 +26,7 @@ mod tests;
 
 pub use blend::BlendMode;
 pub use chroma::{yuv, ChromaKey, Spill, KEY_BLUE, KEY_GREEN};
-pub use clip::{Clip, ClipId, ClipKind, Reversed, TitleStyle, MAX_SPEED, MIN_SPEED};
+pub use clip::{Clip, ClipId, ClipKind, TitleStyle, MAX_SPEED, MIN_SPEED};
 pub use color::{ColorAdjust, Filter, MAX_EXPOSURE};
 pub use duck::{duck_amount, duck_gain, DUCK_ATTACK, DUCK_HOLD, DUCK_LEVEL, DUCK_RELEASE};
 pub use fade::{fade_gain, fade_shape, fit_fades};
@@ -43,6 +44,7 @@ pub use mask::{
 pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
 };
+pub use remade::{Remade, Stabilize};
 pub use stack::{hides_below, LanePicture};
 pub use text::{
     Rgb, TextLook, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE, MAX_OUTLINE, MAX_TEXT_OFFSET,

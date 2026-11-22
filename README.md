@@ -59,8 +59,8 @@ offers the newest build.
 - Colour per clip: brightness, contrast, saturation, exposure, temperature
   and tint, and nine filters with a strength. The monitor shows the grade
   export renders.
-- Speed per clip from 0.25× to 4×, with the sound kept at its pitch, and
-  clips played backwards.
+- Speed per clip from 0.25× to 4×, with the sound kept at its pitch,
+  clips played backwards, and shaky footage stabilized at three levels.
 - Keyframes: position, scale, rotation, opacity and volume change from
   key to key, set from the diamonds in Details or by dragging the picture
   on the monitor, and play the same in preview and export.
@@ -205,9 +205,9 @@ command line is inside the app: `Eddie.app/Contents/MacOS/eddie`.
 FFmpeg is inside the app, so a Mac needs nothing else installed to run
 it: no Homebrew and no `ffmpeg`. The script builds FFmpeg 9.0.2 from
 source for it (`packaging/macos/ffmpeg.sh`; the first build downloads the
-sources) with x264, FreeType, HarfBuzz, dav1d and LAME. The app is about
-52 MB, carries seven libraries and asks for macOS 11.0 or later on Apple
-Silicon. It reads what FFmpeg decodes itself (H.264, HEVC, ProRes, VP9
+sources) with x264, FreeType, HarfBuzz, dav1d, vid.stab and LAME. The app
+is about 52 MB, carries seven libraries and asks for macOS 11.0 or later on
+Apple Silicon. It reads what FFmpeg decodes itself (H.264, HEVC, ProRes, VP9
 and the rest) and AV1 through dav1d, and exports H.264 with AAC.
 
 This was checked on two machines, each running the copy it built: a

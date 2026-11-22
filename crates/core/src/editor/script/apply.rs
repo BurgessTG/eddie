@@ -512,6 +512,17 @@ impl Editor {
             | ScriptCommand::RemoveMarker(_)
             | ScriptCommand::ClearMarkers) => return self.apply_marker_command(command),
             ScriptCommand::SetReverse { clip, enabled } => self.set_reverse(clip, enabled)?,
+            ScriptCommand::SetStabilize { clip, level } => {
+                let level = match level.as_str() {
+                    "" => None,
+                    name => Some(openreel_engine::Stabilize::parse(name).ok_or_else(|| {
+                        format!(
+                            "unknown stabilize level '{name}'; use minimal-crop, recommended or most-stable, or null"
+                        )
+                    })?),
+                };
+                self.set_stabilize(clip, level)?
+            }
             ScriptCommand::SetDuck { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.duck = enabled;

@@ -37,7 +37,7 @@ pub fn default_dir() -> Option<PathBuf> {
 /// misses again when it opens.
 pub const KEEP_UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Delete what in `folder`, one of Eddie's own (drawings, reversed clips),
+/// Delete what in `folder`, one of Eddie's own (drawings, remade clips),
 /// went unused for longer than `keep`, and anything a crash left half
 /// written there.
 pub fn prune(folder: &Path, keep: Duration) {
@@ -53,7 +53,7 @@ pub fn prune(folder: &Path, keep: Duration) {
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age > keep);
         if unused {
-            // A reversal's scratch folder, left by a crash.
+            // A remade file's scratch folder, left by a crash.
             let _ = match entry.file_type() {
                 Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(path),
                 _ => std::fs::remove_file(path),

@@ -4,7 +4,7 @@ use eddie_core::editor::sweep::SweepData;
 use openreel_engine::{Clip, ClipKind, TitleStyle};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::styles::{blend_key, option_key};
+use super::styles::{blend_key, option_key, stabilize_key};
 use super::*;
 use crate::app;
 use crate::testing::shown;
@@ -262,6 +262,36 @@ fn a_pictures_blend_mode_comes_from_its_list() {
     // A title has none.
     let (rt, _) = window(ClipKind::Title);
     assert!(rt.find("details-blend").is_none());
+}
+
+#[test]
+fn a_pictures_stabilize_level_comes_from_its_list() {
+    use openreel_engine::Stabilize;
+    let (mut rt, id) = window(ClipKind::Video);
+    click(&mut rt, "details-stabilize");
+    assert_eq!(rt.state.details.select, Some(Select::Stabilize));
+    for level in std::iter::once(None).chain(Stabilize::ALL.map(Some)) {
+        assert!(
+            rt.find(&stabilize_key(level)).is_some(),
+            "{level:?} is listed"
+        );
+    }
+    click(&mut rt, &stabilize_key(Some(Stabilize::Recommended)));
+    assert_eq!(rt.state.details.select, None);
+    // The clip's file is not real, so making the steadied one may already
+    // have failed by now.
+    let editor = &rt.state.editor;
+    let asked = editor.remake_pending(id).map(|spec| spec.stabilize);
+    assert!(
+        asked == Some(Some(Stabilize::Recommended)) || editor.status.contains("Could not make"),
+        "{asked:?}: {}",
+        editor.status
+    );
+    // A title and a sound have none.
+    for kind in [ClipKind::Title, ClipKind::Audio] {
+        let (rt, _) = window(kind);
+        assert!(rt.find("details-stabilize").is_none(), "{kind:?}");
+    }
 }
 
 #[test]
@@ -567,6 +597,7 @@ fn every_control_has_a_tooltip() {
                 "details-opacity-slider",
                 "details-opacity",
                 "details-blend",
+                "details-stabilize",
                 "details-volume-slider",
                 "details-volume",
                 "details-key-opacity",

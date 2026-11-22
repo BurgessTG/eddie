@@ -163,6 +163,12 @@ pub enum ScriptCommand {
         clip: u64,
         enabled: bool,
     },
+    /// Steady a video clip's picture at a level such as `recommended`, or
+    /// play it as shot with an empty name.
+    SetStabilize {
+        clip: u64,
+        level: String,
+    },
     InsertTime {
         at: f64,
         seconds: f64,
@@ -285,6 +291,7 @@ impl ScriptCommand {
             | Self::SetEmbeddedAudio { clip, .. }
             | Self::SetDuck { clip, .. }
             | Self::SetReverse { clip, .. }
+            | Self::SetStabilize { clip, .. }
             | Self::TightenSilence { clip, .. }
             | Self::SetTitleStyle { clip, .. }
             | Self::AddCaptionsForClip { clip, .. } => Some(clip),
@@ -375,6 +382,7 @@ impl ScriptCommand {
             | Self::SetEmbeddedAudio { .. }
             | Self::SetDuck { .. }
             | Self::SetReverse { .. }
+            | Self::SetStabilize { .. }
             | Self::SetReduceNoise { .. }
             | Self::SetCleanVoice { .. }
             | Self::SetSmoothFades { .. }

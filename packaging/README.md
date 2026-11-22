@@ -95,8 +95,8 @@ installed: it runs on Apple Silicon with macOS 11.0 or later.
   `rsvg-convert`. Render them again after changing an SVG; the script
   makes each `.icns` from the PNG.
 - `macos/ffmpeg.sh` builds FFmpeg 9.0.2 into `target/ffmpeg-macos`, with
-  x264 (export), FreeType and HarfBuzz (titles), dav1d (AV1) and LAME (the
-  tests make mp3 samples). Those five are static, so they sit inside
+  x264 (export), FreeType and HarfBuzz (titles), dav1d (AV1), vid.stab
+  (Stabilize) and LAME (the tests make mp3 samples). Those six are static, so they sit inside
   FFmpeg's own libraries. Each source archive is checked against the
   sha256 in the script. FFmpeg looks for nothing else on the Mac
   (`--disable-autodetect`), so nothing Homebrew has installed ends up in
@@ -110,7 +110,7 @@ installed: it runs on Apple Silicon with macOS 11.0 or later.
 - The script stops when a file in the app still loads a library from
   outside it or from anywhere but that FFmpeg. `LSMinimumSystemVersion` is
   the newest macOS any file in the app was built for, 11.0.
-- The licences of FFmpeg and the five libraries go to
+- The licences of FFmpeg and the six libraries go to
   `Contents/Resources/licenses/<package>-<version>/`, with `SOURCES.txt`
   listing each source's address and checksum and how FFmpeg was
   configured. FFmpeg is built with `--enable-gpl` for x264, so it is

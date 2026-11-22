@@ -192,12 +192,13 @@ return its parts.
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
   transform, background, color, blend, chroma, mask, graphic, speed,
-  reversed, photo, freeze, text, transition, keyframes`. `chroma` is the chroma key
+  remade, photo, freeze, text, transition, keyframes`. `chroma` is the chroma key
   `{color, strength, softness, spill}` or `null`; `mask` is `{shape, x,
   y, width, height, rotation, feather, round, invert}` or `null`;
   `graphic` is `{type: 'shape', kind, fill, outline, thickness, round,
-  ratio}`, `{type: 'sticker', name}` or `null`. `reversed` is `{original,
-  start, end}` or `null` (see Reverse below). A clip
+  ratio}`, `{type: 'sticker', name}` or `null`. `remade` is `{original,
+  start, end, reverse, stabilize}` or `null` (see Reverse and Stabilize
+  below). A clip
   shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
@@ -333,11 +334,22 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     script: about 3 s for 7 s of 1080p and 25 s for 7 s of 4K. Reversing
     the same stretch again is immediate.
   - A reversed clip's `source` is that file, and `sourceIn` counts from
-    its start. `reversed.original` is the file shot, and `start` and
-    `end` the part of it the reversed file holds. `frames clip:7`, `strip`
-    and a sheet's `sourceTime` give times in the original.
+    its start. `remade.original` is the file shot, and `start` and `end`
+    the part of it the file holds. `frames clip:7`, `strip` and a sheet's
+    `sourceTime` give times in the original.
   - Trim a reversed clip at most 1 s past its ends. For more, turn it
     forwards, trim it and reverse it again.
+- **Stabilize:** `setStabilize(id, level)` steadies a shaking camera in a
+  video clip; its linked sound plays the same file. Levels are
+  `minimal-crop`, `recommended` (also `true`) and `most-stable`: each
+  smooths the camera's path more and enlarges the picture more to hide
+  the edges that moving it uncovers. `null` or `false` plays it as shot.
+  - It writes a file the way Reverse does, and waits for it the same way,
+    printing `stabilizing: N%`: about 11 s for 7 s of 1080p and 35 s for
+    4 s of 4K at 60 fps. A clip can be stabilized and reversed at once.
+  - It steadies the whole picture. A scene with little detail, or one
+    where most of the picture moves (a crowd, water), can steady badly;
+    look at the clip with `frames` before you keep it.
 - **Transitions:** `setTransition(id, kind, seconds?)` sets how a video
   clip's picture comes in from the clip that ends where it starts, on
   its lane; `null` removes it. A mix or dip blends each side together
