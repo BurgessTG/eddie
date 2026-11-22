@@ -344,6 +344,15 @@ fn clip_entries(ui: &Ui) -> Vec<El> {
             (!video_here).then_some("Move the playhead over a video clip first"),
             Action::FreezeFrame,
         ),
+        entry(
+            "Record voiceover",
+            "Record from the microphone at the playhead after a 3-second countdown",
+            editor
+                .project_path
+                .is_none()
+                .then_some("Save the project first: takes are kept beside it"),
+            Action::RecordVoiceover,
+        ),
         separator(),
         item(
             "Delete clip",

@@ -21,6 +21,7 @@ mod testing;
 mod theme;
 mod timeline;
 mod updates;
+mod voiceover;
 
 use std::path::PathBuf;
 

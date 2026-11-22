@@ -110,6 +110,7 @@ impl AudioEngine {
             latency_nanos: AtomicU64::new(0),
             master_gain: AtomicU32::new(1.0_f32.to_bits()),
             limiting: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
             reported: AtomicU64::new(0),
             errors: Mutex::new(None),
             device_lost: AtomicBool::new(false),
@@ -268,6 +269,12 @@ impl AudioEngine {
         self.shared
             .limiting
             .store(gain.is_some(), Ordering::Relaxed);
+    }
+
+    /// Play silence instead of the mix, keeping the clock: the timeline
+    /// muted while a voiceover records, so the microphone does not hear it.
+    pub fn set_muted(&self, muted: bool) {
+        self.shared.muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn set_running(&self, running: bool) {

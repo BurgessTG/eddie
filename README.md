@@ -77,6 +77,10 @@ offers the newest build.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
   can duck under speech.
+- Voiceover: record from the system's default input at the playhead (R
+  or the toolbar's microphone) after a 3-second countdown. Takes are
+  saved beside the project and land on their own audio lane, in step
+  with the picture.
 - Program monitor with frame stepping. Audio drives the playhead, and the
   next cut's first picture is prerolled so short clips play through.
 - Titles and generated captions in five styles, identical in preview and
@@ -352,6 +356,7 @@ macOS.
 | Home / End | Go to start / end |
 | S or B | Split at the playhead |
 | T | Add title |
+| R | Record voiceover |
 | M | Toggle magnet |
 | Delete | Delete the selected clip |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
@@ -382,6 +387,9 @@ macOS.
   not editorial judgment. That judgment is the agent's or yours.
 - Undo history is not saved with a project.
 - Sound-card output latency is not compensated.
+- Voiceover records from the system's default input (change it in the
+  system's sound settings), with no input volume, echo reduction or
+  noise reduction of its own.
 
 ## Contributing
 

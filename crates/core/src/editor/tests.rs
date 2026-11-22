@@ -21,6 +21,7 @@ mod playback;
 mod project;
 mod script;
 mod timeline;
+mod voiceover;
 
 /// Generated sample media (video, music), made once per test run. Every
 /// test shares the folder, so no test can remove it: the next run removes

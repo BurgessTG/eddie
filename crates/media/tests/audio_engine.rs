@@ -443,6 +443,16 @@ fn preview_loudness_applies_gain_then_limits_peaks() {
     engine.set_loudness(None);
     let plain = peak(&render(&mut engine, 0.5), 0.1, 0.4);
     assert!((plain - 0.5).abs() < 0.01, "{plain}");
+    // Muted, as while a voiceover records: silence, and the clock goes on.
+    // The clip ends at 2 s, so both stretches stay inside it.
+    engine.set_muted(true);
+    let before = engine.clock();
+    let muted = render(&mut engine, 0.2);
+    assert!(muted.iter().all(|sample| *sample == 0.0));
+    assert!((engine.clock() - before - 0.2).abs() < 0.01);
+    engine.set_muted(false);
+    let back = peak(&render(&mut engine, 0.2), 0.05, 0.15);
+    assert!((back - 0.5).abs() < 0.01, "{back}");
 }
 
 #[test]

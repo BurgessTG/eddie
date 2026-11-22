@@ -15,6 +15,7 @@ mod evidence;
 mod export;
 mod frame;
 mod loudness;
+mod microphone;
 mod playback;
 mod probe;
 mod samples;
@@ -47,6 +48,7 @@ pub use export::{
 };
 pub use frame::{scaled_height, RawFrame};
 pub use loudness::{measure_mix, Loudness, LoudnessMeter};
+pub use microphone::{Microphone, Recorded, Take};
 pub use playback::FrameStream;
 pub use probe::{probe, MediaInfo};
 pub use samples::generate_samples;

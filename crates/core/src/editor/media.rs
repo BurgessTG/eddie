@@ -249,7 +249,7 @@ impl Editor {
                         .as_deref()
                         .is_some_and(|path| self.assets.iter().any(|a| a.info.path == path));
                     if !keep_selection {
-                        self.selected_asset = Some(ready_path);
+                        self.selected_asset = Some(ready_path.clone());
                     }
                     let size_bytes = std::fs::metadata(&info.path).map(|m| m.len()).unwrap_or(0);
                     if let Some(existing) =
@@ -277,6 +277,7 @@ impl Editor {
                     }
                     // Import only makes the asset ready. Curation is
                     // an explicit Curate action in the media bin.
+                    self.place_take(&ready_path);
                 }
                 ImportMsg::Failed(path, err) => {
                     if self.refreshing.remove(&path) {
@@ -287,6 +288,7 @@ impl Editor {
                     self.assets
                         .retain(|a| !(a.info.path == path && a.state != AssetState::Ready));
                     self.status = format!("Could not import {path}: {err}");
+                    self.forget_take(&path);
                     self.import_errors.insert(path, err);
                 }
                 ImportMsg::Finished => finished = true,

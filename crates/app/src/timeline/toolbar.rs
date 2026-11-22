@@ -1,5 +1,6 @@
-//! The bar over the lanes: the magnet, Title, Split, Duplicate, Freeze and
-//! Delete on the left, the zoom buttons and slider on the right.
+//! The bar over the lanes: the magnet, Title, Split, Duplicate, Freeze,
+//! Delete and Voiceover on the left, the zoom buttons and slider on the
+//! right.
 
 use eddie_core::editor::viewport::MAX_ZOOM;
 use eddie_core::{Action, shortcuts};
@@ -92,8 +93,36 @@ fn tool_button(key: &str, icon: Tool, active: bool, help: &str, action: Action) 
     .on_press(move |ui: &mut Ui| ui.act(action))
 }
 
-pub(super) fn toolbar(ui: &Ui) -> El {
+/// A thin vertical line between groups of tools.
+fn rule() -> El {
+    row()
+        .size(13.0, 18.0)
+        .center()
+        .child(el().w(1.0).h_full().fill(c().border_strong))
+}
+
+/// The Voiceover panel's button: on while the panel shows, red while a
+/// take counts down or records.
+fn microphone(ui: &Ui) -> El {
     let c = c();
+    let busy = ui.editor.voiceover_busy();
+    theme::icon_button(
+        "tool-voiceover",
+        icons::tool(
+            Tool::Microphone,
+            if busy { c.destructive } else { c.foreground },
+        ),
+        &shortcuts::tip(
+            "Voiceover: record from the microphone at the playhead",
+            Action::RecordVoiceover,
+        ),
+        ui.show_voiceover,
+        true,
+    )
+    .on_press(crate::voiceover::toggle)
+}
+
+pub(super) fn toolbar(ui: &Ui) -> El {
     row()
         .key("timeline-toolbar")
         .w_full()
@@ -109,12 +138,7 @@ pub(super) fn toolbar(ui: &Ui) -> El {
             "Magnet: snap clip edges while dragging",
             Action::ToggleMagnet,
         ))
-        .child(
-            row()
-                .size(13.0, 18.0)
-                .center()
-                .child(el().w(1.0).h_full().fill(c.border_strong)),
-        )
+        .child(rule())
         .child(
             theme::letter_button(
                 "tool-title",
@@ -153,6 +177,8 @@ pub(super) fn toolbar(ui: &Ui) -> El {
             "Delete the selected clip",
             Action::DeleteSelected,
         ))
+        .child(rule())
+        .child(microphone(ui))
         .child(spacer())
         .child(tool_button(
             "tool-zoom-out",

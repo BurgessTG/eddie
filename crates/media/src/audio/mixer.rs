@@ -210,6 +210,8 @@ pub(super) struct Shared {
     /// `AudioEngine::set_loudness`.
     pub(super) master_gain: AtomicU32,
     pub(super) limiting: AtomicBool,
+    /// Everything rendered is silenced; the clock runs on.
+    pub(super) muted: AtomicBool,
     /// Latest reported clock, in thousandths of a sample, so the clock never
     /// steps back between seeks (a released hold is heard one queue later).
     pub(super) reported: AtomicU64,
@@ -323,6 +325,10 @@ impl Mixer {
     /// a sudden peak is caught on its first sample instead of eased in.
     fn master(&mut self, frames: usize) {
         const LIMIT: f32 = 0.8;
+        if self.shared.muted.load(Ordering::Relaxed) {
+            self.stereo[..frames * 2].fill(0.0);
+            return;
+        }
         let gain = f32::from_bits(self.shared.master_gain.load(Ordering::Relaxed));
         let limiting = self.shared.limiting.load(Ordering::Relaxed);
         if gain == 1.0 && !limiting {

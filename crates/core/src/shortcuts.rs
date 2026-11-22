@@ -165,6 +165,12 @@ pub const BINDINGS: &[Binding] = &[
     bind(Action::FreezeFrame, "Edit", "Freeze frame", &[letter('f')]),
     bind(Action::AddTitle, "Edit", "Add title", &[letter('t')]),
     bind(
+        Action::RecordVoiceover,
+        "Edit",
+        "Record voiceover",
+        &[letter('r')],
+    ),
+    bind(
         Action::ToggleMagnet,
         "Edit",
         "Magnet on or off",

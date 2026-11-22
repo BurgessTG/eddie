@@ -83,6 +83,13 @@
   Details. The monitor, export and `eddie sheet` mix the same colours.
   Scripts use `setBlend`, `state()` gives each clip's `blend`, and
   `inspect()` reports a blended picture with nothing under it.
+- Voiceover recording: the microphone on the timeline toolbar (or R)
+  opens a panel with the input's level. Record counts down 3 seconds,
+  then records from the playhead while the timeline plays, silent unless
+  Hear the timeline is on. R, Space or Esc stops. The take is saved as a
+  WAV in a "<project> voiceovers" folder beside the project and lands on
+  a free audio lane in step with the picture. The Mac app asks for
+  microphone access the first time.
 
 ### Changed
 

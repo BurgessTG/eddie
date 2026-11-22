@@ -88,6 +88,7 @@ pub enum Tool {
     Duplicate,
     Freeze,
     Delete,
+    Microphone,
     ZoomIn,
     ZoomOut,
     Settings,
@@ -170,6 +171,19 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
                 }
             }
             shape
+        }
+        Tool::Microphone => {
+            // A capsule in a cradle, on a stand.
+            let mut shape = outline(shape, cx - 3.0, cy - 9.0, 6.0, 11.0, 3.0, 1.6, fg);
+            let cradle: Vec<P> = (0..=12)
+                .map(|i| {
+                    let angle = PI * (i as f32 / 12.0);
+                    at(-6.0 * angle.cos(), -1.5 + 6.0 * angle.sin())
+                })
+                .collect();
+            shape = shape.stroke_with(cradle, false, 1.6, LineCap::Round, fg);
+            shape = seg(shape, at(0.0, 4.5), at(0.0, 8.0), 1.6, fg);
+            seg(shape, at(-3.5, 8.0), at(3.5, 8.0), 1.6, fg)
         }
         Tool::Delete => {
             let mut shape = seg(shape, at(-7.0, -5.0), at(7.0, -5.0), 1.6, fg);

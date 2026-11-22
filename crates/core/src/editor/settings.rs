@@ -27,6 +27,9 @@ pub struct Settings {
     pub updates: Channel,
     /// What Export makes, as the Export dialog last left it.
     pub export: ExportSettings,
+    /// The timeline plays aloud while a voiceover records. Off by default,
+    /// so speakers are not recorded; turn it on with headphones.
+    pub hear_timeline_while_recording: bool,
     /// The Meta key and endpoint the removed built-in AI saved at the top
     /// level (`api_key`, `base_url`). Kept so Meta transcription without its
     /// own key still works; there is no field for them any more.
@@ -135,6 +138,9 @@ impl Settings {
                 .and_then(Channel::from_name)
                 .unwrap_or_default(),
             export: export_from_json(&value["export"]),
+            hear_timeline_while_recording: value["voiceover"]["hear_timeline"]
+                .as_bool()
+                .unwrap_or(false),
             meta_api_key: text("api_key"),
             meta_base_url: text("base_url"),
         }
@@ -155,6 +161,7 @@ impl Settings {
                 "fps": self.export.fps,
                 "quality": self.export.quality.as_str(),
             },
+            "voiceover": {"hear_timeline": self.hear_timeline_while_recording},
         });
         if !self.meta_api_key.is_empty() {
             body["api_key"] = self.meta_api_key.clone().into();
@@ -390,22 +397,25 @@ mod tests {
                     "https://api.meta.ai/v1"
                 );
                 assert_eq!(settings.updates, Channel::Releases, "the default");
+                assert!(!settings.hear_timeline_while_recording, "off by default");
                 let export = ExportSettings {
                     resolution: Resolution::P2160,
                     fps: Some(60),
                     quality: Quality::Higher,
                 };
-                for (format, hardware, updates, export) in [
-                    (Format::Landscape, false, Channel::Previews, export),
+                for (format, hardware, updates, export, hear) in [
+                    (Format::Landscape, false, Channel::Previews, export, true),
                     (
                         Format::Portrait,
                         true,
                         Channel::Off,
                         ExportSettings::default(),
+                        false,
                     ),
                 ] {
                     settings.format = format;
                     settings.hardware_decode = hardware;
+                    settings.hear_timeline_while_recording = hear;
                     settings.updates = updates;
                     settings.export = export;
                     settings.save().unwrap();
@@ -423,7 +433,8 @@ mod tests {
                             "format",
                             "hardware_decode",
                             "transcription",
-                            "updates"
+                            "updates",
+                            "voiceover"
                         ],
                         "the removed model settings are dropped, the Meta key is kept"
                     );

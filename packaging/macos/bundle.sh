@@ -199,18 +199,20 @@ icns "$here/project.png" eddie-project
 # identity every program and library gets the hardened runtime and a
 # timestamp, which Apple's notary service requires. The libraries are
 # signed first: the app's signature covers theirs.
+# The app itself also gets its entitlements: the hardened runtime refuses
+# the microphone without one.
 identity=${EDDIE_SIGN_IDENTITY:--}
 sign() {
     if [ "$identity" = - ]; then
-        quiet codesign --force --sign - "$1"
+        quiet codesign --force --sign - "$@"
     else
-        quiet codesign --force --options runtime --timestamp --sign "$identity" "$1"
+        quiet codesign --force --options runtime --timestamp --sign "$identity" "$@"
     fi
 }
 for file in "$frameworks"/*.dylib "$macos/ffmpeg"; do
     sign "$file"
 done
-sign "$app"
+sign --entitlements "$here/entitlements.plist" "$app"
 codesign --verify --deep --strict "$app"
 
 echo "$app"

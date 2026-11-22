@@ -16,7 +16,7 @@ use crate::menus::Menu;
 use crate::theme::c;
 use crate::{
     console, details, dialogs, export, gallery, keys, media, menus, monitor, settings, shell,
-    timeline, updates,
+    timeline, updates, voiceover,
 };
 
 /// One filmstrip still of a bin asset: its source time and picture.
@@ -50,6 +50,8 @@ pub struct Ui {
     pub show_settings: bool,
     pub show_shortcuts: bool,
     pub show_export: bool,
+    /// The Voiceover panel, which keeps the microphone open while it shows.
+    pub show_voiceover: bool,
     /// The Settings dialog's typed fields and open list.
     pub settings: settings::State,
     /// The console's input line and height.
@@ -162,6 +164,7 @@ impl Ui {
             show_settings: false,
             show_shortcuts: false,
             show_export: false,
+            show_voiceover: false,
             settings: settings::State::default(),
             console: console::State::default(),
             jump: TextEdit::new(""),
@@ -227,6 +230,10 @@ impl Ui {
             slots.incoming.want(monitor::look(incoming));
         }
         monitor::compose(self);
+        // The microphone stays open only for the panel's meter or a take.
+        if !self.show_voiceover {
+            self.editor.close_microphone();
+        }
         let typing = self.typing();
         self.editor.end_frame(self.pointer_held, typing);
         events.exported
@@ -353,6 +360,15 @@ impl Ui {
                 export::close(self);
                 self.show_shortcuts = !self.show_shortcuts;
             }
+            // R opens the panel too, so its countdown and meter show.
+            Action::RecordVoiceover => {
+                voiceover::open(self);
+                self.editor.perform(action);
+            }
+            // While a take counts down or records, Esc stops it.
+            Action::Deselect if self.editor.voiceover_busy() => {
+                self.editor.perform(action);
+            }
             // Esc closes what is open before it deselects.
             Action::Deselect if self.jump_open => {
                 self.jump_open = false;
@@ -370,6 +386,7 @@ impl Ui {
             Action::Deselect if self.show_shortcuts => self.show_shortcuts = false,
             Action::Deselect if self.show_settings => settings::close(self),
             Action::Deselect if self.show_export => export::close(self),
+            Action::Deselect if self.show_voiceover => voiceover::close(self),
             _ => {
                 self.editor.perform(action);
             }
@@ -577,6 +594,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
     menus::overlay(ui, &mut overlays);
     settings::overlays(ui, &mut overlays);
     export::overlays(ui, &mut overlays);
+    voiceover::overlays(ui, &mut overlays);
     keys::overlay(ui, &mut overlays);
     dialogs::unsaved(ui, &mut overlays);
     ui.view_ms.set(started.elapsed().as_secs_f32() * 1000.0);

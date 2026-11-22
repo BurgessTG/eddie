@@ -28,6 +28,9 @@
 	<string>public.app-category.video</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- macOS shows it when Eddie first asks for the microphone. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Eddie records voiceovers from your microphone.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

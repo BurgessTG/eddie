@@ -7,6 +7,7 @@
 
 mod chrome;
 mod clip;
+mod take;
 mod toolbar;
 
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use eddie_core::editor::lanes::{
     self, ClipHit, Gesture, HEADER_W, Point, RULER_H, Scene, TRACK_GAP, TRACK_H, ViewRect,
 };
 use eddie_core::editor::media::BinAsset;
-use openreel_engine::format_timecode;
+use openreel_engine::{ClipKind, format_timecode};
 use rune::{Color, Cursor, Cx, Drag, El, Phase, PointerEvent, Tx, WheelEvent, col, el, row, text};
 
 use crate::app::Ui;
@@ -269,12 +270,34 @@ fn view(ui: &Ui) -> El {
                 .fill(c.background),
         );
     }
+    // A voiceover take that needs a new audio lane shows it already.
+    if take::extra_lane(&ui.editor) {
+        let row = timeline.lanes.len();
+        let lane = lanes::lane_rect(rect, row);
+        let track = timeline.lanes.audio;
+        view = view.child(chrome::header(
+            timeline,
+            ClipKind::Audio,
+            track,
+            row,
+            lane.top,
+        ));
+        content = content.child(
+            el().absolute(0.0, lane.top)
+                .size(lanes_w, TRACK_H)
+                .radius(theme::R_SM)
+                .fill(c.background),
+        );
+    }
     content = chrome::ruler(port, lanes_w, content);
     for clip in &timeline.clips {
         let hover = hovered.and_then(|(id, hit)| (id == clip.id).then_some(hit));
         if let Some(clip) = clip::clip_el(ui, clip, rect, lanes_w, hover) {
             content = content.child(clip);
         }
+    }
+    for take in take::elements(&ui.editor, rect, lanes_w) {
+        content = content.child(take);
     }
     for span in timeline.transitions() {
         if let Some(mark) = clip::transition_mark(ui, &span, rect, lanes_w) {
@@ -367,7 +390,8 @@ pub fn panel(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         170.0
     } else {
         // Padding, the toolbar and the gap under it, the ruler, the lanes.
-        let rows = ui.editor.timeline.lanes.len() as f32;
+        let extra = usize::from(take::extra_lane(&ui.editor));
+        let rows = (ui.editor.timeline.lanes.len() + extra) as f32;
         let lanes = 20.0 + 30.0 + 14.0 + RULER_H + rows * (TRACK_H + TRACK_GAP);
         (window_h * 0.27)
             .clamp(170.0, 240.0)

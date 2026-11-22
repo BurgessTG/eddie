@@ -45,6 +45,7 @@ use stills::StillUse;
 pub mod sweep;
 mod untitled;
 pub mod viewport;
+pub mod voiceover;
 
 pub use headless::cli_main;
 pub use program::ProgramLayer;
@@ -156,6 +157,7 @@ pub enum Action {
     ShuttleReverse,
     ShuttleStop,
     ShuttleForward,
+    RecordVoiceover,
 }
 
 pub struct Editor {
@@ -296,6 +298,11 @@ pub struct Editor {
     /// The untitled project this editor made, while it has it.
     untitled: Option<PathBuf>,
 
+    /// The microphone while the Voiceover panel is open or a take runs,
+    /// and takes waiting for their import to be placed.
+    voiceover: Option<voiceover::Voiceover>,
+    pending_takes: Vec<voiceover::PendingTake>,
+
     wake: Wake,
     /// The soonest a job in progress wants another frame without a wake.
     repaint_after: Option<Duration>,
@@ -420,6 +427,8 @@ impl Editor {
             socket_dir: server::socket_dir(),
             untitled_dir: None,
             untitled: None,
+            voiceover: None,
+            pending_takes: Vec::new(),
             wake,
             repaint_after: None,
         }
@@ -522,6 +531,9 @@ impl Editor {
             Action::ZoomFit => self.viewport.zoom_to_fit(self.timeline.end()),
             Action::GoStart => self.seek_and_reveal(0.0),
             Action::GoEnd => self.seek_and_reveal(self.timeline.end()),
+            // While a take counts down or records, Space and Esc stop it.
+            Action::RecordVoiceover => self.toggle_voiceover(),
+            Action::PlayPause | Action::Deselect if self.voiceover_busy() => self.stop_voiceover(),
             Action::PlayPause => {
                 // Playback shows on Program, not behind the gallery.
                 self.curator.open = false;
@@ -576,7 +588,9 @@ impl Editor {
     /// transport and take in whatever the workers finished.
     pub fn begin_frame(&mut self, now: f64) -> FrameEvents {
         self.repaint_after = None;
+        let dt = self.last_now.map_or(0.0, |last| (now - last).max(0.0));
         self.advance_playback(now);
+        self.poll_voiceover(now, dt);
         self.poll_imports();
         self.poll_frames();
         if openreel_media::take_hardware_failure().is_some() {
