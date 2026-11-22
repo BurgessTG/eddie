@@ -90,6 +90,18 @@ fn join(grid: &TileGrid) -> Picture {
     )
 }
 
+/// Filters that bring the picture at `path` to export's 8-bit 4:2:0
+/// BT.709 limited range at its own size, as export converts a source.
+pub(crate) fn standard_picture(path: &str) -> String {
+    match read(path).convert {
+        Some(convert) => format!("{convert},format=yuv420p"),
+        None => format!(
+            "scale=flags=bicubic+accurate_rnd+full_chroma_int:\
+             out_color_matrix={VIDEO_COLOR_SPACE}:out_range={VIDEO_COLOR_RANGE},format=yuv420p"
+        ),
+    }
+}
+
 /// The colorspace filter that brings `stream` to the export's BT.709
 /// limited range after resizing, or `None` when it already is BT.709
 /// limited range or the filter cannot read its format (swscale then

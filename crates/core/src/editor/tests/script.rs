@@ -966,7 +966,7 @@ fn a_transition_needs_a_clip_before_it_and_inspect_says_where_it_falls_short() {
     let plain = serde_json::to_value(app.timeline.clip(a).unwrap()).unwrap();
     assert!(plain.get("transition").is_none(), "{plain}");
     let findings = |app: &Editor| {
-        inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics))
+        inspect::inspect(&app.timeline, app.assets.iter().chain(&app.made))
             .into_iter()
             .filter(|finding| finding.kind == "transition")
             .map(|finding| finding.message)

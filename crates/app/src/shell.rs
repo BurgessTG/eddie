@@ -202,7 +202,26 @@ pub fn status_bar(ui: &Ui) -> El {
                     .color(c.muted_fg)
                     .single_line(),
             )
-            .child(export_progress(progress.clamp(0.0, 1.0) as f32));
+            .child(progress_bar(
+                "export-progress",
+                "Export progress",
+                progress.clamp(0.0, 1.0) as f32,
+            ));
+    }
+    if let Some(progress) = editor.reverse_progress() {
+        bar = bar
+            .child(
+                text("Reversing")
+                    .font(theme::sized(12.0))
+                    .color(c.muted_fg)
+                    .single_line(),
+            )
+            .child(progress_bar(
+                "reverse-progress",
+                "Writing the reversed clip; press Reverse on it to stop",
+                progress.clamp(0.0, 1.0) as f32,
+            ))
+            .child(el().w(8.0));
     }
     // Left to right: rate, length, UI frame time, memory.
     let segments = [
@@ -248,7 +267,7 @@ pub fn status_bar(ui: &Ui) -> El {
 fn lamp(ui: &Ui) -> El {
     let c = c();
     let editor = &ui.editor;
-    let busy = editor.importing() || editor.exporting() || editor.curating();
+    let busy = editor.importing() || editor.exporting() || editor.curating() || editor.reversing();
     let lamp = row().key("status-lamp").size(12.0, 12.0).center();
     if busy {
         lamp.child(
@@ -266,16 +285,16 @@ fn lamp(ui: &Ui) -> El {
     }
 }
 
-/// The export's progress bar, `progress` from 0 to 1.
-fn export_progress(progress: f32) -> El {
+/// A progress bar, `progress` from 0 to 1.
+fn progress_bar(key: &str, help: &str, progress: f32) -> El {
     let c = c();
     row()
-        .key("export-progress")
+        .key(key)
         .size(180.0, 16.0)
         .radius(8.0)
         .fill(c.input)
         .clip_rounded(8.0)
-        .help("Export progress")
+        .help(help)
         .child(
             el().absolute(0.0, 0.0)
                 .size((180.0 * progress).max(16.0), 16.0)

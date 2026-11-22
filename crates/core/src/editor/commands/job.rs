@@ -38,13 +38,24 @@ pub enum Job {
         method: String,
         params: Value,
     },
+    /// A `run` that reverses clips, waiting for their files.
+    Reverse {
+        files: Vec<String>,
+        params: Value,
+        /// The share last reported.
+        reported: f64,
+    },
 }
 
 impl Job {
     /// Whether this job ends in a timeline edit, which a window holds back
     /// while the user is mid-drag.
     pub fn edits_timeline(&self) -> bool {
-        matches!(self, Job::Measure { method, .. } if edits_timeline(method))
+        match self {
+            Job::Measure { method, .. } => edits_timeline(method),
+            Job::Reverse { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -81,6 +92,34 @@ impl Job {
                     }
                     Err(error) => Some(Err(error)),
                 }
+            }
+            Job::Reverse {
+                files,
+                params,
+                reported,
+            } => {
+                let running: Vec<f64> = files
+                    .iter()
+                    .filter_map(|file| app.reversal_running(file))
+                    .collect();
+                if running.is_empty() {
+                    // Made, or failed: the script says which when it runs.
+                    return match start(app, "run", params) {
+                        Ok(Reply::Done(outcome)) => Some(Ok(outcome)),
+                        Ok(Reply::Later(job)) => {
+                            *self = job;
+                            None
+                        }
+                        Err(error) => Some(Err(error)),
+                    };
+                }
+                let done = files.len() - running.len();
+                let share = (done as f64 + running.iter().sum::<f64>()) / files.len() as f64;
+                if share >= *reported + 0.1 {
+                    *reported = share;
+                    notes.push(Note::Progress(format!("reversing: {:.0}%", share * 100.0)));
+                }
+                None
             }
             Job::Import(media) => imported(app, media),
             Job::Export {

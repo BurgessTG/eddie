@@ -145,8 +145,11 @@ pub fn frames(
             .timeline
             .clips
             .iter()
-            .filter(|clip| clip.source.as_deref() == Some(info.path.as_str()))
-            .map(|clip| (clip.id, clip.source_in, clip.source_end()))
+            .filter_map(|clip| {
+                // A reversed clip shows a range of the original backwards.
+                let (file, from, to) = clip.shown_range()?;
+                (file == info.path).then_some((clip.id, from, to))
+            })
             .collect(),
         // Markers are timeline times, not source times.
         markers: Vec::new(),
@@ -365,7 +368,7 @@ impl SheetShot {
             "under": self.under(stack).iter().map(|picture| json!({
                 "clip": picture.clip.id,
                 "lane": picture.lane,
-                "sourceTime": picture.clip.source_at(self.time),
+                "sourceTime": picture.clip.shown_at(self.time),
             })).collect::<Vec<_>>(),
             "title": self.title.as_ref().map(|title| title.0),
         })
@@ -432,7 +435,7 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
                 video: segment
                     .video
                     .and_then(|id| timeline.clip(id))
-                    .map(|clip| (clip.id, clip.track, clip.source_at(time))),
+                    .map(|clip| (clip.id, clip.track, clip.shown_at(time))),
                 title: segment.title.and_then(|id| timeline.clip(id)).map(|clip| {
                     let look = openreel_media::clip_title_look(clip);
                     (clip.id, clip.name.clone(), look, clip.opacity)
@@ -462,11 +465,11 @@ impl StripSource {
             placed: timeline
                 .clips
                 .iter()
-                .filter(|clip| {
-                    clip.kind == ClipKind::Video
-                        && clip.source.as_deref() == Some(asset.info.path.as_str())
+                .filter(|clip| clip.kind == ClipKind::Video)
+                .filter_map(|clip| {
+                    let (file, from, to) = clip.shown_range()?;
+                    (file == asset.info.path).then_some((from, to))
                 })
-                .map(|clip| (clip.source_in, clip.source_end()))
                 .collect(),
             shots: (!scenes.is_empty()).then(|| {
                 scenes

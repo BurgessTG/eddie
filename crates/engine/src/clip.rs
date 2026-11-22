@@ -187,6 +187,38 @@ pub struct Clip {
     /// (`photo` is set). Saved only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphic: Option<Graphic>,
+    /// Played backwards: `source` is a file Eddie wrote that holds a range
+    /// of another file backwards, and this says which. Saved only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reversed: Option<Reversed>,
+}
+
+/// What a reversed clip's file holds: `[start, end)` of `original`,
+/// whole frames, last first. Its time `t` is the original's `end - t`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Reversed {
+    /// The file the clip plays backwards.
+    pub original: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+impl Reversed {
+    /// Where `clip`'s source range starts in the other file, the original
+    /// when its source is the reversed one and the other way round: the
+    /// same stretch of picture, read from the other end.
+    pub fn other_in(&self, clip: &Clip) -> f64 {
+        self.end - clip.source_end()
+    }
+
+    /// Whether `[from, to)` of the original lies inside the reversed file.
+    pub fn holds(&self, from: f64, to: f64) -> bool {
+        from >= self.start - 1e-6 && to <= self.end + 1e-6
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.start.is_finite() && self.end.is_finite() && 0.0 <= self.start && self.start < self.end
+    }
 }
 
 /// The slowest and fastest a clip plays.
@@ -237,6 +269,27 @@ impl Clip {
     /// seconds its duration plays.
     pub fn source_end(&self) -> f64 {
         self.source_at(self.end())
+    }
+
+    /// The file the clip shows and the range of it, `[from, to)`: for a
+    /// reversed clip, the original's range, which it plays backwards.
+    pub fn shown_range(&self) -> Option<(&str, f64, f64)> {
+        match &self.reversed {
+            Some(reversed) => Some((
+                &reversed.original,
+                reversed.end - self.source_end(),
+                reversed.end - self.source_in,
+            )),
+            None => Some((self.source.as_deref()?, self.source_in, self.source_end())),
+        }
+    }
+
+    /// The time in [`Clip::shown_range`]'s file shown at timeline `time`.
+    pub fn shown_at(&self, time: f64) -> f64 {
+        let source = self.source_at(time);
+        self.reversed
+            .as_ref()
+            .map_or(source, |reversed| reversed.end - source)
     }
 
     /// Fades that fit the clip: each at most its length, and when

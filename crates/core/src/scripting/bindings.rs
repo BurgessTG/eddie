@@ -350,6 +350,11 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
             .push(0, || ScriptCommand::SetDuck { clip, enabled })
     })?;
     let q = api.queue();
+    api.set("setReverse", move |Whole(clip): Whole, enabled: bool| {
+        q.borrow_mut()
+            .push(0, || ScriptCommand::SetReverse { clip, enabled })
+    })?;
+    let q = api.queue();
     api.set("__insert_time", move |at: f64, seconds: f64| {
         q.borrow_mut()
             .push(0, || ScriptCommand::InsertTime { at, seconds })

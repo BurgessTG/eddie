@@ -59,7 +59,8 @@ offers the newest build.
 - Colour per clip: brightness, contrast, saturation, exposure, temperature
   and tint, and nine filters with a strength. The monitor shows the grade
   export renders.
-- Speed per clip from 0.25× to 4×, with the sound kept at its pitch.
+- Speed per clip from 0.25× to 4×, with the sound kept at its pitch, and
+  clips played backwards.
 - Keyframes: position, scale, rotation, opacity and volume change from
   key to key, set from the diamonds in Details or by dragging the picture
   on the monitor, and play the same in preview and export.

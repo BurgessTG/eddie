@@ -16,7 +16,8 @@ use openreel_engine::{Clip, ClipKind, Timeline};
 use crate::{MediaInfo, MediaResult};
 use audio::encode_audio;
 use frames::{title_frames, VideoClock};
-use scratch::ScratchDir;
+pub(crate) use scratch::ScratchDir;
+pub(crate) use source::standard_picture;
 use titles::Titles;
 use video::{batch_command, encode_segment, plan_video};
 
@@ -41,7 +42,7 @@ fn f(value: f64) -> String {
     value.to_string()
 }
 
-fn collect_stderr(stderr: Option<ChildStderr>) -> thread::JoinHandle<String> {
+pub(crate) fn collect_stderr(stderr: Option<ChildStderr>) -> thread::JoinHandle<String> {
     thread::spawn(move || {
         let mut text = String::new();
         if let Some(mut err) = stderr {

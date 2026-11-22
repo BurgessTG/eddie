@@ -2,7 +2,7 @@
 //! whose picture Eddie draws (`openreel_engine::Graphic`): its drawing is a
 //! PNG in the graphics folder, named by what it draws, and the clip plays,
 //! exports and composites it as a photo. The drawings are kept apart from
-//! the media bin in `Editor::graphics`, so they never show there, in the
+//! the media bin in `Editor::made`, so they never show there, in the
 //! project's media list or in `state().assets`; a project only needs each
 //! clip's `graphic` to draw them again.
 
@@ -37,25 +37,27 @@ pub fn default_dir() -> Option<PathBuf> {
 /// misses again when it opens.
 pub const KEEP_UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Delete the drawings in `folder` unused for longer than `keep`, and any
-/// file a crash left half written.
+/// Delete what in `folder`, one of Eddie's own (drawings, reversed clips),
+/// went unused for longer than `keep`, and anything a crash left half
+/// written there.
 pub fn prune(folder: &Path, keep: Duration) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let ours = path
-            .extension()
-            .is_some_and(|ext| ext == "png" || ext == "tmp");
         let unused = entry
             .metadata()
             .and_then(|meta| meta.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age > keep);
-        if ours && unused {
-            let _ = std::fs::remove_file(path);
+        if unused {
+            // A reversal's scratch folder, left by a crash.
+            let _ = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(path),
+                _ => std::fs::remove_file(path),
+            };
         }
     }
 }
@@ -79,13 +81,13 @@ impl Editor {
             self.drawing.1 += started.elapsed();
         }
         let path = file.info.path.clone();
-        if !self.graphics.iter().any(|known| known.info.path == path) {
+        if !self.made.iter().any(|known| known.info.path == path) {
             let thumbs = if self.make_thumbnails {
                 vec![(0.0, draw_graphic(graphic, THUMB_SIDE)?)]
             } else {
                 Vec::new()
             };
-            self.graphics.push(BinAsset {
+            self.made.push(BinAsset {
                 size_bytes: std::fs::metadata(&file.path).map_or(0, |meta| meta.len()),
                 info: file.info,
                 state: AssetState::Ready,

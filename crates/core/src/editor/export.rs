@@ -76,6 +76,19 @@ impl Editor {
             self.status = format!("Export cannot replace {used}, which this project uses.");
             return;
         }
+        if let Some(clip) = self.timeline.clips.iter().find(|clip| {
+            clip.reversed.is_some()
+                && clip
+                    .source
+                    .as_deref()
+                    .is_none_or(|file| !self.made.iter().any(|made| made.info.path == file))
+        }) {
+            self.status = format!(
+                "{} is still being reversed; export when it is done.",
+                clip.name
+            );
+            return;
+        }
         let timeline = self.timeline.clone();
         let options = openreel_media::ExportOptions {
             normalize_loudness: true,
@@ -86,7 +99,7 @@ impl Editor {
         let infos: HashMap<String, MediaInfo> = self
             .assets
             .iter()
-            .chain(&self.graphics)
+            .chain(&self.made)
             .map(|a| (a.info.path.clone(), a.info.clone()))
             .collect();
         let (tx, rx) = channel::<ExportMsg>();

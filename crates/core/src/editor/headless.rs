@@ -374,6 +374,7 @@ impl Session {
         app.settings = Settings::load();
         app.curation_dir = super::sweep::default_curation_dir();
         app.graphics_dir = super::graphics::default_dir();
+        app.reversed_dir = super::reverse::default_dir();
         app.model_dir = transcribe::installed_model_dir();
         app.make_thumbnails = false;
         Self {
@@ -428,8 +429,9 @@ impl Session {
     }
 }
 
+/// Media still coming in, reversed clips' files included.
 fn importing(app: &Editor) -> bool {
-    app.import_rx.is_some() || !app.import_queue.is_empty()
+    app.import_rx.is_some() || !app.import_queue.is_empty() || app.reversing()
 }
 
 fn new(args: &[String]) -> Result<Value, String> {

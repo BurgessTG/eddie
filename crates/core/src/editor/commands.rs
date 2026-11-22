@@ -72,7 +72,7 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
             serde_json::from_str(&app.script_state_json()).map_err(|error| error.to_string())?,
         )),
         "inspect" => Reply::Done(Outcome::read(json!({
-            "findings": inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics)),
+            "findings": inspect::inspect(&app.timeline, app.assets.iter().chain(&app.made)),
         }))),
         "run" => run(app, params)?,
         "undo" | "redo" => {
@@ -249,7 +249,7 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
         Value::Bool(dry_run) => *dry_run,
         _ => return Err("dryRun is true or false".to_owned()),
     };
-    let findings = inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics));
+    let findings = inspect::inspect(&app.timeline, app.assets.iter().chain(&app.made));
     // Whatever the user had just changed is its own step, not this one's.
     app.commit_history();
     let before = app.edit_snapshot();
@@ -266,14 +266,23 @@ fn run(app: &mut Editor, params: &Value) -> Result<Reply, String> {
     if applied.is_err() {
         // `apply_edit` has already put a refused edit back.
         app.rehearsing = false;
+        // It reversed clips whose files are not made yet: make them, then
+        // run it again.
+        let files = app.make_wanted_reversals();
+        if !files.is_empty() {
+            return Ok(Reply::Later(Job::Reverse {
+                files,
+                params: params.clone(),
+                reported: 0.0,
+            }));
+        }
     }
     let (notes, handles) = applied?;
     let changed = app.differs_from(&before);
-    let introduced: Vec<_> =
-        inspect::inspect(&app.timeline, app.assets.iter().chain(&app.graphics))
-            .into_iter()
-            .filter(|finding| !findings.contains(finding))
-            .collect();
+    let introduced: Vec<_> = inspect::inspect(&app.timeline, app.assets.iter().chain(&app.made))
+        .into_iter()
+        .filter(|finding| !findings.contains(finding))
+        .collect();
     let mut value = json!({
         "changed": changed,
         "saved": false,

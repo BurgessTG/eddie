@@ -318,7 +318,7 @@ impl Ui {
     /// pictures, and drop the pictures of media no longer in the bin.
     fn take_thumbnails(&mut self) {
         let editor = &mut self.editor;
-        for asset in editor.assets.iter_mut().chain(&mut editor.graphics) {
+        for asset in editor.assets.iter_mut().chain(&mut editor.made) {
             if asset.thumbs.is_empty() {
                 continue;
             }
@@ -339,7 +339,7 @@ impl Ui {
             self.thumbs.insert(asset.info.path.clone(), thumbs);
         }
         let editor = &self.editor;
-        if self.thumbs.len() > editor.assets.len() + editor.graphics.len() {
+        if self.thumbs.len() > editor.assets.len() + editor.made.len() {
             self.thumbs.retain(|path, _| editor.asset(path).is_some());
         }
     }

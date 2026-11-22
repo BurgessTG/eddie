@@ -87,6 +87,7 @@ pub enum Tool {
     Split,
     Duplicate,
     Freeze,
+    Reverse,
     Delete,
     Microphone,
     ZoomIn,
@@ -172,6 +173,7 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
             }
             shape
         }
+        Tool::Reverse => u_turn(shape, [cx, cy], 1.0, 1.6, fg),
         Tool::Microphone => {
             // A capsule in a cradle, on a stand.
             let mut shape = outline(shape, cx - 3.0, cy - 9.0, 6.0, 11.0, 3.0, 1.6, fg);
@@ -196,6 +198,22 @@ pub fn tool(icon: Tool, fg: Color) -> Shape {
         }
     }
     .view_box(30.0, 30.0)
+}
+
+/// An arrow that runs right, turns and comes back pointing left: the
+/// mark of a clip played backwards. Centred on `c`, 15 points wide at
+/// `scale` 1.
+pub fn u_turn(shape: Shape, c: P, scale: f32, width: f32, fg: Color) -> Shape {
+    let at = |dx: f32, dy: f32| [c[0] + dx * scale, c[1] + dy * scale];
+    let mut path = vec![at(-7.0, -4.5)];
+    path.extend((0..=12).map(|i| {
+        let angle = -PI / 2.0 + PI * (i as f32 / 12.0);
+        at(2.5 + 4.5 * angle.cos(), 4.5 * angle.sin())
+    }));
+    path.push(at(-7.0, 4.5));
+    let shape = shape.stroke_with(path, false, width, LineCap::Round, fg);
+    let head = vec![at(-3.5, 1.0), at(-7.0, 4.5), at(-3.5, 8.0)];
+    shape.stroke_with(head, false, width, LineCap::Round, fg)
 }
 
 /// A keyframe diamond in a 30×30 box: filled when a key is there, an

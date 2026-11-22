@@ -60,10 +60,10 @@ impl Drop for FilterGraphFile {
 /// Private scratch space beside the output, so segments land on the same
 /// disk as the export rather than in a RAM-backed temp directory. Removed
 /// on every return path.
-pub(super) struct ScratchDir(pub(super) PathBuf);
+pub(crate) struct ScratchDir(pub(crate) PathBuf);
 
 impl ScratchDir {
-    pub(super) fn beside(output: &Path) -> MediaResult<Self> {
+    pub(crate) fn beside(output: &Path) -> MediaResult<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let parent = output
             .parent()

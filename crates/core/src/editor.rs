@@ -20,6 +20,7 @@ pub mod commands;
 pub mod details;
 mod edits;
 mod export;
+mod frontend;
 pub mod gallery;
 pub mod graphics;
 mod headless;
@@ -35,6 +36,7 @@ pub mod pictures;
 mod playback;
 mod program;
 pub mod project;
+mod reverse;
 mod script;
 #[cfg(unix)]
 pub mod server;
@@ -50,6 +52,7 @@ mod untitled;
 pub mod viewport;
 pub mod voiceover;
 
+pub use frontend::{NoPreview, PreviewSink, Wake};
 pub use headless::cli_main;
 pub use program::ProgramLayer;
 pub use script::EditSnapshot;
@@ -78,45 +81,6 @@ type VideoKey = (ClipId, String, u64, u64, u64);
 /// A still picture: clip, source frame index, and decoded width.
 pub type StillKey = (ClipId, i64, u32);
 
-/// Asks the front end for another frame. Worker threads call it when their
-/// result is ready, and playback calls it to keep the clock moving.
-#[derive(Clone)]
-pub struct Wake(Arc<dyn Fn() + Send + Sync>);
-
-impl Wake {
-    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self(Arc::new(wake))
-    }
-
-    /// For an editor nothing draws: the caller polls on its own schedule.
-    pub fn none() -> Self {
-        Self::new(|| {})
-    }
-
-    pub fn wake(&self) {
-        (self.0)()
-    }
-}
-
-/// Where the program monitor's picture goes. The editor picks the frame;
-/// the front end owns the pixels it is copied into.
-pub trait PreviewSink {
-    /// The picture of video lane `lane` ([`Editor::program_layers`]).
-    fn show(&mut self, lane: usize, frame: &RawFrame);
-    /// Lane `lane` no longer holds a picture of the clip it shows.
-    fn clear(&mut self, lane: usize);
-    /// The picture of the clip a transition on lane `lane` goes to.
-    fn show_incoming(&mut self, _lane: usize, _frame: &RawFrame) {}
-}
-
-/// The monitor of an editor nothing draws.
-pub struct NoPreview;
-
-impl PreviewSink for NoPreview {
-    fn show(&mut self, _lane: usize, _frame: &RawFrame) {}
-    fn clear(&mut self, _lane: usize) {}
-}
-
 /// Everything a key, menu item or toolbar button can ask for. The editor
 /// performs the ones that need no window (`Editor::perform`); a front end
 /// handles the rest (file dialogs, panels) itself.
@@ -140,6 +104,7 @@ pub enum Action {
     Paste,
     Duplicate,
     FreezeFrame,
+    Reverse,
     AddTitle,
     ZoomIn,
     ZoomOut,
@@ -183,9 +148,10 @@ pub struct Editor {
     clipboard: Vec<Clip>,
 
     pub assets: Vec<BinAsset>,
-    /// Shapes' and stickers' drawings (`graphics`): found like media by
-    /// `Editor::asset`, never listed in the bin.
-    pub graphics: Vec<BinAsset>,
+    /// Files Eddie made for clips, the drawings of shapes and stickers
+    /// (`graphics`) and reversed clips (`reverse`): found like media by
+    /// `Editor::asset`, never listed in the bin or the project's media.
+    pub made: Vec<BinAsset>,
     pub selected_asset: Option<String>,
     /// User-selected add policy: ranges from baked-in music beds
     /// start silent when true, keep their score when false.
@@ -278,6 +244,11 @@ pub struct Editor {
     /// Shapes' and stickers' drawings; `None` keeps them in the system's
     /// temporary folder.
     pub graphics_dir: Option<PathBuf>,
+    /// Reversed clips' files (`reverse`); `None` keeps them in the
+    /// system's temporary folder.
+    pub reversed_dir: Option<PathBuf>,
+    /// Reversed files being written, and the clips waiting for them.
+    reversals: reverse::Reversals,
     /// Drawings made so far and the time they took, which a script's edit
     /// keeps out of its time budget (`graphics::MAX_NEW_GRAPHICS`).
     drawing: (usize, Duration),
@@ -345,9 +316,13 @@ impl Editor {
         editor.initial_imports = initial_imports;
         editor.curation_dir = sweep::default_curation_dir();
         editor.graphics_dir = graphics::default_dir();
-        if let Some(folder) = editor.graphics_dir.clone() {
-            std::thread::spawn(move || graphics::prune(&folder, graphics::KEEP_UNUSED));
-        }
+        editor.reversed_dir = reverse::default_dir();
+        let made = [editor.graphics_dir.clone(), editor.reversed_dir.clone()];
+        std::thread::spawn(move || {
+            for folder in made.iter().flatten() {
+                graphics::prune(folder, graphics::KEEP_UNUSED);
+            }
+        });
         editor.model_dir = sweep::transcribe::installed_model_dir();
         editor.manual_audio = false;
         editor.listen = true;
@@ -387,7 +362,7 @@ impl Editor {
             selected: None,
             clipboard: Vec::new(),
             assets: Vec::new(),
-            graphics: Vec::new(),
+            made: Vec::new(),
             selected_asset: None,
             mute_music_beds: true,
             match_export_loudness: false,
@@ -439,6 +414,8 @@ impl Editor {
             noise: Default::default(),
             curation_dir: None,
             graphics_dir: None,
+            reversed_dir: None,
+            reversals: Default::default(),
             drawing: (0, Duration::ZERO),
             model_dir: None,
             make_thumbnails: true,
@@ -535,6 +512,7 @@ impl Editor {
             Action::Paste => self.paste(),
             Action::Duplicate => self.duplicate_selected(),
             Action::FreezeFrame => self.freeze_at_playhead(),
+            Action::Reverse => self.reverse_selected(),
             Action::AddTitle => {
                 let track =
                     self.timeline
@@ -627,6 +605,7 @@ impl Editor {
         self.poll_voiceover(now, dt);
         self.poll_imports();
         self.poll_noise();
+        self.poll_reversals();
         self.poll_frames();
         if openreel_media::take_hardware_failure().is_some() {
             self.status = "Hardware decode failed; playing on the CPU.".to_owned();

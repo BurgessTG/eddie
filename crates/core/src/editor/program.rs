@@ -118,7 +118,7 @@ impl Editor {
         let files = self
             .assets
             .iter()
-            .chain(&self.graphics)
+            .chain(&self.made)
             .map(|asset| {
                 let info = &asset.info;
                 let size = (f64::from(info.width), f64::from(info.height));

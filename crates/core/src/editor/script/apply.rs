@@ -511,6 +511,7 @@ impl Editor {
             | ScriptCommand::SetMarker { .. }
             | ScriptCommand::RemoveMarker(_)
             | ScriptCommand::ClearMarkers) => return self.apply_marker_command(command),
+            ScriptCommand::SetReverse { clip, enabled } => self.set_reverse(clip, enabled)?,
             ScriptCommand::SetDuck { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.duck = enabled;

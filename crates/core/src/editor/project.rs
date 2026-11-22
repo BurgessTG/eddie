@@ -202,6 +202,7 @@ impl Editor {
 
         // Shapes and stickers are drawn again here, not imported.
         self.restore_graphics();
+        // A reversed clip's file is made again from its original if gone.
         let mut wanted = media;
         for clip in self
             .timeline
@@ -209,7 +210,11 @@ impl Editor {
             .iter()
             .filter(|clip| clip.graphic.is_none())
         {
-            if let Some(source) = &clip.source {
+            let source = match &clip.reversed {
+                Some(reversed) => Some(&reversed.original),
+                None => clip.source.as_ref(),
+            };
+            if let Some(source) = source {
                 if !wanted.contains(source) {
                     wanted.push(source.clone());
                 }
@@ -232,6 +237,7 @@ impl Editor {
                 *source = moved;
             }
         }
+        self.restore_reversals();
         self.history.reset(&self.timeline);
         self.saved_timeline = self.timeline.clone();
         self.saved_mute_music_beds = self.mute_music_beds;
@@ -284,6 +290,7 @@ impl Editor {
                 .rewrite(|timeline| relink_clips(timeline, old, &new));
         }
         let count = found.len();
+        self.restore_reversals();
         self.spawn_import(found.into_iter().map(|(_, new)| new).collect());
         self.status = match self.missing_media.len() {
             0 => format!("Relinked {count} media file{}.", plural(count)),
@@ -356,6 +363,9 @@ fn relink_clips(timeline: &mut Timeline, old: &str, new: &str) {
     for clip in &mut timeline.clips {
         if clip.source.as_deref() == Some(old) {
             clip.source = Some(new.to_owned());
+        }
+        if let Some(reversed) = clip.reversed.as_mut().filter(|r| r.original == old) {
+            reversed.original = new.to_owned();
         }
     }
 }

@@ -1,4 +1,4 @@
-//! The bar over the lanes: the magnet, Title, Split, Duplicate, Freeze,
+//! The bar over the lanes: the magnet, Title, Split, Duplicate, Freeze, Reverse,
 //! Delete and Voiceover on the left, the zoom buttons and slider on the
 //! right.
 
@@ -101,6 +101,26 @@ fn rule() -> El {
         .child(el().w(1.0).h_full().fill(c().border_strong))
 }
 
+/// Reverse: on while the selected clip plays backwards or waits for its
+/// reversed file.
+fn reverse(ui: &Ui) -> El {
+    let editor = &ui.editor;
+    let on = editor.selected.is_some_and(|id| {
+        editor.reversing_clip(id)
+            || editor
+                .timeline
+                .clip(id)
+                .is_some_and(|clip| clip.reversed.is_some())
+    });
+    tool_button(
+        "tool-reverse",
+        Tool::Reverse,
+        on,
+        "Reverse: play the selected clip backwards, or forwards again",
+        Action::Reverse,
+    )
+}
+
 /// The Voiceover panel's button: on while the panel shows, red while a
 /// take counts down or records.
 fn microphone(ui: &Ui) -> El {
@@ -170,6 +190,7 @@ pub(super) fn toolbar(ui: &Ui) -> El {
             "Freeze frame: hold the picture at the playhead for 3 seconds",
             Action::FreezeFrame,
         ))
+        .child(reverse(ui))
         .child(tool_button(
             "tool-delete",
             Tool::Delete,

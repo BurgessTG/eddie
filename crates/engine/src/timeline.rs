@@ -1,6 +1,8 @@
 //! The timeline: lanes of clips on the project frame grid.
 
-use crate::{time_spec, Clip, ClipId, ClipKind, Graphic, Marker, MarkerId, Shape, TitleStyle};
+use crate::{
+    time_spec, Clip, ClipId, ClipKind, Graphic, Marker, MarkerId, Reversed, Shape, TitleStyle,
+};
 
 mod copies;
 mod edit;
@@ -216,6 +218,7 @@ impl Timeline {
                         .as_ref()
                         .and_then(Graphic::shape)
                         .is_none_or(Shape::is_valid)
+                    && clip.reversed.as_ref().is_none_or(Reversed::is_valid)
             })
             && self.markers_in_range()
     }
@@ -371,6 +374,7 @@ impl Timeline {
             chroma: None,
             mask: None,
             graphic: None,
+            reversed: None,
         });
         id
     }

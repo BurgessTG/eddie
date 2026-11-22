@@ -158,6 +158,11 @@ pub enum ScriptCommand {
         clip: u64,
         enabled: bool,
     },
+    /// Play a clip backwards, or forwards again.
+    SetReverse {
+        clip: u64,
+        enabled: bool,
+    },
     InsertTime {
         at: f64,
         seconds: f64,
@@ -279,6 +284,7 @@ impl ScriptCommand {
             | Self::SetClipLane { clip, .. }
             | Self::SetEmbeddedAudio { clip, .. }
             | Self::SetDuck { clip, .. }
+            | Self::SetReverse { clip, .. }
             | Self::TightenSilence { clip, .. }
             | Self::SetTitleStyle { clip, .. }
             | Self::AddCaptionsForClip { clip, .. } => Some(clip),
@@ -368,6 +374,7 @@ impl ScriptCommand {
             | Self::SetClipLane { .. }
             | Self::SetEmbeddedAudio { .. }
             | Self::SetDuck { .. }
+            | Self::SetReverse { .. }
             | Self::SetReduceNoise { .. }
             | Self::SetCleanVoice { .. }
             | Self::SetSmoothFades { .. }

@@ -21,6 +21,7 @@ mod graphics;
 mod markers;
 mod playback;
 mod project;
+mod reverse;
 mod script;
 mod timeline;
 mod voiceover;

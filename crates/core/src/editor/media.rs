@@ -76,7 +76,7 @@ impl Editor {
     pub fn asset(&self, path: &str) -> Option<&BinAsset> {
         self.assets
             .iter()
-            .chain(&self.graphics)
+            .chain(&self.made)
             .find(|a| a.info.path == path)
     }
 
@@ -329,7 +329,10 @@ impl Editor {
             .timeline
             .clips
             .iter()
-            .filter(|clip| clip.source.as_deref() == Some(path))
+            .filter(|clip| {
+                clip.source.as_deref() == Some(path)
+                    || clip.reversed.as_ref().is_some_and(|r| r.original == path)
+            })
             .count();
         if used > 0 {
             self.status = format!(

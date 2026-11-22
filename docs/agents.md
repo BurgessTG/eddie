@@ -192,11 +192,12 @@ return its parts.
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
   transform, background, color, blend, chroma, mask, graphic, speed,
-  photo, freeze, text, transition, keyframes`. `chroma` is the chroma key
+  reversed, photo, freeze, text, transition, keyframes`. `chroma` is the chroma key
   `{color, strength, softness, spill}` or `null`; `mask` is `{shape, x,
   y, width, height, rotation, feather, round, invert}` or `null`;
   `graphic` is `{type: 'shape', kind, fill, outline, thickness, round,
-  ratio}`, `{type: 'sticker', name}` or `null`. A clip
+  ratio}`, `{type: 'sticker', name}` or `null`. `reversed` is `{original,
+  start, end}` or `null` (see Reverse below). A clip
   shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
@@ -323,6 +324,20 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   `moveClip`). `tightenSilence` refuses a clip that is not at speed 1:
   remove pauses first, then change the speed. A photo has no speed; trim
   it to change how long it shows.
+- **Reverse:** `setReverse(id, true)` plays a video or audio clip
+  backwards, and its linked sound with it; `false` plays it forwards
+  again. Photos, freeze frames, shapes and stickers are refused.
+  - Eddie writes the stretch the clip shows, and 1 s more at each end,
+    backwards into a file of its own. The first time, `run` waits for that
+    file, printing `reversing: N%` lines on stderr, then applies the
+    script: about 3 s for 7 s of 1080p and 25 s for 7 s of 4K. Reversing
+    the same stretch again is immediate.
+  - A reversed clip's `source` is that file, and `sourceIn` counts from
+    its start. `reversed.original` is the file shot, and `start` and
+    `end` the part of it the reversed file holds. `frames clip:7`, `strip`
+    and a sheet's `sourceTime` give times in the original.
+  - Trim a reversed clip at most 1 s past its ends. For more, turn it
+    forwards, trim it and reverse it again.
 - **Transitions:** `setTransition(id, kind, seconds?)` sets how a video
   clip's picture comes in from the clip that ends where it starts, on
   its lane; `null` removes it. A mix or dip blends each side together

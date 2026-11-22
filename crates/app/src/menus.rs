@@ -358,6 +358,12 @@ fn clip_entries(ui: &Ui) -> Vec<El> {
             Action::FreezeFrame,
         ),
         entry(
+            "Reverse",
+            "Play the selected clip backwards, or forwards again",
+            reverse_off(editor),
+            Action::Reverse,
+        ),
+        entry(
             "Record voiceover",
             "Record from the microphone at the playhead after a 3-second countdown",
             editor
@@ -380,6 +386,20 @@ fn clip_entries(ui: &Ui) -> Vec<El> {
             Action::RippleDelete,
         ),
     ]
+}
+
+/// Why Reverse cannot act on the selection, if it cannot.
+fn reverse_off(editor: &eddie_core::editor::Editor) -> Option<&'static str> {
+    let Some(clip) = editor.selected.and_then(|id| editor.timeline.clip(id)) else {
+        return Some("Select a clip first");
+    };
+    if clip.kind == openreel_engine::ClipKind::Title {
+        Some("A title has no direction")
+    } else if clip.still() || clip.graphic.is_some() {
+        Some("A photo, freeze frame, shape or sticker has no direction")
+    } else {
+        None
+    }
 }
 
 fn view(ui: &Ui) -> Vec<El> {

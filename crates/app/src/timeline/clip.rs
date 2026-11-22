@@ -191,12 +191,8 @@ pub(super) fn clip_el(
             (body, art) = filmstrip(body, art, clip, thumbs, port.px_per_sec, left, (w, h));
         }
         ClipKind::Audio => {
-            let asset = source.and_then(|path| {
-                ui.editor
-                    .assets
-                    .iter()
-                    .find(|asset| asset.info.path == path)
-            });
+            // `asset` also finds a reversed clip's file.
+            let asset = source.and_then(|path| ui.editor.asset(path));
             if let Some(asset) = asset {
                 art = waveform(art, clip, asset, port.px_per_sec, left, full_w, (w, h));
             }
@@ -333,7 +329,8 @@ fn key_marks(mut art: Shape, clip: &Clip, px_per_sec: f32, left: f32, (w, h): (f
 /// picture and sound are tied.
 fn name_chip(clip: &Clip, left: f32, full_w: f32) -> El {
     let linked = clip.linked_clip.is_some();
-    let link_w = if linked { 16.0 } else { 0.0 };
+    let reversed = clip.reversed.is_some();
+    let link_w = if linked { 16.0 } else { 0.0 } + if reversed { 16.0 } else { 0.0 };
     let mut chip = row()
         .absolute(left + 3.0, 3.0)
         .h(16.0)
@@ -352,6 +349,16 @@ fn name_chip(clip: &Clip, left: f32, full_w: f32) -> El {
     // dark chip; flat title bodies read without one.
     if clip.kind != ClipKind::Title {
         chip = chip.fill(black(140));
+    }
+    if reversed {
+        chip = chip.child(
+            el().size(16.0, 16.0)
+                .shape(
+                    icons::u_turn(Shape::new(), [8.5, 8.0], 0.55, 1.3, white(225))
+                        .view_box(16.0, 16.0),
+                )
+                .help("Plays backwards"),
+        );
     }
     if linked {
         chip = chip.child(el().size(16.0, 16.0).shape(link_glyph()));

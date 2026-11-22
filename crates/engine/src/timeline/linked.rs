@@ -51,6 +51,7 @@ impl Timeline {
             sound.clean_voice = clip.clean_voice;
             sound.duck = clip.duck;
             sound.speed = clip.speed;
+            sound.reversed = clip.reversed.clone();
         }
         if let Some(picture) = self.clip_mut(id) {
             picture.embedded_audio = false;

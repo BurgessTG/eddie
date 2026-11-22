@@ -127,6 +127,13 @@
   or sticker takes Transform, keyframes, blend modes, masks and
   transitions. Scripts use `addShape`, `addSticker`, `setShape` and
   `stickers()`, and `state()` gives each clip's `graphic`.
+- Reverse: plays a video or audio clip backwards, with its linked sound,
+  from the timeline toolbar, the Edit menu or the clip's right-click
+  menu. Eddie writes the reversed part, with a second more at each end
+  to trim into, in the background; the status bar shows how far it has
+  got, and pressing Reverse again stops it. Pressing it on a reversed
+  clip plays it forwards again. Scripts use `setReverse`, and `state()`
+  gives each clip's `reversed`.
 
 ### Changed
 
