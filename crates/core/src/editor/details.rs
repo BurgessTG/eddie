@@ -3,7 +3,7 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, BlendMode, ChromaKey, ClipId, ClipKind, ColorAdjust, Property,
+    fill_scale, Background, BlendMode, ChromaKey, ClipId, ClipKind, ColorAdjust, Mask, Property,
     TextLook, Transform, Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE,
     MIN_SPEED,
 };
@@ -276,6 +276,20 @@ impl Editor {
             let mut chroma = clip.chroma;
             edit(&mut chroma);
             clip.chroma = chroma.map(ChromaKey::clamped);
+        }
+    }
+
+    /// The Mask card: mask a video clip (`None` for no mask) or change its
+    /// mask, each number moved into its range.
+    pub fn edit_clip_mask(&mut self, id: ClipId, edit: impl FnOnce(&mut Option<Mask>)) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            let mut mask = clip.mask;
+            edit(&mut mask);
+            clip.mask = mask.map(Mask::clamped);
         }
     }
 

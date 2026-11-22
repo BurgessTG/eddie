@@ -191,9 +191,11 @@ return its parts.
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, blend, chroma, speed, photo, freeze,
-  text, transition, keyframes`. `chroma` is the chroma key `{color,
-  strength, softness, spill}` or `null`. A clip shows
+  transform, background, color, blend, chroma, mask, speed, photo,
+  freeze, text, transition, keyframes`. `chroma` is the chroma key
+  `{color, strength, softness, spill}` or `null`; `mask` is `{shape, x,
+  y, width, height, rotation, feather, round, invert}` or `null`. A clip
+  shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
@@ -380,6 +382,25 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - Put the background on a lane under the keyed clip. Over nothing the
     screen shows black, which `inspect()` reports.
   - A sheet draws the key; strips and frames show the file as shot.
+- **Masks:** `setMask(id, {...})` keeps the part of a video clip's
+  picture inside a shape and clears the rest, so the lanes under it show
+  through. `setMask(id, {})` keeps a circle in the middle; it changes
+  only the fields you give, and `null` removes the mask.
+  - `shape` is `split` (keeps the picture above a line through it),
+    `filmstrip` (a band across it, `height` tall), `circle`, `rectangle`,
+    `heart` or `star`.
+  - The shape sits on the picture as it shows, after its crop and flip,
+    and moves, scales and turns with it. `x` and `y` move the shape's
+    centre from the picture's, in picture widths and heights (-1 to 1,
+    right and down positive). `width` and `height` are in the picture's
+    shorter side (0.01 to 5, 0.6 by default), so equal sizes make a
+    circle on any picture. `rotation` turns the shape clockwise in
+    degrees; turn `split` to angle its line.
+  - `feather` (0 to 1) softens the edge, 1 fading over half the
+    picture's shorter side; `round` (0 to 1) rounds a rectangle's
+    corners; `invert: true` keeps the outside instead.
+  - A `'blur'` background stays whole: the mask clears only the picture
+    over it. A sheet draws the mask.
 - **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
   `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
   `volume` on video or audio, in the units of `setTransform`,
@@ -474,8 +495,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   lanes with higher numbers. A picture hides everything under it only
   when it is fully opaque, blends `normal`, has no chroma key and no
   transparency of its own (a PNG with an alpha channel shows through),
-  and covers the canvas
-  or has a `'blur'` background. Anything else shows the lanes under it: a clip below full
+  and covers the canvas without a mask or has a `'blur'` background. Anything else shows the lanes under it: a clip below full
   opacity shows them through it, and around a picture made smaller with
   `setTransform` they show where its black background would be.
 - For picture-in-picture, put the inset on a lane above the base and
@@ -562,7 +582,8 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - clips that the lanes above always cover;
   - transitions that play shorter than set, have no clip before them, or
     run past a file's pictures.
-  - blended or keyed pictures with no picture under them.
+  - blended or keyed pictures with no picture under them;
+  - masks that keep none of their picture.
 - `state()` doesn't show what the edit looks like. Before calling an edit
   done, open a `sheet` and compare each cell with what you meant to place
   there. Past 16 shots, sheet the timeline in ranges.

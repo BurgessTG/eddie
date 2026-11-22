@@ -11,6 +11,7 @@ mod duck;
 mod fade;
 mod keyframe;
 mod marker;
+mod mask;
 mod place;
 mod stack;
 mod text;
@@ -31,6 +32,9 @@ pub use keyframe::{
     key_value, widen, Key, Keyframes, Property, KEY_TOLERANCE, MAX_KEYS, MAX_ROTATION,
 };
 pub use marker::{Marker, MarkerColor, MarkerId};
+pub use mask::{
+    mask_alpha, multiply, Mask, MaskShape, Matte, MASK_MAX_OFFSET, MASK_MAX_SIZE, MASK_MIN_SIZE,
+};
 pub use place::{
     fill_scale, place, Background, Placement, Transform, MAX_SCALE, MIN_CROP_KEEP, MIN_SCALE,
 };

@@ -342,6 +342,7 @@ impl SheetShot {
                     blur: clip.background == Background::Blur,
                     blend: clip.blend,
                     chroma: clip.chroma,
+                    mask: clip.mask,
                 })
             })
             .collect();

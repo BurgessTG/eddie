@@ -363,6 +363,58 @@ fn the_chroma_key_card_keys_a_picture_from_its_switch_presets_and_fields() {
 }
 
 #[test]
+fn the_mask_card_picks_a_shape_and_places_sizes_turns_and_inverts_it() {
+    use openreel_engine::{Mask, MaskShape};
+    let (mut rt, id) = window(ClipKind::Video);
+    let mask = |rt: &Runtime<Ui>| clip(rt, id).mask;
+    let tap = |rt: &mut Runtime<Ui>, key: &str| {
+        reveal(rt, key);
+        click(rt, key);
+    };
+    let enter = |rt: &mut Runtime<Ui>, key: &str, typed: &str| {
+        tap(rt, key);
+        rt.paste(typed);
+        rt.frame(FRAME);
+        press(rt, Key::Enter);
+    };
+    assert!(
+        !shown(&rt, "details-mask-width"),
+        "no controls without a mask"
+    );
+    tap(&mut rt, "details-mask-heart");
+    assert_eq!(mask(&rt), Some(Mask::new(MaskShape::Heart)));
+    enter(&mut rt, "details-mask-x", "25");
+    enter(&mut rt, "details-mask-y", "-10%");
+    enter(&mut rt, "details-mask-width", "80");
+    enter(&mut rt, "details-mask-height", "900");
+    enter(&mut rt, "details-mask-rotation", "45°");
+    enter(&mut rt, "details-mask-feather", "20");
+    let m = mask(&rt).unwrap();
+    assert_eq!(
+        (m.x, m.y, m.width, m.height, m.rotation, m.feather),
+        (0.25, -0.1, 0.8, 5.0, 45.0, 0.2),
+        "height stops at 500%"
+    );
+    assert!(!shown(&rt, "details-mask-round"), "only a rectangle rounds");
+    // Another shape keeps where the mask is and how big.
+    tap(&mut rt, "details-mask-rectangle");
+    let m = mask(&rt).unwrap();
+    assert_eq!((m.shape, m.x, m.width), (MaskShape::Rectangle, 0.25, 0.8));
+    enter(&mut rt, "details-mask-round", "40");
+    assert_eq!(mask(&rt).unwrap().round, 0.4);
+    // Split runs across the whole picture: no width or height.
+    tap(&mut rt, "details-mask-split");
+    assert!(!shown(&rt, "details-mask-width") && !shown(&rt, "details-mask-height"));
+    tap(&mut rt, "details-mask-invert");
+    assert!(mask(&rt).unwrap().invert);
+    tap(&mut rt, "details-mask-reset");
+    assert_eq!(mask(&rt), Some(Mask::new(MaskShape::Split)));
+    tap(&mut rt, "details-mask-none");
+    assert_eq!(mask(&rt), None);
+    assert!(!shown(&rt, "details-mask-invert"));
+}
+
+#[test]
 fn split_and_delete_act_on_the_selected_clip() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.editor.playhead = 3.0;
@@ -416,6 +468,27 @@ fn every_control_has_a_tooltip() {
                 "details-key-softness",
                 "details-key-spill-slider",
                 "details-key-spill",
+                "details-mask-none",
+                "details-mask-split",
+                "details-mask-filmstrip",
+                "details-mask-circle",
+                "details-mask-rectangle",
+                "details-mask-heart",
+                "details-mask-star",
+                "details-mask-x",
+                "details-mask-y",
+                "details-mask-width-slider",
+                "details-mask-width",
+                "details-mask-height-slider",
+                "details-mask-height",
+                "details-mask-rotation-slider",
+                "details-mask-rotation",
+                "details-mask-feather-slider",
+                "details-mask-feather",
+                "details-mask-round-slider",
+                "details-mask-round",
+                "details-mask-invert",
+                "details-mask-reset",
                 "details-split",
                 "details-delete",
                 "details-resize",
@@ -459,9 +532,14 @@ fn every_control_has_a_tooltip() {
     ];
     for (kind, keys) in cases {
         let (mut rt, id) = window(kind);
-        // A keyed picture shows the key's controls too.
+        // A keyed picture shows the key's controls too, and a rectangle
+        // mask every mask control.
         if kind == ClipKind::Video {
-            rt.state.editor.timeline.clip_mut(id).unwrap().chroma = Some(Default::default());
+            let clip = rt.state.editor.timeline.clip_mut(id).unwrap();
+            clip.chroma = Some(Default::default());
+            clip.mask = Some(openreel_engine::Mask::new(
+                openreel_engine::MaskShape::Rectangle,
+            ));
             rt.frame(FRAME);
             rt.frame(FRAME);
         }

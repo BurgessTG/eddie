@@ -13,7 +13,7 @@ use super::rows::{
 };
 use super::styles::{Select, select};
 use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
-use super::{chroma, color, keys, title_text, transform, transition};
+use super::{chroma, color, keys, mask, title_text, transform, transition};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
 
@@ -71,7 +71,9 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
             .child(el().h(14.0))
             .child(color::card(ui, id, clip, value_w, card_inner))
             .child(el().h(14.0))
-            .child(chroma::card(ui, id, clip, value_w, card_inner));
+            .child(chroma::card(ui, id, clip, value_w, card_inner))
+            .child(el().h(14.0))
+            .child(mask::card(ui, id, clip, value_w, card_inner));
     }
     body.child(el().h(20.0)).child(actions(id, inner))
 }

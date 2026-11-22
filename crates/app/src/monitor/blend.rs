@@ -351,6 +351,7 @@ fn draw(canvas: &mut Canvas, made: &Made, clip: &Clip, held: &Held, side: Side) 
         } else {
             clip.blend
         },
+        mask: clip.mask,
         shift: side.shift,
         window: side.window,
     });

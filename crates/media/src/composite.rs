@@ -1,13 +1,13 @@
 //! Pictures laid over one another on the CPU, as export lays them: each
 //! cropped, scaled, turned and flipped where [`openreel_engine::place`]
 //! puts it, faded by its own alpha and its opacity, over a blurred copy of
-//! itself when it has one, and mixed with what is under it by its blend
-//! mode. Contact sheets draw their cells with it, and the monitor the
-//! lanes under a blended picture.
+//! itself when it has one, cleared outside its mask, and mixed with what is
+//! under it by its blend mode. Contact sheets draw their cells with it, and
+//! the monitor the lanes under a blended picture.
 
 use std::ops::Range;
 
-use openreel_engine::{BlendMode, Placement};
+use openreel_engine::{BlendMode, Mask, Placement};
 
 use crate::RawFrame;
 
@@ -48,6 +48,8 @@ pub struct Layer<'a> {
     /// Over a blurred copy of itself that fills the frame.
     pub blur: bool,
     pub blend: BlendMode,
+    /// Clears the picture outside a shape, but not its blurred copy.
+    pub mask: Option<Mask>,
     /// Moved this far across and down, background and all, in canvas
     /// pixels: a sliding transition's side.
     pub shift: [f64; 2],
@@ -154,6 +156,7 @@ impl Canvas {
                 ..layer.placement
             },
             blend: BlendMode::Normal,
+            mask: None,
             window: None,
             ..*layer
         };
@@ -249,6 +252,16 @@ impl Canvas {
             Tap::at((crop_y + v * crop_h) * fy, h)
         };
         let inside = |share: f64| (0.0..1.0).contains(&share);
+        // How much of the picture its mask keeps at a point, as export's
+        // 8-bit matte holds it, folded into `gain`.
+        let matte = layer.mask.map(|mask| mask.on(p.size[0], p.size[1]));
+        let gain_at = move |u: f64, v: f64| match &matte {
+            None => gain,
+            Some(matte) => {
+                let level = (matte.cover(u * p.size[0], v * p.size[1]) * 255.0 + 0.5) as u32;
+                (gain * level + 127) / 255
+            }
+        };
         let dx = move |col: usize| (col as f64 + 0.5) * kx - p.center[0];
         let dy = move |row: usize| (row as f64 + 0.5) * ky - p.center[1];
         if p.rotation.rem_euclid(360.0) == 0.0 {
@@ -268,6 +281,7 @@ impl Canvas {
                 let lines = Lines::of(image, tap_y(v));
                 for (col, x) in columns.clone().zip(&taps) {
                     if let Some(x) = x {
+                        let gain = gain_at(across(dx(col), 0.0), v);
                         put(&mut line[col * 4..][..3], lines.texel(*x), gain, table);
                     }
                 }
@@ -280,7 +294,7 @@ impl Canvas {
                     let (u, v) = (across(dx, dy), down(dx, dy));
                     if inside(u) && inside(v) {
                         let texel = Lines::of(image, tap_y(v)).texel(tap_x(u));
-                        put(&mut line[col * 4..][..3], texel, gain, table);
+                        put(&mut line[col * 4..][..3], texel, gain_at(u, v), table);
                     }
                 }
             });

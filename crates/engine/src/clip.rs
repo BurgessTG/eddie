@@ -5,6 +5,7 @@ use crate::chroma::ChromaKey;
 use crate::color::ColorAdjust;
 use crate::fit_fades;
 use crate::keyframe::{Keyframes, Property};
+use crate::mask::Mask;
 use crate::place::{Background, Transform};
 use crate::text::TextLook;
 use crate::transition::Transition;
@@ -176,6 +177,10 @@ pub struct Clip {
     /// screen. Saved only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroma: Option<ChromaKey>,
+    /// Keeps the part of the picture inside a shape and clears the rest.
+    /// Saved only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Mask>,
 }
 
 /// The slowest and fastest a clip plays.

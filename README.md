@@ -72,8 +72,9 @@ offers the newest build.
   PNG with transparency shows what is beneath. A bin file's right-click
   menu adds it as an overlay at the playhead. Blend modes (multiply,
   screen, overlay and eleven more) mix a picture with the lanes under it,
-  and a chroma key clears a green or blue screen (or any colour picked on
-  the monitor) to show them.
+  a chroma key clears a green or blue screen (or any colour picked on the
+  monitor) to show them, and a mask keeps a circle, rectangle, heart, star
+  or band of a picture and clears the rest.
 - Photos (PNG, JPEG, WebP, HEIC) as clips: 3 seconds when added, any
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and

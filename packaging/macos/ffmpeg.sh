@@ -187,6 +187,10 @@ has filters afftdn
 # Chroma key: chromakey clears the screen, despill takes its cast off.
 has filters chromakey
 has filters despill
+# Masks: each matte is a PGM read by the movie source and multiplied into
+# the picture's alpha.
+has filters movie
+has decoders pgm
 has devices lavfi
 
 # The GPL asks that whoever gets the program can get its source: the app

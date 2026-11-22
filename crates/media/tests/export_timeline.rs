@@ -1675,6 +1675,242 @@ fn chroma_key_clears_the_screen_and_previews_as_it_exports() {
     eprintln!("chroma key patches: worst {worst} levels from the preview");
 }
 
+/// Masks clear a picture outside their shape, laid on the picture as it
+/// shows: after its crop and flip, turning and moving with it. Three
+/// masked clips over blue export as the CPU compositor (contact sheets,
+/// the blended monitor) lays them, and the mask's centre and the point
+/// mirrored from it land where the mask says. A masked photo over its
+/// blurred copy shows that copy where the mask clears it, not the blue.
+#[test]
+fn masks_clear_the_picture_outside_their_shape_as_the_preview_does() {
+    use openreel_engine::{place, BlendMode, Mask, MaskShape, Placement};
+    use openreel_media::{Canvas, Image, Layer};
+    let fixture = Fixture::new();
+    let blue = fixture.color("blue.mp4", "blue", None);
+    let source = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=10:d=1",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        None,
+    );
+    let decoded: Vec<u8> = frames(Path::new(&source))[1]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b]| [r, g, b, 255])
+        .collect();
+    let blue_frame: Vec<u8> = frames(Path::new(&blue))[1]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b]| [r, g, b, 255])
+        .collect();
+    let cases = [
+        (
+            Transform {
+                scale: 0.8,
+                x: 0.1,
+                rotation: 25.0,
+                flip_h: true,
+                ..Transform::default()
+            },
+            Mask {
+                x: 0.15,
+                y: -0.1,
+                width: 0.5,
+                height: 0.7,
+                ..Mask::new(MaskShape::Heart)
+            },
+        ),
+        (
+            Transform {
+                rotation: 30.0,
+                scale: 0.9,
+                ..Transform::default()
+            },
+            Mask {
+                rotation: 40.0,
+                feather: 0.3,
+                invert: true,
+                ..Mask::new(MaskShape::Star)
+            },
+        ),
+        (
+            Transform {
+                crop_left: 0.3,
+                flip_v: true,
+                ..Transform::default()
+            },
+            Mask {
+                x: -0.2,
+                y: 0.15,
+                width: 0.8,
+                height: 0.4,
+                round: 0.6,
+                ..Mask::new(MaskShape::Rectangle)
+            },
+        ),
+    ];
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &blue, 1, 0.0, 1.2, 0.0);
+    for (index, (transform, mask)) in cases.iter().enumerate() {
+        let id = video(&mut timeline, &source, 0, index as f64 * 0.3, 0.3, 0.0);
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.transform = *transform;
+        clip.mask = Some(*mask);
+    }
+    // Half size and a quarter right, so the picture's quadrants meet at
+    // x 240 and its blurred copy's at x 160: they differ at x 200.
+    let still = photo(
+        &mut timeline,
+        &quadrant_photo(&fixture, "quadrants.jpg"),
+        0.9,
+        0.3,
+    );
+    let clip = timeline.clip_mut(still).unwrap();
+    clip.transform = Transform {
+        scale: 0.5,
+        x: 0.25,
+        ..Transform::default()
+    };
+    clip.background = Background::Blur;
+    // A circle about canvas (200, 72): the picture's top-left quadrant.
+    clip.mask = Some(Mask {
+        x: -0.25,
+        y: -0.2,
+        width: 0.3,
+        height: 0.3,
+        ..Mask::new(MaskShape::Circle)
+    });
+    let exported = frames(&fixture.export("masked.mp4", &timeline));
+    let [kept, cleared, corner] =
+        colors_at(&exported[10], 320, &[(200, 72), (200, 120), (10, 170)])[..]
+    else {
+        unreachable!()
+    };
+    // Inside the circle the picture's yellow; outside it, where the
+    // picture is red, its blurred copy's dark bottom-right; no blue.
+    assert!(
+        kept[0] > 200 && kept[1] > 200,
+        "inside the circle: {kept:?}"
+    );
+    assert!(
+        cleared[0] < 60 && cleared[2] < 160,
+        "outside the circle: {cleared:?}"
+    );
+    assert!(
+        corner[2] < 160,
+        "blue shows, so the blurred copy was cleared: {corner:?}"
+    );
+    let size = (320.0, 180.0);
+    fn layer(rgba: &[u8], placement: Placement, mask: Option<Mask>) -> Layer<'_> {
+        let size = (320.0, 180.0);
+        let image = Image {
+            width: 320,
+            height: 180,
+            rgba,
+        };
+        Layer {
+            image,
+            source: size,
+            placement,
+            opacity: 1.0,
+            blur: false,
+            blend: BlendMode::Normal,
+            mask,
+            shift: [0.0, 0.0],
+            window: None,
+        }
+    }
+    for (index, (transform, mask)) in cases.iter().enumerate() {
+        let got = &exported[index * 3 + 1];
+        let p = place(size, size, transform);
+        let lay = |mask: Option<Mask>| {
+            let mut canvas = Canvas::new(320, 180, size);
+            canvas.draw(&layer(
+                &blue_frame,
+                place(size, size, &Transform::default()),
+                None,
+            ));
+            canvas.draw(&layer(&decoded, p, mask));
+            canvas.rgba
+        };
+        let (masked, plain) = (lay(Some(*mask)), lay(None));
+        // Export's rotate and bicubic scaling draw hard edges (the
+        // picture's own, its quadrants' borders and a hard mask's) a pixel
+        // softer than the compositor's exact sampling, so pixels within two
+        // of a hard edge in either frame are left out. A misplaced, mirrored
+        // or wrongly feathered mask still differs over whole areas.
+        let rgb = |frame: &[u8], x: usize, y: usize| -> [u8; 3] {
+            let at = (y * 320 + x) * 4;
+            [frame[at], frame[at + 1], frame[at + 2]]
+        };
+        let near_edge = |frame: &[u8], x: usize, y: usize| {
+            let here = rgb(frame, x, y);
+            (y.saturating_sub(2)..(y + 3).min(180)).any(|ny| {
+                (x.saturating_sub(2)..(x + 3).min(320)).any(|nx| {
+                    let there = rgb(frame, nx, ny);
+                    (0..3).any(|c| here[c].abs_diff(there[c]) > 24)
+                })
+            })
+        };
+        let (mut total, mut counted, mut far) = (0.0, 0, 0);
+        for y in 0..180 {
+            for x in 0..320 {
+                if near_edge(&plain, x, y) || near_edge(&masked, x, y) {
+                    continue;
+                }
+                let preview = rgb(&masked, x, y);
+                let export = &got[(y * 320 + x) * 3..][..3];
+                let off = (0..3)
+                    .map(|c| preview[c].abs_diff(export[c]))
+                    .max()
+                    .unwrap();
+                total += f64::from(off);
+                counted += 1;
+                far += usize::from(off > 24);
+            }
+        }
+        let mean = total / counted as f64;
+        eprintln!(
+            "mask {index}: mean {mean:.2} levels from the compositor over {counted} pixels, \
+             {far} past 24"
+        );
+        assert!(
+            counted > 320 * 180 / 2,
+            "mask {index}: only {counted} pixels compared"
+        );
+        assert!(mean < 1.5, "mask {index}: mean error {mean:.2}");
+        assert!(
+            far < counted / 500,
+            "mask {index}: {far} pixels differ by more than 24"
+        );
+
+        // From the definition: the canvas point of a share of the picture
+        // as it shows, turned clockwise about its centre.
+        let on_canvas = |(u, v): (f64, f64)| {
+            let (dx, dy) = ((u - 0.5) * p.size[0], (v - 0.5) * p.size[1]);
+            let (s, c) = p.rotation.to_radians().sin_cos();
+            let (x, y) = (p.center[0] + dx * c - dy * s, p.center[1] + dx * s + dy * c);
+            (y.round() as usize * 320 + x.round() as usize) * 3
+        };
+        let picture = |at: usize| got[at + 2] < 160;
+        let centre = on_canvas((0.5 + mask.x, 0.5 + mask.y));
+        let mirrored = on_canvas((0.5 - mask.x, 0.5 - mask.y));
+        if index == 1 {
+            // Inverted: the star's middle is cleared, its outside kept.
+            assert!(!picture(centre), "star {index}: middle kept");
+            assert!(
+                picture(on_canvas((0.04, 0.5))),
+                "star {index}: outside cleared"
+            );
+        } else {
+            assert!(picture(centre), "mask {index}: its centre cleared");
+            assert!(!picture(mirrored), "mask {index}: the mirrored point kept");
+        }
+    }
+}
+
 #[test]
 fn graded_clips_export_as_the_preview_grades_them() {
     use openreel_engine::{ColorAdjust, Filter};

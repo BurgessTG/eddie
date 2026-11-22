@@ -24,15 +24,18 @@ pub struct LanePicture<'a> {
 /// `source` sized) or drawn over its own blurred copy, which does. A
 /// picture whose keys move or fade it may uncover the lanes under it, one
 /// with a blend mode mixes with them, and a chroma key clears parts of it,
-/// so none of them hides them.
+/// so none of them hides them. A mask clears the picture but not its
+/// blurred copy, which is drawn only where the picture leaves the canvas
+/// uncovered.
 pub fn hides_below(clip: &Clip, canvas: (f64, f64), source: (f64, f64), alpha: bool) -> bool {
+    let covers = place(canvas, source, &clip.transform).covers(canvas);
+    let backed = clip.background == Background::Blur && !covers;
     clip.opacity >= 1.0
         && clip.blend.is_normal()
         && clip.chroma.is_none()
         && !clip.keyframes.moves_picture()
         && !alpha
-        && (clip.background == Background::Blur
-            || place(canvas, source, &clip.transform).covers(canvas))
+        && (backed || (clip.mask.is_none() && covers))
 }
 
 impl Timeline {

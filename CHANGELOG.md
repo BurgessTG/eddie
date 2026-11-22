@@ -111,6 +111,13 @@
   the key as export renders it. Scripts use `setChroma`, `state()` gives
   each clip's `chroma`, and `inspect()` reports a keyed picture with
   nothing under it.
+- Masks: a Details card for video clips that keeps the picture inside a
+  split line, a filmstrip band, a circle, a rectangle, a heart or a star
+  and clears the rest, so the lanes under it show through. Move, size,
+  turn, feather and invert the shape; it moves, turns and flips with the
+  picture, and a blurred background stays whole around it. Scripts use
+  `setMask`, `state()` gives each clip's `mask`, and `inspect()` reports a
+  mask that keeps none of its picture.
 
 ### Changed
 

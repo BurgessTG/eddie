@@ -7,12 +7,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use openreel_engine::{
-    hides_below, Background, BlendMode, ChromaKey, Clip, ClipId, ColorAdjust, Keyframes, Timeline,
-    Transform,
+    hides_below, Background, BlendMode, ChromaKey, Clip, ClipId, ColorAdjust, Keyframes, Mask,
+    Timeline, Transform,
 };
 
 use super::blend;
 use super::frames::{enabled_frames, visible_frames, VideoClock};
+use super::picture::Mattes;
 use super::picture::{picture, Motion, Spot};
 use super::scratch::FilterGraphFile;
 use super::source::Source;
@@ -41,6 +42,7 @@ pub(super) struct VideoLayer<'a> {
     pub(super) background: Background,
     pub(super) color: ColorAdjust,
     pub(super) chroma: Option<ChromaKey>,
+    pub(super) mask: Option<Mask>,
     /// How it mixes with the lanes under it.
     blend: BlendMode,
     /// Source ticks at timeline tick zero: the source clock is
@@ -154,6 +156,7 @@ pub(super) fn plan_video<'a>(
                 && layer.background == clip.background
                 && layer.color == clip.color
                 && layer.chroma == clip.chroma
+                && layer.mask == clip.mask
                 && layer.blend == clip.blend
         });
         let index = match same {
@@ -173,6 +176,7 @@ pub(super) fn plan_video<'a>(
                     background: clip.background,
                     color: clip.color,
                     chroma: clip.chroma,
+                    mask: clip.mask,
                     blend: clip.blend,
                     source_offset,
                     speed: clip.speed,
@@ -263,7 +267,7 @@ pub(super) fn batch_command(
     layers: &[VideoLayer<'_>],
     transitions: &[TransitionPlan],
     batch: &Batch,
-) -> MediaResult<(Command, FilterGraphFile)> {
+) -> MediaResult<(Command, Vec<FilterGraphFile>)> {
     let (width, height) = canvas;
     let VideoClock {
         rate,
@@ -278,6 +282,7 @@ pub(super) fn batch_command(
          trim=end_frame={count}[base]"
     )];
     let mut current = "base".to_owned();
+    let mut mattes = Mattes::new(rate);
     let mut cmd = crate::cli::ffmpeg();
     cmd.args([
         "-v",
@@ -394,7 +399,8 @@ pub(super) fn batch_command(
                 source_size,
                 (&resize, &convert),
                 motion.as_ref(),
-            );
+                &mut mattes,
+            )?;
             // Input seeking retains keyframe preroll with timestamps relative
             // to the requested seek. Preserve that phase for VFR frame holds.
             // Start at this input's first visible frame: padding back to zero
@@ -507,7 +513,10 @@ pub(super) fn batch_command(
     }
     filters.push(format!("[{current}]format=yuv420p[vout]"));
     let graph = FilterGraphFile::create(&filters.join(";"))?;
-    cmd.arg("-/filter_complex").arg(&graph.0).args([
+    cmd.arg("-/filter_complex").arg(&graph.0);
+    let mut files = vec![graph];
+    files.append(&mut mattes.files);
+    cmd.args([
         "-map",
         "[vout]",
         "-an",
@@ -521,14 +530,14 @@ pub(super) fn batch_command(
         "rawvideo",
         "pipe:1",
     ]);
-    Ok((cmd, graph))
+    Ok((cmd, files))
 }
 
 /// Pipe one batch's raw frames through its own H.264 encoder into `path`.
 /// Every segment starts on a keyframe, so segments join by stream copy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_segment(
-    decoder: (Command, FilterGraphFile),
+    decoder: (Command, Vec<FilterGraphFile>),
     titles: &str,
     canvas: (u32, u32),
     rate: ffmpeg_next::Rational,
@@ -538,7 +547,7 @@ pub(super) fn encode_segment(
     path: &Path,
 ) -> MediaResult<()> {
     let (width, height) = canvas;
-    let (mut decoder, _decoder_graph) = decoder;
+    let (mut decoder, _decoder_files) = decoder;
     let graph = FilterGraphFile::create(titles)?;
     let mut encoder = crate::cli::ffmpeg()
         .args([

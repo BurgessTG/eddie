@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::process::Stdio;
 use std::thread;
 
-use openreel_engine::{BlendMode, ChromaKey, Placement};
+use openreel_engine::{BlendMode, ChromaKey, Mask, Placement};
 
 use crate::composite::{Canvas, Layer};
 use crate::export::{filter_value, font_file};
@@ -50,6 +50,7 @@ pub struct SheetLayer {
     /// How it mixes with the pictures under it.
     pub blend: BlendMode,
     pub chroma: Option<ChromaKey>,
+    pub mask: Option<Mask>,
 }
 
 impl SheetLayer {
@@ -63,6 +64,7 @@ impl SheetLayer {
             blur: false,
             blend: BlendMode::Normal,
             chroma: None,
+            mask: None,
         }
     }
 }
@@ -125,6 +127,7 @@ fn render(
                             opacity: layer.opacity,
                             blur: layer.blur,
                             blend: layer.blend,
+                            mask: layer.mask,
                             shift: [0.0, 0.0],
                             window: None,
                         })

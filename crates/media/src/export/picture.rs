@@ -2,14 +2,18 @@
 //! and moved where [`place`] puts it on the canvas, over black or its own
 //! blurred copy, as the preview draws it. A clip with keys lays its picture
 //! out once at a fixed size, then fades, resizes, turns and moves it every
-//! frame along its keys.
+//! frame along its keys. A mask clears the picture outside its shape
+//! before it turns, by a matte written once per batch.
 
 use openreel_engine::{
-    place, yuv, Background, ChromaKey, ColorAdjust, Keyframes, Property, Spill, Transform,
+    place, yuv, Background, ChromaKey, ColorAdjust, Keyframes, Mask, Property, Spill, Transform,
 };
 
 use super::animate::{commands, curve};
+use super::scratch::FilterGraphFile;
+use super::titles::filter_value;
 use super::video::VideoLayer;
+use crate::MediaResult;
 
 /// Even and at least 2, as yuv420p and the colorspace filter need.
 fn even(value: f64) -> u32 {
@@ -107,6 +111,48 @@ fn look_filters(layer: &VideoLayer<'_>) -> String {
         chroma_filters(layer.chroma.as_ref()),
         color_filters(&layer.color)
     )
+}
+
+/// The mattes a batch's masks read, written while its graph is built and
+/// kept until its FFmpeg is done with them.
+pub(super) struct Mattes {
+    /// The batch's frame rate. A layer's frames run on its inverse after
+    /// `fps`, and a matte is timed on it too, so `lut2` keeps the layer's
+    /// timebase.
+    rate: ffmpeg_next::Rational,
+    pub(super) files: Vec<FilterGraphFile>,
+}
+
+impl Mattes {
+    pub(super) fn new(rate: ffmpeg_next::Rational) -> Self {
+        Self {
+            rate,
+            files: Vec::new(),
+        }
+    }
+
+    /// The filters, starting with a comma, that clear a `size` picture
+    /// outside `mask`: its alpha times the mask's coverage, written as a
+    /// grey picture of [`openreel_engine::Matte::levels`], so export
+    /// clears the pixels the preview does. `lut2` rounds as
+    /// [`openreel_engine::multiply`] does.
+    fn filters(&mut self, index: usize, mask: &Mask, (w, h): (u32, u32)) -> MediaResult<String> {
+        let levels = mask
+            .on(f64::from(w), f64::from(h))
+            .levels(w as usize, h as usize, (0.0, 0.0));
+        let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
+        pgm.extend_from_slice(&levels);
+        let file = FilterGraphFile::write("pgm", &pgm)?;
+        let path = filter_value(&file.0.to_string_lossy());
+        self.files.push(file);
+        let base = format!("{}/{}", self.rate.denominator(), self.rate.numerator());
+        let m = format!("mk{index}");
+        Ok(format!(
+            ",format=rgba,split[{m}p][{m}a];[{m}a]alphaextract[{m}l];\
+             movie=filename={path},format=gray,settb={base}[{m}g];\
+             [{m}l][{m}g]lut2=c0='round(x*y/255)'[{m}x];[{m}p][{m}x]alphamerge"
+        ))
+    }
 }
 
 /// A layer's keys on its batch's clock.
@@ -261,7 +307,8 @@ pub(super) fn picture(
     source: (u32, u32),
     (resize, convert): (&str, &str),
     motion: Option<&Motion<'_>>,
-) -> Picture {
+    mattes: &mut Mattes,
+) -> MediaResult<Picture> {
     let (width, height) = canvas;
     let color = look_filters(layer);
     let alpha = if layer.opacity < 0.999 {
@@ -278,6 +325,7 @@ pub(super) fn picture(
             (resize, convert),
             &color,
             motion,
+            mattes,
         );
     }
     let still = |fixed: String, spot: Spot| Picture {
@@ -290,15 +338,16 @@ pub(super) fn picture(
     if layer.transform.is_identity()
         && layer.background == Background::Black
         && color.is_empty()
+        && layer.mask.is_none()
         && !layer.over
     {
-        return still(
+        return Ok(still(
             format!(
                 ",scale={width}:{height}:force_original_aspect_ratio=decrease:flags={resize},\
                  pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{convert},setsar=1{alpha}"
             ),
             Spot::At(0, 0),
-        );
+        ));
     }
     let canvas_f = (f64::from(width), f64::from(height));
     let t = &layer.transform;
@@ -313,6 +362,9 @@ pub(super) fn picture(
         "scale={pw}:{ph}:flags={resize}{convert}{color},setsar=1{}",
         flips(t)
     ));
+    if let Some(mask) = &layer.mask {
+        chain.push_str(&mattes.filters(index, mask, (pw, ph))?);
+    }
     let (mut out_w, mut out_h) = (f64::from(pw), f64::from(ph));
     if t.rotation.rem_euclid(360.0) != 0.0 {
         let [rw, rh] = p.turned_size();
@@ -327,22 +379,23 @@ pub(super) fn picture(
     let y = (p.center[1] - out_h / 2.0).round() as i64;
     if layer.background == Background::Blur && !p.covers(canvas_f) {
         let background = blurred(canvas, t, resize, convert, &color);
-        return still(
+        return Ok(still(
             format!(
                 ",split[pic{index}][bgin{index}];[bgin{index}]{background}[bg{index}];\
                  [pic{index}]{chain}[fg{index}];\
                  [bg{index}][fg{index}]overlay={x}:{y}{alpha}"
             ),
             Spot::At(0, 0),
-        );
+        ));
     }
-    still(format!(",{chain}{alpha}"), Spot::At(x, y))
+    Ok(still(format!(",{chain}{alpha}"), Spot::At(x, y)))
 }
 
 /// A keyed layer's picture. It is laid out once at the largest size its
 /// keys reach (never past the source's own pixels, which would only be
 /// blown up), then each frame is faded, sized, turned on a square any turn
 /// fits, and moved along the keys, which the preview follows too.
+#[allow(clippy::too_many_arguments)]
 fn moving(
     index: usize,
     layer: &VideoLayer<'_>,
@@ -351,7 +404,8 @@ fn moving(
     (resize, convert): (&str, &str),
     color: &str,
     motion: &Motion<'_>,
-) -> Picture {
+    mattes: &mut Mattes,
+) -> MediaResult<Picture> {
     let canvas_f = (f64::from(canvas.0), f64::from(canvas.1));
     let t = &layer.transform;
     let unit = place(
@@ -386,6 +440,9 @@ fn moving(
         "scale={fw}:{fh}:flags={resize}{convert}{color},setsar=1{}",
         flips(t)
     ));
+    if let Some(mask) = &layer.mask {
+        fixed.push_str(&mattes.filters(index, mask, (fw, fh))?);
+    }
     let mut moving = String::new();
     let (most_w, most_h) = (
         f64::from(even(unit_w * largest)),
@@ -444,11 +501,11 @@ fn moving(
     };
     let background =
         (layer.background == Background::Blur).then(|| blurred(canvas, t, resize, convert, color));
-    Picture {
+    Ok(Picture {
         fixed,
         alpha,
         moving,
         background,
         spot,
-    }
+    })
 }

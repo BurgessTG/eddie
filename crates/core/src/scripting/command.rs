@@ -83,6 +83,12 @@ pub enum ScriptCommand {
         clip: u64,
         name: String,
     },
+    /// `changes` is a JSON object of `Mask` fields to change (an empty one
+    /// masks a circle), or `null` to remove the mask.
+    SetMask {
+        clip: u64,
+        changes: String,
+    },
     /// `changes` is a JSON object of `ChromaKey` fields to change (an empty
     /// one keys green), or `null` to remove the key.
     SetChroma {
@@ -238,6 +244,7 @@ impl ScriptCommand {
             | Self::SetBackground { clip, .. }
             | Self::SetBlend { clip, .. }
             | Self::SetChroma { clip, .. }
+            | Self::SetMask { clip, .. }
             | Self::SetColor { clip, .. }
             | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
@@ -354,6 +361,7 @@ impl ScriptCommand {
             | Self::SetBackground { .. }
             | Self::SetBlend { .. }
             | Self::SetChroma { .. }
+            | Self::SetMask { .. }
             | Self::SetColor { .. }
             | Self::SetText { .. }
             | Self::SetFormat(_)

@@ -212,6 +212,17 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     )?;
     let q = api.queue();
     api.set(
+        "__set_mask",
+        move |Whole(clip): Whole, changes: CString<'_>| {
+            q.borrow_mut()
+                .push(changes.len(), || ScriptCommand::SetMask {
+                    clip,
+                    changes: changes.as_str().to_owned(),
+                })
+        },
+    )?;
+    let q = api.queue();
+    api.set(
         "__set_chroma",
         move |Whole(clip): Whole, changes: CString<'_>| {
             q.borrow_mut()

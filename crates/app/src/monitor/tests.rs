@@ -135,6 +135,38 @@ fn flips_mirror_rows_and_columns() {
     assert_eq!(order(flipped(&image, 2, (true, true))), [4, 3, 2, 1]);
 }
 
+/// A mask lies on the picture as it shows: the cropped part, mirrored with
+/// the flipped pixels the monitor holds.
+#[test]
+fn a_mask_lies_on_the_cropped_flipped_picture() {
+    use super::picture::matte;
+    use openreel_engine::{Mask, MaskShape};
+    // A band four pixels wide (0.4 of the shorter side) 0.2 to the left of
+    // the shown picture's middle, on a 100x10 frame whose left 30% is
+    // cropped off.
+    let band = Mask {
+        x: -0.2,
+        width: 0.4,
+        height: 5.0,
+        ..Mask::new(MaskShape::Rectangle)
+    };
+    let crop = [0.3, 0.0, 0.0, 0.0];
+    let kept =
+        |levels: Vec<u8>| -> Vec<usize> { (0..100).filter(|&x| levels[500 + x] > 128).collect() };
+    // Shown: frame columns 30 to 100, 70 wide; the band's middle is 0.3 of
+    // the way across that, at 51, so it keeps columns 49 to 52.
+    assert_eq!(
+        kept(matte(band, crop, (false, false), (100, 10))),
+        [49, 50, 51, 52]
+    );
+    // Flipped, the frame's columns 0 to 70 show, mirrored: the band's
+    // middle is 0.3 of the way in from their left, at 21.
+    assert_eq!(
+        kept(matte(band, crop, (true, false), (100, 10))),
+        [19, 20, 21, 22]
+    );
+}
+
 /// A 2 s 320x180 clip made with FFmpeg, removed with its folder.
 struct Footage(std::path::PathBuf);
 

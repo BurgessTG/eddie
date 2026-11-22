@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 use openreel_engine::{
     fill_scale, Background, BlendMode, ChromaKey, ClipId, ClipKind, ColorAdjust, Filter, Format,
-    Property, TextLook, TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED,
-    MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
+    Mask, MaskShape, Property, TextLook, TitleStyle, Transform, Transition, TransitionKind,
+    MAX_OUTLINE, MAX_SPEED, MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED,
+    MIN_TEXT_SIZE, MIN_TRANSITION,
 };
 
 use super::super::details;
@@ -145,6 +146,33 @@ fn changed_color(current: ColorAdjust, changes: &str) -> Result<ColorAdjust, Str
         ));
     }
     Ok(color)
+}
+
+/// `current` (a circle when the clip has no mask) with the fields of the
+/// JSON object `changes`, or no mask for `null`.
+fn changed_mask(current: Option<Mask>, changes: &str) -> Result<Option<Mask>, String> {
+    let example = "{shape: 'heart', width: 0.5}";
+    let Some(mut changes) = changes_object("setMask", example, changes)? else {
+        return Ok(None);
+    };
+    if let Some(shape) = changes.get_mut("shape") {
+        let Some(known) = shape.as_str().and_then(MaskShape::from_name) else {
+            let names: Vec<&str> = MaskShape::ALL.iter().map(|s| s.as_str()).collect();
+            return Err(format!("setMask shape is one of {}", names.join(", ")));
+        };
+        *shape = known.as_str().into();
+    }
+    let mask = merged("setMask", current.unwrap_or_default(), changes)?;
+    if !mask.is_valid() {
+        return Err(format!(
+            "setMask takes x and y from -{0} to {0}, width and height from {1} to {2}, \
+             rotation from -360 to 360, and feather and round from 0 to 1",
+            openreel_engine::MASK_MAX_OFFSET,
+            openreel_engine::MASK_MIN_SIZE,
+            openreel_engine::MASK_MAX_SIZE
+        ));
+    }
+    Ok(Some(mask))
 }
 
 /// `current` (green when the clip has no key) with the fields of the JSON
@@ -356,6 +384,12 @@ impl Editor {
                 };
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.text = text;
+                }
+            }
+            ScriptCommand::SetMask { clip, changes } => {
+                let mask = changed_mask(self.video_clip(clip, "setMask")?.mask, &changes)?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.mask = mask;
                 }
             }
             ScriptCommand::SetChroma { clip, changes } => {

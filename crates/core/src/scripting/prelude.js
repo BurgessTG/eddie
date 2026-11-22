@@ -58,6 +58,7 @@ function help() {
     "setBlend(id, mode)  // video only: how the picture mixes with the lanes under it. modes: normal darken multiply color-burn linear-burn lighten screen color-dodge add overlay soft-light hard-light difference exclusion",
     "setKeyframe(id, property, at, value)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run in a straight line from key to key and hold before the first and after the last; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
     "removeKeyframe(id, property, at) clearKeyframes(id, property?)  // clearing keeps the value at the clip's start; no property clears them all. setOpacity, setVolume and setTransform set one value for the whole clip and remove that property's keys",
+    "setMask(id, {shape, x, y, width, height, rotation, feather, round, invert})  // video only: keeps the picture inside a shape and clears the rest, so the lanes under show (a blurred background stays). {} is a circle; changes just the fields given, null removes the mask. shape split (keeps above a line), filmstrip (a band height tall), circle, rectangle, heart or star; x, y the shape's centre from the picture's, in picture widths and heights (-1 to 1); width, height in shorter sides of the picture (0.01 to 5, 0.6); rotation clockwise degrees, with the picture; feather 0 to 1, the soft edge (1 is half the shorter side); round 0 to 1, a rectangle's corners; invert keeps the outside",
     "setChroma(id, {color, strength, softness, spill})  // video only: clears the parts of the picture near color (a green or blue screen) so the lanes under show. {} keys green (#00B140); changes just the fields given, null removes the key. color '#RRGGBB' ('#0047BB' for blue); strength 0 to 1 (0.6), how far from the colour still clears, as a share of the way to grey; softness 0 to 1 (0.3), how gradual the edge is; spill 0 to 1 (0.5), how much of the colour's cast on what stays is taken off",
     "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
@@ -136,6 +137,18 @@ function setColor(id, changes) {
   }
   __set_color(id, JSON.stringify(changes));
 }
+function setMask(id, changes) {
+  if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
+    throw new Error("setMask needs an object such as {shape: 'heart', width: 0.5}, {} for a circle, or null to remove the mask");
+  }
+  for (const key in changes || {}) {
+    if (typeof changes[key] === "number" && !isFinite(changes[key])) {
+      throw new Error("setMask " + key + " must be a finite number");
+    }
+  }
+  __set_mask(id, JSON.stringify(changes));
+}
+
 function setChroma(id, changes) {
   if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
     throw new Error("setChroma needs an object such as {color: '#00B140', strength: 0.5}, {} for green, or null to remove the key");

@@ -1,14 +1,17 @@
 //! The program monitor's picture: the decoded frame, where
 //! `openreel_engine::place` puts it on the canvas (as export does), and a
 //! drag that moves it. Rune draws images upright only and has no colour
-//! filter for them, so flips and colour happen to the pixels here.
+//! filter or mask for them, so flips, keys, colour and masks happen to the
+//! pixels here.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use eddie_core::PreviewSink;
-use openreel_engine::{Background, ChromaKey, Clip, ClipId, ColorAdjust, Rgb, Transform, place};
+use openreel_engine::{
+    Background, ChromaKey, Clip, ClipId, ColorAdjust, Mask, Rgb, mask_alpha, place,
+};
 use openreel_media::RawFrame;
 use rune::{Cursor, El, Phase, Pixels, SurfaceFit, el};
 
@@ -29,19 +32,30 @@ pub struct Look {
     pub flips: (bool, bool),
     pub chroma: Option<ChromaKey>,
     pub color: ColorAdjust,
+    pub mask: Option<Mask>,
+    /// The crop's left, top, right and bottom shares, which place the mask.
+    pub crop: [f64; 4],
+    /// Over its blurred copy, which the mask does not clear.
+    pub blur: bool,
 }
 
 /// The look of the video clip at the playhead, for [`Picture::want`].
 pub fn look(clip: Option<&Clip>) -> Look {
     clip.map_or_else(Look::default, |clip| {
-        let Transform { flip_h, flip_v, .. } = clip.transform;
+        let t = clip.transform;
         Look {
-            flips: (flip_h, flip_v),
+            flips: (t.flip_h, t.flip_v),
             chroma: clip.chroma,
             color: clip.color,
+            mask: clip.mask,
+            crop: [t.crop_left, t.crop_top, t.crop_right, t.crop_bottom],
+            blur: clip.background == Background::Blur,
         }
     })
 }
+
+/// What a matte was laid for: the mask, crop and flips on a frame's size.
+type MatteFor = (Mask, [f64; 4], (bool, bool), u32, u32);
 
 /// The last decoded frame, upright and ungraded, and the look it is shown
 /// with.
@@ -54,16 +68,20 @@ pub struct Picture {
     rgba: Arc<Vec<u8>>,
     /// Counts decoded frames, so a reader can tell a new one arrived.
     frame: u64,
+    /// The mask's coverage of each pixel of the frame, kept while the mask,
+    /// crop, flips and frame size stay.
+    matte: Vec<u8>,
+    matte_for: Option<MatteFor>,
 }
 
 impl Picture {
     /// Show frames with the clip at the playhead's look, redrawing the held
     /// frame when it changed (a flip toggled or a slider moved while
     /// paused).
-    pub fn want(&mut self, look: Look, pixels: &Pixels) {
+    pub fn want(&mut self, look: Look, pixels: &Pixels, backdrop: &Pixels) {
         self.want = look;
         if self.shown != look && !self.rgba.is_empty() {
-            self.show(pixels);
+            self.show(pixels, backdrop);
         }
     }
 
@@ -79,7 +97,9 @@ impl Picture {
         (self.width, Arc::clone(&self.rgba))
     }
 
-    fn show(&mut self, pixels: &Pixels) {
+    /// Draw the held frame with the wanted look into `pixels`, and, when a
+    /// mask clears it over its blurred copy, unmasked into `backdrop`.
+    fn show(&mut self, pixels: &Pixels, backdrop: &Pixels) {
         self.shown = self.want;
         let height = (self.rgba.len() / (self.width as usize * 4).max(1)) as u32;
         let mut shown = flipped(&self.rgba, self.width, self.want.flips);
@@ -87,8 +107,44 @@ impl Picture {
             key.apply_rgba(&mut shown, self.width as usize);
         }
         self.want.color.apply_rgba(&mut shown);
+        if let Some(mask) = self.want.mask {
+            if self.want.blur {
+                backdrop.set(self.width, height, shown.clone());
+            }
+            mask_alpha(&mut shown, self.matte(mask, height));
+        }
         pixels.set(self.width, height, shown);
     }
+
+    /// The wanted mask's [`matte`] over a held frame `height` tall, kept
+    /// until the mask, crop, flips or size change.
+    fn matte(&mut self, mask: Mask, height: u32) -> &[u8] {
+        let Look { crop, flips, .. } = self.want;
+        let made_for = (mask, crop, flips, self.width, height);
+        if self.matte_for != Some(made_for) {
+            self.matte = matte(mask, crop, flips, (self.width, height));
+            self.matte_for = Some(made_for);
+        }
+        &self.matte
+    }
+}
+
+/// `mask`'s coverage of each pixel of a `width` by `height` decoded frame
+/// already flipped by `flips`: laid on the part `crop` (left, top, right
+/// and bottom shares of the unflipped source) shows, which the flip moves
+/// to the other side.
+pub(super) fn matte(
+    mask: Mask,
+    crop: [f64; 4],
+    flips: (bool, bool),
+    (width, height): (u32, u32),
+) -> Vec<u8> {
+    let (w, h) = (f64::from(width), f64::from(height));
+    let [left, top, right, bottom] = crop;
+    let x = if flips.0 { right } else { left };
+    let y = if flips.1 { bottom } else { top };
+    mask.on((1.0 - left - right) * w, (1.0 - top - bottom) * h)
+        .levels(width as usize, height as usize, (x * w, y * h))
 }
 
 /// `rgba` mirrored left to right and/or top to bottom.
@@ -120,6 +176,8 @@ pub(super) fn flipped(rgba: &[u8], width: u32, (across, down): (bool, bool)) -> 
 #[derive(Clone, Default)]
 pub struct Slot {
     pub pixels: Pixels,
+    /// The picture without its mask, for its blurred copy.
+    pub backdrop: Pixels,
     pub size: Rc<Cell<Option<(u32, u32)>>>,
     pub picture: Rc<RefCell<Picture>>,
 }
@@ -127,7 +185,9 @@ pub struct Slot {
 impl Slot {
     /// Show the held frame as the clip `look` describes wants it.
     pub fn want(&self, look: Look) {
-        self.picture.borrow_mut().want(look, &self.pixels);
+        self.picture
+            .borrow_mut()
+            .want(look, &self.pixels, &self.backdrop);
     }
 
     fn show(&self, frame: &RawFrame) {
@@ -142,7 +202,7 @@ impl Slot {
             None => picture.rgba = Arc::new(frame.rgba.clone()),
         }
         picture.frame += 1;
-        picture.show(&self.pixels);
+        picture.show(&self.pixels, &self.backdrop);
         self.size.set(Some((frame.width, frame.height)));
     }
 }
@@ -227,11 +287,17 @@ pub fn placed(
         // side, the dark rim falls outside it.
         let sigma = BLUR_SHARE * w;
         let rim = 3.0 * sigma;
+        // A mask clears the picture, not its blurred copy.
+        let pixels = if clip.mask.is_some() {
+            &slot.backdrop
+        } else {
+            &slot.pixels
+        };
         layer = layer.child(
             el().key(format!("{key}-background"))
                 .absolute(-rim, -rim)
                 .size(w + 2.0 * rim, h + 2.0 * rim)
-                .pixels_fit(&slot.pixels, SurfaceFit::Fill)
+                .pixels_fit(pixels, SurfaceFit::Fill)
                 .blur(sigma),
         );
     }

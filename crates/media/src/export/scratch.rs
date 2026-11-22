@@ -7,18 +7,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::MediaResult;
 
-/// FFmpeg 9's -/filter_complex reads an argument file. A 500-shot edit can
-/// exceed the OS limit for a single argv string even with just one input.
-/// Create exclusively, close before spawning (also on Windows), and unlink
-/// on every return path, including write, spawn, and encoder errors.
+/// A file FFmpeg reads while export runs: a filter graph (FFmpeg 9's
+/// -/filter_complex reads an argument file, and a 500-shot edit can exceed
+/// the OS limit for a single argv string even with just one input) or a
+/// mask's matte. Create exclusively, close before spawning (also on
+/// Windows), and unlink on every return path, including write, spawn, and
+/// encoder errors.
 pub(super) struct FilterGraphFile(pub(super) PathBuf);
 
 impl FilterGraphFile {
     pub(super) fn create(graph: &str) -> MediaResult<Self> {
+        Self::write("ffgraph", graph.as_bytes())
+    }
+
+    /// A file named `….{extension}` holding `bytes`.
+    pub(super) fn write(extension: &str, bytes: &[u8]) -> MediaResult<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         loop {
             let path = std::env::temp_dir().join(format!(
-                "openreel-export-{}-{}.ffgraph",
+                "openreel-export-{}-{}.{extension}",
                 std::process::id(),
                 NEXT_ID.fetch_add(1, Ordering::Relaxed)
             ));
@@ -32,13 +39,13 @@ impl FilterGraphFile {
             match options.open(&path) {
                 Ok(mut file) => {
                     let graph_file = Self(path);
-                    let written = file.write_all(graph.as_bytes());
+                    let written = file.write_all(bytes);
                     drop(file);
-                    written.map_err(|e| format!("write export filter graph: {e}"))?;
+                    written.map_err(|e| format!("write export {extension} file: {e}"))?;
                     return Ok(graph_file);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("create export filter graph: {error}")),
+                Err(error) => return Err(format!("create export {extension} file: {error}")),
             }
         }
     }

@@ -255,3 +255,46 @@ fn a_blended_or_keyed_picture_shows_the_lane_under_it_and_is_reported_over_black
         .collect();
     assert_eq!(found, vec![("key-over-black", vec![lone])], "{base}");
 }
+
+/// A masked picture shows the lane under it outside its shape, so that
+/// lane is not hidden; a mask that keeps none of its picture is reported.
+#[test]
+fn a_masked_picture_shows_the_lane_under_it_and_one_that_keeps_nothing_is_reported() {
+    use openreel_engine::{Mask, MaskShape};
+    let mut timeline = Timeline::empty_project();
+    let base = timeline.add_media_clip("B", ClipKind::Video, 1, 0.0, 4.0, 0.0, "a.mp4");
+    let top = timeline.add_media_clip("T", ClipKind::Video, 0, 0.0, 4.0, 0.0, "a.mp4");
+    let assets = [asset("a.mp4", 1920, 1080)];
+    let found = |timeline: &Timeline| -> Vec<_> {
+        kinds(&inspect(timeline, &assets))
+            .into_iter()
+            .filter(|(kind, _)| ["hidden-clip", "mask-clears-picture"].contains(kind))
+            .collect()
+    };
+    assert_eq!(found(&timeline), vec![("hidden-clip", vec![base])]);
+    timeline.clip_mut(top).unwrap().mask = Some(Mask::new(MaskShape::Heart));
+    assert_eq!(found(&timeline), vec![]);
+
+    // Moved off the picture: a circle 0.6 of the height across, its middle
+    // a whole picture width away, misses it.
+    timeline.clip_mut(top).unwrap().mask = Some(Mask {
+        x: 1.0,
+        ..Mask::new(MaskShape::Circle)
+    });
+    assert_eq!(found(&timeline), vec![("mask-clears-picture", vec![top])]);
+    // Inverted over a rectangle that covers the picture, nothing is kept;
+    // one that leaves a strip at the edge keeps it.
+    let covering = Mask {
+        width: 2.0,
+        height: 1.1,
+        invert: true,
+        ..Mask::new(MaskShape::Rectangle)
+    };
+    timeline.clip_mut(top).unwrap().mask = Some(covering);
+    assert_eq!(found(&timeline), vec![("mask-clears-picture", vec![top])]);
+    timeline.clip_mut(top).unwrap().mask = Some(Mask {
+        height: 0.9,
+        ..covering
+    });
+    assert_eq!(found(&timeline), vec![]);
+}

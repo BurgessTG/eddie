@@ -91,6 +91,7 @@ pub fn inspect(timeline: &Timeline, assets: &[BinAsset]) -> Vec<Finding> {
     inspection.gaps_and_flashes(&segments, &runs);
     inspection.near_match_cuts(&runs);
     inspection.hidden_clips();
+    inspection.masks();
     inspection.transitions();
     inspection.findings
 }
@@ -128,6 +129,53 @@ impl<'a> Inspection<'a> {
             start,
             end,
         });
+    }
+
+    /// Masks that keep none of their clip's picture, such as one moved off
+    /// it or inverted over a shape that covers it, so the clip never shows.
+    fn masks(&mut self) {
+        let timeline = self.timeline;
+        for clip in &timeline.clips {
+            let Some(mask) = clip.mask.filter(|_| clip.kind == ClipKind::Video) else {
+                continue;
+            };
+            let (w, h) = clip
+                .source
+                .as_deref()
+                .and_then(|source| self.asset(source))
+                .map_or((16.0, 9.0), |asset| {
+                    let info = &asset.info;
+                    (f64::from(info.width.max(1)), f64::from(info.height.max(1)))
+                });
+            let t = &clip.transform;
+            let (w, h) = (
+                w * (1.0 - t.crop_left - t.crop_right),
+                h * (1.0 - t.crop_top - t.crop_bottom),
+            );
+            // A grid fine enough to find any part a viewer would see.
+            let k = 128.0 / w.max(h);
+            let (across, down) = ((w * k).ceil() as usize, (h * k).ceil() as usize);
+            let matte = mask.on(w, h);
+            let keeps = (0..down).any(|row| {
+                (0..across).any(|col| {
+                    matte.cover((col as f64 + 0.5) / k, (row as f64 + 0.5) / k) * 255.0 >= 0.5
+                })
+            });
+            if !keeps {
+                self.report(
+                    "mask-clears-picture",
+                    "warning",
+                    format!(
+                        "Clip {}'s mask keeps none of its picture, so the clip never shows. \
+                         Move the mask onto the picture, make it larger or turn invert off.",
+                        clip.id
+                    ),
+                    vec![clip.id],
+                    clip.start,
+                    clip.end(),
+                );
+            }
+        }
     }
 
     /// Transitions that do not play as set: with no clip right before, cut

@@ -47,10 +47,17 @@ pub enum Field {
     KeyStrength,
     KeySoftness,
     KeySpill,
+    MaskX,
+    MaskY,
+    MaskWidth,
+    MaskHeight,
+    MaskRotation,
+    MaskFeather,
+    MaskRound,
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 36] = [
+    pub(super) const ALL: [Self; 43] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -87,6 +94,13 @@ impl Field {
         Self::KeyStrength,
         Self::KeySoftness,
         Self::KeySpill,
+        Self::MaskX,
+        Self::MaskY,
+        Self::MaskWidth,
+        Self::MaskHeight,
+        Self::MaskRotation,
+        Self::MaskFeather,
+        Self::MaskRound,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -127,6 +141,13 @@ impl Field {
             Self::KeyStrength => "details-key-strength",
             Self::KeySoftness => "details-key-softness",
             Self::KeySpill => "details-key-spill",
+            Self::MaskX => "details-mask-x",
+            Self::MaskY => "details-mask-y",
+            Self::MaskWidth => "details-mask-width",
+            Self::MaskHeight => "details-mask-height",
+            Self::MaskRotation => "details-mask-rotation",
+            Self::MaskFeather => "details-mask-feather",
+            Self::MaskRound => "details-mask-round",
         }
     }
 
@@ -149,6 +170,7 @@ impl Field {
                 | Self::FadeOut
                 | Self::TransitionLength
                 | Self::Rotation
+                | Self::MaskRotation
                 | Self::Exposure
                 | Self::TextColor
                 | Self::BoxColor
@@ -209,6 +231,13 @@ impl Field {
             Self::KeyStrength => clip.chroma.unwrap_or_default().strength * 100.0,
             Self::KeySoftness => clip.chroma.unwrap_or_default().softness * 100.0,
             Self::KeySpill => clip.chroma.unwrap_or_default().spill * 100.0,
+            Self::MaskX => clip.mask.unwrap_or_default().x * 100.0,
+            Self::MaskY => clip.mask.unwrap_or_default().y * 100.0,
+            Self::MaskWidth => clip.mask.unwrap_or_default().width * 100.0,
+            Self::MaskHeight => clip.mask.unwrap_or_default().height * 100.0,
+            Self::MaskRotation => clip.mask.unwrap_or_default().rotation,
+            Self::MaskFeather => clip.mask.unwrap_or_default().feather * 100.0,
+            Self::MaskRound => clip.mask.unwrap_or_default().round * 100.0,
         }
     }
 
@@ -220,7 +249,7 @@ impl Field {
             format!("#{:06X}", value as u32)
         } else if self.percent() {
             format!("{:.0}%", whole())
-        } else if self == Self::Rotation {
+        } else if matches!(self, Self::Rotation | Self::MaskRotation) {
             format!("{:.0}°", whole())
         } else if self == Self::Exposure {
             let value = if value.abs() < 0.05 { 0.0 } else { value };
@@ -241,7 +270,7 @@ impl Field {
         }
         let number = if self.percent() {
             typed.strip_suffix('%').unwrap_or(typed)
-        } else if self == Self::Rotation {
+        } else if matches!(self, Self::Rotation | Self::MaskRotation) {
             typed.strip_suffix('°').unwrap_or(typed)
         } else if self == Self::Speed {
             typed.trim_end_matches(['×', 'x', 'X'])
@@ -311,6 +340,25 @@ impl Field {
             }),
             Self::KeySpill => editor.edit_clip_chroma(id, |k| {
                 k.get_or_insert_default().spill = value / 100.0;
+            }),
+            Self::MaskX
+            | Self::MaskY
+            | Self::MaskWidth
+            | Self::MaskHeight
+            | Self::MaskRotation
+            | Self::MaskFeather
+            | Self::MaskRound => editor.edit_clip_mask(id, |mask| {
+                let mask = mask.get_or_insert_default();
+                let share = value / 100.0;
+                match self {
+                    Self::MaskX => mask.x = share,
+                    Self::MaskY => mask.y = share,
+                    Self::MaskWidth => mask.width = share,
+                    Self::MaskHeight => mask.height = share,
+                    Self::MaskRotation => mask.rotation = value,
+                    Self::MaskFeather => mask.feather = share,
+                    _ => mask.round = share,
+                }
             }),
         }
     }

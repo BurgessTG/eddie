@@ -1262,6 +1262,16 @@ fn lanes_stack_and_only_an_opaque_picture_filling_the_frame_hides_those_under_it
     tl.clip_mut(top).unwrap().chroma = Some(crate::ChromaKey::default());
     assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
     tl.clip_mut(top).unwrap().chroma = None;
+    // A mask clears the picture but not its blurred copy, which still
+    // fills the frame around a small picture...
+    tl.clip_mut(top).unwrap().mask = Some(crate::Mask::default());
+    assert_eq!(stack(&tl, 3.0), vec![top]);
+    // ...and is not drawn under one that fills it, so the lanes under show.
+    tl.clip_mut(top).unwrap().transform.scale = 1.0;
+    assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
+    tl.clip_mut(top).unwrap().mask = None;
+    assert_eq!(stack(&tl, 3.0), vec![top]);
+    tl.clip_mut(top).unwrap().transform.scale = 0.3;
     // A file with transparency never hides what is under it.
     let pillarboxed = (1080.0, 1920.0);
     let middle_clip = tl.clip(middle).unwrap().clone();

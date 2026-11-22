@@ -538,6 +538,28 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
     run(&mut app, &format!("setChroma({video}, null)")).unwrap();
     assert_eq!(app.timeline.clip(video).unwrap().chroma, None);
 
+    // {} masks a circle; a shape name is read in any case, and later
+    // changes keep what they do not name.
+    run(&mut app, &format!("setMask({video}, {{}})")).unwrap();
+    assert_eq!(
+        app.timeline.clip(video).unwrap().mask,
+        Some(openreel_engine::Mask::default())
+    );
+    run(
+        &mut app,
+        &format!("setMask({video}, {{shape: 'Heart', x: 0.2, invert: true}})"),
+    )
+    .unwrap();
+    run(&mut app, &format!("setMask({video}, {{feather: 0.5}})")).unwrap();
+    let read = run(
+        &mut app,
+        &format!("const m = state().clips.find(c => c.id == {video}).mask; return [m.shape, m.x, m.invert, m.feather, m.width]"),
+    )
+    .unwrap();
+    assert_eq!(read, r#"["heart",0.2,true,0.5,0.6]"#);
+    run(&mut app, &format!("setMask({video}, null)")).unwrap();
+    assert_eq!(app.timeline.clip(video).unwrap().mask, None);
+
     // Refused whole: nothing before the failing command stays applied,
     // the format included.
     let before = app.timeline.clone();
@@ -566,6 +588,17 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
         (format!("setChroma({video}, {{color: 'lime'}})"), "#RRGGBB"),
         (format!("setChroma({video}, {{hue: 0.3}})"), "no 'hue'"),
         (format!("setChroma({song}, {{}})"), "needs a video clip"),
+        (
+            format!("setMask({video}, {{shape: 'oval'}})"),
+            "one of split",
+        ),
+        (
+            format!("setMask({video}, {{width: 0}})"),
+            "width and height from",
+        ),
+        (format!("setMask({video}, {{x: NaN}})"), "finite"),
+        (format!("setMask({video}, {{size: 1}})"), "no 'size'"),
+        (format!("setMask({song}, {{}})"), "needs a video clip"),
         ("setFormat('3:2')".to_owned(), "unknown format"),
     ] {
         let error = run(&mut app, &code).unwrap_err();
