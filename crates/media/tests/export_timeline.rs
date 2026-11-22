@@ -2385,9 +2385,11 @@ fn noise_reduction_quiets_hiss_in_step_and_preview_matches_export() {
         assert!(!block.is_empty(), "preview clock stopped");
         preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
     }
-    // Every 100 ms window matches. AAC takes 0.15-0.2 dB off the reduced
-    // hiss near -50 dBFS (FFmpeg's own afftdn, written uncompressed, was
-    // within 0.04 dB of the preview there), so those get that allowance.
+    // Every 100 ms window matches. AAC takes some of the reduced hiss near
+    // -51 dBFS away: 0.15-0.25 dB with FFmpeg 9.0.2, up to 0.66 dB with 9.1,
+    // while FFmpeg's own afftdn written uncompressed matched the preview
+    // within 0.04 dB (9.0.2) and a millionth of a dB (9.1). Those windows
+    // get 1 dB; a preview without the measured profile is about 10 dB off.
     let upmix = 20.0 * std::f64::consts::FRAC_1_SQRT_2.log10();
     let (mut words, mut gaps) = (0.0_f64, 0.0_f64);
     for window in 2..38 {
@@ -2409,7 +2411,7 @@ fn noise_reduction_quiets_hiss_in_step_and_preview_matches_export() {
         "preview and export words differ by {words:.2} dB"
     );
     assert!(
-        gaps < 0.3,
+        gaps < 1.0,
         "preview and export hiss differs by {gaps:.2} dB"
     );
 }
