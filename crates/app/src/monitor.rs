@@ -117,7 +117,7 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
         frame = if drawn.is_empty() {
             frame.child(message("Loading frame…"))
         } else {
-            picture::draggable(frame.children(drawn))
+            picture::draggable(frame.children(drawn), ui.key_pick.is_some())
         };
     } else {
         let audio = timeline

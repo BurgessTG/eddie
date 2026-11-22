@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use eddie_core::PreviewSink;
-use openreel_engine::{Background, Clip, ColorAdjust, Transform, place};
+use openreel_engine::{Background, ChromaKey, Clip, ClipId, ColorAdjust, Rgb, Transform, place};
 use openreel_media::RawFrame;
 use rune::{Cursor, El, Phase, Pixels, SurfaceFit, el};
 
@@ -27,6 +27,7 @@ const CENTRE_SNAP: f32 = 6.0;
 pub struct Look {
     /// Horizontal and vertical flips.
     pub flips: (bool, bool),
+    pub chroma: Option<ChromaKey>,
     pub color: ColorAdjust,
 }
 
@@ -36,6 +37,7 @@ pub fn look(clip: Option<&Clip>) -> Look {
         let Transform { flip_h, flip_v, .. } = clip.transform;
         Look {
             flips: (flip_h, flip_v),
+            chroma: clip.chroma,
             color: clip.color,
         }
     })
@@ -81,6 +83,9 @@ impl Picture {
         self.shown = self.want;
         let height = (self.rgba.len() / (self.width as usize * 4).max(1)) as u32;
         let mut shown = flipped(&self.rgba, self.width, self.want.flips);
+        if let Some(key) = &self.want.chroma {
+            key.apply_rgba(&mut shown, self.width as usize);
+        }
         self.want.color.apply_rgba(&mut shown);
         pixels.set(self.width, height, shown);
     }
@@ -264,20 +269,78 @@ pub fn placed(
     layer.child(turned)
 }
 
+/// Half the side of the square of decoded pixels a pick averages, so
+/// noise in the screen does not decide the colour.
+const PICK_REACH: usize = 2;
+
+/// Key clip `id` on the colour under canvas point `point` in the frame its
+/// lane holds, as decoded (before its flips, grade or key).
+fn pick_key(ui: &mut Ui, id: ClipId, point: (f64, f64)) {
+    let Some(lane) = ui.editor.timeline.clip(id).map(|clip| clip.track) else {
+        ui.key_pick = None;
+        return;
+    };
+    let Some((u, v)) = ui.editor.picture_point(id, point) else {
+        ui.editor.status = "Click on the clip's own picture to pick its key colour.".to_owned();
+        return;
+    };
+    let slot = ui.pictures.lane(lane).program;
+    let colour = {
+        let picture = slot.picture.borrow();
+        let (width, rgba, _) = picture.upright();
+        let width = width as usize;
+        let height = rgba.len() / (width * 4).max(1);
+        if height == 0 {
+            ui.editor.status = "The clip's picture has not loaded yet.".to_owned();
+            return;
+        }
+        let x = ((u * width as f64) as usize).min(width - 1);
+        let y = ((v * height as f64) as usize).min(height - 1);
+        let (mut sum, mut count) = ([0u32; 3], 0u32);
+        for row in y.saturating_sub(PICK_REACH)..=(y + PICK_REACH).min(height - 1) {
+            for column in x.saturating_sub(PICK_REACH)..=(x + PICK_REACH).min(width - 1) {
+                let at = (row * width + column) * 4;
+                for (total, value) in sum.iter_mut().zip(&rgba[at..at + 3]) {
+                    *total += u32::from(*value);
+                }
+                count += 1;
+            }
+        }
+        let [r, g, b] = sum.map(|total| ((total + count / 2) / count) as u8);
+        Rgb(r, g, b)
+    };
+    ui.key_pick = None;
+    ui.editor.edit_clip_chroma(id, |key| {
+        key.get_or_insert_default().color = colour;
+    });
+    ui.editor.status = format!("Keying out {}.", colour.hex());
+}
+
 /// Drag the top picture under the pointer to move its clip, which it
 /// selects. It lands on the canvas centre when near it, and Esc puts it
-/// back.
-pub fn draggable(frame: El) -> El {
-    frame.cursor(Cursor::Move).on_drag(|ui: &mut Ui, drag, _| {
+/// back. While Details picks a key colour (`picking`), a click picks it
+/// instead.
+pub fn draggable(frame: El, picking: bool) -> El {
+    let cursor = if picking {
+        Cursor::Crosshair
+    } else {
+        Cursor::Move
+    };
+    frame.cursor(cursor).on_drag(|ui: &mut Ui, drag, _| {
+        let (cw, ch) = ui.editor.canvas();
+        // The pointer on the canvas.
+        let point = (
+            f64::from(drag.x / drag.w.max(1.0)) * f64::from(cw),
+            f64::from(drag.y / drag.h.max(1.0)) * f64::from(ch),
+        );
+        if let (Phase::Down, Some(id)) = (drag.phase, ui.key_pick) {
+            pick_key(ui, id, point);
+            return;
+        }
         let editor = &mut ui.editor;
         match drag.phase {
             Phase::Down => {
-                // The top picture under the pointer, on the canvas.
-                let (cw, ch) = editor.canvas();
-                let point = (
-                    f64::from(drag.x / drag.w.max(1.0)) * f64::from(cw),
-                    f64::from(drag.y / drag.h.max(1.0)) * f64::from(ch),
-                );
+                // The top picture under the pointer.
                 let clip = editor
                     .picture_at(point)
                     .and_then(|id| editor.timeline.clip(id));

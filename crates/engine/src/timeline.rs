@@ -209,6 +209,7 @@ impl Timeline {
                     && (crate::MIN_SPEED..=crate::MAX_SPEED).contains(&clip.speed)
                     && clip.transition.is_none_or(|t| t.is_valid())
                     && clip.keyframes.is_valid()
+                    && clip.chroma.is_none_or(|key| key.is_valid())
             })
             && self.markers_in_range()
     }
@@ -361,6 +362,7 @@ impl Timeline {
             transition: None,
             keyframes: crate::Keyframes::default(),
             blend: crate::BlendMode::Normal,
+            chroma: None,
         });
         id
     }

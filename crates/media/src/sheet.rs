@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::process::Stdio;
 use std::thread;
 
-use openreel_engine::{BlendMode, Placement};
+use openreel_engine::{BlendMode, ChromaKey, Placement};
 
 use crate::composite::{Canvas, Layer};
 use crate::export::{filter_value, font_file};
@@ -34,7 +34,8 @@ pub struct SheetCell {
     pub label: String,
 }
 
-/// One picture of a cell. The colour grade is not drawn.
+/// One picture of a cell. The colour grade is not drawn; a chroma key is,
+/// since it decides what shows.
 pub struct SheetLayer {
     /// Source path and the source time shown.
     pub path: String,
@@ -48,6 +49,7 @@ pub struct SheetLayer {
     pub blur: bool,
     /// How it mixes with the pictures under it.
     pub blend: BlendMode,
+    pub chroma: Option<ChromaKey>,
 }
 
 impl SheetLayer {
@@ -60,6 +62,7 @@ impl SheetLayer {
             opacity: 1.0,
             blur: false,
             blend: BlendMode::Normal,
+            chroma: None,
         }
     }
 }
@@ -248,7 +251,11 @@ impl Decoders {
         let shown = source.0 * placement.size[0] / placement.crop[2].max(1.0);
         let width = shown * grid.cell_w as f64 / canvas.0;
         let width = ((width / 2.0).ceil() * 2.0).clamp(16.0, 1920.0) as u32;
-        self.get(&layer.path, width)?.still_at(layer.time)
+        let mut frame = self.get(&layer.path, width)?.still_at(layer.time)?;
+        if let Some(key) = &layer.chroma {
+            key.apply_rgba(&mut frame.rgba, frame.width as usize);
+        }
+        Ok(frame)
     }
 }
 

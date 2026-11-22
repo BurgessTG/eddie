@@ -1,6 +1,7 @@
 //! A clip: one placed piece of video, audio or title text.
 
 use crate::blend::BlendMode;
+use crate::chroma::ChromaKey;
 use crate::color::ColorAdjust;
 use crate::fit_fades;
 use crate::keyframe::{Keyframes, Property};
@@ -171,6 +172,10 @@ pub struct Clip {
     /// Video only: how the picture mixes with what the lanes under it show.
     #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
     pub blend: BlendMode,
+    /// Clears the parts of the picture near a colour, such as a green
+    /// screen. Saved only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma: Option<ChromaKey>,
 }
 
 /// The slowest and fastest a clip plays.

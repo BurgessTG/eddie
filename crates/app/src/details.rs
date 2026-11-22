@@ -4,11 +4,13 @@
 //!
 //! `fields` is the typed values and when typing reaches the clip, `body`
 //! the cards for one clip, `transform` the card that places a picture,
+//! `chroma` the one that keys out a screen colour,
 //! `color` the one that grades it and `filters` its filter tiles, `title_text`
 //! the one that styles a title's letters, `rows` the controls those cards
 //! are made of and `styles` the title-style lists.
 
 mod body;
+mod chroma;
 mod color;
 mod fields;
 mod filters;

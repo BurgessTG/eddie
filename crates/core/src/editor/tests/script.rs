@@ -518,6 +518,25 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
         app.timeline.clip(video).unwrap().blend,
         openreel_engine::BlendMode::SoftLight
     );
+    // {} keys green; later changes keep what they do not name.
+    run(&mut app, &format!("setChroma({video}, {{}})")).unwrap();
+    assert_eq!(
+        app.timeline.clip(video).unwrap().chroma,
+        Some(openreel_engine::ChromaKey::default())
+    );
+    run(
+        &mut app,
+        &format!("setChroma({video}, {{color: '#0047bb', strength: 0.7}})"),
+    )
+    .unwrap();
+    let read = run(
+        &mut app,
+        &format!("const k = state().clips.find(c => c.id == {video}).chroma; return [k.color, k.strength, k.softness]"),
+    )
+    .unwrap();
+    assert_eq!(read, r##"["#0047BB",0.7,0.3]"##);
+    run(&mut app, &format!("setChroma({video}, null)")).unwrap();
+    assert_eq!(app.timeline.clip(video).unwrap().chroma, None);
 
     // Refused whole: nothing before the failing command stays applied,
     // the format included.
@@ -543,6 +562,10 @@ fn transforms_backgrounds_and_formats_change_only_what_is_asked() {
         (format!("setBackground({video}, 'pink')"), "black or blur"),
         (format!("setBlend({video}, 'glow')"), "use normal, darken"),
         (format!("setBlend({song}, 'screen')"), "needs a video clip"),
+        (format!("setChroma({video}, {{spill: 1.5}})"), "from 0 to 1"),
+        (format!("setChroma({video}, {{color: 'lime'}})"), "#RRGGBB"),
+        (format!("setChroma({video}, {{hue: 0.3}})"), "no 'hue'"),
+        (format!("setChroma({song}, {{}})"), "needs a video clip"),
         ("setFormat('3:2')".to_owned(), "unknown format"),
     ] {
         let error = run(&mut app, &code).unwrap_err();

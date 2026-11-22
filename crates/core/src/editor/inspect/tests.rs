@@ -226,10 +226,11 @@ fn a_clip_under_a_picture_in_picture_is_not_hidden() {
     assert_eq!(hidden(&timeline), vec![]);
 }
 
-/// A blended picture mixes with the lanes under it: over one it is not
-/// covering it, and with nothing under it the blend has only black.
+/// A blended or keyed picture mixes with the lanes under it: over one it
+/// is not covering it, and with nothing under it the blend has only black
+/// and the keyed screen shows black.
 #[test]
-fn a_blended_picture_shows_the_lane_under_it_and_is_reported_over_black() {
+fn a_blended_or_keyed_picture_shows_the_lane_under_it_and_is_reported_over_black() {
     let mut timeline = Timeline::empty_project();
     let base = timeline.add_media_clip("B", ClipKind::Video, 1, 0.0, 4.0, 0.0, "a.mp4");
     let top = timeline.add_media_clip("T", ClipKind::Video, 0, 0.0, 4.0, 0.0, "a.mp4");
@@ -242,4 +243,15 @@ fn a_blended_picture_shows_the_lane_under_it_and_is_reported_over_black() {
         .filter(|(kind, _)| ["hidden-clip", "blend-over-black"].contains(kind))
         .collect();
     assert_eq!(found, vec![("blend-over-black", vec![lone])], "{base}");
+
+    for id in [top, lone] {
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.blend = openreel_engine::BlendMode::Normal;
+        clip.chroma = Some(openreel_engine::ChromaKey::default());
+    }
+    let found: Vec<_> = kinds(&inspect(&timeline, &assets))
+        .into_iter()
+        .filter(|(kind, _)| ["hidden-clip", "blend-over-black", "key-over-black"].contains(kind))
+        .collect();
+    assert_eq!(found, vec![("key-over-black", vec![lone])], "{base}");
 }

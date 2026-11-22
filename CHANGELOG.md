@@ -104,6 +104,13 @@
   export. Eddie measures the noise from the file's quiet parts the first
   time, so no setting is needed. Scripts use `setReduceNoise`, and
   `state()` gives each clip's `reduceNoise`.
+- Chroma key: a Details card for video clips that clears a green or blue
+  screen, or any colour picked by clicking it on the monitor, so the lanes
+  under it show through. Strength, Softness and Spill (which takes the
+  screen's colour cast off hair and skin) adjust it, and the monitor shows
+  the key as export renders it. Scripts use `setChroma`, `state()` gives
+  each clip's `chroma`, and `inspect()` reports a keyed picture with
+  nothing under it.
 
 ### Changed
 

@@ -439,6 +439,79 @@ fn a_blended_picture_mixes_with_the_lane_under_it_on_the_monitor() {
     assert!(shown(&rt, "monitor-lane0-placed") && shown(&rt, "monitor-lane1-placed"));
 }
 
+/// Picking a key colour: a click off the clip's picture says so and keeps
+/// waiting; a click on it keys the colour under the pointer, moves
+/// nothing, and the lane under the keyed picture shows.
+#[test]
+fn a_click_on_the_monitor_picks_the_key_colour() {
+    let footage = Footage::new();
+    let red = footage.path();
+    let green = footage.color("screen.mp4", "0x00B140");
+    let mut ui = Ui::headless();
+    ui.editor
+        .spawn_import(vec![red.clone().into(), green.clone().into()]);
+    let mut rt = window(ui);
+    until(&mut rt, "the imports", |ui| {
+        ui.editor.asset(&green).is_some()
+            && ui.editor.asset(&red).is_some()
+            && !ui.editor.importing()
+    });
+    let editor = &mut rt.state.editor;
+    editor.timeline.lanes.video = 2;
+    editor
+        .timeline
+        .add_media_clip("Base", ClipKind::Video, 1, 0.0, 2.0, 0.0, &red);
+    let screen =
+        editor
+            .timeline
+            .add_media_clip("Screen", ClipKind::Video, 0, 0.0, 2.0, 0.0, &green);
+    // Half size in the right half of the frame.
+    editor.edit_clip_transform(screen, |t| {
+        t.scale = 0.5;
+        t.x = 0.25;
+    });
+    editor.selected = Some(screen);
+    editor.playhead = 0.5;
+    until(&mut rt, "both pictures", |ui| {
+        ui.editor.program_layers().len() == 2 && ui.editor.preview_is_current()
+    });
+    rt.state.key_pick = Some(screen);
+    let placed = rt.state.editor.timeline.clip(screen).unwrap().transform;
+    let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+    let tap = |rt: &mut Runtime<Ui>, x: f32, y: f32| {
+        crate::testing::input_arrives();
+        rt.pointer_move(x, y);
+        rt.frame(FRAME);
+        rt.pointer_down(x, y);
+        rt.frame(FRAME);
+        rt.pointer_up(x, y);
+        frames(rt, 2);
+    };
+
+    tap(&mut rt, fx + fw * 0.2, fy + fh * 0.5);
+    assert_eq!(rt.state.key_pick, Some(screen), "still waiting");
+    assert!(
+        rt.state.editor.status.contains("own picture"),
+        "{}",
+        rt.state.editor.status
+    );
+
+    tap(&mut rt, fx + fw * 0.75, fy + fh * 0.5);
+    assert_eq!(rt.state.key_pick, None);
+    let clip = rt.state.editor.timeline.clip(screen).unwrap();
+    assert_eq!(clip.transform, placed, "a pick moves nothing");
+    let openreel_engine::Rgb(r, g, b) = clip.chroma.expect("keyed").color;
+    let near = |got: u8, want: u8| got.abs_diff(want) <= 6;
+    assert!(
+        near(r, 0) && near(g, 177) && near(b, 64),
+        "picked {:?}",
+        (r, g, b)
+    );
+    frames(&mut rt, 2);
+    assert!(shown(&rt, "monitor-lane1-placed"), "the lane under shows");
+    assert!(shown(&rt, "monitor-lane0-placed"));
+}
+
 #[test]
 fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
     let mut ui = Ui::headless();

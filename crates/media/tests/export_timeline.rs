@@ -1481,13 +1481,18 @@ const PATCHES: [[u8; 3]; 8] = [
 /// `name`, 320x180 at 10 fps for 1 s: eight 80x90 patches, patch `i`
 /// showing `PATCHES[(i + shift) % 8]`.
 fn patch_source(fixture: &Fixture, name: &str, shift: usize) -> String {
+    colour_patches(
+        fixture,
+        name,
+        std::array::from_fn(|i| PATCHES[(i + shift) % 8]),
+    )
+}
+
+/// `name`, 320x180 at 10 fps for 1 s: eight 80x90 patches, patch `i`
+/// showing `colours[i]`.
+fn colour_patches(fixture: &Fixture, name: &str, colours: [[u8; 3]; 8]) -> String {
     let pick = |c: usize| {
-        let at = |i: usize| {
-            format!(
-                "if(eq(floor(X/80)+4*floor(Y/90),{i}),{},",
-                PATCHES[(i + shift) % 8][c]
-            )
-        };
+        let at = |i: usize| format!("if(eq(floor(X/80)+4*floor(Y/90),{i}),{},", colours[i][c]);
         let mut e: String = (0..8).map(at).collect();
         e.push('0');
         e.push_str(&")".repeat(8));
@@ -1570,6 +1575,104 @@ fn blend_modes_mix_a_picture_with_the_lane_under_it_as_the_preview_does() {
         }
     }
     eprintln!("blend patches: worst {worst} levels past the preview's range");
+}
+
+/// A chroma key clears a green screen, lit evenly, in shadow or bright,
+/// so the lane under it shows, and keeps skin, dark hair, white and grey;
+/// a green cast on skin loses half its green over the mean of the other
+/// two. Export's `chromakey` and `despill` agree with the preview's maths
+/// on every patch, including one half keyed, for green, red and blue
+/// keys.
+#[test]
+fn chroma_key_clears_the_screen_and_previews_as_it_exports() {
+    use openreel_engine::{ChromaKey, Rgb, KEY_BLUE};
+    let fixture = Fixture::new();
+    let red = colour_patches(&fixture, "red.mp4", [[255, 0, 0]; 8]);
+    let colours = [
+        [0, 177, 64],    // the screen
+        [20, 110, 45],   // the screen in shadow
+        [70, 205, 100],  // the screen lit bright
+        [220, 170, 140], // skin
+        [40, 30, 25],    // dark hair
+        [235, 235, 235], // white
+        [160, 185, 140], // skin with green spill
+        [110, 165, 115], // greyish green, half keyed
+    ];
+    let source = colour_patches(&fixture, "screen.mp4", colours);
+    let decoded = &frames(Path::new(&source))[5];
+    let keys = [
+        ChromaKey::default(),
+        ChromaKey {
+            color: Rgb(200, 40, 60),
+            spill: 1.0,
+            ..ChromaKey::default()
+        },
+        ChromaKey {
+            color: KEY_BLUE,
+            strength: 0.8,
+            softness: 0.0,
+            spill: 1.0,
+        },
+    ];
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &red, 1, 0.0, 1.2, 0.0);
+    for (index, key) in keys.iter().enumerate() {
+        let id = video(&mut timeline, &source, 0, index as f64 * 0.4, 0.4, 0.0);
+        timeline.clip_mut(id).unwrap().chroma = Some(*key);
+    }
+    let exported = frames(&fixture.export("keyed.mp4", &timeline));
+
+    let mut worst = 0;
+    for (index, key) in keys.iter().enumerate() {
+        let mut rgba: Vec<u8> = decoded
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
+            .collect();
+        key.apply_rgba(&mut rgba, 320);
+        let got = &exported[index * 4 + 2];
+        for i in 0..8 {
+            let (x, y) = (40 + 80 * (i % 4), 45 + 90 * (i / 4));
+            let px = &rgba[(y * 320 + x) * 4..][..4];
+            let alpha = f64::from(px[3]) / 255.0;
+            let preview: [f64; 3] = std::array::from_fn(|c| {
+                let under = if c == 0 { 255.0 } else { 0.0 };
+                under + alpha * (f64::from(px[c]) - under)
+            });
+            let exported = patch(got, i);
+            if index == 0 {
+                // What the key should do, from its definition.
+                match i {
+                    0..=2 => assert_eq!(px[3], 0, "screen patch {i} kept: {px:?}"),
+                    3..=6 => assert_eq!(px[3], 255, "patch {i} cleared: {px:?}"),
+                    _ => assert!((40..216).contains(&px[3]), "half keyed: {px:?}"),
+                }
+                if i == 6 {
+                    let [r, g, b] = decoded[(y * 320 + x) * 3..][..3] else {
+                        unreachable!()
+                    };
+                    let pulled = f64::from(g) - 0.5 * (f64::from(g) - f64::from(r / 2 + b / 2));
+                    assert!(
+                        (f64::from(px[1]) - pulled).abs() <= 1.5,
+                        "spill: green {g} became {}, not {pulled}",
+                        px[1]
+                    );
+                }
+            }
+            for c in 0..3 {
+                let off = (preview[c] - f64::from(exported[c])).abs().round() as i32;
+                worst = worst.max(off);
+                assert!(
+                    off <= 5,
+                    "key {index}, patch {i}, channel {c}: preview {:.0}, export {}",
+                    preview[c],
+                    exported[c]
+                );
+            }
+        }
+    }
+    eprintln!("chroma key patches: worst {worst} levels from the preview");
 }
 
 #[test]

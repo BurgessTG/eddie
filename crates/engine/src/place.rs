@@ -167,6 +167,27 @@ impl Placement {
         x.abs() <= self.size[0] / 2.0 && y.abs() <= self.size[1] / 2.0
     }
 
+    /// The source pixel (unflipped, in the file's displayed size) under
+    /// canvas point `point`, or `None` off the picture.
+    pub fn source_point(&self, point: (f64, f64)) -> Option<(f64, f64)> {
+        if !self.contains(point) {
+            return None;
+        }
+        let (sin, cos) = (-self.rotation.to_radians()).sin_cos();
+        let (dx, dy) = (point.0 - self.center[0], point.1 - self.center[1]);
+        let (x, y) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        let mut u = (x / self.size[0] + 0.5).clamp(0.0, 1.0);
+        let mut v = (y / self.size[1] + 0.5).clamp(0.0, 1.0);
+        if self.flip_h {
+            u = 1.0 - u;
+        }
+        if self.flip_v {
+            v = 1.0 - v;
+        }
+        let [cx, cy, cw, ch] = self.crop;
+        Some((cx + u * cw, cy + v * ch))
+    }
+
     /// Whether any of the picture lands on the canvas.
     pub fn on_canvas(&self, canvas: (f64, f64)) -> bool {
         let [w, h] = self.turned_size();
@@ -230,6 +251,37 @@ mod tests {
         assert!((p.size[0] - 607.5).abs() < 1e-9 && p.size[1] == 1080.0);
         assert_eq!(p.origin(), [656.25, 0.0]);
         assert!(!p.covers(HD));
+    }
+
+    /// A canvas point finds the source pixel under it through crop, flip
+    /// and turn, which the monitor's colour picker reads.
+    #[test]
+    fn a_canvas_point_finds_its_source_pixel() {
+        let canvas = (400.0, 200.0);
+        let source = (200.0, 100.0);
+        // The right half of the source, fitted 200 px square in the middle.
+        let half = Transform {
+            crop_left: 0.5,
+            ..Transform::default()
+        };
+        let at = |t: Transform, point| place(canvas, source, &t).source_point(point);
+        let near = |got: Option<(f64, f64)>, want: (f64, f64)| {
+            got.is_some_and(|(x, y)| (x - want.0).abs() < 1e-9 && (y - want.1).abs() < 1e-9)
+        };
+        assert!(near(at(half, (101.0, 100.0)), (100.5, 50.0)));
+        assert_eq!(at(half, (99.0, 100.0)), None, "off the picture");
+        // Mirrored, the left edge shows the source's right edge.
+        let mirrored = Transform {
+            flip_h: true,
+            ..half
+        };
+        assert!(near(at(mirrored, (101.0, 100.0)), (199.5, 50.0)));
+        // Turned a quarter clockwise, its top edge faces right.
+        let turned = Transform {
+            rotation: 90.0,
+            ..half
+        };
+        assert!(near(at(turned, (299.0, 100.0)), (150.0, 0.5)));
     }
 
     #[test]

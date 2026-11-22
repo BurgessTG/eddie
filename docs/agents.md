@@ -191,8 +191,9 @@ return its parts.
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
   smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
-  transform, background, color, blend, speed, photo, freeze, text,
-  transition, keyframes`. A clip shows
+  transform, background, color, blend, chroma, speed, photo, freeze,
+  text, transition, keyframes`. `chroma` is the chroma key `{color,
+  strength, softness, spill}` or `null`. A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
@@ -364,6 +365,21 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - A blended picture never hides the lanes under it. Over nothing it
     blends with black, which `inspect()` reports.
   - Inside a transition both sides draw without their blend modes.
+- **Chroma key:** `setChroma(id, {...})` clears the parts of a video
+  clip's picture near one colour, such as a green screen, so the lanes
+  under it show through. `setChroma(id, {})` keys green (`'#00B140'`);
+  `{color: '#0047BB'}` keys blue. It changes only the fields you give;
+  `null` removes the key. `strength` (0 to 1, 0.6 by default) is how far
+  from the colour still clears, as a share of the way to grey, so 1
+  clears greys too; `softness` (0.3) how gradual the edge is, 0 cutting
+  hard; `spill` (0.5) how much of the colour's cast on what
+  stays, such as green on hair and skin, is taken off.
+  - Only colour counts, not brightness, so the screen in shadow clears
+    with the lit part. Raise `strength` while screen remains; lower it
+    when hair or clothes of a similar colour clear too.
+  - Put the background on a lane under the keyed clip. Over nothing the
+    screen shows black, which `inspect()` reports.
+  - A sheet draws the key; strips and frames show the file as shot.
 - **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
   `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
   `volume` on video or audio, in the units of `setTransform`,
@@ -456,8 +472,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   of that kind.
 - Video lanes stack: lane 0 draws on top, and each lane draws over the
   lanes with higher numbers. A picture hides everything under it only
-  when it is fully opaque, blends `normal`, has no transparency of its
-  own (a PNG with an alpha channel shows through), and covers the canvas
+  when it is fully opaque, blends `normal`, has no chroma key and no
+  transparency of its own (a PNG with an alpha channel shows through),
+  and covers the canvas
   or has a `'blur'` background. Anything else shows the lanes under it: a clip below full
   opacity shows them through it, and around a picture made smaller with
   `setTransform` they show where its black background would be.
@@ -545,7 +562,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - clips that the lanes above always cover;
   - transitions that play shorter than set, have no clip before them, or
     run past a file's pictures.
-  - blended pictures with no picture under them.
+  - blended or keyed pictures with no picture under them.
 - `state()` doesn't show what the edit looks like. Before calling an edit
   done, open a `sheet` and compare each cell with what you meant to place
   there. Past 16 shots, sheet the timeline in ranges.

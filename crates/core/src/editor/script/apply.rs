@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use openreel_engine::{
-    fill_scale, Background, BlendMode, ClipId, ClipKind, ColorAdjust, Filter, Format, Property,
-    TextLook, TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED,
+    fill_scale, Background, BlendMode, ChromaKey, ClipId, ClipKind, ColorAdjust, Filter, Format,
+    Property, TextLook, TitleStyle, Transform, Transition, TransitionKind, MAX_OUTLINE, MAX_SPEED,
     MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MAX_TRANSITION, MIN_SPEED, MIN_TEXT_SIZE, MIN_TRANSITION,
 };
 
@@ -145,6 +145,20 @@ fn changed_color(current: ColorAdjust, changes: &str) -> Result<ColorAdjust, Str
         ));
     }
     Ok(color)
+}
+
+/// `current` (green when the clip has no key) with the fields of the JSON
+/// object `changes`, or no key for `null`.
+fn changed_chroma(current: Option<ChromaKey>, changes: &str) -> Result<Option<ChromaKey>, String> {
+    let example = "{color: '#00B140', strength: 0.5}";
+    let Some(changes) = changes_object("setChroma", example, changes)? else {
+        return Ok(None);
+    };
+    let key = merged("setChroma", current.unwrap_or_default(), changes)?;
+    if !key.is_valid() {
+        return Err("setChroma takes strength, softness and spill from 0 to 1".to_owned());
+    }
+    Ok(Some(key))
 }
 
 /// `current` with the fields of the JSON object `changes`, or the style's
@@ -342,6 +356,12 @@ impl Editor {
                 };
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.text = text;
+                }
+            }
+            ScriptCommand::SetChroma { clip, changes } => {
+                let chroma = changed_chroma(self.video_clip(clip, "setChroma")?.chroma, &changes)?;
+                if let Some(target) = self.timeline.clip_mut(clip) {
+                    target.chroma = chroma;
                 }
             }
             ScriptCommand::SetColor { clip, changes } => {

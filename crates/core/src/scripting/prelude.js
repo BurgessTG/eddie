@@ -58,6 +58,7 @@ function help() {
     "setBlend(id, mode)  // video only: how the picture mixes with the lanes under it. modes: normal darken multiply color-burn linear-burn lighten screen color-dodge add overlay soft-light hard-light difference exclusion",
     "setKeyframe(id, property, at, value)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run in a straight line from key to key and hold before the first and after the last; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
     "removeKeyframe(id, property, at) clearKeyframes(id, property?)  // clearing keeps the value at the clip's start; no property clears them all. setOpacity, setVolume and setTransform set one value for the whole clip and remove that property's keys",
+    "setChroma(id, {color, strength, softness, spill})  // video only: clears the parts of the picture near color (a green or blue screen) so the lanes under show. {} keys green (#00B140); changes just the fields given, null removes the key. color '#RRGGBB' ('#0047BB' for blue); strength 0 to 1 (0.6), how far from the colour still clears, as a share of the way to grey; softness 0 to 1 (0.3), how gradual the edge is; spill 0 to 1 (0.5), how much of the colour's cast on what stays is taken off",
     "setColor(id, {brightness, contrast, saturation, exposure, temperature, tint, filter, strength})  // video only; changes just the fields given, null resets. -1 to 1 each (0 is unchanged), exposure in stops (-2 to 2); filter: none vivid dramatic warm cool fade vintage sepia mono noir, at strength 0 to 1 (1)",
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
     "setTransition(id, kind, seconds?)  // video only: how the picture passes from the clip right before it on its lane, centred on the cut. kinds: mix dip-black dip-white wipe-left wipe-right wipe-up wipe-down slide-left slide-right slide-up slide-down; seconds 0.1 to 5 (0.5); null removes it",
@@ -134,6 +135,17 @@ function setColor(id, changes) {
     throw new Error("setColor needs an object such as {saturation: 0.2, filter: 'warm'}, or null to reset");
   }
   __set_color(id, JSON.stringify(changes));
+}
+function setChroma(id, changes) {
+  if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {
+    throw new Error("setChroma needs an object such as {color: '#00B140', strength: 0.5}, {} for green, or null to remove the key");
+  }
+  for (const key in changes || {}) {
+    if (typeof changes[key] === "number" && !isFinite(changes[key])) {
+      throw new Error("setChroma " + key + " must be a finite number");
+    }
+  }
+  __set_chroma(id, JSON.stringify(changes));
 }
 function setText(id, changes) {
   if (changes !== null && (typeof changes !== "object" || Array.isArray(changes))) {

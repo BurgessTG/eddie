@@ -3,8 +3,9 @@
 //! status line live here, so every front end behaves alike.
 
 use openreel_engine::{
-    fill_scale, Background, BlendMode, ClipId, ClipKind, ColorAdjust, Property, TextLook,
-    Transform, Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE, MIN_SPEED,
+    fill_scale, Background, BlendMode, ChromaKey, ClipId, ClipKind, ColorAdjust, Property,
+    TextLook, Transform, Transition, MAX_ROTATION, MAX_SCALE, MAX_SPEED, MIN_CROP_KEEP, MIN_SCALE,
+    MIN_SPEED,
 };
 
 use super::Editor;
@@ -261,6 +262,20 @@ impl Editor {
             .filter(|clip| clip.kind == ClipKind::Video)
         {
             clip.blend = blend;
+        }
+    }
+
+    /// The Chroma key card: key a video clip (`None` for no key) or change
+    /// its key, each amount moved into its range.
+    pub fn edit_clip_chroma(&mut self, id: ClipId, edit: impl FnOnce(&mut Option<ChromaKey>)) {
+        if let Some(clip) = self
+            .timeline
+            .clip_mut(id)
+            .filter(|clip| clip.kind == ClipKind::Video)
+        {
+            let mut chroma = clip.chroma;
+            edit(&mut chroma);
+            clip.chroma = chroma.map(ChromaKey::clamped);
         }
     }
 

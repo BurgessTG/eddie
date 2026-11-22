@@ -71,7 +71,9 @@ offers the newest build.
   the ones under it, so a shrunk picture, a clip below full opacity or a
   PNG with transparency shows what is beneath. A bin file's right-click
   menu adds it as an overlay at the playhead. Blend modes (multiply,
-  screen, overlay and eleven more) mix a picture with the lanes under it.
+  screen, overlay and eleven more) mix a picture with the lanes under it,
+  and a chroma key clears a green or blue screen (or any colour picked on
+  the monitor) to show them.
 - Photos (PNG, JPEG, WebP, HEIC) as clips: 3 seconds when added, any
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and

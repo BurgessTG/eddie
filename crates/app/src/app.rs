@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use eddie_core::shortcuts::{self, Chord, KeyName};
 use eddie_core::{Action, Editor, PreviewSink, Wake};
-use openreel_engine::{Clip, TextLook, Transform};
+use openreel_engine::{Clip, ClipId, TextLook, Transform};
 use rune::{AppHandle, Cx, El, Key, KeyEvent, Pixels, TextEdit, Tx, col, row};
 
 use crate::dialogs::{Discard, PendingFileDialog};
@@ -40,6 +40,9 @@ pub struct Ui {
     pub monitor_drag: Option<(Clip, Transform)>,
     /// Where the title a drag on the monitor moves was.
     pub title_drag: Option<TextLook>,
+    /// The clip whose chroma key colour the next click on the monitor
+    /// picks.
+    pub key_pick: Option<ClipId>,
     /// Filmstrip pictures by media path, taken from each finished import.
     pub thumbs: HashMap<String, Vec<Thumb>>,
 
@@ -158,6 +161,7 @@ impl Ui {
             monitor_drag: None,
             composite: monitor::Composite::default(),
             title_drag: None,
+            key_pick: None,
             thumbs: HashMap::new(),
             menu: None,
             show_media: true,

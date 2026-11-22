@@ -43,10 +43,14 @@ pub enum Field {
     Outline,
     TextX,
     TextY,
+    KeyColor,
+    KeyStrength,
+    KeySoftness,
+    KeySpill,
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 32] = [
+    pub(super) const ALL: [Self; 36] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -79,6 +83,10 @@ impl Field {
         Self::Outline,
         Self::TextX,
         Self::TextY,
+        Self::KeyColor,
+        Self::KeyStrength,
+        Self::KeySoftness,
+        Self::KeySpill,
     ];
 
     pub(super) fn key(self) -> &'static str {
@@ -115,12 +123,19 @@ impl Field {
             Self::Outline => "details-outline",
             Self::TextX => "details-text-x",
             Self::TextY => "details-text-y",
+            Self::KeyColor => "details-key-color",
+            Self::KeyStrength => "details-key-strength",
+            Self::KeySoftness => "details-key-softness",
+            Self::KeySpill => "details-key-spill",
         }
     }
 
     /// A colour, shown and typed as `#RRGGBB`.
     fn colour(self) -> bool {
-        matches!(self, Self::TextColor | Self::BoxColor | Self::OutlineColor)
+        matches!(
+            self,
+            Self::TextColor | Self::BoxColor | Self::OutlineColor | Self::KeyColor
+        )
     }
 
     fn percent(self) -> bool {
@@ -138,6 +153,7 @@ impl Field {
                 | Self::TextColor
                 | Self::BoxColor
                 | Self::OutlineColor
+                | Self::KeyColor
         )
     }
 
@@ -186,6 +202,13 @@ impl Field {
             }
             Self::BoxOpacity => openreel_media::drawn_text(clip).box_opacity.unwrap_or(0.0) * 100.0,
             Self::Outline => openreel_media::drawn_text(clip).outline.unwrap_or(0.0) * 100.0,
+            Self::KeyColor => {
+                let Rgb(r, g, b) = clip.chroma.unwrap_or_default().color;
+                f64::from(u32::from_be_bytes([0, r, g, b]))
+            }
+            Self::KeyStrength => clip.chroma.unwrap_or_default().strength * 100.0,
+            Self::KeySoftness => clip.chroma.unwrap_or_default().softness * 100.0,
+            Self::KeySpill => clip.chroma.unwrap_or_default().spill * 100.0,
         }
     }
 
@@ -276,6 +299,19 @@ impl Field {
                 let [_, r, g, b] = (value as u32).to_be_bytes();
                 set_colour(editor, id, self, Rgb(r, g, b));
             }
+            Self::KeyColor => {
+                let [_, r, g, b] = (value as u32).to_be_bytes();
+                editor.edit_clip_chroma(id, |k| k.get_or_insert_default().color = Rgb(r, g, b));
+            }
+            Self::KeyStrength => editor.edit_clip_chroma(id, |k| {
+                k.get_or_insert_default().strength = value / 100.0;
+            }),
+            Self::KeySoftness => editor.edit_clip_chroma(id, |k| {
+                k.get_or_insert_default().softness = value / 100.0;
+            }),
+            Self::KeySpill => editor.edit_clip_chroma(id, |k| {
+                k.get_or_insert_default().spill = value / 100.0;
+            }),
         }
     }
 }
@@ -333,6 +369,10 @@ pub fn sync(ui: &mut Ui) {
     }
     ui.details.focused = focused;
 
+    if ui.key_pick.is_some() && (ui.key_pick != selected || !ui.show_inspector) {
+        // Picking is for the clip Details shows.
+        ui.key_pick = None;
+    }
     let changed = ui.details.shown != selected;
     if changed {
         ui.details.shown = selected;

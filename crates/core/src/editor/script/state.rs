@@ -41,6 +41,7 @@ impl Editor {
                     "keyframes": c.keyframes,
                     "background": c.background.as_str(),
                     "blend": c.blend.as_str(),
+                    "chroma": c.chroma,
                     "color": c.color,
                     "text": c.text,
                     "transition": c.transition.map(|t| serde_json::json!({

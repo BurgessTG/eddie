@@ -184,6 +184,9 @@ has filters xstack
 has filters xfade
 # Reduce noise: afftdn, in export and in the app's own preview.
 has filters afftdn
+# Chroma key: chromakey clears the screen, despill takes its cast off.
+has filters chromakey
+has filters despill
 has devices lavfi
 
 # The GPL asks that whoever gets the program can get its source: the app

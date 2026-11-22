@@ -183,6 +183,22 @@ impl Editor {
             .map(|picture| picture.clip.id)
     }
 
+    /// Where canvas point `point` falls on clip `id`'s file at the
+    /// playhead, as shares of its displayed width and height before any
+    /// flip, when that clip's picture shows there and covers the point.
+    pub fn picture_point(&self, id: ClipId, point: (f64, f64)) -> Option<(f64, f64)> {
+        let stack = self.stack();
+        let picture = stack
+            .at(self.playhead)
+            .into_iter()
+            .find(|picture| picture.clip.id == id)?;
+        let (width, height) = stack.file(picture.clip).0;
+        let (x, y) = stack
+            .placement(picture.clip, self.playhead)
+            .source_point(point)?;
+        Some((x / width.max(1.0), y / height.max(1.0)))
+    }
+
     /// The clip lane `lane` shows at `at`, if it shows.
     pub(super) fn lane_clip(&self, lane: usize, at: f64) -> Option<Clip> {
         self.stack()

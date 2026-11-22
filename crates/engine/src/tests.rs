@@ -1258,6 +1258,10 @@ fn lanes_stack_and_only_an_opaque_picture_filling_the_frame_hides_those_under_it
     tl.clip_mut(top).unwrap().blend = BlendMode::Screen;
     assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
     tl.clip_mut(top).unwrap().blend = BlendMode::Normal;
+    // Or is keyed: its cleared screen shows the lanes under it.
+    tl.clip_mut(top).unwrap().chroma = Some(crate::ChromaKey::default());
+    assert_eq!(stack(&tl, 3.0), vec![base, middle, top]);
+    tl.clip_mut(top).unwrap().chroma = None;
     // A file with transparency never hides what is under it.
     let pillarboxed = (1080.0, 1920.0);
     let middle_clip = tl.clip(middle).unwrap().clone();

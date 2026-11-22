@@ -4,7 +4,9 @@
 //! out once at a fixed size, then fades, resizes, turns and moves it every
 //! frame along its keys.
 
-use openreel_engine::{place, Background, ColorAdjust, Keyframes, Property, Transform};
+use openreel_engine::{
+    place, yuv, Background, ChromaKey, ColorAdjust, Keyframes, Property, Spill, Transform,
+};
 
 use super::animate::{commands, curve};
 use super::video::VideoLayer;
@@ -58,6 +60,53 @@ fn color_filters(color: &ColorAdjust) -> String {
         out.push_str(&format!(",lutrgb=r={curve}:g={curve}:b={curve}"));
     }
     out
+}
+
+/// The filters that key a picture as [`ChromaKey::apply_rgba`] does for
+/// the preview, starting with a comma, or nothing without a key:
+/// `chromakey` on 4:4:4 chroma, given the key colour in the BT.709
+/// limited-range chroma the frames carry, then `despill` on RGBA. Red spill
+/// is despill's green with the two channels swapped around it.
+fn chroma_filters(key: Option<&ChromaKey>) -> String {
+    let Some(key) = key else {
+        return String::new();
+    };
+    let (y, u, v) = yuv(key.color);
+    let mut out = format!(
+        ",format=yuva444p,chromakey=color=0x{y:02x}{u:02x}{v:02x}:similarity={}:blend={}:yuv=1,\
+         format=rgba",
+        key.similarity(),
+        key.blend()
+    );
+    if key.spill > 0.0 {
+        let amount = -(key.spill as f32);
+        let swap = ",colorchannelmixer=rr=0:rg=1:gr=1:gg=0";
+        let (kind, scales) = match key.spill_kind() {
+            Spill::Green | Spill::Red => ("green", format!("red=0:green={amount}:blue=0")),
+            Spill::Blue => ("blue", format!("red=0:green=0:blue={amount}")),
+        };
+        let red = key.spill_kind() == Spill::Red;
+        if red {
+            out.push_str(swap);
+        }
+        out.push_str(&format!(
+            ",despill=type={kind}:mix=0.5:expand=0:{scales}:brightness=0:alpha=0"
+        ));
+        if red {
+            out.push_str(swap);
+        }
+    }
+    out
+}
+
+/// What a picture's own pixels go through after it is sized: its key, then
+/// its grade, so the key colour is the file's own.
+fn look_filters(layer: &VideoLayer<'_>) -> String {
+    format!(
+        "{}{}",
+        chroma_filters(layer.chroma.as_ref()),
+        color_filters(&layer.color)
+    )
 }
 
 /// A layer's keys on its batch's clock.
@@ -214,7 +263,7 @@ pub(super) fn picture(
     motion: Option<&Motion<'_>>,
 ) -> Picture {
     let (width, height) = canvas;
-    let color = color_filters(&layer.color);
+    let color = look_filters(layer);
     let alpha = if layer.opacity < 0.999 {
         format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
     } else {

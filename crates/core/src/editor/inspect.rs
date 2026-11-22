@@ -434,7 +434,7 @@ impl<'a> Inspection<'a> {
 
     /// Video that the opaque, frame-filling pictures of the lanes above
     /// cover for its whole length ([`Timeline::video_stack`]), and blended
-    /// pictures that never have one under them.
+    /// or keyed pictures that never have one under them.
     fn hidden_clips(&mut self) {
         let timeline = self.timeline;
         let spans = timeline.transitions();
@@ -457,7 +457,7 @@ impl<'a> Inspection<'a> {
         edges.sort_by(f64::total_cmp);
         edges.dedup();
         let mut shown = HashSet::new();
-        // Blended clips with a picture under them somewhere.
+        // Blended or keyed clips with a picture under them somewhere.
         let mut over = HashSet::new();
         for pair in edges.windows(2) {
             let middle = (pair[0] + pair[1]) / 2.0;
@@ -484,6 +484,25 @@ impl<'a> Inspection<'a> {
                          so the blend mode has nothing to mix with.",
                         clip.id,
                         clip.blend.as_str()
+                    ),
+                    vec![clip.id],
+                    clip.start,
+                    clip.end(),
+                );
+            }
+            if clip.kind == ClipKind::Video
+                && clip.chroma.is_some()
+                && shown.contains(&clip.id)
+                && !over.contains(&clip.id)
+            {
+                self.report(
+                    "key-over-black",
+                    "warning",
+                    format!(
+                        "Clip {} has a chroma key with no lane under it showing a picture, \
+                         so its keyed-out screen shows black. Put a background on the \
+                         lane under it.",
+                        clip.id
                     ),
                     vec![clip.id],
                     clip.start,

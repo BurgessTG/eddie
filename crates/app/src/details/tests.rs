@@ -7,6 +7,7 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use super::styles::{blend_key, option_key};
 use super::*;
 use crate::app;
+use crate::testing::shown;
 
 const FRAME: f64 = 1.0 / 60.0;
 
@@ -315,6 +316,53 @@ fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
 }
 
 #[test]
+fn the_chroma_key_card_keys_a_picture_from_its_switch_presets_and_fields() {
+    use openreel_engine::{ChromaKey, KEY_BLUE, Rgb};
+    let (mut rt, id) = window(ClipKind::Video);
+    let key = |rt: &Runtime<Ui>| clip(rt, id).chroma;
+    let tap = |rt: &mut Runtime<Ui>, key: &str| {
+        reveal(rt, key);
+        click(rt, key);
+    };
+    let enter = |rt: &mut Runtime<Ui>, key: &str, typed: &str| {
+        tap(rt, key);
+        rt.paste(typed);
+        rt.frame(FRAME);
+        press(rt, Key::Enter);
+    };
+    assert!(
+        !shown(&rt, "details-key-strength"),
+        "no controls without a key"
+    );
+    tap(&mut rt, "details-chroma");
+    assert_eq!(key(&rt), Some(ChromaKey::default()));
+    tap(&mut rt, "details-chroma-blue");
+    assert_eq!(key(&rt).unwrap().color, KEY_BLUE);
+    assert_eq!(typed(&rt, Field::KeyColor), "#0047BB");
+    enter(&mut rt, "details-key-color", "#1a2b3c");
+    assert_eq!(key(&rt).unwrap().color, Rgb(0x1A, 0x2B, 0x3C));
+    enter(&mut rt, "details-key-strength", "70");
+    enter(&mut rt, "details-key-softness", "0");
+    enter(&mut rt, "details-key-spill", "150");
+    let k = key(&rt).unwrap();
+    assert_eq!(
+        (k.strength, k.softness, k.spill),
+        (0.7, 0.0, 1.0),
+        "spill stops at 100%"
+    );
+
+    // Pick waits for a click on the monitor; pressing it again stops.
+    tap(&mut rt, "details-chroma-pick");
+    assert_eq!(rt.state.key_pick, Some(id));
+    tap(&mut rt, "details-chroma-pick");
+    assert_eq!(rt.state.key_pick, None);
+
+    tap(&mut rt, "details-chroma");
+    assert_eq!(key(&rt), None);
+    assert!(!shown(&rt, "details-key-strength"));
+}
+
+#[test]
 fn split_and_delete_act_on_the_selected_clip() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.editor.playhead = 3.0;
@@ -357,6 +405,17 @@ fn every_control_has_a_tooltip() {
                 "details-embedded-audio",
                 "details-detach",
                 "details-remove-silence",
+                "details-chroma",
+                "details-key-color",
+                "details-chroma-green",
+                "details-chroma-blue",
+                "details-chroma-pick",
+                "details-key-strength-slider",
+                "details-key-strength",
+                "details-key-softness-slider",
+                "details-key-softness",
+                "details-key-spill-slider",
+                "details-key-spill",
                 "details-split",
                 "details-delete",
                 "details-resize",
@@ -399,7 +458,13 @@ fn every_control_has_a_tooltip() {
         ),
     ];
     for (kind, keys) in cases {
-        let (mut rt, _) = window(kind);
+        let (mut rt, id) = window(kind);
+        // A keyed picture shows the key's controls too.
+        if kind == ClipKind::Video {
+            rt.state.editor.timeline.clip_mut(id).unwrap().chroma = Some(Default::default());
+            rt.frame(FRAME);
+            rt.frame(FRAME);
+        }
         rt.help_delay = 0.0;
         for key in keys {
             reveal(&mut rt, key);

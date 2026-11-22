@@ -83,6 +83,12 @@ pub enum ScriptCommand {
         clip: u64,
         name: String,
     },
+    /// `changes` is a JSON object of `ChromaKey` fields to change (an empty
+    /// one keys green), or `null` to remove the key.
+    SetChroma {
+        clip: u64,
+        changes: String,
+    },
     /// `changes` is a JSON object of `ColorAdjust` fields to change, or
     /// `null` to reset.
     SetColor {
@@ -231,6 +237,7 @@ impl ScriptCommand {
             | Self::SetTransform { clip, .. }
             | Self::SetBackground { clip, .. }
             | Self::SetBlend { clip, .. }
+            | Self::SetChroma { clip, .. }
             | Self::SetColor { clip, .. }
             | Self::SetText { clip, .. }
             | Self::SetVolume { clip, .. }
@@ -346,6 +353,7 @@ impl ScriptCommand {
             | Self::ClearKeyframes { .. }
             | Self::SetBackground { .. }
             | Self::SetBlend { .. }
+            | Self::SetChroma { .. }
             | Self::SetColor { .. }
             | Self::SetText { .. }
             | Self::SetFormat(_)

@@ -7,7 +7,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use openreel_engine::{
-    hides_below, Background, BlendMode, Clip, ClipId, ColorAdjust, Keyframes, Timeline, Transform,
+    hides_below, Background, BlendMode, ChromaKey, Clip, ClipId, ColorAdjust, Keyframes, Timeline,
+    Transform,
 };
 
 use super::blend;
@@ -39,6 +40,7 @@ pub(super) struct VideoLayer<'a> {
     pub(super) transform: Transform,
     pub(super) background: Background,
     pub(super) color: ColorAdjust,
+    pub(super) chroma: Option<ChromaKey>,
     /// How it mixes with the lanes under it.
     blend: BlendMode,
     /// Source ticks at timeline tick zero: the source clock is
@@ -151,6 +153,7 @@ pub(super) fn plan_video<'a>(
                 && layer.transform == clip.transform
                 && layer.background == clip.background
                 && layer.color == clip.color
+                && layer.chroma == clip.chroma
                 && layer.blend == clip.blend
         });
         let index = match same {
@@ -169,6 +172,7 @@ pub(super) fn plan_video<'a>(
                     transform: clip.transform,
                     background: clip.background,
                     color: clip.color,
+                    chroma: clip.chroma,
                     blend: clip.blend,
                     source_offset,
                     speed: clip.speed,
