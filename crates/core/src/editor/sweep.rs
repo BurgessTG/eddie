@@ -31,8 +31,8 @@ pub use classify::minute_second;
 pub use speech::utterances;
 pub(crate) use store::path_hash;
 pub use store::{
-    default_dir as default_curation_dir, load as load_curation, load_peaks, load_shots,
-    load_transcript, save_peaks, save_shots,
+    default_dir as default_curation_dir, load as load_curation, load_noise, load_peaks, load_shots,
+    load_transcript, save_noise, save_peaks, save_shots,
 };
 pub use transcript::{
     ends_sentence, transcript_segment_id, TranscriptSegment, TranscriptSession, TranscriptWord,

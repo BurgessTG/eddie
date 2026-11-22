@@ -190,7 +190,7 @@ return its parts.
 
 - **Clips:** `id, name, kind ('video'|'audio'|'title'), track, start,
   duration, sourceIn, source, opacity, volume, fadeIn, fadeOut,
-  smoothFades, duck, cleanVoice, embeddedAudio, linkedClip, titleStyle,
+  smoothFades, duck, reduceNoise, cleanVoice, embeddedAudio, linkedClip, titleStyle,
   transform, background, color, blend, speed, photo, freeze, text,
   transition, keyframes`. A clip shows
   source `sourceIn` to `sourceIn + duration * speed`; a photo clip
@@ -299,10 +299,16 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - Lanes run from 0 to 64 and times to 1,000,000 seconds.
 - **Picture and sound:** `setOpacity(id, 0..1)`, `setVolume(id, gain)`,
   `setFade(id, inSeconds, outSeconds)`, `setSmoothFades(id, bool)`,
-  `setDuck(id, bool)`, `setCleanVoice(id, bool)`, `setEmbeddedAudio(id,
-  bool)`, `detachAudio(id)`, `unlinkClip(id)`.
+  `setDuck(id, bool)`, `setReduceNoise(id, bool)`, `setCleanVoice(id,
+  bool)`, `setEmbeddedAudio(id, bool)`, `detachAudio(id)`,
+  `unlinkClip(id)`.
   - `gain` is linear, from 0 to 2: 1 leaves the clip as recorded, 0.5 is
     about 6 dB quieter, 0.25 about 12 dB.
+  - `setReduceNoise(id, true)` brings down steady noise (hiss, hum, fans)
+    by up to 18 dB, from a measurement of the file's quietest parts, taken
+    once per file. It hardly touches noise that comes and goes, such as
+    traffic or a crowd, and can thin out quiet music, so use it on speech.
+    `setCleanVoice` then evens out the voice.
 - **Speed:** `setSpeed(id, speed)` plays a video or audio clip 0.25 to 4
   times as fast; its sound keeps its pitch, and a linked partner changes
   with it. The clip keeps its source range, so its length becomes that

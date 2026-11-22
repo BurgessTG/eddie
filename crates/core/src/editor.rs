@@ -29,6 +29,7 @@ pub mod keys;
 pub mod lanes;
 mod markers;
 pub mod media;
+mod noise;
 pub mod pictures;
 mod playback;
 mod program;
@@ -266,6 +267,8 @@ pub struct Editor {
     pub console_history_idx: Option<usize>,
 
     pub settings: Settings,
+    /// Sources' measured noise, for clips that reduce it (`noise`).
+    noise: noise::Noise,
     /// Saved curations; `None` keeps tests away from the user's config.
     pub curation_dir: Option<PathBuf>,
     /// The user's installed whisper models; `None` keeps tests off them.
@@ -418,6 +421,7 @@ impl Editor {
             console_history: Vec::new(),
             console_history_idx: None,
             settings,
+            noise: Default::default(),
             curation_dir: None,
             model_dir: None,
             make_thumbnails: true,
@@ -605,6 +609,7 @@ impl Editor {
         self.advance_playback(now);
         self.poll_voiceover(now, dt);
         self.poll_imports();
+        self.poll_noise();
         self.poll_frames();
         if openreel_media::take_hardware_failure().is_some() {
             self.status = "Hardware decode failed; playing on the CPU.".to_owned();

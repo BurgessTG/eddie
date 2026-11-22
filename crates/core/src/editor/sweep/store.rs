@@ -5,6 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use openreel_media::NoiseProfile;
 use serde_json::json;
 
 use super::{SweepData, SweepStatus, TranscriptSegment};
@@ -214,6 +215,39 @@ pub fn load_peaks(dir: &Path, path: &str, rate: u32) -> Option<Vec<f32>> {
     serde_json::from_value(value["peaks"].take())
         .ok()
         .filter(|peaks: &Vec<f32>| !peaks.is_empty())
+}
+
+/// A file's measured background noise beside its curation
+/// (`<hash>.noise.json`), so a file is measured once.
+pub fn save_noise(dir: &Path, path: &str, profile: &NoiseProfile) -> Result<(), String> {
+    let (size, modified) = identity(path).ok_or("Source file is unavailable")?;
+    let body = json!({
+        "version": VERSION,
+        "path": path,
+        "size": size,
+        "modified": modified.to_string(),
+        "profile": profile,
+    });
+    write_private(
+        dir,
+        &file_for(dir, path).with_extension("noise.json"),
+        &body,
+    )
+}
+
+/// The saved noise of this exact file, if any.
+pub fn load_noise(dir: &Path, path: &str) -> Option<NoiseProfile> {
+    let (size, modified) = identity(path)?;
+    let raw = std::fs::read(file_for(dir, path).with_extension("noise.json")).ok()?;
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if value["version"].as_u64() != Some(VERSION)
+        || value["path"].as_str() != Some(path)
+        || value["size"].as_u64() != Some(size)
+        || value["modified"].as_str() != Some(modified.to_string().as_str())
+    {
+        return None;
+    }
+    serde_json::from_value(value["profile"].take()).ok()
 }
 
 #[cfg(test)]

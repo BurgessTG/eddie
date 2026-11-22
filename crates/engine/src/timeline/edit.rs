@@ -403,6 +403,7 @@ impl Timeline {
             fade_out: 0.0,
             linked_clip: None,
             duck: false,
+            reduce_noise: false,
             clean_voice: false,
             smooth_fades: false,
             speed: 1.0,

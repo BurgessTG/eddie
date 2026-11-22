@@ -111,6 +111,10 @@ pub struct Clip {
     /// another audible clip that does not itself duck is talking.
     #[serde(default)]
     pub duck: bool,
+    /// Steady background noise (hiss, hum, fans) brought down in preview
+    /// and export, from the noise measured in the source's quiet parts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reduce_noise: bool,
     /// Speech cleanup (80 Hz high-pass and a gentle compressor) in preview
     /// and export. Projects saved before it load with it off.
     #[serde(default)]

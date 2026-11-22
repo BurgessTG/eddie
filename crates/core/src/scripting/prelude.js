@@ -62,7 +62,7 @@ function help() {
     "setFormat(name)  // the canvas shape: original landscape portrait square vertical classic cinema, or a ratio such as '9:16'",
     "setTransition(id, kind, seconds?)  // video only: how the picture passes from the clip right before it on its lane, centred on the cut. kinds: mix dip-black dip-white wipe-left wipe-right wipe-up wipe-down slide-left slide-right slide-up slide-down; seconds 0.1 to 5 (0.5); null removes it",
     "setSpeed(id, 0.25..4)  // video or audio; keeps the source range, so the clip's length becomes it at that speed (a linked partner too); sound keeps its pitch",
-    "setFade(id, inSec, outSec) setDuck(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
+    "setFade(id, inSec, outSec) setDuck(id, bool) setReduceNoise(id, bool) setCleanVoice(id, bool) setSmoothFades(id, bool)",
     "insertTime(at, seconds)  // splits clips crossing at and moves everything after later",
     "detachAudio(id) unlinkClip(id) setEmbeddedAudio(id, bool)",
     "tightenSilence(id, threshold?, minSilence?, padding?)  // removes pauses of minSilence (0.35 s) or more, keeping padding (0.08 s); no threshold uses the recording's own quiet level",

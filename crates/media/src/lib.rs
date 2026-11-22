@@ -8,9 +8,11 @@
 
 mod audio;
 mod beats;
+mod chain;
 mod cli;
 mod composite;
 mod decode;
+mod denoise;
 mod evidence;
 mod export;
 mod frame;
@@ -41,6 +43,7 @@ pub use decode::{
     inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
     StillDecoder,
 };
+pub use denoise::{measure_noise, NoiseProfile, NOISE_BANDS};
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::{
     clip_title_look, drawn_text, export_canvas, export_timeline, output_canvas, title_look,

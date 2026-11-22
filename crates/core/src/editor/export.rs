@@ -80,6 +80,7 @@ impl Editor {
         let options = openreel_media::ExportOptions {
             normalize_loudness: true,
             speech: self.speech_map(),
+            noise: self.noise_profiles(),
             settings,
         };
         let infos: HashMap<String, MediaInfo> = self

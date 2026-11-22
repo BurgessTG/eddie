@@ -466,3 +466,67 @@ fn tightening_silence_keeps_detached_audio_in_linked_phrases() {
         assert!(!picture.embedded_audio);
     }
 }
+
+/// Turning on Reduce noise has the clip's source measured off the UI
+/// thread; the preview then plays it with that measurement, and the mix
+/// does not count as measured before it.
+#[test]
+fn a_clip_that_reduces_noise_plays_with_its_measured_source_noise() {
+    let dir = std::env::temp_dir().join(format!("eddie-noise-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hiss.wav");
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("aevalsrc=0.01*(2*random(0)-1):s=48000:d=2")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let path = path.to_str().unwrap().to_owned();
+    let mut app = Editor::headless();
+    app.assets.push(BinAsset {
+        info: openreel_media::probe(&path).unwrap(),
+        size_bytes: 0,
+        state: AssetState::Ready,
+        peaks: Vec::new(),
+        beats: None,
+        thumbs: Vec::new(),
+        sweep: sweep::SweepData::default(),
+    });
+    let clip = app
+        .timeline
+        .add_media_clip("hiss", ClipKind::Audio, 0, 0.0, 2.0, 0.0, &path);
+
+    let mut engine = crate::scripting::ScriptEngine::new().unwrap();
+    let (_, commands) = engine
+        .eval_checked(
+            &format!("setReduceNoise({clip}, true)"),
+            &app.script_state_json(),
+        )
+        .unwrap();
+    app.apply_edit(commands).unwrap();
+    assert!(app.noise_pending(), "nothing has measured the hiss yet");
+    assert!(!app.mix_measured());
+    let started = std::time::Instant::now();
+    while app.noise_pending() {
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "the measurement never came back"
+        );
+        app.begin_frame(started.elapsed().as_secs_f64());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let noise = app.audio_segments(None)[0].1.noise;
+    assert_eq!(noise, Some(openreel_media::measure_noise(&path).unwrap()));
+    let state = app.script_state_json();
+    assert!(state.contains("\"reduceNoise\":true"), "{state}");
+
+    // Split pieces keep it, and a piece's sound uses the same measurement.
+    app.timeline.split_at(clip, 1.0).expect("split");
+    assert!(app.timeline.clips.iter().all(|clip| clip.reduce_noise));
+    assert!(app
+        .audio_segments(None)
+        .iter()
+        .all(|(_, segment)| segment.noise == noise));
+    let _ = std::fs::remove_dir_all(&dir);
+}

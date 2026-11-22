@@ -211,6 +211,8 @@ fn sound_switches_and_fades_edit_the_clip() {
     assert_eq!(clip(&rt, id).duck, !before);
     click(&mut rt, "details-smooth-fades");
     assert!(clip(&rt, id).smooth_fades);
+    click(&mut rt, "details-reduce-noise");
+    assert!(clip(&rt, id).reduce_noise);
     click(&mut rt, "details-fade-in");
     rt.paste("0.5");
     rt.frame(FRAME);
@@ -367,6 +369,7 @@ fn every_control_has_a_tooltip() {
                 "details-fade-out",
                 "details-smooth-fades",
                 "details-duck",
+                "details-reduce-noise",
                 "details-clean-voice",
             ],
         ),

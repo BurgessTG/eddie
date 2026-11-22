@@ -1,4 +1,5 @@
-//! One clip's sound: decode, resample to the mix format, clean, fade.
+//! One clip's sound: decode, resample to the mix format, filter, clean,
+//! fade.
 
 use std::sync::mpsc::{Receiver, SyncSender};
 
@@ -7,7 +8,9 @@ use ffmpeg_next as ffmpeg;
 
 use super::mixer::Chunk;
 use super::{sample, RATE};
-use crate::tempo::{Tempo, TEMPO_TAIL};
+use crate::chain::Chain;
+use crate::denoise::DENOISE_TAIL;
+use crate::tempo::TEMPO_TAIL;
 use crate::{AudioSegment, MediaResult, AUDIO_RATE};
 
 /// Decode `segment` from timeline sample `first` to `end` into chunks.
@@ -23,16 +26,21 @@ pub(super) fn decode_voice(
     let source_in = sample(segment.source_in) as i64;
     // The source sample heard at timeline sample `t`.
     let source_at = |t: u64| source_in + ((t as i64 - start) as f64 * segment.speed).round() as i64;
-    let mut tempo = Tempo::for_speed(segment.speed, AUDIO_RATE)?;
-    // The source samples this voice plays, [wanted, stop). A sped-up clip
-    // reads a little further, as export does, so the stretch reaches `end`.
+    // Built at the first frame, once the source's channels are known.
+    let filtered = segment.speed != 1.0 || segment.noise.is_some();
+    let mut chain: Option<Chain> = None;
+    // The source samples this voice plays, [wanted, stop). A filtered clip
+    // reads a little further, as export does, so what the filters hold
+    // back still reaches `end`.
     let wanted = source_at(first);
-    let tail = if tempo.is_some() {
-        sample(TEMPO_TAIL)
-    } else {
-        0
-    };
-    let stop = source_at(end) + tail as i64;
+    let mut tail = 0.0;
+    if segment.speed != 1.0 {
+        tail += TEMPO_TAIL;
+    }
+    if segment.noise.is_some() {
+        tail += DENOISE_TAIL;
+    }
+    let stop = source_at(end) + sample(tail) as i64;
     source.seek(wanted as f64 / RATE)?;
 
     let mut out = Out {
@@ -69,6 +77,10 @@ pub(super) fn decode_voice(
             }
         }
         source.damage.clear();
+        if filtered && chain.is_none() {
+            let mono = shape.1.channels() == 1;
+            chain = Chain::for_clip(segment.speed, segment.noise.as_ref(), mono, AUDIO_RATE)?;
+        }
         if let Some(pts) = frame.timestamp() {
             let at = source.sample_at(pts);
             // Trust timestamps only across real discontinuities; resampled
@@ -85,13 +97,13 @@ pub(super) fn decode_voice(
         let keep_from = (wanted - block_source).clamp(0, produced) as usize;
         let keep_to = (stop - block_source).clamp(0, produced) as usize;
         let kept = &samples[keep_from * 2..keep_to.max(keep_from) * 2];
-        let more = match tempo.as_mut() {
+        let more = match chain.as_mut() {
             None => out.send(block_source + keep_from as i64 - source_in + start, kept),
-            Some(tempo) => {
-                tempo.push(kept)?;
-                tempo.drain(|stretched| {
-                    let more = out.send(heard, stretched);
-                    heard += stretched.len() as i64 / 2;
+            Some(chain) => {
+                chain.push(kept)?;
+                chain.drain(|filtered| {
+                    let more = out.send(heard, filtered);
+                    heard += filtered.len() as i64 / 2;
                     more
                 })?
             }
@@ -103,14 +115,46 @@ pub(super) fn decode_voice(
             break;
         }
     }
-    // The end of the read: the stretch gives back what it still holds.
-    if let Some(tempo) = tempo.as_mut() {
-        tempo.finish()?;
-        tempo.drain(|stretched| {
-            let more = out.send(heard, stretched);
-            heard += stretched.len() as i64 / 2;
+    // The end of the read: the filters give back what they still hold.
+    if let Some(chain) = chain.as_mut() {
+        chain.finish()?;
+        chain.drain(|filtered| {
+            let more = out.send(heard, filtered);
+            heard += filtered.len() as i64 / 2;
             more
         })?;
+    }
+    Ok(())
+}
+
+/// Pass the sound at `path` from its start, in the mix format, to `each`
+/// until `seconds` of it have gone; `each` also learns whether the source
+/// is mono.
+pub(crate) fn read_stereo(
+    path: &str,
+    seconds: f64,
+    mut each: impl FnMut(&[f32], bool),
+) -> MediaResult<()> {
+    let mut source = Source::open(path)?;
+    let mut resampler = Resampler::default();
+    let mut frame = ffmpeg::frame::Audio::empty();
+    let mut left = sample(seconds) as usize * 2;
+    while left > 0 && source.next_frame(&mut frame)? {
+        if frame.rate() == 0 || frame.samples() == 0 {
+            continue;
+        }
+        let shape = shape_of(&frame);
+        if !resampler.fits(shape) {
+            if let Err(e) = resampler.rebuild(shape) {
+                source.damage.hit("audio resampler", e)?;
+                continue;
+            }
+        }
+        source.damage.clear();
+        let samples = resampler.convert(&frame)?;
+        let samples = &samples[..samples.len().min(left)];
+        left -= samples.len();
+        each(samples, shape.1.channels() == 1);
     }
     Ok(())
 }

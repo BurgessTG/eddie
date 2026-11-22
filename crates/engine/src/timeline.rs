@@ -347,6 +347,7 @@ impl Timeline {
             linked_clip: None,
             title_style: TitleStyle::default(),
             duck: false,
+            reduce_noise: false,
             clean_voice: false,
             smooth_fades: false,
             words: Vec::new(),

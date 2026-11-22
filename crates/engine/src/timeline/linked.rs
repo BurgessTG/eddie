@@ -47,6 +47,7 @@ impl Timeline {
             sound.fade_in = clip.fade_in;
             sound.fade_out = clip.fade_out;
             sound.smooth_fades = clip.smooth_fades;
+            sound.reduce_noise = clip.reduce_noise;
             sound.clean_voice = clip.clean_voice;
             sound.duck = clip.duck;
             sound.speed = clip.speed;
@@ -56,6 +57,7 @@ impl Timeline {
             picture.fade_in = 0.0;
             picture.fade_out = 0.0;
             picture.smooth_fades = false;
+            picture.reduce_noise = false;
             picture.clean_voice = false;
             picture.duck = false;
             picture.keyframes.volume.clear();

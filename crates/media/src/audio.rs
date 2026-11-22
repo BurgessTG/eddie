@@ -20,6 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use decode::decode_voice;
+pub(crate) use decode::read_stereo;
 use mixer::{Command, Mixer, Shared, Voice};
 use output::{open_device, spawn_null, Output};
 
@@ -55,6 +56,9 @@ pub struct AudioSegment {
     /// Ducking ranges in clip-local seconds, from
     /// `openreel_engine::Timeline::duck_ranges`; empty when it never ducks.
     pub duck: Vec<(f64, f64)>,
+    /// The source's noise when the clip reduces it (`denoise.rs`), applied
+    /// as the clip decodes, before speed and voice cleanup.
+    pub noise: Option<crate::NoiseProfile>,
     /// Voice cleanup (`voice.rs`), applied as the clip decodes.
     pub clean_voice: bool,
     /// Fades follow `openreel_engine::fade_shape`'s quarter sine.
@@ -407,6 +411,7 @@ fn same_source(a: &AudioSegment, b: &AudioSegment) -> bool {
         && a.start == b.start
         && a.duration == b.duration
         && a.source_in == b.source_in
+        && a.noise == b.noise
         && a.clean_voice == b.clean_voice
         && a.smooth_fades == b.smooth_fades
         && a.speed == b.speed

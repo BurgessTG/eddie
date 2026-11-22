@@ -79,6 +79,7 @@ fn samples_probe_decode_and_export_end_to_end() {
             fade_in: 0.0,
             fade_out: 0.0,
             duck: Vec::new(),
+            noise: None,
             clean_voice: false,
             smooth_fades: false,
             speed: 1.0,

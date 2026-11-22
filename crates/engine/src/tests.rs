@@ -614,6 +614,7 @@ fn detach_audio_creates_linked_clip_and_silences_picture() {
         clip.volume = 0.6;
         (clip.fade_in, clip.fade_out) = (0.5, 1.5);
         (clip.smooth_fades, clip.clean_voice, clip.duck) = (true, true, true);
+        clip.reduce_noise = true;
     }
 
     let audio = tl.detach_audio(video).expect("detach embedded audio");
@@ -622,9 +623,11 @@ fn detach_audio_creates_linked_clip_and_silences_picture() {
     assert!(!picture.embedded_audio);
     // The sound keeps its fades and processing; the silent picture has none.
     assert_eq!((sound.fade_in, sound.fade_out), (0.5, 1.5));
-    assert!(sound.smooth_fades && sound.clean_voice && sound.duck);
+    assert!(sound.smooth_fades && sound.clean_voice && sound.duck && sound.reduce_noise);
     assert_eq!((picture.fade_in, picture.fade_out), (0.0, 0.0));
-    assert!(!picture.smooth_fades && !picture.clean_voice && !picture.duck);
+    assert!(
+        !picture.smooth_fades && !picture.clean_voice && !picture.duck && !picture.reduce_noise
+    );
     assert_eq!(picture.linked_clip, Some(audio));
     assert_eq!(sound.kind, ClipKind::Audio);
     assert_eq!(sound.linked_clip, Some(video));

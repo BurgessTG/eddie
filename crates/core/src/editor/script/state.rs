@@ -28,6 +28,7 @@ impl Editor {
                     "fadeIn": c.fade_in,
                     "fadeOut": c.fade_out,
                     "duck": c.duck,
+                    "reduceNoise": c.reduce_noise,
                     "cleanVoice": c.clean_voice,
                     "smoothFades": c.smooth_fades,
                     "speed": c.speed,

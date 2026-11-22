@@ -111,6 +111,10 @@ pub enum ScriptCommand {
         clip: u64,
         speed: f64,
     },
+    SetReduceNoise {
+        clip: u64,
+        enabled: bool,
+    },
     SetCleanVoice {
         clip: u64,
         enabled: bool,
@@ -233,6 +237,7 @@ impl ScriptCommand {
             | Self::SetSpeed { clip, .. }
             | Self::SetTransition { clip, .. }
             | Self::SetFade { clip, .. }
+            | Self::SetReduceNoise { clip, .. }
             | Self::SetCleanVoice { clip, .. }
             | Self::SetSmoothFades { clip, .. }
             | Self::DetachAudio { clip }
@@ -327,6 +332,7 @@ impl ScriptCommand {
             | Self::SetClipLane { .. }
             | Self::SetEmbeddedAudio { .. }
             | Self::SetDuck { .. }
+            | Self::SetReduceNoise { .. }
             | Self::SetCleanVoice { .. }
             | Self::SetSmoothFades { .. }
             | Self::SetTitleStyle { .. }

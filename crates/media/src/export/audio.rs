@@ -8,8 +8,9 @@ use openreel_engine::{Clip, ClipKind, Crossfade, Timeline};
 
 use super::scratch::FilterGraphFile;
 use super::{export_error, f, ExportOptions};
+use crate::denoise::{denoise_filter, measure_noise, DENOISE_TAIL};
 use crate::tempo::{tempo_filter, TEMPO_TAIL};
-use crate::{MediaInfo, MediaResult};
+use crate::{MediaInfo, MediaResult, NoiseProfile};
 
 /// Integrated loudness a normalized export aims for, in LUFS.
 pub const LOUDNESS_TARGET: f64 = -16.0;
@@ -40,9 +41,22 @@ pub(super) fn mix(
     let mut inputs: Vec<String> = Vec::new();
     let mut filters: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
+    let mut noise: HashMap<String, NoiseProfile> = HashMap::new();
     for (clip, crossfade) in audible_runs(timeline, infos) {
         let Some(src) = clip.source.as_ref() else {
             continue;
+        };
+        let profile = if clip.reduce_noise {
+            let profile = match options.noise.get(src).or(noise.get(src)) {
+                Some(profile) => *profile,
+                None => {
+                    measure_noise(src).map_err(|e| format!("measure the noise in {src}: {e}"))?
+                }
+            };
+            noise.insert(src.clone(), profile);
+            Some(profile)
+        } else {
+            None
         };
         let idx = if let Some(i) = inputs.iter().position(|p| p == src) {
             i + 1
@@ -51,7 +65,15 @@ pub(super) fn mix(
             inputs.len()
         };
         let label = format!("a{}", labels.len());
-        filters.push(branch(timeline, options, &clip, crossfade, idx, &label));
+        filters.push(branch(
+            timeline,
+            options,
+            &clip,
+            crossfade,
+            profile.as_ref(),
+            idx,
+            &label,
+        ));
         labels.push(label);
     }
     let audio_mix = match labels.len() {
@@ -122,6 +144,7 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
                 && clip.keyframes.volume.is_empty()
                 && !last.duck
                 && !clip.duck
+                && last.reduce_noise == clip.reduce_noise
                 && last.clean_voice == clip.clean_voice
                 && last.smooth_fades == clip.smooth_fades
                 && last.fade_lengths() == (0.0, 0.0)
@@ -138,14 +161,15 @@ fn audible_runs(timeline: &Timeline, infos: &HashMap<String, MediaInfo>) -> Vec<
     runs
 }
 
-/// One run's branch of the graph: input `idx` trimmed to the run, cleaned,
-/// set to its volume, faded, crossfaded, ducked and delayed to its place,
-/// as `[label]`.
+/// One run's branch of the graph: input `idx` trimmed to the run, its
+/// `noise` reduced, sped, cleaned, set to its volume, faded, crossfaded,
+/// ducked and delayed to its place, as `[label]`.
 fn branch(
     timeline: &Timeline,
     options: &ExportOptions,
     clip: &Clip,
     crossfade: Crossfade,
+    noise: Option<&NoiseProfile>,
     idx: usize,
     label: &str,
 ) -> String {
@@ -238,19 +262,26 @@ fn branch(
             amount.join("+")
         ));
     }
+    // Noise reduction runs on the source, before speed; it reads
+    // `DENOISE_TAIL` further and drops as much from the front, so its
+    // sound stays in step and as long as the clip.
+    let (denoise, denoise_tail) = match noise {
+        None => (String::new(), 0.0),
+        Some(profile) => (format!(",{}", denoise_filter(profile)), DENOISE_TAIL),
+    };
     // Speed stretches the trimmed source onto the clip's own length; it
     // reads `TEMPO_TAIL` further, as the preview does, so the stretch is not
     // short at the end.
     let (source_end, tempo) = match tempo_filter(clip.speed) {
-        None => (clip.source_end(), String::new()),
+        None => (clip.source_end() + denoise_tail, String::new()),
         Some(chain) => (
-            clip.source_end() + TEMPO_TAIL,
+            clip.source_end() + denoise_tail + TEMPO_TAIL,
             format!(",{chain},atrim=end={}", f(clip.duration)),
         ),
     };
     format!(
-        "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{tempo}{cleanup},\
-         {volume}{fades},adelay=delays={delay}S:all=1[{label}]",
+        "[{idx}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,aresample=48000{denoise}{tempo}\
+         {cleanup},{volume}{fades},adelay=delays={delay}S:all=1[{label}]",
         f(clip.source_in),
         f(source_end),
     )

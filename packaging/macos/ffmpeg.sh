@@ -182,6 +182,8 @@ has decoders hevc
 has filters xstack
 # Transitions: xfade between two clips' pictures.
 has filters xfade
+# Reduce noise: afftdn, in export and in the app's own preview.
+has filters afftdn
 has devices lavfi
 
 # The GPL asks that whoever gets the program can get its source: the app

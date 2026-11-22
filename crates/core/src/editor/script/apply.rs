@@ -594,6 +594,11 @@ impl Editor {
                     c.duck = enabled;
                 }
             }
+            ScriptCommand::SetReduceNoise { clip, enabled } => {
+                if let Some(c) = self.timeline.clip_mut(clip) {
+                    c.reduce_noise = enabled;
+                }
+            }
             ScriptCommand::SetCleanVoice { clip, enabled } => {
                 if let Some(c) = self.timeline.clip_mut(clip) {
                     c.clean_voice = enabled;

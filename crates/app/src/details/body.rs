@@ -268,6 +268,14 @@ fn sound(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32) -> Vec<El> {
         ),
         checkbox(
             id,
+            "details-reduce-noise",
+            "Reduce noise",
+            "Bring down steady background noise such as hiss, hum and fans, measured from this file's quiet parts",
+            clip.reduce_noise,
+            |clip| clip.reduce_noise = !clip.reduce_noise,
+        ),
+        checkbox(
+            id,
             "details-clean-voice",
             "Clean voice",
             "Cut low rumble and even out loud and quiet speech, in preview and export",

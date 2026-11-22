@@ -150,6 +150,7 @@ impl Editor {
                             fade_in: c.fade_in,
                             fade_out: c.fade_out,
                             duck: self.timeline.duck_ranges(&c, &speech),
+                            noise: c.reduce_noise.then(|| self.noise_profile(source)).flatten(),
                             clean_voice: c.clean_voice,
                             smooth_fades: c.smooth_fades,
                             speed: c.speed,
@@ -266,9 +267,12 @@ impl Editor {
         }
     }
 
-    /// Whether the last measurement is of the mix the timeline has now.
+    /// Whether the last measurement is of the mix the timeline has now,
+    /// with every source's noise measured that a clip reduces.
     pub fn mix_measured(&self) -> bool {
-        self.loudness_rx.is_none() && self.loudness_mix == self.audio_segments(None)
+        self.loudness_rx.is_none()
+            && !self.noise_pending()
+            && self.loudness_mix == self.audio_segments(None)
     }
 
     /// Measure the mix off this thread unless that measurement exists or is

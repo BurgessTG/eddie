@@ -76,7 +76,8 @@ offers the newest build.
   length after a trim, upright as the phone took them.
 - Linked audio: detach a video's sound into a clip that moves, trims and
   splits with it, or unlink it for J/L cuts. Audio clips have fades and
-  can duck under speech.
+  can duck under speech, reduce steady background noise and clean up a
+  voice.
 - Markers: flags on the ruler in eight colours, each with a note, added
   with M and jumped between with Shift+M and Alt+Shift+M; clips snap to
   them.

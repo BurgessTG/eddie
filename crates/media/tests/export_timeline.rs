@@ -2006,6 +2006,7 @@ fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
                 fade_in: 1.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
+                noise: None,
                 clean_voice: false,
                 smooth_fades: smooth,
                 speed: 1.0,
@@ -2067,6 +2068,7 @@ fn keyed_volume_follows_its_keys_in_preview_and_export() {
             fade_in: 0.0,
             fade_out: 0.0,
             duck: Vec::new(),
+            noise: None,
             clean_voice: false,
             smooth_fades: false,
             speed: 1.0,
@@ -2125,6 +2127,7 @@ fn sound_crossfades_under_a_transition_in_preview_and_export() {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
+                noise: None,
                 clean_voice: false,
                 smooth_fades: false,
                 speed: 1.0,
@@ -2244,6 +2247,7 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
             fade_in: 0.0,
             fade_out: 0.0,
             duck: Vec::new(),
+            noise: None,
             clean_voice: true,
             smooth_fades: false,
             speed: 1.0,
@@ -2275,6 +2279,139 @@ fn clean_voice_cuts_rumble_and_preview_matches_export() {
     }
     eprintln!("clean voice: rumble x{rumble:.3}, quiet/loud {:.2}, worst preview-export window {worst:.2} dB", quiet / loud);
     assert!(worst < 0.1, "preview and export differ by {worst:.2} dB");
+}
+
+/// Noise reduction quiets steady hiss between words, keeps the words at
+/// their level and in step with the picture (afftdn's output starts 25 ms
+/// late), and plays in the preview as export renders it.
+#[test]
+fn noise_reduction_quiets_hiss_in_step_and_preview_matches_export() {
+    // 220 Hz "words" for 0.3 s of every 0.5 s over white noise at -38.8 dBFS.
+    let fixture = Fixture::new();
+    let speech = fixture.0.join("hiss.wav");
+    run(Command::new("ffmpeg").args([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=if(lt(mod(t\\,0.5)\\,0.3)\\,0.3*sin(2*PI*220*t)\\,0)+0.02*(2*random(0)-1):s=48000:d=4",
+        "-c:a",
+        "pcm_f32le",
+        speech.to_str().unwrap(),
+    ]));
+    let speech = speech.to_str().unwrap().to_owned();
+
+    // The quietest stretches are the hiss: its level, and flat as white.
+    let profile = openreel_media::measure_noise(&speech).unwrap();
+    let hiss = 20.0 * (0.02 / 3f32.sqrt()).log10();
+    assert!(
+        (profile.floor - hiss).abs() < 1.5,
+        "measured {profile:?}, hiss at {hiss:.1} dBFS"
+    );
+    assert!(
+        profile.bands.iter().all(|band| band.abs() < 2.0),
+        "white noise measured as {profile:?}"
+    );
+
+    let picture = fixture.color("black.mp4", "black", None);
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &picture, 0, 0.0, 4.0, 0.0);
+    let voice = timeline.add_media_clip("voice", ClipKind::Audio, 1, 0.0, 4.0, 0.0, &speech);
+    let plain = fixture.export("plain.mp4", &timeline);
+    timeline.clip_mut(voice).unwrap().reduce_noise = true;
+    // Export measures the source itself: the options carry no profile.
+    let reduced = fixture.export("reduced.mp4", &timeline);
+    let (plain, reduced) = (audio_samples(&plain), audio_samples(&reduced));
+    let db = |samples: &[f32]| {
+        let mean =
+            samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64;
+        10.0 * mean.log10()
+    };
+    let at = |seconds: f64| (seconds * 48_000.0) as usize;
+    let gap = at(1.35)..at(1.45);
+    let quieter = db(&plain[gap.clone()]) - db(&reduced[gap]);
+    assert!(quieter > 8.0, "the hiss between words fell {quieter:.1} dB");
+    let word = at(1.05)..at(1.25);
+    let change = db(&reduced[word.clone()]) - db(&plain[word]);
+    assert!(change.abs() < 0.5, "the words changed by {change:.2} dB");
+    // In step: the reduced sound lines up with the plain one at no lag.
+    // A 25 ms lag lands on a later word edge, so it cannot hide in the
+    // tone's own period.
+    let lag = (-1500_i64..=1500)
+        .max_by(|a, b| {
+            let score = |lag: i64| {
+                (at(0.9)..at(1.9))
+                    .map(|i| f64::from(plain[i]) * f64::from(reduced[(i as i64 + lag) as usize]))
+                    .sum::<f64>()
+            };
+            score(*a).total_cmp(&score(*b))
+        })
+        .unwrap();
+    assert!(
+        lag.abs() < 20,
+        "the reduced sound is {lag} samples off the plain one"
+    );
+
+    // The preview runs the same afftdn; a mono source is raised to its own
+    // level around it, as export runs it on the mono file.
+    let mut engine = openreel_media::AudioEngine::manual();
+    engine.seek(0.0);
+    engine.set_limit(4.0);
+    engine.set_running(true);
+    engine.set_voices(&[(
+        voice,
+        openreel_media::AudioSegment {
+            path: speech.clone(),
+            start: 0.0,
+            duration: 4.0,
+            source_in: 0.0,
+            volume: 1.0,
+            volume_keys: Vec::new(),
+            fade_in: 0.0,
+            fade_out: 0.0,
+            duck: Vec::new(),
+            noise: Some(profile),
+            clean_voice: false,
+            smooth_fades: false,
+            speed: 1.0,
+            crossfade: (0.0, 0.0),
+        },
+    )]);
+    let mut preview = Vec::new();
+    while preview.len() < 4 * 48_000 {
+        let block = engine.render(1024);
+        assert!(!block.is_empty(), "preview clock stopped");
+        preview.extend(block.as_chunks::<2>().0.iter().map(|frame| frame[0]));
+    }
+    // Every 100 ms window matches. AAC takes 0.15-0.2 dB off the reduced
+    // hiss near -50 dBFS (FFmpeg's own afftdn, written uncompressed, was
+    // within 0.04 dB of the preview there), so those get that allowance.
+    let upmix = 20.0 * std::f64::consts::FRAC_1_SQRT_2.log10();
+    let (mut words, mut gaps) = (0.0_f64, 0.0_f64);
+    for window in 2..38 {
+        let (a, b) = (window * 4800, (window + 1) * 4800);
+        let exported = db(&reduced[a..b]);
+        let diff = (db(&preview[a..b]) - upmix - exported).abs();
+        if exported > -30.0 {
+            words = words.max(diff);
+        } else {
+            gaps = gaps.max(diff);
+        }
+    }
+    eprintln!(
+        "noise reduction: hiss -{quieter:.1} dB, words {change:+.2} dB, lag {lag}, \
+         preview against export {words:.2} dB in words, {gaps:.2} dB between"
+    );
+    assert!(
+        words < 0.05,
+        "preview and export words differ by {words:.2} dB"
+    );
+    assert!(
+        gaps < 0.3,
+        "preview and export hiss differs by {gaps:.2} dB"
+    );
 }
 
 #[test]
@@ -2822,6 +2959,7 @@ fn speed_keeps_the_pitch_and_preview_matches_export() {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 duck: Vec::new(),
+                noise: None,
                 clean_voice: false,
                 smooth_fades: false,
                 speed,

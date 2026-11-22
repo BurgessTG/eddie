@@ -107,6 +107,9 @@ pub struct ExportOptions {
     /// Audible source-time ranges per source path, for clips that duck
     /// under speech (`openreel_engine::Timeline::duck_ranges`).
     pub speech: HashMap<String, Vec<(f64, f64)>>,
+    /// Measured noise per source path, for clips that reduce it. A source
+    /// missing here is measured before the mix.
+    pub noise: HashMap<String, crate::NoiseProfile>,
     pub settings: ExportSettings,
 }
 

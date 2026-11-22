@@ -99,6 +99,11 @@
   their time when clips move, and Clear timeline keeps them. Scripts use
   `markers()`, `addMarker`, `setMarker`, `removeMarker` and
   `clearMarkers`, `state()` lists `markers`, and times accept `marker:3`.
+- Reduce noise: a Details switch for a clip's sound that brings down
+  steady background noise such as hiss, hum and fans, in preview and
+  export. Eddie measures the noise from the file's quiet parts the first
+  time, so no setting is needed. Scripts use `setReduceNoise`, and
+  `state()` gives each clip's `reduceNoise`.
 
 ### Changed
 
