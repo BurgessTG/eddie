@@ -40,11 +40,21 @@ guide` prints this guide as written for the installed version.
 - `run` and `import` on one project take turns, each waiting up to 60
   seconds for the one before it. Starting several at once loses no edit.
 - An unknown command is an error too; it never opens the window.
-- `export` takes `--resolution auto|480p|720p|1080p|2k|4k`, `--fps
-  24|25|30|50|60` and `--quality lower|recommended|higher`. Without them
-  it uses what the window's Export dialog last chose: at first `auto`
-  (the largest video's size, at most 1080p), the project's frame rate and
-  `recommended`. Its reply gives the `size`, `fps` and `quality` it made.
+- `export` writes what the output's extension names: `.mp4` (or `.mov`,
+  `.m4v`, `.mkv`) a video; `.mp3`, `.wav`, `.m4a` (AAC) or `.flac` the
+  mix alone; `.gif` a silent looping GIF at 15 fps, or the project's rate
+  when that is lower. A name without one of these gets the extension of
+  what the window's Export dialog last chose (`cut` becomes `cut.mp4` at
+  first).
+  - A video takes `--resolution auto|480p|720p|1080p|2k|4k`, `--fps
+    24|25|30|50|60` and `--quality lower|recommended|higher`; a GIF takes
+    `--resolution 240p|320p|480p|640p`. A flag that does not apply is an
+    error. Without them it uses what the Export dialog last chose: at
+    first `auto` (the largest video's size, at most 1080p), the project's
+    frame rate and `recommended`, and 480p for a GIF.
+  - Its reply gives the `output` it wrote and the `kind` (`video`,
+    `audio` or `gif`), with the `size`, `fps` and `quality` of a video,
+    the `format` of a sound file, or the `size` and `fps` of a GIF.
 
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
 `sheet`, and fix what the edit broke. `run --dry-run` keeps nothing: its

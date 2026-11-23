@@ -63,7 +63,13 @@ impl Editor {
         self.start_export_with(output, self.settings.export);
     }
 
+    /// Export to `output`, as its extension says or, without a known one,
+    /// to `output` with the extension of what `settings` make.
     pub fn start_export_with(&mut self, output: PathBuf, settings: ExportSettings) {
+        // A name that is the project or its media is refused as typed, before
+        // an extension makes it another file.
+        let given = output.clone();
+        let (output, settings) = settings.for_output(&output);
         if self.export_rx.is_some() {
             self.status = "An export is already running.".to_owned();
             return;
@@ -72,7 +78,10 @@ impl Editor {
             self.status = "Nothing to export.".to_owned();
             return;
         }
-        if let Some(used) = self.export_would_replace(&output) {
+        if let Some(used) = [&given, &output]
+            .into_iter()
+            .find_map(|path| self.export_would_replace(path))
+        {
             self.status = format!("Export cannot replace {used}, which this project uses.");
             return;
         }
@@ -156,8 +165,8 @@ impl Editor {
                 self.asset(path)
                     .map(|asset| (asset.info.width, asset.info.height))
             },
-            settings.resolution,
+            settings.short_side(),
         );
-        (size, settings.fps.map_or(self.timeline.fps, f64::from))
+        (size, settings.frame_rate(self.timeline.fps))
     }
 }

@@ -205,6 +205,13 @@ has devices lavfi
 # Stabilize: vid.stab measures the camera's motion, then steadies it.
 has filters vidstabdetect
 has filters vidstabtransform
+# Export the sound alone (MP3 is libmp3lame above) or a GIF from a palette.
+has encoders flac
+has encoders pcm_s16le
+has filters palettegen
+has filters paletteuse
+has encoders gif
+has muxers gif
 
 # The GPL asks that whoever gets the program can get its source: the app
 # carries this list beside the licences.

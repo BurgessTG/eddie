@@ -105,7 +105,8 @@ offers the newest build.
   with its project is found again; anything else is relinked with File →
   Locate missing media.
 - Export to H.264/AAC MP4 at 480p to 4K, 24 to 60 fps and three quality
-  levels, in limited-range BT.709, normalized to -16 LUFS.
+  levels, in limited-range BT.709, normalized to -16 LUFS; or the sound
+  alone as MP3, WAV, AAC or FLAC; or a looping GIF at 240p to 640p.
 
 **Curator**
 
@@ -312,6 +313,8 @@ eddie sheet talk.eddie sheet.jpg                # the edit as labelled pictures
 eddie strip talk.eddie a.mp4 a.jpg              # 16 pictures through a source
 eddie frames talk.eddie a.mp4 12..14 shots/     # timestamped source frames
 eddie export talk.eddie out.mp4
+eddie export talk.eddie mix.mp3                 # the sound alone (.wav, .m4a, .flac too)
+eddie export talk.eddie loop.gif --resolution 320p
 eddie editors                                   # every running Eddie and its project
 eddie help                                      # commands and the script API
 eddie guide                                     # the guide for agents
@@ -376,7 +379,7 @@ macOS.
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+= / Ctrl+- / Shift+Z | Zoom in / out / fit timeline |
 | Ctrl+N / O / S | New / open / save project |
-| Ctrl+I / Ctrl+E | Import media / export MP4 |
+| Ctrl+I / Ctrl+E | Import media / export |
 | Ctrl+, | Settings |
 
 ## Layout

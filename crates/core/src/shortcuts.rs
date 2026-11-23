@@ -154,7 +154,7 @@ pub const BINDINGS: &[Binding] = &[
         &[cmd_shift('s')],
     )),
     anywhere(bind(Action::Import, "Project", "Import media", &[cmd('i')])),
-    anywhere(bind(Action::Export, "Project", "Export MP4", &[cmd('e')])),
+    anywhere(bind(Action::Export, "Project", "Export", &[cmd('e')])),
     bind(Action::Undo, "Edit", "Undo", &[cmd('z')]),
     bind(Action::Redo, "Edit", "Redo", &[cmd_shift('z'), cmd('y')]),
     bind(

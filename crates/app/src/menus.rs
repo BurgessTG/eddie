@@ -269,8 +269,8 @@ fn file(ui: &Ui) -> Vec<El> {
             Action::Import,
         ),
         item(
-            "Export MP4…",
-            "Pick the size, frame rate and quality, then export an MP4",
+            "Export…",
+            "Export a video, the sound alone or a GIF",
             true,
             Action::Export,
         ),

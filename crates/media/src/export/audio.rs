@@ -7,7 +7,7 @@ use std::process::Stdio;
 use openreel_engine::{Clip, ClipKind, Crossfade, Timeline};
 
 use super::scratch::FilterGraphFile;
-use super::{export_error, f, ExportOptions};
+use super::{export_error, f, AudioFormat, ExportOptions};
 use crate::denoise::{denoise_filter, measure_noise, DENOISE_TAIL};
 use crate::tempo::{tempo_filter, TEMPO_TAIL};
 use crate::{MediaInfo, MediaResult, NoiseProfile};
@@ -289,6 +289,45 @@ fn branch(
 
 /// Encode the timeline's audio mix once, on the whole-timeline clock.
 pub(super) fn encode_audio(inputs: &[String], graph: &str, path: &Path) -> MediaResult<()> {
+    encode(
+        inputs,
+        graph,
+        "[aout]",
+        &["-c:a", "aac", "-b:a", "160k", "-f", "mp4"],
+        path,
+    )
+}
+
+/// Write the mix alone to `path` as `format`, its muxer chosen by the
+/// path's extension. Silence pads it to `total` seconds: a timeline that
+/// ends on a silent picture still lasts its whole length. WAV and FLAC are
+/// dithered down to 16 bits.
+pub(super) fn encode_audio_file(
+    mix: &Mix,
+    total: f64,
+    format: AudioFormat,
+    path: &Path,
+) -> MediaResult<()> {
+    let dither = if format.is_pcm() {
+        ",aresample=osf=s16:dither_method=triangular"
+    } else {
+        ""
+    };
+    let graph = format!(
+        "{};[aout]apad=whole_dur={}{dither}[afile]",
+        mix.graph,
+        f(total)
+    );
+    encode(&mix.inputs, &graph, "[afile]", format.encoder(), path)
+}
+
+fn encode(
+    inputs: &[String],
+    graph: &str,
+    label: &str,
+    encoder: &[&str],
+    path: &Path,
+) -> MediaResult<()> {
     let graph_file = FilterGraphFile::create(graph)?;
     let mut cmd = crate::cli::ffmpeg();
     cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=d=0.01"]);
@@ -298,7 +337,8 @@ pub(super) fn encode_audio(inputs: &[String], graph: &str, path: &Path) -> Media
     let out = cmd
         .arg("-/filter_complex")
         .arg(&graph_file.0)
-        .args(["-map", "[aout]", "-c:a", "aac", "-b:a", "160k", "-f", "mp4"])
+        .args(["-map", label])
+        .args(encoder)
         .arg(path)
         .stdin(Stdio::null())
         .output()

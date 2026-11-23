@@ -31,6 +31,11 @@
   remembers the last choice. Titles keep their size and place on the
   frame at any resolution. `eddie export` takes `--resolution`, `--fps`
   and `--quality`.
+- Export the sound alone, as MP3, WAV, AAC or FLAC, or a silent looping
+  GIF at 240p to 640p and 15 fps: File in the Export dialog picks Video,
+  Audio or GIF. `eddie export` makes what the output's extension names
+  (`.mp3`, `.wav`, `.m4a`, `.flac`, `.gif`), and a name without a known
+  extension gets the dialog's, where it used to fail.
 - Photos (PNG, JPEG, WebP and HEIC) as clips. One added whole lasts 3
   seconds; trim either edge to any length. A phone photo shows upright
   from its orientation, an iPhone's HEIC included, and photos take the

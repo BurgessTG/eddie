@@ -61,12 +61,17 @@ Usage: eddie <command> <project.eddie> ...
                                      the range without --every). Times are
                                      source times; clip:7 is the source range
                                      clip 7 shows
-  export <project> <out.mp4> [--resolution auto|480p|720p|1080p|2k|4k]
+  export <project> <out> [--resolution auto|480p|720p|1080p|2k|4k]
          [--fps 24|25|30|50|60] [--quality lower|recommended|higher]
-                                     render the timeline. Without a flag,
-                                     what the window's Export dialog last
-                                     chose (auto size, the project's rate,
-                                     recommended quality at first)
+                                     render the timeline. The extension says
+                                     what: .mp4 (.mov, .m4v, .mkv) a video;
+                                     .mp3, .wav, .m4a or .flac the sound
+                                     alone; .gif a silent looping GIF at
+                                     15 fps, --resolution 240p|320p|480p|640p.
+                                     Without a flag, or a name without a known
+                                     extension, what the window's Export
+                                     dialog last chose (an auto-sized MP4 at
+                                     the project's rate at first)
   editors                            every running Eddie (windows and serve)
                                      with the project it has open; a window
                                      not saved yet has an untitled project
@@ -312,7 +317,7 @@ fn params(command: &str, args: &[String]) -> Result<Value, String> {
                 number.map_or_else(|| fps.clone(), |number| json!(number))
             });
             json!({
-                "output": absolute(at(0, "<out.mp4>")?)?,
+                "output": absolute(at(0, "<out>")?)?,
                 "resolution": values.get("resolution"),
                 "fps": fps,
                 "quality": values.get("quality"),

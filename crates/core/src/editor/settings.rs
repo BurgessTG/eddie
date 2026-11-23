@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use openreel_engine::Format;
-use openreel_media::{ExportSettings, Quality, Resolution, FRAME_RATES};
+use openreel_media::{
+    AudioFormat, ExportKind, ExportSettings, GifSize, Quality, Resolution, FRAME_RATES,
+};
 
 use super::sweep::transcribe::{Provider, TranscribeSettings};
 use crate::update::Channel;
@@ -98,18 +100,26 @@ pub fn adopt_old_config() {
 
 /// Export settings as saved; anything missing or unknown is the default.
 fn export_from_json(value: &serde_json::Value) -> ExportSettings {
+    let named = |key: &str| value[key].as_str();
     ExportSettings {
-        resolution: value["resolution"]
-            .as_str()
+        kind: named("kind")
+            .and_then(ExportKind::from_name)
+            .unwrap_or_default(),
+        resolution: named("resolution")
             .and_then(Resolution::from_name)
             .unwrap_or_default(),
         fps: value["fps"]
             .as_u64()
             .and_then(|fps| u32::try_from(fps).ok())
             .filter(|fps| FRAME_RATES.contains(fps)),
-        quality: value["quality"]
-            .as_str()
+        quality: named("quality")
             .and_then(Quality::from_name)
+            .unwrap_or_default(),
+        audio: named("audio")
+            .and_then(AudioFormat::from_name)
+            .unwrap_or_default(),
+        gif: named("gif")
+            .and_then(GifSize::from_name)
             .unwrap_or_default(),
     }
 }
@@ -157,9 +167,12 @@ impl Settings {
             "transcription": self.transcription.to_json(),
             "updates": self.updates.as_str(),
             "export": {
+                "kind": self.export.kind.as_str(),
                 "resolution": self.export.resolution.as_str(),
                 "fps": self.export.fps,
                 "quality": self.export.quality.as_str(),
+                "audio": self.export.audio.as_str(),
+                "gif": self.export.gif.as_str(),
             },
             "voiceover": {"hear_timeline": self.hear_timeline_while_recording},
         });
@@ -399,9 +412,12 @@ mod tests {
                 assert_eq!(settings.updates, Channel::Releases, "the default");
                 assert!(!settings.hear_timeline_while_recording, "off by default");
                 let export = ExportSettings {
+                    kind: ExportKind::Gif,
                     resolution: Resolution::P2160,
                     fps: Some(60),
                     quality: Quality::Higher,
+                    audio: AudioFormat::Flac,
+                    gif: GifSize::P640,
                 };
                 for (format, hardware, updates, export, hear) in [
                     (Format::Landscape, false, Channel::Previews, export, true),

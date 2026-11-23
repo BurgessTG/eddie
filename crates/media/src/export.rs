@@ -1,6 +1,8 @@
 //! Timeline export renders bounded video batches in parallel, each into its
 //! own H.264 segment, joins them by stream copy and muxes one AAC encode.
-//! Titles and the audio mix use the complete timeline clock.
+//! Titles and the audio mix use the complete timeline clock. An audio export
+//! encodes the mix alone; a GIF renders the picture the same way, without
+//! sound, and quantizes it in two passes (`gif.rs`).
 
 use std::collections::HashMap;
 use std::fs::{self};
@@ -14,7 +16,7 @@ use std::thread;
 use openreel_engine::{Clip, ClipKind, Timeline};
 
 use crate::{MediaInfo, MediaResult};
-use audio::encode_audio;
+use audio::{encode_audio, encode_audio_file};
 use frames::{title_frames, VideoClock};
 pub(crate) use scratch::ScratchDir;
 pub(crate) use source::standard_picture;
@@ -25,6 +27,7 @@ mod animate;
 mod audio;
 mod blend;
 mod frames;
+mod gif;
 mod picture;
 mod scratch;
 mod settings;
@@ -34,7 +37,9 @@ mod transition;
 mod video;
 
 pub use audio::LOUDNESS_TARGET;
-pub use settings::{ExportSettings, Quality, Resolution, FRAME_RATES};
+pub use settings::{
+    AudioFormat, ExportKind, ExportSettings, GifSize, Quality, Resolution, FRAME_RATES, GIF_FPS,
+};
 pub use titles::{clip_title_look, drawn_text, title_look, TitleLook};
 pub(crate) use titles::{filter_value, font_file};
 
@@ -71,15 +76,15 @@ fn export_error(stderr: &str) -> String {
 /// size. Every clip fits this canvas by its transform; the program monitor
 /// uses the same canvas, so pictures and titles preview as exported.
 pub fn export_canvas(timeline: &Timeline, size: impl Fn(&str) -> Option<(u32, u32)>) -> (u32, u32) {
-    output_canvas(timeline, size, Resolution::Auto)
+    output_canvas(timeline, size, None)
 }
 
-/// The picture an export at `resolution` renders: [`export_canvas`]'s
-/// shape, with the resolution's short side.
+/// The picture an export renders: [`export_canvas`]'s shape, with
+/// `short_side` as its short side (`None` for Auto's, [`ExportSettings::short_side`]).
 pub fn output_canvas(
     timeline: &Timeline,
     size: impl Fn(&str) -> Option<(u32, u32)>,
-    resolution: Resolution,
+    short_side: Option<u32>,
 ) -> (u32, u32) {
     let mut pictures: Vec<(&Clip, (u32, u32))> = timeline
         .clips
@@ -96,9 +101,7 @@ pub fn output_canvas(
         .max()
         .map_or(720, |short| short.min(1080));
     let first = pictures.first().map_or((1280, 720), |(_, size)| *size);
-    timeline
-        .format
-        .canvas(resolution.short_side().unwrap_or(short), first)
+    timeline.format.canvas(short_side.unwrap_or(short), first)
 }
 
 /// How export treats the audio mix.
@@ -117,8 +120,9 @@ pub struct ExportOptions {
     pub settings: ExportSettings,
 }
 
-/// Export `timeline` to `output` (H.264/AAC MP4). Sends 0..=1 progress on
-/// `progress` as ffmpeg reports it. Blocks — call from a worker thread.
+/// Export `timeline` to `output` as `options.settings` say: an H.264/AAC
+/// video, the mix alone, or a GIF. Sends 0..=1 progress on `progress` as
+/// ffmpeg reports it. Blocks — call from a worker thread.
 pub fn export_timeline(
     timeline: &Timeline,
     infos: &HashMap<String, MediaInfo>,
@@ -131,8 +135,19 @@ pub fn export_timeline(
         return Err("timeline is empty".to_owned());
     }
     let output = &*argument_path(output);
-    let fps = options.settings.fps.map_or(timeline.fps, f64::from);
-    if !fps.is_finite() || fps <= 0.0 || !total.is_finite() {
+    let settings = options.settings;
+    if !total.is_finite() {
+        return Err("timeline has an invalid frame rate or duration".to_owned());
+    }
+    if settings.kind == ExportKind::Audio {
+        let mix = audio::mix(timeline, infos, options)?;
+        encode_audio_file(&mix, total, settings.audio, output)?;
+        let _ = progress.send(1.0);
+        return Ok(output.to_path_buf());
+    }
+    let gif = settings.kind == ExportKind::Gif;
+    let fps = settings.frame_rate(timeline.fps);
+    if !fps.is_finite() || fps <= 0.0 {
         return Err("timeline has an invalid frame rate or duration".to_owned());
     }
     let rate = ffmpeg_next::Rational::from(fps);
@@ -156,7 +171,7 @@ pub fn export_timeline(
         .collect();
 
     let size = |path: &str| infos.get(path).map(|i| (i.width, i.height));
-    let (canvas_w, canvas_h) = output_canvas(timeline, size, options.settings.resolution);
+    let (canvas_w, canvas_h) = output_canvas(timeline, size, settings.short_side());
     // Titles are sized on the canvas the monitor shows, and keep their
     // place on the frame at any other size.
     let layout = export_canvas(timeline, size);
@@ -175,8 +190,10 @@ pub fn export_timeline(
             .collect(),
     };
     // Audio is independent of picture visibility and is encoded once, without
-    // seams.
-    let mix = audio::mix(timeline, infos, options)?;
+    // seams. A GIF has none.
+    let mix = (!gif)
+        .then(|| audio::mix(timeline, infos, options))
+        .transpose()?;
 
     let mut sources = HashMap::new();
     for source in video_clips.iter().filter_map(|clip| clip.source.as_deref()) {
@@ -206,8 +223,15 @@ pub fn export_timeline(
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let done = AtomicI64::new(0);
+    // A GIF's picture is kept whole until it is quantized.
+    let crf = if gif { 0 } else { settings.quality.crf() };
+    // Quantizing a GIF takes the last part of its progress.
+    let rendered_share = if gif { 0.6 } else { 0.99 };
     let (audio, video) = thread::scope(|scope| {
-        let audio = scope.spawn(|| encode_audio(&mix.inputs, &mix.graph, &audio_path));
+        let audio = scope.spawn(|| match &mix {
+            Some(mix) => encode_audio(&mix.inputs, &mix.graph, &audio_path),
+            None => Ok(()),
+        });
         let workers: Vec<_> = (0..workers)
             .map(|_| {
                 let progress = progress.clone();
@@ -233,7 +257,7 @@ pub fn export_timeline(
                                 &titles.graph(batch.start, batch.end),
                                 (canvas_w, canvas_h),
                                 rate,
-                                options.settings.quality.crf(),
+                                crf,
                                 count,
                                 encoder_threads,
                                 &segment(index),
@@ -244,7 +268,8 @@ pub fn export_timeline(
                             return Err(error);
                         }
                         let frames = done.fetch_add(count, Ordering::Relaxed) + count;
-                        let _ = progress.send((frames as f64 / frame_count as f64).min(0.99));
+                        let share = frames as f64 / frame_count as f64 * rendered_share;
+                        let _ = progress.send(share.min(rendered_share));
                     }
                     Ok(())
                 })
@@ -258,36 +283,46 @@ pub fn export_timeline(
     video?;
     audio?;
 
-    join(&scratch.0, batches.len(), &audio_path, output)?;
+    let list = segment_list(&scratch.0, batches.len())?;
+    if gif {
+        gif::write(
+            &scratch.0,
+            &list,
+            batches.len(),
+            (frame_count, rate),
+            (&progress, rendered_share),
+            output,
+        )?;
+    } else {
+        join(&list, &audio_path, output)?;
+    }
     let _ = progress.send(1.0);
     Ok(output.to_path_buf())
 }
 
-/// Write `output` from the `segments` video files in `scratch` and the one
-/// audio encode. Every segment opens with a keyframe on one shared encoder
-/// setup, so they join by stream copy, and the audio is muxed once.
-fn join(scratch: &Path, segments: usize, audio: &Path, output: &Path) -> MediaResult<()> {
+/// The list FFmpeg's concat demuxer reads the `segments` video files in
+/// `scratch` from, in order.
+fn segment_list(scratch: &Path, segments: usize) -> MediaResult<PathBuf> {
     let list = scratch.join("segments.ffconcat");
     let mut entries = "ffconcat version 1.0\n".to_owned();
     for index in 0..segments {
         entries.push_str(&format!("file '{index:05}.mp4'\n"));
     }
     fs::write(&list, entries).map_err(|e| format!("write export segment list: {e}"))?;
+    Ok(list)
+}
+
+/// Write `output` from the segments in `list` and the one audio encode.
+/// Every segment opens with a keyframe on one shared encoder setup, so they
+/// join by stream copy, and the audio is muxed once.
+fn join(list: &Path, audio: &Path, output: &Path) -> MediaResult<()> {
     let out = crate::cli::ffmpeg()
         .args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
-        .arg(&list)
+        .arg(list)
         .arg("-i")
         .arg(audio)
-        .args([
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-        ])
+        .args(["-map", "0:v", "-map", "1:a"])
+        .args(["-c", "copy", "-movflags", "+faststart"])
         .arg(output)
         .stdin(Stdio::null())
         .output()
@@ -370,7 +405,7 @@ mod canvas_tests {
             output_canvas(
                 &timeline,
                 |path| sources.get(path.parse::<usize>().ok()?).copied(),
-                resolution,
+                resolution.short_side(),
             )
         };
         // Above the sources' own size, and past the 1080 that Auto stops at.

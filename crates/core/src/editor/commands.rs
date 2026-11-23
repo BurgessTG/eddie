@@ -10,6 +10,8 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
+use openreel_media::ExportKind;
+
 use super::media::AssetState;
 use super::sweep::transcribe::{self, Provider, TranscribeSettings};
 use super::sweep::SweepStatus;
@@ -125,8 +127,10 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
             render(app, frames)
         }
         "export" => {
+            // The name decides the kind the flags are read for; the export
+            // itself is given the name as typed (`start_export_with`).
             let output = path(params, "output")?;
-            let settings = export_settings(app.settings.export, params)?;
+            let settings = export_settings(app.settings.export.for_output(&output).1, params)?;
             if !app.missing_media.is_empty() {
                 return Err(format!(
                     "{} media file(s) are missing: {}",
@@ -142,24 +146,57 @@ pub fn start(app: &mut Editor, method: &str, params: &Value) -> Result<Reply, St
                 return Err(app.status.clone());
             }
             let (size, fps) = app.export_output(settings);
+            let kind = settings.kind.as_str();
+            let made = match settings.kind {
+                ExportKind::Video => json!({
+                    "kind": kind, "size": size, "fps": fps, "quality": settings.quality.as_str(),
+                }),
+                ExportKind::Audio => json!({ "kind": kind, "format": settings.audio.as_str() }),
+                ExportKind::Gif => json!({ "kind": kind, "size": size, "fps": fps }),
+            };
             Reply::Later(Job::Export {
                 started: Instant::now(),
                 reported: 0.0,
-                made: json!({ "size": size, "fps": fps, "quality": settings.quality.as_str() }),
+                made,
             })
         }
         other => return Err(format!("unknown method '{other}'")),
     })
 }
 
-/// The saved export settings, with whatever the request names instead.
+/// The saved export settings for this kind of file, with whatever the
+/// request names instead. A GIF's `resolution` is its size; an audio file
+/// has no picture to size, and a GIF has one rate and one quality, so those
+/// are refused rather than ignored.
 fn export_settings(
     saved: openreel_media::ExportSettings,
     params: &Value,
 ) -> Result<openreel_media::ExportSettings, String> {
-    use openreel_media::{Quality, Resolution, FRAME_RATES};
+    use openreel_media::{GifSize, Quality, Resolution, FRAME_RATES, GIF_FPS};
     let given = |key: &str| params.get(key).filter(|value| !value.is_null());
     let mut settings = saved;
+    let refused = |key: &str, why: &str| {
+        given(key).map_or(Ok(()), |_| Err(format!("{key} does not apply to {why}")))
+    };
+    match settings.kind {
+        ExportKind::Audio => {
+            for key in ["resolution", "fps", "quality"] {
+                refused(key, "an audio file")?;
+            }
+            return Ok(settings);
+        }
+        ExportKind::Gif => {
+            refused("fps", &format!("a GIF, which plays at {GIF_FPS} fps"))?;
+            refused("quality", "a GIF")?;
+            if let Some(value) = given("resolution") {
+                settings.gif = value.as_str().and_then(GifSize::from_name).ok_or_else(|| {
+                    format!("a GIF's resolution is 240p, 320p, 480p or 640p, not {value}")
+                })?;
+            }
+            return Ok(settings);
+        }
+        ExportKind::Video => {}
+    }
     if let Some(value) = given("resolution") {
         settings.resolution = value
             .as_str()

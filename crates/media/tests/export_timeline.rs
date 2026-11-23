@@ -12,7 +12,8 @@ use openreel_engine::{
     TransitionKind,
 };
 use openreel_media::{
-    export_timeline, probe, ExportOptions, ExportSettings, Quality, Resolution, VideoDecoder,
+    export_timeline, probe, AudioFormat, ExportKind, ExportOptions, ExportSettings, GifSize,
+    Quality, Resolution, VideoDecoder,
 };
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
@@ -3630,6 +3631,161 @@ fn higher_quality_keeps_more_in_a_larger_file() {
         })
         .collect();
     assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]), "{sizes:?}");
+}
+
+/// Each stream in a file as `type:codec`, and the file's length.
+fn contents(path: &Path) -> (Vec<String>, f64) {
+    let out = run(Command::new("ffprobe").args([
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name:format=duration",
+        "-of",
+        "json",
+        path.to_str().unwrap(),
+    ]));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("probe JSON");
+    let streams = json["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stream| format!("{}:{}", stream["codec_type"], stream["codec_name"]).replace('"', ""))
+        .collect();
+    let length = json["format"]["duration"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    (streams, length)
+}
+
+#[test]
+fn audio_only_writes_the_whole_mix_in_each_format_without_a_picture() {
+    let fixture = Fixture::new();
+    let tone = fixture.color("tone.mp4", "red", Some(440));
+    let mut timeline = Timeline::new(30.0);
+    video(&mut timeline, &tone, 0, 0.0, 1.0, 0.0);
+    // A title after the sound: the file still lasts the whole timeline.
+    timeline.add_clip("End", ClipKind::Title, 0, 1.0, 0.5, 0.0);
+    for (format, codec) in [
+        (AudioFormat::Mp3, "mp3"),
+        (AudioFormat::Wav, "pcm_s16le"),
+        (AudioFormat::Aac, "aac"),
+        (AudioFormat::Flac, "flac"),
+    ] {
+        let settings = ExportSettings {
+            kind: ExportKind::Audio,
+            audio: format,
+            ..ExportSettings::default()
+        };
+        let name = format!("mix.{}", format.extension());
+        let exported = fixture.export_with(&name, &timeline, &with(settings));
+        let (streams, length) = contents(&exported);
+        assert_eq!(streams, [format!("audio:{codec}")], "{name}");
+        assert!((length - 1.5).abs() < 0.05, "{name} lasts {length} s");
+        assert!(
+            tone_window(&exported, 440.0, 0.1, 0.9) > 0.08,
+            "{name}: the tone"
+        );
+        assert!(
+            tone_window(&exported, 440.0, 1.1, 1.45) < 0.005,
+            "{name}: silence under the title"
+        );
+    }
+}
+
+/// A GIF's frames as a viewer walks them: the count, the sum of their
+/// delays in hundredths of a second, how many blocks ask it to loop, and
+/// whether its one trailer closes the file. FFmpeg's decoder reads on past
+/// a trailer; browsers stop there.
+fn gif_blocks(gif: &[u8]) -> (usize, u32, usize, bool) {
+    let sub_blocks = |mut at: usize| {
+        while gif[at] != 0 {
+            at += 1 + gif[at] as usize;
+        }
+        at + 1
+    };
+    let table = |flags: u8| {
+        if flags & 0x80 != 0 {
+            3 << ((flags & 7) + 1)
+        } else {
+            0
+        }
+    };
+    let (mut frames, mut delays, mut loops) = (0, 0, 0);
+    let mut at = 13 + table(gif[10]);
+    while gif[at] != 0x3B {
+        if gif[at] == 0x21 {
+            if gif[at + 1] == 0xF9 {
+                delays += u32::from(u16::from_le_bytes([gif[at + 4], gif[at + 5]]));
+            }
+            loops += usize::from(&gif[at + 3..at + 14] == b"NETSCAPE2.0");
+            at = sub_blocks(at + 2);
+        } else {
+            assert_eq!(gif[at], 0x2C, "a block at byte {at}");
+            frames += 1;
+            at = sub_blocks(at + 11 + table(gif[at + 9]));
+        }
+    }
+    (frames, delays, loops, at == gif.len() - 1)
+}
+
+#[test]
+fn a_gif_is_a_silent_loop_at_its_size_and_rate_in_the_pictures_colours() {
+    let fixture = Fixture::new();
+    let quadrants = fixture.video(
+        "quadrants.mp4",
+        "nullsrc=s=320x180:r=30:d=1",
+        "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
+        Some(440),
+    );
+    // Six files: more than one batch decodes at once, so the GIF is joined
+    // from parts mapped apart.
+    let colours = [
+        ("blue", BLUE),
+        ("red", RED),
+        ("green", GREEN),
+        ("white", [255; 3]),
+    ];
+    let colours: Vec<(String, [u8; 3])> = colours
+        .iter()
+        .map(|(name, rgb)| (fixture.color(&format!("{name}.mp4"), name, None), *rgb))
+        .collect();
+    let settings = ExportSettings {
+        kind: ExportKind::Gif,
+        gif: GifSize::P240,
+        ..ExportSettings::default()
+    };
+    // 15 fps, or the project's rate when it is lower.
+    for (project, rate) in [(30.0, 15.0_f64), (10.0, 10.0)] {
+        let mut timeline = Timeline::new(project).with_format(Format::Landscape);
+        video(&mut timeline, &quadrants, 0, 0.0, 0.6, 0.0);
+        for (index, (path, _)) in colours.iter().enumerate() {
+            video(&mut timeline, path, 0, 0.6 + 0.2 * index as f64, 0.2, 0.0);
+        }
+        let name = format!("loop{project}.gif");
+        let gif = fixture.export_with(&name, &timeline, &with(settings));
+        let (streams, _) = contents(&gif);
+        assert_eq!(streams, ["video:gif"], "{name}: no sound");
+        let info = probe(gif.to_str().unwrap()).unwrap();
+        assert_eq!((info.width, info.height), (428, 240), "{name}");
+        let (count, delays, loops, closed) = gif_blocks(&std::fs::read(&gif).unwrap());
+        let frames_in = (1.4 * rate).round() as usize;
+        assert_eq!(count, frames_in, "{name}: 1.4 s at {rate} fps");
+        assert_eq!(delays, 140, "{name}: its frames last 1.4 s");
+        assert_eq!(
+            (loops, closed),
+            (1, true),
+            "{name}: one loop block and trailer"
+        );
+        let pictures = frames(&gif);
+        let points = [(107, 60), (321, 60), (107, 180), (321, 180)];
+        let at = |time: f64| colors_at(&pictures[(time * rate) as usize], 428, &points);
+        assert_colors(&name, &at(0.3), &[TL, TR, BL, BR]);
+        for (index, (_, rgb)) in colours.iter().enumerate() {
+            assert_colors(&name, &at(0.7 + 0.2 * index as f64), &[*rgb; 4]);
+        }
+    }
 }
 
 /// A mix: the clip before plays on past its out point and the next starts

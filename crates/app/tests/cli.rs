@@ -363,6 +363,53 @@ fn a_project_is_built_edited_and_exported_from_the_command_line() {
     }
     assert!(!dir.0.join("x.mp4").exists());
 
+    // The extension says what is made: the sound alone, or a GIF whose
+    // resolution is its size. A name without one is the saved kind's.
+    let streams = |name: &str| {
+        let probed = Command::new("ffprobe")
+            .args(["-v", "error", "-show_entries", "stream=codec_type"])
+            .args(["-of", "csv=p=0"])
+            .arg(dir.0.join(name))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&probed.stdout).trim().to_owned()
+    };
+    let (code, sound) = dir.eddie(&["export", "p.eddie", "sound.wav"]);
+    assert_eq!(code, 0, "{sound}");
+    assert_eq!(
+        (&sound["kind"], &sound["format"]),
+        (&"audio".into(), &"wav".into())
+    );
+    assert_eq!(streams("sound.wav"), "audio");
+    let (code, gif) = dir.eddie(&["export", "p.eddie", "loop.gif", "--resolution", "240p"]);
+    assert_eq!(code, 0, "{gif}");
+    assert_eq!(
+        (&gif["kind"], &gif["size"], &gif["fps"]),
+        (&"gif".into(), &serde_json::json!([428, 240]), &15.0.into()),
+        "{gif}"
+    );
+    assert_eq!(streams("loop.gif"), "video");
+    let (code, named) = dir.eddie(&["export", "p.eddie", "cut v1.2"]);
+    assert_eq!(code, 0, "{named}");
+    assert!(
+        named["output"].as_str().unwrap().ends_with("cut v1.2.mp4"),
+        "{named}"
+    );
+    for (output, flag, value) in [
+        ("x.mp3", "--fps", "30"),
+        ("x.flac", "--resolution", "720p"),
+        ("x.gif", "--quality", "higher"),
+        ("x.gif", "--resolution", "1080p"),
+    ] {
+        let (code, refused) = dir.eddie(&["export", "p.eddie", output, flag, value]);
+        assert_eq!(code, 1, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains(&flag[2..]) && !dir.0.join(output).exists(),
+            "{refused}"
+        );
+    }
+
     // An export never replaces the project or the media it is made from.
     let source = std::fs::read(&talk).unwrap();
     for target in ["media/talk.mp4", "p.eddie"] {

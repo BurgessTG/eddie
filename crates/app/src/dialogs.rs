@@ -56,11 +56,20 @@ impl Ui {
         self.open_file_dialog(FilePurpose::Import, dialog);
     }
 
+    /// Ask where to write what the Export dialog chose.
     pub fn pick_export(&mut self) {
+        let settings = self.editor.settings.export;
+        let extension = settings.extension();
+        let what = match settings.kind {
+            openreel_media::ExportKind::Video => "video",
+            openreel_media::ExportKind::Audio => "audio",
+            openreel_media::ExportKind::Gif => "animation",
+        };
+        let name = extension.to_ascii_uppercase();
         let dialog = rfd::FileDialog::new()
-            .add_filter("MP4 video", &["mp4"])
-            .set_file_name("export.mp4")
-            .set_title("Export MP4");
+            .add_filter(format!("{name} {what}"), &[extension])
+            .set_file_name(format!("export.{extension}"))
+            .set_title(format!("Export {name}"));
         self.open_file_dialog(FilePurpose::Export, dialog);
     }
 

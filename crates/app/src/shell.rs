@@ -107,7 +107,7 @@ pub fn menu_bar(ui: &Ui, cx: &Cx<Ui>) -> El {
                 "Export",
                 Variant::Primary,
                 &shortcuts::tip(
-                    "Export the timeline as an MP4: pick its size, frame rate and quality",
+                    "Export the timeline as a video, its sound alone or a GIF",
                     Action::Export,
                 ),
                 true,
