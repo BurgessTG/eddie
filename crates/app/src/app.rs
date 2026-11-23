@@ -232,12 +232,13 @@ impl Ui {
         self.pointer_held |= self.details.slider_held;
         self.editor.sync_playback();
         // A frame shown this pump with the last clip's look is redrawn.
-        let timeline = &self.editor.timeline;
+        let (timeline, playhead) = (&self.editor.timeline, self.editor.playhead);
         for layer in self.editor.program_layers() {
             let slots = self.pictures.lane(layer.lane);
-            slots.program.want(monitor::look(timeline.clip(layer.clip)));
+            let program = timeline.clip(layer.clip);
+            slots.program.want(monitor::look(program, playhead));
             let incoming = layer.transition.and_then(|span| timeline.clip(span.to));
-            slots.incoming.want(monitor::look(incoming));
+            slots.incoming.want(monitor::look(incoming, playhead));
         }
         monitor::compose(self);
         timeline::markers::sync(self);

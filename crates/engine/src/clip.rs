@@ -171,10 +171,10 @@ pub struct Clip {
     /// [`Timeline::transitions`]: crate::Timeline::transitions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
-    /// Position, scale, rotation, opacity and volume changing over the
-    /// clip; a property with keys ignores its plain value. Read the values
-    /// at a time with [`Clip::transform_at`], [`Clip::opacity_at`] and
-    /// [`Clip::volume_at`].
+    /// Position, scale, rotation, opacity, colour and volume changing over
+    /// the clip; a property with keys ignores its plain value. Read the
+    /// values at a time with [`Clip::transform_at`], [`Clip::opacity_at`],
+    /// [`Clip::color_at`] and [`Clip::volume_at`].
     #[serde(default, skip_serializing_if = "Keyframes::is_empty")]
     pub keyframes: Keyframes,
     /// Video only: how the picture mixes with what the lanes under it show.
@@ -303,6 +303,12 @@ impl Clip {
             .map_or(self.volume, |v| v as f32)
     }
 
+    /// The grade at timeline `time`: its colour with any keyed adjustment
+    /// in place.
+    pub fn color_at(&self, time: f64) -> ColorAdjust {
+        self.keyframes.color(self.color, time - self.start)
+    }
+
     /// This clip with its keyed values at timeline `time` as its plain
     /// ones: what a panel shows for the moment under the playhead.
     pub fn posed_at(&self, time: f64) -> Clip {
@@ -310,6 +316,7 @@ impl Clip {
         clip.transform = self.transform_at(time);
         clip.opacity = self.opacity_at(time);
         clip.volume = self.volume_at(time);
+        clip.color = self.color_at(time);
         clip
     }
 
@@ -335,6 +342,7 @@ impl Clip {
             Property::Volume => self
                 .keyed(Property::Volume, time)
                 .unwrap_or_else(|| crate::widen(self.volume)),
+            color => self.color_at(time).value(color).unwrap_or(0.0),
         }
     }
 

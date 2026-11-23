@@ -98,6 +98,11 @@
   slowly (Ease in), slow down into the next key (Ease out), both, or move
   at one speed (Linear, the default). Preview and export follow the same
   curve; scripts pass the ease to `setKeyframe`.
+- Keyframes for colour: the diamond beside Brightness, Contrast,
+  Saturation, Exposure, Temperature, Tint and a filter's Strength in the
+  Colour card keys it at the playhead, so a grade can change over a clip,
+  the same in the monitor and in export. A freeze frame keeps the grade
+  at its point. Scripts key them with `setKeyframe`.
 - Blend modes for a picture over other lanes: Darken, Multiply, Colour
   burn, Linear burn, Lighten, Screen, Colour dodge, Add, Overlay, Soft
   light, Hard light, Difference and Exclusion, picked under Opacity in

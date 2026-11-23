@@ -2,15 +2,16 @@
 //! and moved where [`place`] puts it on the canvas, over black or its own
 //! blurred copy, as the preview draws it. A clip with keys lays its picture
 //! out once at a fixed size, then fades, resizes, turns and moves it every
-//! frame along its keys. A mask clears the picture outside its shape
-//! before it turns, by a matte written once per batch.
+//! frame along its keys; a grade with keys changes every frame
+//! (`grade.rs`). A mask clears the picture outside its shape before it
+//! turns, by a matte written once per batch.
 
 use openreel_engine::{
-    place, yuv, Background, ChromaKey, ColorAdjust, Ease, Key, Keyframes, Mask, Property, Spill,
-    Transform,
+    place, yuv, Background, ChromaKey, Ease, Key, Keyframes, Mask, Property, Spill, Transform,
 };
 
 use super::animate::{commands, curve};
+use super::grade::{color_filters, Keyed};
 use super::scratch::FilterGraphFile;
 use super::titles::filter_value;
 use super::video::VideoLayer;
@@ -19,52 +20,6 @@ use crate::MediaResult;
 /// Even and at least 2, as yuv420p and the colorspace filter need.
 fn even(value: f64) -> u32 {
     ((value / 2.0).round() as u32).max(1) * 2
-}
-
-/// The filters that grade a picture as [`ColorAdjust::apply_rgba`] does
-/// for the preview, starting with a comma, or nothing for no change. One
-/// `colorchannelmixer` on 8-bit RGBA clamps once, at the end, as the
-/// preview does. A matrix past the mixer's ±2 runs halved, then doubled
-/// back, on float RGBA, which does not clamp between filters (3 ms more a
-/// 1080p frame), and converting back to 8 bits clamps. `lutrgb` then bends
-/// brightness with the preview's own formula.
-fn color_filters(color: &ColorAdjust) -> String {
-    if color.is_identity() {
-        return String::new();
-    }
-    let mut m = color.matrix();
-    let largest = m.iter().flatten().fold(0f64, |a, v| a.max(v.abs()));
-    let mut doublings = 0;
-    while largest / f64::from(1u32 << doublings) > 2.0 {
-        doublings += 1;
-    }
-    let k = f64::from(1u32 << doublings);
-    m.iter_mut().flatten().for_each(|v| *v /= k);
-    let format = if doublings == 0 { "rgba" } else { "gbrapf32le" };
-    let mut out = format!(",format={format},colorchannelmixer=");
-    let names = [
-        ["rr", "rg", "rb", "ra"],
-        ["gr", "gg", "gb", "ga"],
-        ["br", "bg", "bb", "ba"],
-    ];
-    let terms: Vec<String> = names
-        .iter()
-        .flatten()
-        .zip(m.iter().flatten())
-        .map(|(name, v)| format!("{name}={v}"))
-        .collect();
-    out.push_str(&terms.join(":"));
-    if doublings > 0 {
-        for _ in 0..doublings {
-            out.push_str(",colorchannelmixer=rr=2:gg=2:bb=2");
-        }
-        out.push_str(",format=rgba");
-    }
-    if color.brightness != 0.0 {
-        let curve = format!("round(255*exp({}*log(val/255)))", color.gamma());
-        out.push_str(&format!(",lutrgb=r={curve}:g={curve}:b={curve}"));
-    }
-    out
 }
 
 /// The filters that key a picture as [`ChromaKey::apply_rgba`] does for
@@ -105,13 +60,26 @@ fn chroma_filters(key: Option<&ChromaKey>) -> String {
 }
 
 /// What a picture's own pixels go through after it is sized: its key, then
-/// its grade, so the key colour is the file's own.
-fn look_filters(layer: &VideoLayer<'_>) -> String {
-    format!(
-        "{}{}",
-        chroma_filters(layer.chroma.as_ref()),
-        color_filters(&layer.color)
-    )
+/// its grade, so the key colour is the file's own. A grade with keys changes
+/// every frame; `name` names its filters, one name per chain.
+fn look_filters(
+    layer: &VideoLayer<'_>,
+    motion: Option<&Motion<'_>>,
+    name: &str,
+    mattes: &mut Mattes,
+) -> MediaResult<String> {
+    let grade = match motion.filter(|motion| motion.keys.grades()) {
+        Some(motion) => Keyed {
+            plain: layer.color,
+            keys: motion.keys,
+            offset: motion.offset,
+            frames: motion.frames,
+            rate: mattes.rate,
+        }
+        .filters(name, &mut mattes.files)?,
+        None => color_filters(&layer.color),
+    };
+    Ok(format!("{}{grade}", chroma_filters(layer.chroma.as_ref())))
 }
 
 /// The mattes a batch's masks read, written while its graph is built and
@@ -161,6 +129,8 @@ pub(super) struct Motion<'a> {
     pub(super) keys: &'a Keyframes,
     /// The clip's start, in seconds after the batch's first frame.
     pub(super) offset: f64,
+    /// The batch frames the layer is decoded for, `[first, last)`.
+    pub(super) frames: (i64, i64),
 }
 
 impl Motion<'_> {
@@ -311,13 +281,13 @@ pub(super) fn picture(
     mattes: &mut Mattes,
 ) -> MediaResult<Picture> {
     let (width, height) = canvas;
-    let color = look_filters(layer);
+    let color = look_filters(layer, motion, &format!("g{index}"), mattes)?;
     let alpha = if layer.opacity < 0.999 {
         format!(",format=rgba,colorchannelmixer=aa={:.3}", layer.opacity)
     } else {
         String::new()
     };
-    if let Some(motion) = motion {
+    if let Some(motion) = motion.filter(|motion| motion.keys.moves_picture()) {
         return moving(
             index,
             layer,
@@ -379,6 +349,7 @@ pub(super) fn picture(
     let x = (p.center[0] - out_w / 2.0).round() as i64;
     let y = (p.center[1] - out_h / 2.0).round() as i64;
     if layer.background == Background::Blur && !p.covers(canvas_f) {
+        let color = look_filters(layer, motion, &format!("g{index}bg"), mattes)?;
         let background = blurred(canvas, t, resize, convert, &color);
         return Ok(still(
             format!(
@@ -507,8 +478,13 @@ fn moving(
         x: centre(Property::X, t.x, canvas_f.0),
         y: centre(Property::Y, t.y, canvas_f.1),
     };
-    let background =
-        (layer.background == Background::Blur).then(|| blurred(canvas, t, resize, convert, color));
+    let background = match layer.background {
+        Background::Blur => {
+            let color = look_filters(layer, Some(motion), &format!("g{index}bg"), mattes)?;
+            Some(blurred(canvas, t, resize, convert, &color))
+        }
+        Background::Black => None,
+    };
     Ok(Picture {
         fixed,
         alpha,

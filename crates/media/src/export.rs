@@ -30,6 +30,7 @@ mod blend;
 mod encoder;
 mod frames;
 mod gif;
+mod grade;
 mod picture;
 mod scratch;
 mod settings;

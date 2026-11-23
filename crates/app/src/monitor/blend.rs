@@ -323,14 +323,15 @@ fn draw(canvas: &mut Canvas, made: &Made, clip: &Clip, held: &Held, side: Side) 
     }
     let height = (rgba.len() / (width as usize * 4)) as u32;
     let graded;
-    let rgba = if clip.color.is_identity() && clip.chroma.is_none() {
+    let color = clip.color_at(made.time);
+    let rgba = if color.is_identity() && clip.chroma.is_none() {
         rgba
     } else {
         let mut pixels = rgba.to_vec();
         if let Some(key) = &clip.chroma {
             key.apply_rgba(&mut pixels, width as usize);
         }
-        clip.color.apply_rgba(&mut pixels);
+        color.apply_rgba(&mut pixels);
         graded = pixels;
         &graded
     };

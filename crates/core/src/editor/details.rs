@@ -294,17 +294,40 @@ impl Editor {
     }
 
     /// The Colour card: change a video clip's adjustments and filter, each
-    /// moved into its range.
+    /// moved into its range. `edit` sees the grade at the playhead; an
+    /// adjustment with keys gets a key there when this edit changes it.
     pub fn edit_clip_color(&mut self, id: ClipId, edit: impl FnOnce(&mut ColorAdjust)) {
-        if let Some(clip) = self
+        let Some(at) = self.clip_time(id) else {
+            return;
+        };
+        let playhead = self.playhead;
+        let Some(clip) = self
             .timeline
             .clip_mut(id)
             .filter(|clip| clip.kind == ClipKind::Video)
-        {
-            let mut color = clip.color;
-            edit(&mut color);
-            clip.color = color.clamped();
+        else {
+            return;
+        };
+        let here = clip.color_at(playhead);
+        let mut plain = here;
+        edit(&mut plain);
+        plain = plain.clamped();
+        for property in Property::COLOR {
+            if clip.keyframes.keys(property).is_empty() {
+                continue;
+            }
+            // A keyed adjustment keeps its plain value and changes by key,
+            // only when this edit changed it.
+            let (Some(field), Some(kept)) = (plain.field_mut(property), clip.color.value(property))
+            else {
+                continue;
+            };
+            let after = std::mem::replace(field, kept);
+            if Some(after) != here.value(property) {
+                clip.keyframes.set(property, at, after);
+            }
         }
+        clip.color = plain;
     }
 
     /// The Transition card: a video clip's way in from the clip right

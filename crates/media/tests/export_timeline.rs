@@ -2312,6 +2312,108 @@ fn graded_clips_export_as_the_preview_grades_them() {
     }
 }
 
+/// Colour keys grade every exported frame with that frame's values: each
+/// matches a plain grade of the values at its time, which
+/// `graded_clips_export_as_the_preview_grades_them` holds to the preview.
+/// The first clip's grades all fit the 8-bit mixer; the second's pass its
+/// ±2 on every frame, so its matrix runs halved on float. Neighbouring
+/// frames differ by 3 levels or more somewhere, so a grade a frame early or
+/// late fails. A still holds its picture but not its grade: a photo goes
+/// grey over its first second, its blurred background with it.
+#[test]
+fn keyed_colour_grades_each_frame_as_the_preview_does() {
+    let fixture = Fixture::new();
+    let source = patch_source(&fixture, "patches.mp4", 0);
+    let mut timeline = Timeline::new(10.0);
+    let fits = video(&mut timeline, &source, 0, 0.0, 1.0, 0.0);
+    let float = video(&mut timeline, &source, 0, 1.0, 1.0, 0.0);
+    for (id, keys) in [
+        (
+            fits,
+            [
+                (Property::Brightness, 0.0, -0.5),
+                (Property::Brightness, 1.0, 0.5),
+                (Property::Saturation, 0.2, 0.0),
+                (Property::Saturation, 0.8, 0.6),
+            ],
+        ),
+        (
+            float,
+            [
+                (Property::Exposure, 0.2, 1.2),
+                (Property::Exposure, 0.8, 2.0),
+                (Property::Brightness, 0.0, -0.3),
+                (Property::Brightness, 1.0, 0.3),
+            ],
+        ),
+    ] {
+        let clip = timeline.clip_mut(id).unwrap();
+        clip.color.contrast = if id == float { 0.8 } else { 0.0 };
+        for (property, at, value) in keys {
+            clip.keyframes.set(property, at, value);
+        }
+    }
+    let keyed = frames(&fixture.export("keyed-colour.mp4", &timeline));
+    // The same frames, each a clip of its own with that frame's grade.
+    let mut plain = Timeline::new(10.0);
+    for n in 0..20 {
+        let at = n as f64 / 10.0;
+        let clip = timeline.clip(if n < 10 { fits } else { float }).unwrap();
+        let id = video(&mut plain, &source, 0, at, 0.1, 0.0);
+        plain.clip_mut(id).unwrap().color = clip.color_at(at);
+    }
+    let plain = frames(&fixture.export("plain-colour.mp4", &plain));
+    assert_eq!((keyed.len(), plain.len()), (20, 20));
+    let worst = |a: &[u8], b: &[u8]| {
+        (0..PATCHES.len())
+            .flat_map(|i| {
+                let (a, b) = (patch(a, i), patch(b, i));
+                (0..3).map(move |c| a[c].abs_diff(b[c]))
+            })
+            .max()
+            .unwrap()
+    };
+    for n in 0..20 {
+        let error = worst(&keyed[n], &plain[n]);
+        assert!(
+            error <= 1,
+            "frame {n}: keyed and plain differ by {error} levels"
+        );
+    }
+
+    let path = quadrant_photo(&fixture, "quadrants.png");
+    let mut timeline = Timeline::new(10.0).with_format(Format::Portrait);
+    let id = photo(&mut timeline, &path, 0.0, 1.5);
+    let clip = timeline.clip_mut(id).unwrap();
+    clip.background = Background::Blur;
+    clip.keyframes.set(Property::Saturation, 0.0, 0.0);
+    clip.keyframes.set(Property::Saturation, 1.0, -1.0);
+    let clip = clip.clone();
+    let exported = frames(&fixture.export("keyed-photo.mp4", &timeline));
+    for n in [0, 5, 12] {
+        let mut preview = [TL[0], TL[1], TL[2], 255];
+        clip.color_at(n as f64 / 10.0).apply_rgba(&mut preview);
+        let [got] = colors_at(&exported[n], 180, &[(45, 135)])[..] else {
+            unreachable!()
+        };
+        let error = (0..3).map(|c| got[c].abs_diff(preview[c])).max().unwrap();
+        assert!(
+            error <= 6,
+            "photo frame {n}: {got:?}, preview {:?}",
+            &preview[..3]
+        );
+        let [bar] = colors_at(&exported[n], 180, &[(90, 20)])[..] else {
+            unreachable!()
+        };
+        let spread = bar.iter().max().unwrap() - bar.iter().min().unwrap();
+        if n == 12 {
+            assert!(spread <= 4, "grey background at frame {n}: {bar:?}");
+        } else if n == 0 {
+            assert!(spread > 60, "coloured background at frame {n}: {bar:?}");
+        }
+    }
+}
+
 #[test]
 fn occluded_video_resumes_at_advanced_source_time() {
     let fixture = Fixture::new();

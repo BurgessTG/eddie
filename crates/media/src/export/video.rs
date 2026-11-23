@@ -139,9 +139,7 @@ pub(super) fn plan_video<'a>(
             ((clip.source_in - clip.start * clip.speed) * tick_rate as f64).round() as i64
         };
         let over = over.contains(&clip.id);
-        let keys = clip
-            .keyframes
-            .moves_picture()
+        let keys = (clip.keyframes.moves_picture() || clip.keyframes.grades())
             .then_some((clip.start, &clip.keyframes));
         let same = layers.iter().position(|layer| {
             keys.is_none()
@@ -392,6 +390,7 @@ pub(super) fn batch_command(
             let motion = layer.keys.map(|(clip_start, keys)| Motion {
                 keys,
                 offset: clip_start - clock.time(start),
+                frames: (first, last),
             });
             let picture = picture(
                 index,
@@ -431,7 +430,12 @@ pub(super) fn batch_command(
                     "{}settb=1/{tick_rate},{first_picture}setpts=PTS-STARTPTS",
                     layer.read.head(index)
                 );
-                filters.extend(picture.filters(index, &lead, Some(&hold)));
+                // A grade that changes is laid out on every held frame.
+                if layer.keys.is_some_and(|(_, keys)| keys.grades()) {
+                    filters.extend(picture.filters(index, &format!("{lead},{hold}"), None));
+                } else {
+                    filters.extend(picture.filters(index, &lead, Some(&hold)));
+                }
             } else {
                 let lead = format!(
                     "{}settb=1/{tick_rate},setpts={timestamps},{hold}",

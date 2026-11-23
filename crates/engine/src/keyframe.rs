@@ -1,16 +1,16 @@
-//! Keyframes: a clip's position, scale, rotation, opacity or volume
-//! changing over the clip. Each property has its own keys, at clip-local
-//! seconds (from the clip's start); the value runs from one key to the next
-//! along the first key's [`Ease`] and holds before the first key and after
-//! the last.
+//! Keyframes: a clip's position, scale, rotation, opacity, colour or
+//! volume changing over the clip. Each property has its own keys, at
+//! clip-local seconds (from the clip's start); the value runs from one key
+//! to the next along the first key's [`Ease`] and holds before the first
+//! key and after the last.
 //! Edits that move a clip's content against its start (a left trim, a
 //! split, a speed change) move the keys with the content.
 
-use crate::{MAX_SCALE, MIN_SCALE};
+use crate::{ColorAdjust, MAX_EXPOSURE, MAX_SCALE, MIN_SCALE};
 
 /// A property keys can change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum Property {
     /// The picture's centre, as [`Transform::x`](crate::Transform) and `y`.
     X,
@@ -20,6 +20,16 @@ pub enum Property {
     Rotation,
     Opacity,
     Volume,
+    /// The [`ColorAdjust`](crate::ColorAdjust) fields of the same names.
+    Brightness,
+    Contrast,
+    Saturation,
+    Exposure,
+    Temperature,
+    Tint,
+    /// [`ColorAdjust::strength`](crate::ColorAdjust): how much of the
+    /// filter applies.
+    FilterStrength,
 }
 
 /// The most keys one property may have.
@@ -30,13 +40,31 @@ pub const KEY_TOLERANCE: f64 = 0.0005;
 pub const MAX_ROTATION: f64 = 3600.0;
 
 impl Property {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 13] = [
         Self::X,
         Self::Y,
         Self::Scale,
         Self::Rotation,
         Self::Opacity,
         Self::Volume,
+        Self::Brightness,
+        Self::Contrast,
+        Self::Saturation,
+        Self::Exposure,
+        Self::Temperature,
+        Self::Tint,
+        Self::FilterStrength,
+    ];
+
+    /// The colour properties, in the Colour card's order.
+    pub const COLOR: [Self; 7] = [
+        Self::FilterStrength,
+        Self::Brightness,
+        Self::Contrast,
+        Self::Saturation,
+        Self::Exposure,
+        Self::Temperature,
+        Self::Tint,
     ];
 
     /// The name scripts and project files use.
@@ -48,30 +76,57 @@ impl Property {
             Self::Rotation => "rotation",
             Self::Opacity => "opacity",
             Self::Volume => "volume",
+            Self::Brightness => "brightness",
+            Self::Contrast => "contrast",
+            Self::Saturation => "saturation",
+            Self::Exposure => "exposure",
+            Self::Temperature => "temperature",
+            Self::Tint => "tint",
+            Self::FilterStrength => "filterStrength",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        let name = name.trim().to_lowercase();
-        Self::ALL.into_iter().find(|p| p.as_str() == name)
+        let name = name.trim();
+        Self::ALL
+            .into_iter()
+            .find(|p| p.as_str().eq_ignore_ascii_case(name))
     }
 
     /// Whether a clip's picture moves or fades with this property.
     pub fn is_picture(self) -> bool {
-        self != Self::Volume
+        matches!(
+            self,
+            Self::X | Self::Y | Self::Scale | Self::Rotation | Self::Opacity
+        )
+    }
+
+    /// Whether this is one of the picture's colour adjustments.
+    pub fn is_color(self) -> bool {
+        Self::COLOR.contains(&self)
     }
 
     /// Whether `value` is one this property can take, as the renderers and
     /// [`Transform::is_valid`](crate::Transform::is_valid) accept it.
     pub fn accepts(self, value: f64) -> bool {
-        value.is_finite()
-            && match self {
-                Self::X | Self::Y => value.abs() <= 10.0,
-                Self::Scale => (MIN_SCALE..=MAX_SCALE).contains(&value),
-                Self::Rotation => value.abs() <= MAX_ROTATION,
-                Self::Opacity => (0.0..=1.0).contains(&value),
-                Self::Volume => (0.0..=2.0).contains(&value),
-            }
+        value.is_finite() && self.range().contains(&value)
+    }
+
+    /// The values this property takes.
+    pub fn range(self) -> std::ops::RangeInclusive<f64> {
+        match self {
+            Self::X | Self::Y => -10.0..=10.0,
+            Self::Scale => MIN_SCALE..=MAX_SCALE,
+            Self::Rotation => -MAX_ROTATION..=MAX_ROTATION,
+            Self::Opacity | Self::FilterStrength => 0.0..=1.0,
+            Self::Volume => 0.0..=2.0,
+            Self::Exposure => -MAX_EXPOSURE..=MAX_EXPOSURE,
+            Self::Brightness
+            | Self::Contrast
+            | Self::Saturation
+            | Self::Temperature
+            | Self::Tint => -1.0..=1.0,
+        }
     }
 }
 
@@ -194,6 +249,20 @@ pub struct Keyframes {
     pub opacity: Vec<Key>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub volume: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub brightness: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contrast: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub saturation: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exposure: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub temperature: Vec<Key>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tint: Vec<Key>,
+    #[serde(rename = "filterStrength", skip_serializing_if = "Vec::is_empty")]
+    pub filter_strength: Vec<Key>,
 }
 
 impl Keyframes {
@@ -228,6 +297,13 @@ impl Keyframes {
             Property::Rotation => &self.rotation,
             Property::Opacity => &self.opacity,
             Property::Volume => &self.volume,
+            Property::Brightness => &self.brightness,
+            Property::Contrast => &self.contrast,
+            Property::Saturation => &self.saturation,
+            Property::Exposure => &self.exposure,
+            Property::Temperature => &self.temperature,
+            Property::Tint => &self.tint,
+            Property::FilterStrength => &self.filter_strength,
         }
     }
 
@@ -239,7 +315,30 @@ impl Keyframes {
             Property::Rotation => &mut self.rotation,
             Property::Opacity => &mut self.opacity,
             Property::Volume => &mut self.volume,
+            Property::Brightness => &mut self.brightness,
+            Property::Contrast => &mut self.contrast,
+            Property::Saturation => &mut self.saturation,
+            Property::Exposure => &mut self.exposure,
+            Property::Temperature => &mut self.temperature,
+            Property::Tint => &mut self.tint,
+            Property::FilterStrength => &mut self.filter_strength,
         }
+    }
+
+    /// Whether any colour adjustment has keys.
+    pub fn grades(&self) -> bool {
+        Property::COLOR.iter().any(|&p| !self.keys(p).is_empty())
+    }
+
+    /// `plain` with each keyed colour adjustment's value at clip-local `at`.
+    pub fn color(&self, plain: ColorAdjust, at: f64) -> ColorAdjust {
+        let mut c = plain;
+        for p in Property::COLOR {
+            if let (Some(value), Some(field)) = (self.value(p, at), c.field_mut(p)) {
+                *field = value;
+            }
+        }
+        c
     }
 
     /// The value at clip-local `at`, or `None` when the property has no keys.

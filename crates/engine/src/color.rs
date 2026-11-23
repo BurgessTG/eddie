@@ -149,6 +149,26 @@ const WHITE_BALANCE: f64 = 0.2;
 
 impl ColorAdjust {
     /// Whether this changes no pixel.
+    /// The value of the adjustment `property` names, for a colour property.
+    pub fn value(mut self, property: crate::Property) -> Option<f64> {
+        self.field_mut(property).map(|value| *value)
+    }
+
+    /// The adjustment `property` names, for a colour property.
+    pub fn field_mut(&mut self, property: crate::Property) -> Option<&mut f64> {
+        use crate::Property as P;
+        Some(match property {
+            P::Brightness => &mut self.brightness,
+            P::Contrast => &mut self.contrast,
+            P::Saturation => &mut self.saturation,
+            P::Exposure => &mut self.exposure,
+            P::Temperature => &mut self.temperature,
+            P::Tint => &mut self.tint,
+            P::FilterStrength => &mut self.strength,
+            _ => return None,
+        })
+    }
+
     pub fn is_identity(&self) -> bool {
         self.adjustments().iter().all(|&v| v == 0.0)
             && (self.filter == Filter::None || self.strength == 0.0)

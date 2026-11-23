@@ -7,8 +7,8 @@ use openreel_engine::{Clip, ClipId, ClipKind, Ease, Property, KEY_TOLERANCE, MAX
 
 use super::Editor;
 
-/// Whether `clip` can key `property`: a picture's place, size, turn and
-/// opacity on video clips, and volume on anything with sound.
+/// Whether `clip` can key `property`: a picture's place, size, turn,
+/// opacity and colour on video clips, and volume on anything with sound.
 pub fn keyable(clip: &Clip, property: Property) -> bool {
     match property {
         Property::Volume => clip.kind != ClipKind::Title,
@@ -25,6 +25,11 @@ fn set_plain(clip: &mut Clip, property: Property, value: f64) {
         Property::Rotation => clip.transform.rotation = value,
         Property::Opacity => clip.opacity = value as f32,
         Property::Volume => clip.volume = value as f32,
+        color => {
+            if let Some(field) = clip.color.field_mut(color) {
+                *field = value;
+            }
+        }
     }
 }
 
@@ -212,8 +217,10 @@ impl Editor {
                     Property::X | Property::Y => "-10 to 10 canvases",
                     Property::Scale => "0.05 to 20 times the fitted size",
                     Property::Rotation => "-3600 to 3600 degrees",
-                    Property::Opacity => "0 to 1",
+                    Property::Opacity | Property::FilterStrength => "0 to 1",
                     Property::Volume => "gain 0 to 2",
+                    Property::Exposure => "-2 to 2 stops",
+                    _ => "-1 to 1",
                 }
             ));
         }

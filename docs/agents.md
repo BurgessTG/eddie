@@ -216,12 +216,11 @@ return its parts.
   (`photo`) shows its one picture for its whole length, and a freeze
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
   `setText` changed; a `null` field follows the style. `transition` is
-  `{kind, duration}` or `null`. `keyframes` holds `x`, `y`, `scale`,
-  `rotation`, `opacity` and `volume` keys as `[{at, value, ease}]`, `at`
-  in seconds from the clip's start and `ease` left out when linear; a
-  property without keys is left out, and
-  a keyed property's plain value (`opacity`, `transform.scale`, …) is not
-  what plays.
+  `{kind, duration}` or `null`. `keyframes` holds each keyed property's
+  keys (the names `setKeyframe` takes) as `[{at, value, ease}]`, `at` in
+  seconds from the clip's start and `ease` left out when linear; a
+  property without keys is left out, and a keyed property's plain value
+  (`opacity`, `transform.scale`, `color.exposure`, …) is not what plays.
 - **Markers:** `id, time, name, color`, in time order. The user drops
   them while watching, often with a note such as "B-roll here"; read them
   as their requests.
@@ -473,9 +472,12 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     run. Drawings are kept outside the project, and a project opened on
     another computer draws them again.
 - **Keyframes:** `setKeyframe(id, property, at, value, ease?)` animates a
-  clip. `property` is `x`, `y`, `scale`, `rotation` or `opacity` on
-  video, or `volume` on video or audio, in the units of `setTransform`,
-  `setOpacity` and `setVolume`. `at` is a timeline time on the clip.
+  clip. `property` is `x`, `y`, `scale`, `rotation`, `opacity`,
+  `brightness`, `contrast`, `saturation`, `exposure`, `temperature`,
+  `tint` or `filterStrength` (the filter's `strength`) on video, or
+  `volume` on video or audio, in the units of `setTransform`,
+  `setOpacity`, `setColor` and `setVolume`. `at` is a timeline time on
+  the clip.
   - The value runs from each key to the next along that key's `ease`, and
     holds before the first key and after the last. `linear` (a new key's)
     changes at one speed; `ease-in` starts slowly, `ease-out` slows into
@@ -488,8 +490,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - `removeKeyframe(id, property, at)` takes one key away.
     `clearKeyframes(id, property?)` takes away a property's keys, or
     every property's, keeping the value at the clip's start.
-  - `setOpacity`, `setVolume` and `setTransform` set one value for the
-    whole clip and remove the keys of each property they set.
+  - `setOpacity`, `setVolume`, `setTransform` and `setColor` set one
+    value for the whole clip and remove the keys of each property they
+    set (`strength` for `filterStrength`). The filter itself has no keys.
   - A picture that moves or fades by key never hides the lanes under it.
     A sheet shows each picture where its keys put it at the cell's time.
 - **Colour:** `setColor(id, {...})` grades a video clip. It changes only

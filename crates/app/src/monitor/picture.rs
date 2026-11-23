@@ -39,14 +39,15 @@ pub struct Look {
     pub blur: bool,
 }
 
-/// The look of the video clip at the playhead, for [`Picture::want`].
-pub fn look(clip: Option<&Clip>) -> Look {
+/// The look of the video clip at the playhead, at timeline `time`, for
+/// [`Picture::want`].
+pub fn look(clip: Option<&Clip>, time: f64) -> Look {
     clip.map_or_else(Look::default, |clip| {
         let t = clip.transform;
         Look {
             flips: (t.flip_h, t.flip_v),
             chroma: clip.chroma,
-            color: clip.color,
+            color: clip.color_at(time),
             mask: clip.mask,
             crop: [t.crop_left, t.crop_top, t.crop_right, t.crop_bottom],
             blur: clip.background == Background::Blur,

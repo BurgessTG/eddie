@@ -706,6 +706,12 @@ fn every_control_has_a_tooltip() {
                 "details-key-scale",
                 "details-key-position",
                 "details-key-rotation",
+                "details-key-brightness",
+                "details-key-contrast",
+                "details-key-saturation",
+                "details-key-exposure",
+                "details-key-temperature",
+                "details-key-tint",
                 "details-previous-key",
                 "details-next-key",
                 "details-ease",
@@ -1144,4 +1150,24 @@ fn key_buttons_and_fields_animate_a_clip_from_the_playhead() {
     reveal(&mut rt, "details-ease");
     click(&mut rt, "details-ease");
     assert_eq!(rt.state.details.select, None, "an inert list stays shut");
+    // The Colour card's adjustments key the same way.
+    reveal(&mut rt, "details-key-exposure");
+    click(&mut rt, "details-key-exposure");
+    rt.state.editor.playhead = 5.0;
+    rt.frame(FRAME);
+    reveal(&mut rt, "details-exposure");
+    click(&mut rt, "details-exposure");
+    rt.paste("2");
+    rt.frame(FRAME);
+    press(&mut rt, Key::Enter);
+    let keys = &clip(&rt, id).keyframes.exposure;
+    assert_eq!((keys.len(), keys[1].at, keys[1].value), (2, 3.0, 2.0));
+    assert_eq!(clip(&rt, id).color.exposure, 0.0);
+    rt.state.editor.playhead = 4.0;
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    assert_eq!(typed(&rt, Field::Exposure), "1.0 EV");
+    reveal(&mut rt, "details-color-reset");
+    click(&mut rt, "details-color-reset");
+    assert!(clip(&rt, id).keyframes.exposure.is_empty());
 }

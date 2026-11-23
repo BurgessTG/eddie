@@ -234,8 +234,24 @@ impl Editor {
             }
             ScriptCommand::SetColor { clip, changes } => {
                 let color = changed_color(self.video_clip(clip, "setColor")?.color, &changes)?;
+                // A field it sets is one value for the whole clip again.
+                let fields = match serde_json::from_str(&changes) {
+                    Ok(serde_json::Value::Object(fields)) => Some(fields),
+                    _ => None,
+                };
+                let set = Property::COLOR.into_iter().filter(|p| {
+                    let name = match p {
+                        Property::FilterStrength => "strength",
+                        p => p.as_str(),
+                    };
+                    fields.as_ref().is_none_or(|f| f.contains_key(name))
+                });
+                let set: Vec<Property> = set.collect();
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.color = color;
+                    for property in set {
+                        target.keyframes.clear(property);
+                    }
                 }
             }
             ScriptCommand::SetBackground { clip, name } => {

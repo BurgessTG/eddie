@@ -1243,3 +1243,55 @@ fn keyframes_animate_by_script_and_by_the_details_fields() {
     assert_eq!((clip.opacity, clip.transform.scale), (0.6, 0.5));
     assert_eq!(clip.keyframes.volume.len(), 1);
 }
+
+/// Colour adjustments take keys like a picture's place: by script, by the
+/// Colour card's fields at the playhead once keyed, and a freeze frame holds
+/// the grade at its point. `setColor` makes a field one value again.
+#[test]
+fn colour_keys_grade_by_script_and_by_the_colour_card() {
+    let mut app = Editor::headless();
+    app.assets.push(asset("a.mp4", 20.0, true));
+    run(&mut app, "addAssetRange('a.mp4', 2, 0, 4);").unwrap();
+    let id = app.timeline.clips[0].id;
+    run(
+        &mut app,
+        &format!(
+            "setKeyframe({id}, 'exposure', 2, 0); setKeyframe({id}, 'exposure', 6, 2); \
+             setKeyframe({id}, 'filterStrength', 3, 0.5)"
+        ),
+    )
+    .unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.color_at(4.0).exposure, 1.0);
+    assert_eq!(clip.color_at(5.0).strength, 0.5);
+    let read = run(&mut app, "return clips()[0].keyframes.filterStrength").unwrap();
+    assert_eq!(read, r#"[{"at":1,"value":0.5}]"#);
+    let error = run(&mut app, &format!("setKeyframe({id}, 'exposure', 3, 2.5)")).unwrap_err();
+    assert!(error.contains("-2 to 2 stops"), "{error}");
+
+    // A keyed field edited at the playhead keys it there; an unkeyed one is
+    // the clip's one value, and leaves the keyed ones as they were.
+    app.seek(4.0);
+    app.edit_clip_color(id, |c| {
+        c.exposure = 1.5;
+        c.contrast = 0.3;
+    });
+    app.seek(5.0);
+    app.edit_clip_color(id, |c| c.contrast = 0.4);
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.exposure.len(), 3);
+    assert_eq!(clip.color_at(5.0).exposure, 1.75);
+    assert_eq!((clip.color.exposure, clip.color.contrast), (0.0, 0.4));
+    assert!(clip.keyframes.contrast.is_empty());
+
+    run(&mut app, &format!("freezeFrame({id}, 5)")).unwrap();
+    let freeze = app.timeline.clips.iter().find(|clip| clip.freeze).unwrap();
+    assert_eq!(freeze.color.exposure, 1.75, "{freeze:?}");
+    assert!(freeze.keyframes.is_empty());
+
+    run(&mut app, &format!("setColor({id}, {{exposure: 0.5}})")).unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert!(clip.keyframes.exposure.is_empty());
+    assert_eq!(clip.color_at(4.0).exposure, 0.5);
+    assert_eq!(clip.keyframes.filter_strength.len(), 1);
+}

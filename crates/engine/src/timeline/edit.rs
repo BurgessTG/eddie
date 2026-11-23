@@ -387,8 +387,10 @@ impl Timeline {
             at = clip.start;
         }
         let picture = clip.source_at(at);
-        // The held picture keeps the place and opacity it had there, still.
+        // The held picture keeps the place, opacity and grade it had there,
+        // still.
         let (transform, opacity) = (clip.transform_at(at), clip.opacity_at(at));
+        let color = clip.color_at(at);
         let seconds = self.snap(seconds).max(frame);
         self.push_later(at, seconds);
         let freeze = self.next_id;
@@ -411,6 +413,7 @@ impl Timeline {
             transition: None,
             transform,
             opacity,
+            color,
             keyframes: crate::Keyframes::default(),
             ..clip
         });
