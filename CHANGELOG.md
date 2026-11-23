@@ -158,6 +158,9 @@
 - Projects saved as Landscape or Portrait now render at exactly 16:9 or
   9:16. They took the shape of their largest video of that orientation
   before.
+- Dragging a Shape slider redraws the shape on the monitor at once: the
+  monitor shows a drawing of its own size while the pointer is held, and
+  the full drawing is made when it is let go.
 
 ### Fixed
 

@@ -138,13 +138,13 @@ struct Drawing {
 }
 
 impl Drawing {
-    /// `svg` sized so its long side is `long` pixels (both sides even, at
-    /// least 2).
-    fn new(svg: &str, long: u32) -> MediaResult<Self> {
+    /// `svg` sized so its long side is `long(width, height)` pixels, given
+    /// the drawing's own width and height (both sides even, at least 2).
+    fn new(svg: &str, long: impl FnOnce(f32, f32) -> u32) -> MediaResult<Self> {
         let tree = usvg::Tree::from_str(svg, &usvg::Options::default())
             .map_err(|error| format!("drawing a graphic: {error}"))?;
         let size = tree.size();
-        let scale = long as f32 / size.width().max(size.height());
+        let scale = long(size.width(), size.height()) as f32 / size.width().max(size.height());
         let even = |side: f32| (((side * scale) / 2.0).round() as u32 * 2).max(2);
         Ok(Self {
             width: even(size.width()),
@@ -191,7 +191,7 @@ fn demultiply(rgba: &mut [u8]) {
 /// A graphic drawn `long` pixels on its long side, as straight
 /// (not premultiplied) RGBA, for tiles and filmstrips.
 pub fn draw_graphic(graphic: &Graphic, long: u32) -> MediaResult<RawFrame> {
-    Drawing::new(&svg(graphic)?, long)?.rgba()
+    Drawing::new(&svg(graphic)?, |_, _| long)?.rgba()
 }
 
 /// `frame` as a PNG, compressed fast: graphics are mostly flat colour,
@@ -226,8 +226,33 @@ const FILE_VERSION: u64 = 1;
 /// file is used as it is. The file is written beside its final name and
 /// renamed in, so a reader never sees half of it.
 pub fn write_graphic(graphic: &Graphic, folder: &Path) -> MediaResult<GraphicFile> {
+    write(graphic, folder, |_, _| GRAPHIC_SIDE)
+}
+
+/// [`write_graphic`] drawn only `width` pixels wide (never larger than the
+/// full drawing), for the monitor while a slider moves: a 2160-pixel PNG
+/// took the monitor 155 ms to open and scale, one 960 wide 18 ms.
+pub fn write_graphic_draft(
+    graphic: &Graphic,
+    folder: &Path,
+    width: u32,
+) -> MediaResult<GraphicFile> {
+    write(graphic, folder, |w, h| {
+        ((width as f32 * w.max(h) / w).ceil() as u32).min(GRAPHIC_SIDE)
+    })
+}
+
+fn write(
+    graphic: &Graphic,
+    folder: &Path,
+    long: impl FnOnce(f32, f32) -> u32,
+) -> MediaResult<GraphicFile> {
     let svg = svg(graphic)?;
-    let drawing = Drawing::new(&svg, GRAPHIC_SIDE)?;
+    let mut side = 0;
+    let drawing = Drawing::new(&svg, |w, h| {
+        side = long(w, h);
+        side
+    })?;
     let slug = match graphic {
         Graphic::Shape(shape) => shape.kind.as_str(),
         Graphic::Sticker { name } => name.as_str(),
@@ -236,7 +261,7 @@ pub fn write_graphic(graphic: &Graphic, folder: &Path) -> MediaResult<GraphicFil
         [
             FILE_VERSION.to_le_bytes().as_slice(),
             svg.as_bytes(),
-            &GRAPHIC_SIDE.to_le_bytes(),
+            &side.to_le_bytes(),
         ]
         .concat()
         .as_slice(),

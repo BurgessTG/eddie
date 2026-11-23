@@ -254,6 +254,9 @@ pub struct Editor {
     /// Drawings made so far and the time they took, which a script's edit
     /// keeps out of its time budget (`graphics::MAX_NEW_GRAPHICS`).
     drawing: (usize, Duration),
+    /// Monitor-sized drawings a Shape slider made while the pointer was
+    /// held, replaced by full ones when it comes up (`graphics`).
+    graphic_drafts: Vec<String>,
     /// The user's installed whisper models; `None` keeps tests off them.
     pub model_dir: Option<PathBuf>,
     /// Imports decode filmstrip thumbnails; the command line has no bin.
@@ -420,6 +423,7 @@ impl Editor {
             remade_dir: None,
             remakes: Default::default(),
             drawing: (0, Duration::ZERO),
+            graphic_drafts: Vec::new(),
             model_dir: None,
             make_thumbnails: true,
             project_path: None,
@@ -643,6 +647,10 @@ impl Editor {
     /// or a text field is still changing it.
     pub fn end_frame(&mut self, pointer_down: bool, typing: bool) {
         self.pointer_held = pointer_down;
+        if !pointer_down && !self.graphic_drafts.is_empty() {
+            // Before the history sees the edit, so its step has the files.
+            self.finish_graphic_drafts();
+        }
         self.poll_loudness(pointer_down);
         let now = self.last_now.unwrap_or(0.0);
         if self

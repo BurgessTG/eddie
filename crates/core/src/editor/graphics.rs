@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use openreel_engine::{format_timecode, ClipId, ClipKind, Graphic, Shape};
-use openreel_media::{draw_graphic, graphic_label, write_graphic};
+use openreel_media::{draw_graphic, graphic_label, write_graphic, write_graphic_draft};
 
 use super::media::{AssetState, BinAsset, PHOTO_SECONDS};
 use super::sweep::SweepData;
-use super::Editor;
+use super::{Editor, PREVIEW_W};
 
 /// A new graphic's size against the canvas it fits: a third of it.
 pub const GRAPHIC_SCALE: f64 = 0.35;
@@ -72,15 +72,25 @@ impl Editor {
     }
 
     /// The file `graphic` is drawn in, drawn now if it is not there yet,
-    /// and known to `Editor::asset` from then on.
-    fn graphic_file(&mut self, graphic: &Graphic) -> Result<String, String> {
+    /// and known to `Editor::asset` from then on. A draft is drawn only as
+    /// wide as the monitor's picture and replaced when the pointer comes
+    /// up (`finish_graphic_drafts`).
+    fn graphic_file(&mut self, graphic: &Graphic, draft: bool) -> Result<String, String> {
         let started = Instant::now();
-        let file = write_graphic(graphic, &self.graphics_folder())?;
+        let folder = self.graphics_folder();
+        let file = if draft {
+            write_graphic_draft(graphic, &folder, PREVIEW_W)?
+        } else {
+            write_graphic(graphic, &folder)?
+        };
         if file.drawn {
             self.drawing.0 += 1;
             self.drawing.1 += started.elapsed();
         }
         let path = file.info.path.clone();
+        if draft && !self.graphic_drafts.contains(&path) {
+            self.graphic_drafts.push(path.clone());
+        }
         if !self.made.iter().any(|known| known.info.path == path) {
             let thumbs = if self.make_thumbnails {
                 vec![(0.0, draw_graphic(graphic, THUMB_SIDE)?)]
@@ -113,7 +123,7 @@ impl Editor {
         if !at.is_finite() || at < 0.0 || !duration.is_finite() || duration <= 0.0 {
             return Err("a graphic needs a time from 0 on and a positive length".to_owned());
         }
-        let path = self.graphic_file(&graphic)?;
+        let path = self.graphic_file(&graphic, false)?;
         let name = graphic_label(&graphic);
         let video_row =
             row.filter(|&row| matches!(self.timeline.lane_at_row(row), Some((ClipKind::Video, _))));
@@ -134,6 +144,11 @@ impl Editor {
     /// Draw clip `id` as `graphic` instead. A clip still called what it
     /// drew takes the new drawing's name.
     pub fn set_graphic(&mut self, id: ClipId, graphic: Graphic) -> Result<(), String> {
+        self.redraw_clip(id, graphic, false)
+    }
+
+    /// `set_graphic`, drawn as a draft when `draft`.
+    fn redraw_clip(&mut self, id: ClipId, graphic: Graphic, draft: bool) -> Result<(), String> {
         let old = match self.timeline.clip(id) {
             Some(clip) => clip.graphic.clone(),
             None => return Err(format!("no clip {id}")),
@@ -141,7 +156,7 @@ impl Editor {
         let Some(old) = old else {
             return Err(format!("clip {id} is not a shape or sticker"));
         };
-        let path = self.graphic_file(&graphic)?;
+        let path = self.graphic_file(&graphic, draft)?;
         let (old_name, name) = (graphic_label(&old), graphic_label(&graphic));
         if let Some(clip) = self.timeline.clip_mut(id) {
             clip.source = Some(path);
@@ -155,6 +170,7 @@ impl Editor {
 
     /// The Shape card: change a shape clip's shape, each number moved into
     /// its range. A shape left with neither fill nor outline is refused.
+    /// While the pointer is held (a slider moving) it is drawn as a draft.
     pub fn edit_clip_shape(&mut self, id: ClipId, edit: impl FnOnce(&mut Shape)) {
         let Some(Some(Graphic::Shape(current))) =
             self.timeline.clip(id).map(|clip| clip.graphic.clone())
@@ -171,8 +187,26 @@ impl Editor {
             self.status = "A shape needs a fill or an outline.".to_owned();
             return;
         }
-        if let Err(error) = self.set_graphic(id, Graphic::Shape(shape)) {
+        if let Err(error) = self.redraw_clip(id, Graphic::Shape(shape), self.pointer_held) {
             self.status = error;
+        }
+    }
+
+    /// The pointer is up: draw every clip shown from a draft in full and
+    /// delete the drafts no clip shows any more.
+    pub(crate) fn finish_graphic_drafts(&mut self) {
+        let drafts = std::mem::take(&mut self.graphic_drafts);
+        self.redraw_graphics(|source| drafts.iter().any(|draft| draft == source));
+        for draft in drafts {
+            let shown = self
+                .timeline
+                .clips
+                .iter()
+                .any(|clip| clip.source.as_deref() == Some(&draft));
+            if !shown {
+                let _ = std::fs::remove_file(&draft);
+                self.made.retain(|asset| asset.info.path != draft);
+            }
         }
     }
 
@@ -180,15 +214,22 @@ impl Editor {
     /// file is gone or the project came from another computer. A graphic
     /// this version cannot draw keeps its path and shows as missing.
     pub(crate) fn restore_graphics(&mut self) {
+        self.redraw_graphics(|_| true);
+    }
+
+    /// Point each graphic clip whose source `redraw` picks at its full
+    /// drawing.
+    fn redraw_graphics(&mut self, redraw: impl Fn(&str) -> bool) {
         let wanted: Vec<(usize, Graphic)> = self
             .timeline
             .clips
             .iter()
             .enumerate()
+            .filter(|(_, clip)| redraw(clip.source.as_deref().unwrap_or_default()))
             .filter_map(|(index, clip)| Some((index, clip.graphic.clone()?)))
             .collect();
         for (index, graphic) in wanted {
-            if let Ok(path) = self.graphic_file(&graphic) {
+            if let Ok(path) = self.graphic_file(&graphic, false) {
                 self.timeline.clips[index].source = Some(path);
             }
         }

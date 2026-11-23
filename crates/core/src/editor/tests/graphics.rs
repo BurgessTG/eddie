@@ -164,3 +164,52 @@ fn a_saved_graphic_is_drawn_again_where_its_file_is_gone() {
     assert!(!reopened.has_unsaved_changes());
     let _ = std::fs::remove_dir_all(base);
 }
+
+#[test]
+fn a_shape_slider_shows_drafts_while_held_and_draws_in_full_when_let_go() {
+    let dir = std::env::temp_dir().join(format!("eddie-graphics-drag-{}", std::process::id()));
+    let mut app = editor_with_video(&dir);
+    run(&mut app, "addShape({kind: 'star', fill: '#FF3B30'}, 0);").unwrap();
+    app.end_frame(false, false);
+    let id = graphic_clips(&app)[0].id;
+    let source = |app: &Editor| app.timeline.clip(id).unwrap().source.clone().unwrap();
+    let size = |app: &Editor, path: &str| {
+        let info = &app.asset(path).unwrap().info;
+        (info.width, info.height)
+    };
+    let pngs = || std::fs::read_dir(&dir).unwrap().count();
+    let before = source(&app);
+    assert_eq!(pngs(), 1);
+
+    // A slider is dragged: the pointer went down in an earlier frame.
+    app.end_frame(true, false);
+    let mut drafts = Vec::new();
+    for ratio in [1.5, 0.5, 1.2] {
+        app.edit_clip_shape(id, |shape| shape.ratio = ratio);
+        let draft = source(&app);
+        // As wide as the monitor's picture, so a tall shape keeps its
+        // detail there: 960 by 1920 at half as wide as tall.
+        let (width, height) = size(&app, &draft);
+        assert_eq!(width, PREVIEW_W, "ratio {ratio}");
+        assert_eq!(
+            height,
+            (f64::from(PREVIEW_W) / ratio / 2.0).round() as u32 * 2
+        );
+        assert!(Path::new(&draft).is_file());
+        drafts.push(draft);
+        app.end_frame(true, false);
+    }
+
+    // Let go: one full drawing, the drafts gone, one undo step.
+    app.end_frame(false, false);
+    let after = source(&app);
+    assert!(!drafts.contains(&after) && after != before);
+    assert_eq!(size(&app, &after), (2160, 1800));
+    assert_eq!(pngs(), 2, "only the first and the last drawing are kept");
+    for draft in &drafts {
+        assert!(!Path::new(draft).exists() && app.asset(draft).is_none());
+    }
+    assert!(app.step_history(false));
+    assert_eq!(source(&app), before);
+    let _ = std::fs::remove_dir_all(dir);
+}

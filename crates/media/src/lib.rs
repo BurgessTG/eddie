@@ -54,8 +54,8 @@ pub use export::{
 };
 pub use frame::{scaled_height, RawFrame};
 pub use graphic::{
-    draw_graphic, graphic_label, sticker, write_graphic, GraphicFile, Sticker, GRAPHIC_SIDE,
-    STICKERS,
+    draw_graphic, graphic_label, sticker, write_graphic, write_graphic_draft, GraphicFile, Sticker,
+    GRAPHIC_SIDE, STICKERS,
 };
 pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use microphone::{Microphone, Recorded, Take};
