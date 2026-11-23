@@ -45,7 +45,8 @@
   quality, and the CPU encodes otherwise. A 3-minute 1080p export took
   43 s instead of 63 s. `eddie export` says which `encoder` it used.
 - Photos (PNG, JPEG, WebP and HEIC) as clips. One added whole lasts 3
-  seconds; trim either edge to any length. A phone photo shows upright
+  seconds, or the length set in Settings → Photos; trim either edge to any
+  length. A phone photo shows upright
   from its orientation, an iPhone's HEIC included, and photos take the
   same transform, background and colour as video. `state()` marks photo
   assets and clips `photo`. Import's file list shows `IMG_0001.HEIC` and

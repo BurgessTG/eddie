@@ -461,9 +461,10 @@ impl Editor {
             }
             ScriptCommand::AddAsset { asset, at, handle } => {
                 from_zero("addAsset", "time", at)?;
-                let (path, name, duration) = self
-                    .asset_named(&asset)
-                    .map(|a| (a.info.path.clone(), a.info.name.clone(), a.clip_length()))?;
+                let (path, name, duration) = self.asset_named(&asset).map(|a| {
+                    let length = a.clip_length(self.settings.photo_length);
+                    (a.info.path.clone(), a.info.name.clone(), length)
+                })?;
                 let id =
                     self.try_add_asset_range_to_timeline(&path, &name, None, at, 0.0, duration)?;
                 created.extend(handle.map(|handle| (handle, id)));

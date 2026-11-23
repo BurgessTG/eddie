@@ -4,6 +4,7 @@
 use openreel_engine::Property;
 
 use super::*;
+use crate::editor::media::PhotoLength;
 
 fn asset(path: &str, duration: f64, video: bool) -> BinAsset {
     BinAsset {
@@ -815,7 +816,7 @@ fn speed_keeps_the_source_range_and_refuses_what_it_cannot_play() {
 }
 
 #[test]
-fn a_photo_lasts_three_seconds_and_trims_to_any_length() {
+fn a_photo_lasts_the_set_photo_length_and_trims_to_any_length() {
     let dir = std::env::temp_dir().join(format!("eddie-photo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let photo = dir.join("photo.jpg");
@@ -864,6 +865,22 @@ fn a_photo_lasts_three_seconds_and_trims_to_any_length() {
         (range.duration, range.source_in, range.photo),
         (0.5, 0.0, true)
     );
+    // Settings → Photos sets the whole length, for a script, the
+    // playhead's Add and an overlay alike.
+    app.settings.photo_length = PhotoLength::from_seconds(1.25).unwrap();
+    run(&mut app, "addAsset('photo.jpg', 12)").unwrap();
+    app.playhead = 20.0;
+    let path = photo.to_string_lossy().into_owned();
+    app.add_asset_to_timeline(&path, None, 16.0);
+    app.add_overlay(&path);
+    let lengths: Vec<(f64, f64)> = app.timeline.clips[2..]
+        .iter()
+        .map(|clip| (clip.start, clip.duration))
+        .collect();
+    assert_eq!(lengths, [(12.0, 1.25), (16.0, 1.25), (20.0, 1.25)]);
+    for _ in 0..3 {
+        app.timeline.clips.pop();
+    }
 
     // Either edge goes as far as it likes: no source runs out.
     let id = whole.id;

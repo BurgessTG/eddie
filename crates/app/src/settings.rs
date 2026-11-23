@@ -8,6 +8,7 @@
 mod dialog;
 mod lists;
 
+use eddie_core::editor::media::PhotoLength;
 use eddie_core::editor::sweep::transcribe::{self, TranscribeSettings};
 use rune::{El, TextEdit};
 
@@ -88,6 +89,9 @@ pub struct State {
     /// The fields that had the keyboard at the last poll. One the keyboard
     /// has just left still holds keystrokes the settings have not seen.
     typed: [bool; 5],
+    /// Photo length in seconds, and whether it had the keyboard.
+    photo: TextEdit,
+    photo_typed: bool,
     /// The speech provider list is open.
     pub providers_open: bool,
     /// The project format list is open.
@@ -108,6 +112,8 @@ impl Default for State {
                 }
             }),
             typed: [false; 5],
+            photo: TextEdit::new(""),
+            photo_typed: false,
             providers_open: false,
             formats_open: false,
             models: None,
@@ -118,7 +124,7 @@ impl Default for State {
 impl State {
     /// A field here has the keyboard, so plain keys are text.
     pub fn typing(&self) -> bool {
-        self.edits.iter().any(|edit| edit.focused)
+        self.edits.iter().any(|edit| edit.focused) || self.photo.focused
     }
 }
 
@@ -156,7 +162,7 @@ fn edit(ui: &mut Ui, change: impl FnOnce(&mut eddie_core::editor::settings::Sett
 /// change is applied and saved.
 pub fn sync(ui: &mut Ui) {
     let open = ui.show_settings;
-    let held = ui.settings.typing() || ui.settings.typed.contains(&true);
+    let held = ui.settings.typing() || ui.settings.typed.contains(&true) || ui.settings.photo_typed;
     if !open && !held {
         return;
     }
@@ -178,7 +184,29 @@ pub fn sync(ui: &mut Ui) {
         edit.focused &= open;
         ui.settings.typed[index] = edit.focused;
     }
+    // Each number typed applies; what is not one is dropped once the field
+    // lets go, and it shows the length again.
+    let photo = &mut ui.settings.photo;
+    if photo.focused || ui.settings.photo_typed {
+        if let Some(length) = photo_length(&photo.text) {
+            ui.editor.settings.photo_length = length;
+        }
+    } else {
+        let shown = format!("{}", ui.editor.settings.photo_length.seconds());
+        if photo.text != shown {
+            photo.replace_text(shown);
+        }
+    }
+    photo.focused &= open;
+    ui.settings.photo_typed = photo.focused;
     ui.editor.settings_changed(&before);
+}
+
+/// A typed photo length: seconds, with or without an "s", a comma for
+/// the decimal point taken too.
+fn photo_length(typed: &str) -> Option<PhotoLength> {
+    let typed = typed.trim().trim_end_matches('s').trim().replace(',', ".");
+    PhotoLength::from_seconds(typed.parse().ok()?)
 }
 
 /// The dialog and whichever of its pick lists is open. The editor behind

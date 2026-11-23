@@ -10,6 +10,7 @@ use openreel_media::{
     AudioFormat, ExportKind, ExportSettings, GifSize, Quality, Resolution, FRAME_RATES,
 };
 
+use super::media::PhotoLength;
 use super::sweep::transcribe::{Provider, TranscribeSettings};
 use crate::update::Channel;
 
@@ -40,6 +41,8 @@ pub struct Settings {
     /// The timeline plays aloud while a voiceover records. Off by default,
     /// so speakers are not recorded; turn it on with headphones.
     pub hear_timeline_while_recording: bool,
+    /// How long a photo lasts when it is added whole.
+    pub photo_length: PhotoLength,
     /// The Meta key and endpoint the removed built-in AI saved at the top
     /// level (`api_key`, `base_url`). Kept so Meta transcription without its
     /// own key still works; there is no field for them any more.
@@ -161,6 +164,10 @@ impl Settings {
             hear_timeline_while_recording: value["voiceover"]["hear_timeline"]
                 .as_bool()
                 .unwrap_or(false),
+            photo_length: value["photo_seconds"]
+                .as_f64()
+                .and_then(PhotoLength::from_seconds)
+                .unwrap_or_default(),
             meta_api_key: text("api_key"),
             meta_base_url: text("base_url"),
         }
@@ -187,6 +194,7 @@ impl Settings {
                 "gif": self.export.gif.as_str(),
             },
             "voiceover": {"hear_timeline": self.hear_timeline_while_recording},
+            "photo_seconds": self.photo_length.seconds(),
         });
         if !self.meta_api_key.is_empty() {
             body["api_key"] = self.meta_api_key.clone().into();
@@ -424,6 +432,7 @@ mod tests {
                 assert_eq!(settings.updates, Channel::Releases, "the default");
                 assert!(!settings.hear_timeline_while_recording, "off by default");
                 assert!(!settings.proxies, "off by default");
+                assert_eq!(settings.photo_length.seconds(), 3.0, "the default");
                 let export = ExportSettings {
                     kind: ExportKind::Gif,
                     resolution: Resolution::P2160,
@@ -432,14 +441,23 @@ mod tests {
                     audio: AudioFormat::Flac,
                     gif: GifSize::P640,
                 };
-                for (format, hardware, updates, export, hear) in [
-                    (Format::Landscape, false, Channel::Previews, export, true),
+                let short = PhotoLength::from_seconds(1.25).unwrap();
+                for (format, hardware, updates, export, hear, photo) in [
+                    (
+                        Format::Landscape,
+                        false,
+                        Channel::Previews,
+                        export,
+                        true,
+                        short,
+                    ),
                     (
                         Format::Portrait,
                         true,
                         Channel::Off,
                         ExportSettings::default(),
                         false,
+                        PhotoLength::default(),
                     ),
                 ] {
                     settings.format = format;
@@ -449,6 +467,7 @@ mod tests {
                     settings.hear_timeline_while_recording = hear;
                     settings.updates = updates;
                     settings.export = export;
+                    settings.photo_length = photo;
                     settings.save().unwrap();
                     assert_eq!(Settings::load(), settings, "settings round-trip");
                     let value: serde_json::Value =
@@ -464,6 +483,7 @@ mod tests {
                             "format",
                             "hardware_decode",
                             "hardware_encode",
+                            "photo_seconds",
                             "proxies",
                             "transcription",
                             "updates",

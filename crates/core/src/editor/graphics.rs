@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 use openreel_engine::{format_timecode, ClipId, ClipKind, Graphic, Shape};
 use openreel_media::{draw_graphic, graphic_label, write_graphic, write_graphic_draft};
 
-use super::media::{AssetState, BinAsset, PHOTO_SECONDS};
+use super::media::{AssetState, BinAsset};
 use super::sweep::SweepData;
 use super::{Editor, PREVIEW_W};
 
 /// A new graphic's size against the canvas it fits: a third of it.
 pub const GRAPHIC_SCALE: f64 = 0.35;
-/// How long a new graphic lasts, as a photo does.
-pub const GRAPHIC_SECONDS: f64 = PHOTO_SECONDS;
+/// How long a new graphic lasts: 3 s, CapCut's length for a new photo.
+pub const GRAPHIC_SECONDS: f64 = 3.0;
 /// The long side of a graphic's filmstrip picture, in pixels.
 const THUMB_SIDE: u32 = 160;
 /// The most new drawings one script edit may make. Drawing does not count

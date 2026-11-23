@@ -300,8 +300,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   sourceIn, dur)`. A new clip lands on the first lane of its kind that is
   free for its whole span. Read its lane as `track` in the next `state()`,
   or set it with `setClipLane`.
-  - A photo added with `addAsset` lasts 3 seconds. `addAssetRange` places
-    it for `dur` and ignores `sourceIn`.
+  - A photo added with `addAsset` lasts the user's Photos setting, 3
+    seconds unless they changed it. `addAssetRange` places it for `dur`
+    and ignores `sourceIn`.
   - A name that two assets share is an error; pass the asset's `path`.
 - **Move and trim:** `moveClip(id, start)`, `setClipLane(id, lane)`,
   `insertTime(at, seconds)`, `closeGaps()`, `trimClip(id, left, right)`.

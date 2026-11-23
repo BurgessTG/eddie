@@ -108,6 +108,7 @@ fn rows(ui: &Ui) -> El {
         "A short, comma-separated list of names and terms, such as Eddie, Bothell. Local and OpenAI-compatible providers use it; it can also make other words worse.",
     ))
     .child(setting("Format", format(ui)))
+    .child(setting("Photos", photo_length(ui)))
     .child(setting("Updates", updates(settings)))
 }
 
@@ -222,6 +223,35 @@ fn format(ui: &Ui) -> El {
     )
     .w(CONTROL_W)
     .on_press(|ui: &mut Ui| ui.settings.formats_open = !ui.settings.formats_open)
+}
+
+/// How long a photo lasts when added whole, typed in seconds.
+fn photo_length(ui: &Ui) -> El {
+    let c = c();
+    let input = rune::text_input(&ui.settings.photo, theme::BODY)
+        .selection_color(theme::selection())
+        .key("settings-photo-length")
+        .single_line()
+        .w(72.0)
+        .h(FIELD_H)
+        .px(8.0)
+        .py(6.0)
+        .radius(theme::R_MD)
+        .fill(c.input)
+        .color(c.foreground)
+        .focus_within_ring(1.0, -1.0, c.brand)
+        .label("Photo length")
+        .help(
+            "How long a photo lasts when it is added whole, 0.1 to 600 seconds. Trim it to any length on the timeline."
+                .to_owned(),
+        )
+        .on_edit(rune::edit_access(|ui: &mut Ui| &mut ui.settings.photo));
+    row().gap(8.0).center_y().child(input).child(
+        text("seconds")
+            .font(theme::BODY)
+            .color(c.muted_fg)
+            .single_line(),
+    )
 }
 
 fn updates(settings: &Settings) -> El {

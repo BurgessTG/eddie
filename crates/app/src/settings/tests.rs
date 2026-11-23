@@ -256,6 +256,42 @@ fn a_long_model_list_scrolls_inside_the_window() {
     );
 }
 
+/// Select what the focused field holds and type `text` over it.
+fn retype(rt: &mut Runtime<Ui>, text: &str) {
+    let cmd = Mods {
+        cmd: true,
+        ..Mods::default()
+    };
+    chord(rt, Key::Command('a'), cmd);
+    rt.paste(text);
+    frames(rt, 2);
+}
+
+#[test]
+fn a_typed_photo_length_applies_and_anything_else_is_dropped() {
+    isolated_config(
+        "settings::tests::a_typed_photo_length_applies_and_anything_else_is_dropped",
+        |_| {
+            let mut rt = settings();
+            assert_eq!(rt.state.settings.photo.text, "3", "the default shows");
+            click(&mut rt, "settings-photo-length");
+            assert!(rt.state.typing(), "plain keys are text in the field");
+            retype(&mut rt, "1,5 s");
+            assert_eq!(rt.state.editor.settings.photo_length.seconds(), 1.5);
+            assert_eq!(Settings::load().photo_length.seconds(), 1.5, "saved");
+
+            // Out of range is not a length; the field shows 1.5 again once
+            // it lets go.
+            retype(&mut rt, "900");
+            click(&mut rt, "settings-done");
+            assert!(!rt.state.typing());
+            assert_eq!(rt.state.editor.settings.photo_length.seconds(), 1.5);
+            open(&mut rt);
+            assert_eq!(rt.state.settings.photo.text, "1.5");
+        },
+    );
+}
+
 #[test]
 fn every_setting_explains_itself() {
     isolated_config("settings::tests::every_setting_explains_itself", |path| {
@@ -277,6 +313,7 @@ fn every_setting_explains_itself() {
             "settings-language",
             "settings-vocabulary",
             "settings-format",
+            "settings-photo-length",
             "settings-done",
         ] {
             assert!(

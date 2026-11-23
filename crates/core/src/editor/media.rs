@@ -32,15 +32,41 @@ pub struct BinAsset {
     pub sweep: SweepData,
 }
 
-/// How long a photo lasts when it is added whole, as in CapCut.
-pub const PHOTO_SECONDS: f64 = 3.0;
+/// How long a photo lasts when it is added whole: Settings → Photos, as
+/// CapCut desktop's Settings → Edit → Image duration. Held in
+/// hundredths of a second, so settings compare exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhotoLength(u32);
+
+impl Default for PhotoLength {
+    /// 3 s, CapCut's default.
+    fn default() -> Self {
+        Self(300)
+    }
+}
+
+impl PhotoLength {
+    /// The lengths the setting takes, in seconds.
+    pub const RANGE: std::ops::RangeInclusive<f64> = 0.1..=600.0;
+
+    pub fn seconds(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+
+    /// `seconds` to the nearest hundredth, or `None` outside [`Self::RANGE`].
+    pub fn from_seconds(seconds: f64) -> Option<Self> {
+        Self::RANGE
+            .contains(&seconds)
+            .then(|| Self((seconds * 100.0).round() as u32))
+    }
+}
 
 impl BinAsset {
-    /// What adding the whole file places: its length, or
-    /// [`PHOTO_SECONDS`] of a photo.
-    pub fn clip_length(&self) -> f64 {
+    /// What adding the whole file places: its length, or `photo` for a
+    /// photo.
+    pub fn clip_length(&self, photo: PhotoLength) -> f64 {
         if self.info.photo {
-            PHOTO_SECONDS
+            photo.seconds()
         } else {
             self.info.duration
         }
@@ -375,7 +401,10 @@ impl Editor {
         let Some(asset) = self.asset(path) else {
             return;
         };
-        let (name, duration) = (asset.info.name.clone(), asset.clip_length());
+        let (name, duration) = (
+            asset.info.name.clone(),
+            asset.clip_length(self.settings.photo_length),
+        );
         self.add_asset_range_to_timeline(path, &name, row, at, 0.0, duration);
     }
 
@@ -393,7 +422,10 @@ impl Editor {
             self.status = format!("{} has no picture to overlay", asset.info.name);
             return;
         }
-        let (name, duration) = (asset.info.name.clone(), asset.clip_length());
+        let (name, duration) = (
+            asset.info.name.clone(),
+            asset.clip_length(self.settings.photo_length),
+        );
         let at = self.playhead;
         let track = self.timeline.overlay_lane(at, at + duration);
         let row = self.timeline.row(ClipKind::Video, track);

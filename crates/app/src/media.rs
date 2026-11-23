@@ -275,7 +275,7 @@ pub fn overlays(ui: &Ui, overlays: &mut Vec<El>) {
                     } else {
                         ClipKind::Audio
                     };
-                    (kind, asset.clip_length())
+                    (kind, asset.clip_length(ui.editor.settings.photo_length))
                 }
             };
             let track = timeline.drop_lane(kind, row, at, at + length)?;
