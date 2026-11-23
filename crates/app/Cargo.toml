@@ -26,6 +26,8 @@ rune = { git = "https://github.com/BurgessTG/rune", rev = "00f6c53f38b5880fa0ba0
 rune-kit = { git = "https://github.com/BurgessTG/rune", rev = "00f6c53f38b5880fa0ba0ae3bf58f05cc25fc6a3" }
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 serde_json = "1"
+# The version Rune draws with, to name the features `rune::warm_gpu` takes.
+wgpu = { version = "30", default-features = false }
 
 # To receive files opened from Finder (`src/finder.rs`). The versions Rune
 # and winit already build.

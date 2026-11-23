@@ -429,7 +429,7 @@ impl Ui {
 }
 
 /// Rune is rendering to a file or a script, not opening a window.
-fn headless_run() -> bool {
+pub fn headless_run() -> bool {
     const FLAGS: [&str; 7] = [
         "--snap",
         "--frames",

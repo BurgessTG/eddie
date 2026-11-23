@@ -43,6 +43,11 @@ fn main() {
         .filter(|arg| !arg.starts_with('-'))
         .map(PathBuf::from)
         .collect();
+    if !app::headless_run() {
+        // Linux and Windows: the GPU device, made on a thread while the
+        // window and the editor start (macOS does this in Rune's run).
+        rune::warm_gpu(wgpu::Features::empty());
+    }
     // Matches eddie.desktop, so docks and launchers show the icon.
     rune::set_app_id("eddie");
     let spec = AppSpec {

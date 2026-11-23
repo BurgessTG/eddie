@@ -176,6 +176,8 @@
 - Photos, shapes and stickers import in less than half the time and open
   on the monitor faster: FFmpeg decoded a PNG or WebP twice each time it
   was opened, and a photo's thumbnail decoded a JPEG twice.
+- The window opens about 40 ms sooner on Linux: the GPU starts up while
+  the window and the editor do, not after them.
 
 ### Fixed
 
