@@ -336,6 +336,37 @@ impl Editor {
         }
     }
 
+    /// Give every other caption `id`'s style and text look, as CapCut's
+    /// "Apply to all captions" does. A caption is a title in a caption
+    /// style; lower thirds keep their own. Returns how many changed.
+    pub fn apply_look_to_captions(&mut self, id: ClipId) -> usize {
+        let Some((style, text)) = self
+            .timeline
+            .clip(id)
+            .filter(|clip| clip.kind == ClipKind::Title && clip.title_style.is_caption())
+            .map(|clip| (clip.title_style, clip.text))
+        else {
+            return 0;
+        };
+        let mut changed = 0;
+        for clip in &mut self.timeline.clips {
+            if clip.id != id
+                && clip.kind == ClipKind::Title
+                && clip.title_style.is_caption()
+                && (clip.title_style, clip.text) != (style, text)
+            {
+                (clip.title_style, clip.text) = (style, text);
+                changed += 1;
+            }
+        }
+        self.status = match changed {
+            0 => "Every caption already looks like this one.".to_owned(),
+            1 => "1 more caption looks like this one.".to_owned(),
+            n => format!("{n} more captions look like this one."),
+        };
+        changed
+    }
+
     /// Whether the clip's source file has sound.
     pub fn clip_source_has_audio(&self, id: ClipId) -> bool {
         self.timeline

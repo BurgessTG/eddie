@@ -97,7 +97,7 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
                 "How thick the outline is, as a share of the text size; 0% draws none",
             ),
             position(ui, value_w),
-            reset(id, card_inner),
+            buttons(id, clip, card_inner),
         ],
     )
 }
@@ -241,21 +241,33 @@ fn position(ui: &Ui, value_w: f32) -> El {
     )
 }
 
-fn reset(id: ClipId, card_inner: f32) -> El {
-    button_row(
-        vec![
+/// Reset, and on a caption, a button that gives every caption its look.
+fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
+    let mut buttons = vec![
+        theme::button(
+            "details-text-reset",
+            "Reset",
+            Variant::Secondary,
+            "Draw the text as its style does: size, colours, box, outline and place",
+            true,
+        )
+        .on_press(move |ui: &mut Ui| {
+            ui.editor.edit_title_text(id, |t| *t = TextLook::default());
+        }),
+    ];
+    if clip.title_style.is_caption() {
+        buttons.push(
             theme::button(
-                "details-text-reset",
-                "Reset",
+                "details-text-all-captions",
+                "Apply to all",
                 Variant::Secondary,
-                "Draw the text as its style does: size, colours, box, outline and place",
+                "Give every caption this one's style, size, colours, box, outline and place. Lower thirds keep theirs",
                 true,
             )
             .on_press(move |ui: &mut Ui| {
-                ui.editor.edit_title_text(id, |t| *t = TextLook::default());
+                ui.editor.apply_look_to_captions(id);
             }),
-        ],
-        card_inner,
-    )
-    .py(2.0)
+        );
+    }
+    button_row(buttons, card_inner).py(2.0)
 }

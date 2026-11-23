@@ -75,6 +75,11 @@ impl TitleStyle {
         }
     }
 
+    /// Every style but the lower third is a caption's.
+    pub fn is_caption(self) -> bool {
+        self != Self::LowerThird
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL
             .into_iter()

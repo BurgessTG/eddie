@@ -158,6 +158,8 @@
 - Quit on Linux: File → Quit or Ctrl+Q, which asks to save
   unsaved changes first, as closing the window does. Only the window's
   close button left Eddie before.
+- Apply to all in a caption's Text card gives every caption its style,
+  size, colours, box, outline and place at once; lower thirds keep theirs.
 
 ### Changed
 

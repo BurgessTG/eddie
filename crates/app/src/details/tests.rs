@@ -345,6 +345,42 @@ fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
     assert_eq!(text(&rt), TextLook::default());
 }
 
+/// Apply to all gives every caption the selected one's style and look,
+/// and leaves lower thirds alone; a lower third has no such button.
+#[test]
+fn apply_to_all_gives_every_caption_this_captions_look() {
+    use openreel_engine::{Rgb, TextLook};
+    let (mut rt, id) = window(ClipKind::Title);
+    assert!(!shown(&rt, "details-text-all-captions"), "a lower third");
+    let timeline = &mut rt.state.editor.timeline;
+    let other = timeline.add_clip("Second", ClipKind::Title, 0, 6.0, 2.0, 0.0);
+    let lower = timeline.add_clip("Name", ClipKind::Title, 1, 2.0, 2.0, 0.0);
+    timeline.clip_mut(other).unwrap().title_style = TitleStyle::Caption;
+    let look = TextLook {
+        size: 1.5,
+        color: Some(Rgb(255, 214, 0)),
+        y: -0.2,
+        ..TextLook::default()
+    };
+    let this = timeline.clip_mut(id).unwrap();
+    (this.title_style, this.text) = (TitleStyle::PopCaption, look);
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    reveal(&mut rt, "details-text-all-captions");
+    click(&mut rt, "details-text-all-captions");
+    let got = |rt: &Runtime<Ui>, id| (clip(rt, id).title_style, clip(rt, id).text);
+    assert_eq!(got(&rt, other), (TitleStyle::PopCaption, look));
+    assert_eq!(
+        got(&rt, lower),
+        (TitleStyle::LowerThird, TextLook::default()),
+        "a lower third keeps its look"
+    );
+    assert_eq!(
+        rt.state.editor.status,
+        "1 more caption looks like this one."
+    );
+}
+
 #[test]
 fn the_chroma_key_card_keys_a_picture_from_its_switch_presets_and_fields() {
     use openreel_engine::{ChromaKey, KEY_BLUE, Rgb};
@@ -678,6 +714,7 @@ fn every_control_has_a_tooltip() {
                 "details-text-x",
                 "details-text-y",
                 "details-text-reset",
+                "details-text-all-captions",
             ],
         ),
     ];
@@ -685,6 +722,12 @@ fn every_control_has_a_tooltip() {
         let (mut rt, id) = window(kind);
         // A keyed picture shows the key's controls too, and a rectangle
         // mask every mask control.
+        // A caption shows Apply to all.
+        if kind == ClipKind::Title {
+            rt.state.editor.timeline.clip_mut(id).unwrap().title_style = TitleStyle::Caption;
+            rt.frame(FRAME);
+            rt.frame(FRAME);
+        }
         if kind == ClipKind::Video {
             let clip = rt.state.editor.timeline.clip_mut(id).unwrap();
             clip.chroma = Some(Default::default());
