@@ -6,7 +6,8 @@
 //! before it turns, by a matte written once per batch.
 
 use openreel_engine::{
-    place, yuv, Background, ChromaKey, ColorAdjust, Keyframes, Mask, Property, Spill, Transform,
+    place, yuv, Background, ChromaKey, ColorAdjust, Ease, Key, Keyframes, Mask, Property, Spill,
+    Transform,
 };
 
 use super::animate::{commands, curve};
@@ -163,12 +164,15 @@ pub(super) struct Motion<'a> {
 }
 
 impl Motion<'_> {
-    /// `property`'s keys as (seconds on the batch's clock, value).
-    fn keys(&self, property: Property) -> Vec<(f64, f64)> {
+    /// `property`'s keys, at seconds on the batch's clock.
+    fn keys(&self, property: Property) -> Vec<Key> {
         self.keys
             .keys(property)
             .iter()
-            .map(|key| (key.at + self.offset, key.value))
+            .map(|key| Key {
+                at: key.at + self.offset,
+                ..*key
+            })
             .collect()
     }
 }
@@ -179,10 +183,7 @@ impl Motion<'_> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Spot {
     At(i64, i64),
-    Moving {
-        x: Vec<(f64, f64)>,
-        y: Vec<(f64, f64)>,
-    },
+    Moving { x: Vec<Key>, y: Vec<Key> },
 }
 
 impl Spot {
@@ -425,7 +426,7 @@ fn moving(
     let largest = if scales.is_empty() {
         t.scale
     } else {
-        scales.iter().map(|key| key.1).fold(0.0, f64::max)
+        scales.iter().map(|key| key.value).fold(0.0, f64::max)
     };
     let shrink = if scales.is_empty() {
         1.0
@@ -488,10 +489,17 @@ fn moving(
     let centre = |property: Property, plain: f64, size: f64| {
         let keys = motion.keys(property);
         if keys.is_empty() {
-            vec![(0.0, size / 2.0 + plain * size)]
+            vec![Key {
+                at: 0.0,
+                value: size / 2.0 + plain * size,
+                ease: Ease::Linear,
+            }]
         } else {
             keys.into_iter()
-                .map(|(at, v)| (at, size / 2.0 + v * size))
+                .map(|key| Key {
+                    value: size / 2.0 + key.value * size,
+                    ..key
+                })
                 .collect()
         }
     };

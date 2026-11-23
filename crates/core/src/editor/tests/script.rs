@@ -1157,6 +1157,27 @@ fn keyframes_animate_by_script_and_by_the_details_fields() {
     let read = run(&mut app, "return clips()[0].keyframes.scale[1]").unwrap();
     assert_eq!(read, r#"{"at":2,"value":1.5}"#);
 
+    // An ease runs from its key to the next: ease-in is 0.5³ of the way
+    // halfway. Setting the key again without one keeps it.
+    run(
+        &mut app,
+        &format!(
+            "setKeyframe({id}, 'scale', 2, 0.5, 'ease-in'); setKeyframe({id}, 'scale', 2, 0.5)"
+        ),
+    )
+    .unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.scale[0].ease, openreel_engine::Ease::EaseIn);
+    assert!((clip.transform_at(3.0).scale - 0.625).abs() < 1e-12);
+    let read = run(&mut app, "return clips()[0].keyframes.scale[0]").unwrap();
+    assert_eq!(read, r#"{"at":0,"ease":"ease-in","value":0.5}"#);
+    run(
+        &mut app,
+        &format!("setKeyframe({id}, 'scale', 2, 0.5, 'linear')"),
+    )
+    .unwrap();
+    assert_eq!(app.timeline.clip(id).unwrap().transform_at(3.0).scale, 1.0);
+
     // Out of range, off the clip, or a property the clip has not: refused.
     for (code, why) in [
         (
@@ -1170,6 +1191,10 @@ fn keyframes_animate_by_script_and_by_the_details_fields() {
         (
             format!("setKeyframe({id}, 'size', 3, 1)"),
             "unknown property 'size'",
+        ),
+        (
+            format!("setKeyframe({id}, 'scale', 3, 1, 'bounce')"),
+            "an ease is one of linear, ease-in",
         ),
         (
             format!("removeKeyframe({id}, 'scale', 3)"),

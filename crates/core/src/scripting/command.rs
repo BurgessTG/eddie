@@ -51,12 +51,14 @@ pub enum ScriptCommand {
         clip: u64,
         value: f32,
     },
-    /// `property` (a `Property` name) is `value` at timeline time `at`.
+    /// `property` (a `Property` name) is `value` at timeline time `at`,
+    /// running on along `ease` (an `Ease` name; empty keeps the key's).
     SetKeyframe {
         clip: u64,
         property: String,
         at: f64,
         value: f64,
+        ease: String,
     },
     RemoveKeyframe {
         clip: u64,

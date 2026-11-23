@@ -93,6 +93,11 @@
   timeline marks them on the clip. Scripts use `setKeyframe`,
   `removeKeyframe` and `clearKeyframes`, and `state()` gives each clip's
   `keyframes`.
+- Easing between keyframes: Details' Ease list, under the key buttons,
+  makes the run from the key before the playhead to the next one start
+  slowly (Ease in), slow down into the next key (Ease out), both, or move
+  at one speed (Linear, the default). Preview and export follow the same
+  curve; scripts pass the ease to `setKeyframe`.
 - Blend modes for a picture over other lanes: Darken, Multiply, Colour
   burn, Linear burn, Lighten, Screen, Colour dodge, Add, Overlay, Soft
   light, Hard light, Difference and Exclusion, picked under Opacity in

@@ -155,13 +155,14 @@ fn clip_edits(api: &Api<'_, '_>) -> rquickjs::Result<()> {
     let q = api.queue();
     api.set(
         "__set_keyframe",
-        move |Whole(clip): Whole, property: CString<'_>, at: f64, value: f64| {
+        move |Whole(clip): Whole, property: CString<'_>, at: f64, value: f64, ease: CString<'_>| {
             q.borrow_mut()
-                .push(property.len(), || ScriptCommand::SetKeyframe {
+                .push(property.len() + ease.len(), || ScriptCommand::SetKeyframe {
                     clip,
                     property: property.as_str().to_owned(),
                     at,
                     value,
+                    ease: ease.as_str().to_owned(),
                 })
         },
     )?;

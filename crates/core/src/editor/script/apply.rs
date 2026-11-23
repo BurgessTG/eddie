@@ -164,7 +164,8 @@ impl Editor {
                 property,
                 at,
                 value,
-            } => self.set_keyframe(clip, &property, at, value)?,
+                ease,
+            } => self.set_keyframe(clip, &property, at, value, &ease)?,
             ScriptCommand::RemoveKeyframe { clip, property, at } => {
                 self.remove_keyframe(clip, &property, at)?;
             }

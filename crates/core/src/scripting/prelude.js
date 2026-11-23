@@ -56,7 +56,7 @@ function help() {
     "setTransform(id, {scale, x, y, rotation, flipH, flipV, cropLeft, cropTop, cropRight, cropBottom})  // video only; changes just the fields given, null resets. scale 1 fits the canvas, 'fill' covers it; x and y move by canvas widths and heights (right and down); rotation is clockwise degrees; crops are shares of the source",
     "setBackground(id, 'black' | 'blur')  // what fills the canvas around a video picture",
     "setBlend(id, mode)  // video only: how the picture mixes with the lanes under it. modes: normal darken multiply color-burn linear-burn lighten screen color-dodge add overlay soft-light hard-light difference exclusion",
-    "setKeyframe(id, property, at, value)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run in a straight line from key to key and hold before the first and after the last; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
+    "setKeyframe(id, property, at, value, ease?)  // animate: property is x y scale rotation opacity (video) or volume (video or audio), in setTransform's, setOpacity's and setVolume's units; at is a timeline time on the clip. Values run from each key to the next along its ease, linear (a new key's), ease-in, ease-out or ease-in-out, and hold before the first and after the last; leaving ease out keeps a key's; keys move with the clip and stay on their moment through trims, splits and speed changes. Rotation keys may pass 360 to keep turning",
     "removeKeyframe(id, property, at) clearKeyframes(id, property?)  // clearing keeps the value at the clip's start; no property clears them all. setOpacity, setVolume and setTransform set one value for the whole clip and remove that property's keys",
     "setMask(id, {shape, x, y, width, height, rotation, feather, round, invert})  // video only: keeps the picture inside a shape and clears the rest, so the lanes under show (a blurred background stays). {} is a circle; changes just the fields given, null removes the mask. shape split (keeps above a line), filmstrip (a band height tall), circle, rectangle, heart or star; x, y the shape's centre from the picture's, in picture widths and heights (-1 to 1); width, height in shorter sides of the picture (0.01 to 5, 0.6); rotation clockwise degrees, with the picture; feather 0 to 1, the soft edge (1 is half the shorter side); round 0 to 1, a rectangle's corners; invert keeps the outside",
     "setChroma(id, {color, strength, softness, spill})  // video only: clears the parts of the picture near color (a green or blue screen) so the lanes under show. {} keys green (#00B140); changes just the fields given, null removes the key. color '#RRGGBB' ('#0047BB' for blue); strength 0 to 1 (0.6), how far from the colour still clears, as a share of the way to grey; softness 0 to 1 (0.3), how gradual the edge is; spill 0 to 1 (0.5), how much of the colour's cast on what stays is taken off",
@@ -122,9 +122,9 @@ function setTransform(id, changes) {
   }
   __set_transform(id, JSON.stringify(changes));
 }
-function setKeyframe(id, property, at, value) {
+function setKeyframe(id, property, at, value, ease) {
   if (typeof value !== "number" || !isFinite(value)) throw new Error("setKeyframe needs a finite number for the value");
-  __set_keyframe(id, String(property), __t(at), value);
+  __set_keyframe(id, String(property), __t(at), value, ease === undefined || ease === null ? "" : String(ease));
 }
 function removeKeyframe(id, property, at) { __remove_keyframe(id, String(property), __t(at)); }
 function clearKeyframes(id, property) {

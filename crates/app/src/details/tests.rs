@@ -1,10 +1,10 @@
 use eddie_core::editor::details::MAX_VOLUME;
 use eddie_core::editor::media::{AssetState, BinAsset};
 use eddie_core::editor::sweep::SweepData;
-use openreel_engine::{Clip, ClipKind, TitleStyle};
+use openreel_engine::{Clip, ClipKind, Ease, TitleStyle};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::styles::{blend_key, option_key, stabilize_key};
+use super::styles::{blend_key, ease_key, option_key, stabilize_key};
 use super::*;
 use crate::app;
 use crate::testing::shown;
@@ -706,6 +706,9 @@ fn every_control_has_a_tooltip() {
                 "details-key-scale",
                 "details-key-position",
                 "details-key-rotation",
+                "details-previous-key",
+                "details-next-key",
+                "details-ease",
                 "details-embedded-audio",
                 "details-detach",
                 "details-remove-silence",
@@ -802,8 +805,8 @@ fn every_control_has_a_tooltip() {
     ];
     for (kind, keys) in cases {
         let (mut rt, id) = window(kind);
-        // A keyed picture shows the key's controls too, and a rectangle
-        // mask every mask control.
+        // A picture with opacity keys shows the key steps and Ease, a
+        // chroma key its controls, and a rectangle mask every mask control.
         // A caption shows Apply to all, and a shadow how it falls.
         if kind == ClipKind::Title {
             let clip = rt.state.editor.timeline.clip_mut(id).unwrap();
@@ -814,6 +817,10 @@ fn every_control_has_a_tooltip() {
         }
         if kind == ClipKind::Video {
             let clip = rt.state.editor.timeline.clip_mut(id).unwrap();
+            clip.keyframes
+                .set(openreel_engine::Property::Opacity, 0.0, 1.0);
+            clip.keyframes
+                .set(openreel_engine::Property::Opacity, 2.0, 0.5);
             clip.chroma = Some(Default::default());
             clip.mask = Some(openreel_engine::Mask::new(
                 openreel_engine::MaskShape::Rectangle,
@@ -1117,11 +1124,24 @@ fn key_buttons_and_fields_animate_a_clip_from_the_playhead() {
     rt.frame(FRAME);
     rt.frame(FRAME);
     assert_eq!(typed(&rt, Field::Opacity), "65%");
+    // Ease in from the first key: an eighth of the way from 100% to 30%
+    // halfway, where a straight line is halfway.
+    reveal(&mut rt, "details-ease");
+    click(&mut rt, "details-ease");
+    assert_eq!(rt.state.details.select, Some(Select::Ease));
+    click(&mut rt, &ease_key(Ease::EaseIn));
+    assert_eq!(rt.state.details.select, None);
+    assert_eq!(clip(&rt, id).keyframes.opacity[0].ease, Ease::EaseIn);
+    rt.frame(FRAME);
+    assert_eq!(typed(&rt, Field::Opacity), "91%");
     reveal(&mut rt, "details-previous-key");
     click(&mut rt, "details-previous-key");
     assert_eq!(rt.state.editor.playhead, 3.0);
-    // On a key the diamond takes it away.
+    // On a key the diamond takes it away; one key has nothing to ease.
     reveal(&mut rt, "details-key-opacity");
     click(&mut rt, "details-key-opacity");
     assert_eq!(clip(&rt, id).keyframes.opacity.len(), 1);
+    reveal(&mut rt, "details-ease");
+    click(&mut rt, "details-ease");
+    assert_eq!(rt.state.details.select, None, "an inert list stays shut");
 }

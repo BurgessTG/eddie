@@ -35,7 +35,7 @@ pub use graphic::{
     MIN_SHAPE_RATIO,
 };
 pub use keyframe::{
-    key_value, widen, Key, Keyframes, Property, KEY_TOLERANCE, MAX_KEYS, MAX_ROTATION,
+    key_value, widen, Ease, Key, Keyframes, Property, KEY_TOLERANCE, MAX_KEYS, MAX_ROTATION,
 };
 pub use marker::{Marker, MarkerColor, MarkerId};
 pub use mask::{

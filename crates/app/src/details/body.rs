@@ -33,6 +33,7 @@ pub(super) fn body(ui: &Ui, id: ClipId, clip: &Clip) -> El {
         look.push(title_style(ui, clip));
     }
     look.extend(keys::navigation(ui, id, clip, card_inner));
+    look.extend(keys::ease(ui, id, clip));
     look.extend(links(id, clip, &info, card_inner));
     if info.can_caption {
         look.push(captions(ui, id));

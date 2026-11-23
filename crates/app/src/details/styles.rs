@@ -1,8 +1,8 @@
 //! The pick lists in Details: the selected title's own style and font,
-//! the style generated captions get, a picture's blend mode and how it is
-//! steadied. Each is a closed field that opens a list under itself.
+//! the style generated captions get, a picture's blend mode, how it is
+//! steadied and how its keyed values ease. Each is a closed field that opens a list under itself.
 
-use openreel_engine::{BlendMode, ClipId, Stabilize, TitleFont, TitleStyle};
+use openreel_engine::{BlendMode, ClipId, Ease, Stabilize, TitleFont, TitleStyle};
 use rune::{Align, Cx, El, Family, Side, TextStyle};
 
 use crate::app::Ui;
@@ -21,6 +21,8 @@ pub enum Select {
     Stabilize,
     /// The selected title's font.
     Font,
+    /// How the selected clip's keyed values run on from the playhead.
+    Ease,
 }
 
 /// A closed list: its choice and a down arrow.
@@ -59,7 +61,7 @@ fn option(which: Select, id: ClipId, style: TitleStyle, current: bool) -> El {
                 }
             }
             Select::Captions => ui.editor.caption_style = style,
-            Select::Blend | Select::Stabilize | Select::Font => {}
+            Select::Blend | Select::Stabilize | Select::Font | Select::Ease => {}
         }
         ui.details.select = None;
     })
@@ -115,6 +117,20 @@ fn font_option(id: ClipId, font: TitleFont, current: bool) -> El {
     })
 }
 
+pub(super) fn ease_key(ease: Ease) -> String {
+    format!("details-ease-{}", ease.as_str())
+}
+
+/// One ease in the open list.
+fn ease_option(id: ClipId, ease: Ease, current: bool) -> El {
+    theme::option(ease_key(ease), ease.label(), ease.help(), current).on_press(
+        move |ui: &mut Ui| {
+            ui.editor.set_ease_here(id, ease);
+            ui.details.select = None;
+        },
+    )
+}
+
 /// The open list, hung under its field. A press outside closes it.
 pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
     let Some(which) = ui.details.select else {
@@ -158,6 +174,17 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
                 TitleFont::ALL
                     .into_iter()
                     .map(|font| font_option(id, font, font == current))
+                    .collect(),
+            )
+        }
+        Select::Ease => {
+            let current = ui.editor.ease_here(id).flatten();
+            (
+                "details-ease",
+                2.0,
+                Ease::ALL
+                    .into_iter()
+                    .map(|ease| ease_option(id, ease, Some(ease) == current))
                     .collect(),
             )
         }

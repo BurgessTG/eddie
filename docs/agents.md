@@ -217,8 +217,9 @@ return its parts.
   frame (`freeze`) the picture at `sourceIn`. A title's `text` holds what
   `setText` changed; a `null` field follows the style. `transition` is
   `{kind, duration}` or `null`. `keyframes` holds `x`, `y`, `scale`,
-  `rotation`, `opacity` and `volume` keys as `[{at, value}]`, `at` in
-  seconds from the clip's start; a property without keys is left out, and
+  `rotation`, `opacity` and `volume` keys as `[{at, value, ease}]`, `at`
+  in seconds from the clip's start and `ease` left out when linear; a
+  property without keys is left out, and
   a keyed property's plain value (`opacity`, `transform.scale`, …) is not
   what plays.
 - **Markers:** `id, time, name, color`, in time order. The user drops
@@ -471,13 +472,16 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - One edit draws at most 16 new shapes or stickers; add more in another
     run. Drawings are kept outside the project, and a project opened on
     another computer draws them again.
-- **Keyframes:** `setKeyframe(id, property, at, value)` animates a clip.
-  `property` is `x`, `y`, `scale`, `rotation` or `opacity` on video, or
-  `volume` on video or audio, in the units of `setTransform`,
+- **Keyframes:** `setKeyframe(id, property, at, value, ease?)` animates a
+  clip. `property` is `x`, `y`, `scale`, `rotation` or `opacity` on
+  video, or `volume` on video or audio, in the units of `setTransform`,
   `setOpacity` and `setVolume`. `at` is a timeline time on the clip.
-  - The value runs in a straight line from each key to the next, and
-    holds before the first key and after the last. A key at the time of
-    another replaces it. Rotation keys may pass 360 to keep turning.
+  - The value runs from each key to the next along that key's `ease`, and
+    holds before the first key and after the last. `linear` (a new key's)
+    changes at one speed; `ease-in` starts slowly, `ease-out` slows into
+    the next key, `ease-in-out` does both. Leaving `ease` out keeps the
+    key's. A key at the time of another replaces it. Rotation keys may
+    pass 360 to keep turning.
   - Keys move with the clip and stay on the same moment of its footage
     through trims, splits and speed changes. A freeze frame holds the
     look at its point, without keys.

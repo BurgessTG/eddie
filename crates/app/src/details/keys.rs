@@ -1,12 +1,14 @@
 //! Keyframe controls: the diamond beside each value that can change over a
-//! clip, and the buttons that step the playhead between a clip's keys. The
-//! keys themselves are `eddie_core::editor::keys`.
+//! clip, the buttons that step the playhead between a clip's keys, and how
+//! the values ease from the key before the playhead to the next. The keys
+//! themselves are `eddie_core::editor::keys`.
 
 use openreel_engine::{Clip, ClipId, Property};
 use rune::El;
 
 use super::GAP;
-use super::rows::button_row;
+use super::rows::{button_row, prop_row};
+use super::styles::Select;
 use crate::app::Ui;
 use crate::icons;
 use crate::theme::{self, Variant, c};
@@ -77,4 +79,50 @@ pub(super) fn navigation(ui: &Ui, id: ClipId, clip: &Clip, width: f32) -> Option
         })
     };
     Some(button_row(vec![step(false), step(true)], width).py(2.0))
+}
+
+/// The Ease list, for a clip with keys: how every value keyed on both
+/// sides of the playhead runs from the key before it to the next. Inert
+/// where no two keys hold the playhead between them.
+pub(super) fn ease(ui: &Ui, id: ClipId, clip: &Clip) -> Option<El> {
+    if clip.keyframes.is_empty() {
+        return None;
+    }
+    let here = ui.editor.ease_here(id);
+    let (choice, help) = match here {
+        None => (
+            "None here",
+            "Move the playhead between two keys to choose how the values change from one to the next",
+        ),
+        Some(Some(ease)) => (
+            ease.label(),
+            "How the values change from the key before the playhead to the next",
+        ),
+        Some(None) => (
+            "Mixed",
+            "The values here change in different ways; pick one for all of them",
+        ),
+    };
+    let open = ui.details.select == Some(Select::Ease);
+    let field = theme::select(
+        "details-ease",
+        choice,
+        help,
+        theme::field_fill(),
+        open,
+        here.is_some(),
+    );
+    // Rune's `disabled` does not stop presses.
+    let field = if here.is_some() {
+        field.on_press(|ui: &mut Ui| {
+            ui.details.select = (ui.details.select != Some(Select::Ease)).then_some(Select::Ease);
+        })
+    } else {
+        field
+    };
+    Some(prop_row(
+        "Ease",
+        "How a keyed value changes between two keys: at one speed, or easing in or out",
+        field.grow(1.0).min_w(0.0),
+    ))
 }

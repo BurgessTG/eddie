@@ -219,11 +219,14 @@ fn branch(
         format!("volume={:.3}", clip.volume)
     } else {
         let middle = 128.0 / 48_000.0;
-        let keys: Vec<(f64, f64)> = clip
+        let keys: Vec<_> = clip
             .keyframes
             .volume
             .iter()
-            .map(|key| (key.at - middle, key.value))
+            .map(|key| openreel_engine::Key {
+                at: key.at - middle,
+                ..*key
+            })
             .collect();
         format!(
             "asetnsamples=n=256:p=0,volume=volume='{}':eval=frame",

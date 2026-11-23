@@ -1160,6 +1160,15 @@ fn keyed(
     keys: &[(Property, f64, f64)],
     sample: &[(usize, &[(usize, usize)])],
 ) -> Vec<Vec<[u8; 3]>> {
+    eased(keys, openreel_engine::Ease::Linear, sample)
+}
+
+/// [`keyed`] with every key easing to the next along `ease`.
+fn eased(
+    keys: &[(Property, f64, f64)],
+    ease: openreel_engine::Ease,
+    sample: &[(usize, &[(usize, usize)])],
+) -> Vec<Vec<[u8; 3]>> {
     let fixture = Fixture::new();
     let source = fixture.video(
         "quadrants.mp4",
@@ -1174,6 +1183,7 @@ fn keyed(
     let clip = timeline.clip_mut(id).unwrap();
     for &(property, at, value) in keys {
         clip.keyframes.set(property, at, value);
+        clip.keyframes.ease_key(property, at, ease);
     }
     let frames = frames(&fixture.export("keyed.mp4", &timeline));
     sample
@@ -1256,6 +1266,56 @@ fn keyed_opacity_fades_the_picture_between_keys() {
             .unwrap();
         assert!(error <= 6, "opacity {a}: {:?}, want {want:?}", sample[0]);
     }
+}
+
+/// Opacity from 0 to 1 over the first second, easing in and out: t³ x 4
+/// to halfway, then its mirror, so 0.032 at 0.2 s, 0.5 at 0.5 s and 0.968
+/// at 0.8 s, where a straight line gives 0.2 and 0.8. Export fades by
+/// `sendcmd`, whose commands cannot hold the `if` that joins the halves.
+#[test]
+fn eased_opacity_fades_along_its_curve() {
+    let points: &[(usize, usize)] = &[(80, 45)];
+    let got = eased(
+        &[(Property::Opacity, 0.0, 0.0), (Property::Opacity, 1.0, 1.0)],
+        openreel_engine::Ease::EaseInOut,
+        &[(2, points), (5, points), (8, points)],
+    );
+    for (sample, a) in got.iter().zip([0.032_f64, 0.5, 0.968]) {
+        let want: Vec<u8> = TL
+            .iter()
+            .zip(BLUE)
+            .map(|(&p, b)| (f64::from(p) * a + f64::from(b) * (1.0 - a)).round() as u8)
+            .collect();
+        let error = sample[0]
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(error <= 6, "opacity {a}: {:?}, want {want:?}", sample[0]);
+    }
+}
+
+/// Position from a quarter left to a quarter right over the first second,
+/// easing in (t³). At 0.2 s the centre is 0.004 of the way, x -0.246: the
+/// 320 px picture spans -79 to 241, so x 250 shows the blue under it (a
+/// straight line puts it at -48 to 272). At 0.5 s it is 0.125 of the way,
+/// x -0.1875: -60 to 260, so x 110 is 170 into the picture, its top right
+/// quadrant (the straight line's top left), and x 270 is blue.
+#[test]
+fn eased_position_moves_along_its_curve() {
+    let got = eased(
+        &[(Property::X, 0.0, -0.25), (Property::X, 1.0, 0.25)],
+        openreel_engine::Ease::EaseIn,
+        &[
+            (2, &[(250, 90), (230, 40)]),
+            (5, &[(110, 40), (270, 130), (250, 130)]),
+            (15, &[(100, 20), (40, 90)]),
+        ],
+    );
+    assert_colors("0.2 s", &got[0], &[BLUE, TR]);
+    assert_colors("0.5 s", &got[1], &[TR, BLUE, BR]);
+    assert_colors("held", &got[2], &[TL, BLUE]);
 }
 
 fn quadrant_photo(fixture: &Fixture, name: &str) -> PathBuf {

@@ -1,7 +1,8 @@
 //! Keyframes: a clip's position, scale, rotation, opacity or volume
 //! changing over the clip. Each property has its own keys, at clip-local
-//! seconds (from the clip's start); the value runs in a straight line from
-//! one key to the next and holds before the first key and after the last.
+//! seconds (from the clip's start); the value runs from one key to the next
+//! along the first key's [`Ease`] and holds before the first key and after
+//! the last.
 //! Edits that move a clip's content against its start (a left trim, a
 //! split, a speed change) move the keys with the content.
 
@@ -74,11 +75,83 @@ impl Property {
     }
 }
 
-/// One key: `value` at `at` seconds after the clip's start.
+/// How a value runs from one key to the next. None overshoots: every value
+/// between two keys lies between theirs, so the keys hold the extremes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ease {
+    /// A straight line, at one speed.
+    #[default]
+    Linear,
+    /// Starts slowly and speeds up: t³.
+    EaseIn,
+    /// Starts fast and slows down to the next key: 1 - (1 - t)³.
+    EaseOut,
+    /// Slow at both keys, fastest halfway: ease in, then ease out.
+    EaseInOut,
+}
+
+impl Ease {
+    pub const ALL: [Self; 4] = [Self::Linear, Self::EaseIn, Self::EaseOut, Self::EaseInOut];
+
+    /// The name scripts and project files use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::EaseIn => "ease-in",
+            Self::EaseOut => "ease-out",
+            Self::EaseInOut => "ease-in-out",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_lowercase();
+        Self::ALL.into_iter().find(|e| e.as_str() == name)
+    }
+
+    pub fn is_linear(&self) -> bool {
+        *self == Self::Linear
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::EaseIn => "Ease in",
+            Self::EaseOut => "Ease out",
+            Self::EaseInOut => "Ease in and out",
+        }
+    }
+
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Linear => "Change at one speed from this key to the next",
+            Self::EaseIn => "Start slowly and speed up into the next key",
+            Self::EaseOut => "Start fast and slow down into the next key",
+            Self::EaseInOut => "Start and end slowly, fastest halfway",
+        }
+    }
+
+    /// How far from the first key's value to the next's, 0 to 1, at `t` of
+    /// the way between their times (0 to 1).
+    pub fn apply(self, t: f64) -> f64 {
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => t * t * t,
+            Self::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Self::EaseInOut if t < 0.5 => 4.0 * t * t * t,
+            Self::EaseInOut => 1.0 - (2.0 - 2.0 * t).powi(3) / 2.0,
+        }
+    }
+}
+
+/// One key: `value` at `at` seconds after the clip's start, and how the
+/// value runs from here to the next key.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Key {
     pub at: f64,
     pub value: f64,
+    #[serde(default, skip_serializing_if = "Ease::is_linear")]
+    pub ease: Ease,
 }
 
 /// An `f32` value (opacity and volume are) as the `f64` a key holds: the
@@ -88,9 +161,9 @@ pub fn widen(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(f64::from(value))
 }
 
-/// The value keys in time order give at `at`: a straight line from each key
-/// to the next, the first key's value before it and the last's after it.
-/// `None` without keys.
+/// The value keys in time order give at `at`: from each key to the next
+/// along the first's [`Ease`], the first key's value before it and the
+/// last's after it. `None` without keys.
 pub fn key_value(keys: &[Key], at: f64) -> Option<f64> {
     let first = keys.first()?;
     if at <= first.at {
@@ -101,7 +174,8 @@ pub fn key_value(keys: &[Key], at: f64) -> Option<f64> {
         return keys.last().map(|key| key.value);
     };
     let a = keys[next - 1];
-    Some(a.value + (b.value - a.value) * (at - a.at) / (b.at - a.at))
+    let t = (at - a.at) / (b.at - a.at);
+    Some(a.value + (b.value - a.value) * a.ease.apply(t))
 }
 
 /// A clip's keys, per property, each list in time order.
@@ -181,7 +255,8 @@ impl Keyframes {
             .find(|key| (key.at - at).abs() <= KEY_TOLERANCE)
     }
 
-    /// Set `property` to `value` at clip-local `at`, replacing a key there.
+    /// Set `property` to `value` at clip-local `at`, replacing the value of
+    /// a key there and keeping its ease; a new key runs on linearly.
     pub fn set(&mut self, property: Property, at: f64, value: f64) {
         let keys = self.keys_mut(property);
         if let Some(key) = keys
@@ -192,7 +267,45 @@ impl Keyframes {
             return;
         }
         let index = keys.partition_point(|key| key.at < at);
-        keys.insert(index, Key { at, value });
+        let ease = Ease::Linear;
+        keys.insert(index, Key { at, value, ease });
+    }
+
+    /// The key whose run to the next key holds clip-local `at`: the last key
+    /// at or before it, when a key follows. A key within [`KEY_TOLERANCE`]
+    /// after `at` counts as at it.
+    pub fn run_at(&self, property: Property, at: f64) -> Option<usize> {
+        let keys = self.keys(property);
+        let next = keys.partition_point(|key| key.at <= at + KEY_TOLERANCE);
+        (next > 0 && next < keys.len()).then(|| next - 1)
+    }
+
+    /// Give the key within [`KEY_TOLERANCE`] of clip-local `at` `ease`, for
+    /// the run from it to the next key; false when there is none.
+    pub fn ease_key(&mut self, property: Property, at: f64, ease: Ease) -> bool {
+        match self
+            .keys_mut(property)
+            .iter_mut()
+            .find(|key| (key.at - at).abs() <= KEY_TOLERANCE)
+        {
+            Some(key) => {
+                key.ease = ease;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Give the run holding clip-local `at` ([`Self::run_at`]) `ease`; false
+    /// when no run holds it.
+    pub fn set_ease(&mut self, property: Property, at: f64, ease: Ease) -> bool {
+        match self.run_at(property, at) {
+            Some(index) => {
+                self.keys_mut(property)[index].ease = ease;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Remove the key at clip-local `at`; false when there is none.
@@ -277,6 +390,38 @@ mod tests {
         assert_eq!(k.value(Property::Scale, 2.0), None);
     }
 
+    /// Each ease against its formula at a quarter, half and three quarters
+    /// of the way from 0.2 to 1.0 (over 2 s from 1 s), worked by hand: ease
+    /// in 0.25³ = 0.015625, ease out 1 - 0.75³ = 0.578125, ease in and out
+    /// 4 x 0.25³ = 0.0625 and 1 - (0.5)³/2 = 0.9375.
+    #[test]
+    fn eased_values_follow_their_curves_and_stay_between_the_keys() {
+        for (ease, quarter, half, three) in [
+            (Ease::Linear, 0.25, 0.5, 0.75),
+            (Ease::EaseIn, 0.015625, 0.125, 0.421875),
+            (Ease::EaseOut, 0.578125, 0.875, 0.984375),
+            (Ease::EaseInOut, 0.0625, 0.5, 0.9375),
+        ] {
+            let mut k = keys(&[(1.0, 0.2), (3.0, 1.0), (4.0, 0.0)]);
+            assert!(k.set_ease(Property::Opacity, 2.2, ease));
+            let v = |at| k.value(Property::Opacity, at).unwrap();
+            for (at, share) in [(1.5, quarter), (2.0, half), (2.5, three)] {
+                let want = 0.2 + 0.8 * share;
+                assert!((v(at) - want).abs() < 1e-12, "{ease:?} at {at}: {}", v(at));
+            }
+            // The next run stays straight, and nothing leaves 0..1.
+            assert!((v(3.5) - 0.5).abs() < 1e-12, "{ease:?}");
+            assert!((0..=400).all(|i| (0.0..=1.0).contains(&v(f64::from(i) / 100.0))));
+            // A new value keeps the key's ease; only a key with a key after
+            // it starts a run.
+            k.set(Property::Opacity, 1.0, 0.4);
+            assert_eq!(k.opacity[0].ease, ease);
+            assert_eq!(k.run_at(Property::Opacity, 4.0), None);
+            assert_eq!(k.run_at(Property::Opacity, 0.5), None);
+            assert_eq!(k.run_at(Property::Opacity, 2.9998), Some(1));
+        }
+    }
+
     #[test]
     fn a_key_near_another_replaces_it_and_shifts_move_every_key() {
         let mut k = keys(&[(1.0, 0.5), (2.0, 0.25)]);
@@ -296,7 +441,11 @@ mod tests {
     #[test]
     fn values_a_renderer_cannot_take_are_invalid() {
         assert!(keys(&[(0.0, 1.0)]).is_valid());
-        let key = |at, value| Key { at, value };
+        let key = |at, value| Key {
+            at,
+            value,
+            ease: Ease::Linear,
+        };
         for bad in [
             Keyframes {
                 scale: vec![key(0.0, 0.0)],

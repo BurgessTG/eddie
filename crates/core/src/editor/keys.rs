@@ -3,7 +3,7 @@
 //! script commands. Keys live on the clip's own clock
 //! (`openreel_engine::Keyframes`); here they are set at timeline times.
 
-use openreel_engine::{Clip, ClipId, ClipKind, Property, KEY_TOLERANCE, MAX_KEYS};
+use openreel_engine::{Clip, ClipId, ClipKind, Ease, Property, KEY_TOLERANCE, MAX_KEYS};
 
 use super::Editor;
 
@@ -108,6 +108,38 @@ impl Editor {
         self.status = if remove { "Key removed." } else { "Key added." }.to_owned();
     }
 
+    /// How clip `id`'s values run on from the playhead: the ease of every
+    /// property's run between two keys there (the key at or before the
+    /// playhead to the next). `None` when no run holds the playhead,
+    /// `Some(None)` when the runs there differ.
+    pub fn ease_here(&self, id: ClipId) -> Option<Option<Ease>> {
+        let (clip, at) = (self.timeline.clip(id)?, self.clip_time(id)?);
+        let mut eases = Property::ALL.iter().filter_map(|&p| {
+            let index = clip.keyframes.run_at(p, at)?;
+            Some(clip.keyframes.keys(p)[index].ease)
+        });
+        let first = eases.next()?;
+        Some(eases.all(|ease| ease == first).then_some(first))
+    }
+
+    /// Give every run of clip `id` that holds the playhead ([`Self::ease_here`])
+    /// `ease`.
+    pub fn set_ease_here(&mut self, id: ClipId, ease: Ease) {
+        let Some(at) = self.clip_time(id) else {
+            return;
+        };
+        let Some(clip) = self.timeline.clip_mut(id) else {
+            return;
+        };
+        let mut changed = false;
+        for property in Property::ALL {
+            changed |= clip.keyframes.set_ease(property, at, ease);
+        }
+        if !changed {
+            self.status = "Move the playhead between two keys to ease the change.".to_owned();
+        }
+    }
+
     /// The timeline time of clip `id`'s previous or next key, of any
     /// property, inside the clip.
     pub fn key_beside(&self, id: ClipId, forward: bool) -> Option<f64> {
@@ -143,15 +175,27 @@ impl Editor {
     }
 
     /// `setKeyframe`: `property` of clip `id` is `value` at timeline time
-    /// `time`, which must be on the clip.
+    /// `time`, which must be on the clip, running on to the next key along
+    /// `ease` (a name; empty keeps a key's ease, and a new key is linear).
     pub(super) fn set_keyframe(
         &mut self,
         id: ClipId,
         name: &str,
         time: f64,
         value: f64,
+        ease: &str,
     ) -> Result<(), String> {
         let (clip, property) = self.key_target(id, name, "setKeyframe")?;
+        let ease = match ease {
+            "" => None,
+            name => Some(Ease::from_name(name).ok_or_else(|| {
+                let names: Vec<&str> = Ease::ALL.iter().map(|e| e.as_str()).collect();
+                format!(
+                    "setKeyframe: an ease is one of {}, not '{name}'",
+                    names.join(", ")
+                )
+            })?),
+        };
         let slack = 0.5 / self.timeline.fps;
         if time < clip.start - slack || time > clip.end() + slack {
             return Err(format!(
@@ -184,6 +228,9 @@ impl Editor {
             ));
         }
         clip.keyframes.set(property, at, value);
+        if let Some(ease) = ease {
+            clip.keyframes.ease_key(property, at, ease);
+        }
         Ok(())
     }
 
