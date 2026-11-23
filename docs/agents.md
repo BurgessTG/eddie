@@ -476,7 +476,9 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   `brightness`, `contrast`, `saturation`, `exposure`, `temperature`,
   `tint` or `filterStrength` (the filter's `strength`) on video, or
   `volume` on video or audio, in the units of `setTransform`,
-  `setOpacity`, `setColor` and `setVolume`. `at` is a timeline time on
+  `setOpacity`, `setColor` and `setVolume`. On a title, `x`, `y` and
+  `scale` key its text's place and size, in `setText`'s `x`, `y` and
+  `size` units, and `opacity` its opacity. `at` is a timeline time on
   the clip.
   - The value runs from each key to the next along that key's `ease`, and
     holds before the first key and after the last. `linear` (a new key's)
@@ -490,11 +492,13 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   - `removeKeyframe(id, property, at)` takes one key away.
     `clearKeyframes(id, property?)` takes away a property's keys, or
     every property's, keeping the value at the clip's start.
-  - `setOpacity`, `setVolume`, `setTransform` and `setColor` set one
-    value for the whole clip and remove the keys of each property they
-    set (`strength` for `filterStrength`). The filter itself has no keys.
+  - `setOpacity`, `setVolume`, `setTransform`, `setColor` and `setText`
+    set one value for the whole clip and remove the keys of each property
+    they set (`strength` for `filterStrength`, a title's `size` for
+    `scale`). The filter itself has no keys.
   - A picture that moves or fades by key never hides the lanes under it.
-    A sheet shows each picture where its keys put it at the cell's time.
+    A sheet shows each picture and title where its keys put it at the
+    cell's time.
 - **Colour:** `setColor(id, {...})` grades a video clip. It changes only
   the fields you give; `null` resets them all. `brightness`, `contrast`,
   `saturation`, `temperature` (warm is positive) and `tint` (magenta is

@@ -357,6 +357,64 @@ fn a_keyed_picture_moves_with_the_playhead_and_a_drag_keys_it() {
     );
 }
 
+/// A keyed caption moves and grows with the playhead, and a drag keys its
+/// place there; Esc puts the keys back.
+#[test]
+fn a_keyed_title_moves_with_the_playhead_and_a_drag_keys_it() {
+    let mut ui = Ui::headless();
+    let id = ui
+        .editor
+        .timeline
+        .add_clip("Moving", ClipKind::Title, 0, 0.0, 2.0, 0.0);
+    let clip = ui.editor.timeline.clip_mut(id).unwrap();
+    clip.title_style = openreel_engine::TitleStyle::Caption;
+    clip.keyframes.set(Property::X, 0.0, -0.2);
+    clip.keyframes.set(Property::X, 2.0, 0.2);
+    clip.keyframes.set(Property::Scale, 0.0, 1.0);
+    clip.keyframes.set(Property::Scale, 2.0, 2.0);
+    ui.editor.playhead = 0.0;
+    ui.show_inspector = false;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    let title = |rt: &Runtime<Ui>| rt.presented("monitor-title").unwrap().0;
+    let centre = |r: [f32; 4]| r[0] + r[2] / 2.0;
+    let start = title(&rt);
+    rt.state.editor.playhead = 1.0;
+    frames(&mut rt, 2);
+    let middle = title(&rt);
+    let ([_, _, fw, _], _) = rt.presented("monitor").unwrap();
+    // Halfway: a fifth of the monitor right, and half as wide again.
+    assert!(
+        (centre(middle) - centre(start) - 0.2 * fw).abs() < 2.0,
+        "{start:?} to {middle:?} on {fw}"
+    );
+    assert!(
+        (middle[2] / start[2] - 1.5).abs() < 0.05,
+        "{start:?} to {middle:?}"
+    );
+
+    let (x, y) = (centre(middle), middle[1] + middle[3] / 2.0);
+    crate::testing::input_arrives();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x + fw * 0.1, y);
+    rt.frame(FRAME);
+    let clip = rt.state.editor.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.x.len(), 3);
+    assert!(
+        (clip.keyframes.x[1].value - 0.1).abs() < 0.01,
+        "{:?}",
+        clip.keyframes.x
+    );
+    assert_eq!(clip.text.x, 0.0, "its plain place stays");
+    press(&mut rt, Key::Escape);
+    rt.pointer_up(x + fw * 0.1, y);
+    frames(&mut rt, 2);
+    let clip = rt.state.editor.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.x.len(), 2);
+}
+
 /// A half-size clip on video lane 0 over a whole-canvas clip on lane 1:
 /// both show, the top one in its quarter, and a press takes hold of the
 /// picture under it, the top one first.

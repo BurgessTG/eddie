@@ -307,6 +307,55 @@ fn a_pictures_stabilize_level_comes_from_its_list() {
     }
 }
 
+/// A title's size, place and opacity key from the Text card and the
+/// Opacity row, as a picture's do, and the Text card's Reset takes the
+/// size and place keys away.
+#[test]
+fn a_titles_size_place_and_opacity_key_from_the_playhead() {
+    let (mut rt, id) = window(ClipKind::Title);
+    let tap = |rt: &mut Runtime<Ui>, key: &str| {
+        reveal(rt, key);
+        click(rt, key);
+    };
+    let enter = |rt: &mut Runtime<Ui>, key: &str, typed: &str| {
+        tap(rt, key);
+        rt.paste(typed);
+        rt.frame(FRAME);
+        press(rt, Key::Enter);
+    };
+    // The title runs 2 s to 5 s.
+    rt.state.editor.playhead = 2.5;
+    rt.frame(FRAME);
+    for key in [
+        "details-key-text-size",
+        "details-key-text-position",
+        "details-key-opacity",
+    ] {
+        tap(&mut rt, key);
+    }
+    let keys = &clip(&rt, id).keyframes;
+    let count = [&keys.scale, &keys.x, &keys.y, &keys.opacity].map(Vec::len);
+    assert_eq!(count, [1, 1, 1, 1]);
+    rt.state.editor.playhead = 4.5;
+    rt.frame(FRAME);
+    enter(&mut rt, "details-text-size", "200");
+    enter(&mut rt, "details-text-x", "20");
+    let keys = &clip(&rt, id).keyframes;
+    assert_eq!((keys.scale[1].at, keys.scale[1].value), (2.5, 2.0));
+    assert_eq!((keys.x[1].value, keys.y.len()), (0.2, 1));
+    assert_eq!(clip(&rt, id).text.size, 1.0, "its plain size stays");
+    // Between the keys the fields show the values under the playhead.
+    rt.state.editor.playhead = 3.5;
+    rt.frame(FRAME);
+    rt.frame(FRAME);
+    assert_eq!(typed(&rt, Field::TextSize), "150%");
+    assert_eq!(typed(&rt, Field::TextX), "10%");
+    tap(&mut rt, "details-text-reset");
+    let keys = &clip(&rt, id).keyframes;
+    assert!(keys.scale.is_empty() && keys.x.is_empty() && keys.y.is_empty());
+    assert_eq!(keys.opacity.len(), 1, "Reset keeps the opacity key");
+}
+
 #[test]
 fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
     use openreel_engine::{DEFAULT_OUTLINE, DEFAULT_SHADOW_OPACITY, Rgb, TextLook};

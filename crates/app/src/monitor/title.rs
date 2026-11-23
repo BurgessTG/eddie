@@ -17,7 +17,8 @@ fn color(rgb: Rgb, alpha: f32) -> Color {
         .alpha(alpha)
 }
 
-/// `title` on a `w` by `h` monitor showing a canvas `canvas_h` pixels tall.
+/// `title`, posed at the playhead, on a `w` by `h` monitor showing a canvas
+/// `canvas_h` pixels tall.
 /// Each line is its own element (`monitor-title-line{n}`), lined up as
 /// export's drawtext lines them up.
 pub(super) fn overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32) -> El {
@@ -147,23 +148,33 @@ pub(super) fn overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32
 
 /// Drag a title to move it, as a share of the `monitor` size. It selects
 /// the title, lands back on its style's place when near it, and Esc puts
-/// it back where it was.
+/// it back where it was. Once its place has keys, the drag keys it at the
+/// playhead.
 fn dragged(ui: &mut Ui, id: openreel_engine::ClipId, drag: &rune::Drag, monitor: (f32, f32)) {
     let editor = &mut ui.editor;
     match drag.phase {
         Phase::Down => {
-            ui.title_drag = editor.timeline.clip(id).map(|clip| clip.text);
+            let playhead = editor.playhead;
+            ui.title_drag = editor
+                .timeline
+                .clip(id)
+                .map(|clip| (clip.clone(), clip.text_at(playhead)));
             editor.selected = Some(id);
         }
         Phase::Up => {
-            if let Some(before) = ui.title_drag.take().filter(|_| drag.cancelled()) {
-                editor.edit_title_text(id, |text| *text = before);
+            // A key the drag added or moved goes too.
+            if let Some((before, _)) = ui.title_drag.take().filter(|_| drag.cancelled())
+                && let Some(clip) = editor.timeline.clip_mut(id)
+            {
+                clip.text = before.text;
+                clip.keyframes = before.keyframes;
             }
         }
         _ => {
-            let Some(before) = ui.title_drag else {
+            let Some((_, before)) = &ui.title_drag else {
                 return;
             };
+            let before = *before;
             let along = |start: f64, travel: f32, size: f32| {
                 let moved = start * f64::from(size) + f64::from(travel);
                 if moved.abs() < f64::from(HOME_SNAP) {

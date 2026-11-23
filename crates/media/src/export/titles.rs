@@ -10,7 +10,12 @@ use openreel_engine::{
 };
 
 use super::frames::{enabled_frames, VideoClock};
+use super::scratch::FilterGraphFile;
 use crate::fonts::Face;
+use crate::MediaResult;
+use keyed::KeyedTitle;
+
+mod keyed;
 
 /// `value` as one filter option, quoted for both parsers it passes: the
 /// option list (`:`, `'` and `\` are special) and then the filtergraph
@@ -61,66 +66,96 @@ fn text_width(font: &[u8], text: &str, size: f32) -> Option<f32> {
     Some(width * scale)
 }
 
+/// drawtext's `x` and `y` for `title`'s lines drawn with `look`. A
+/// highlight caption's layers all start at the full line's left edge, so
+/// drawtext lays out each prefix exactly as in the full line.
+pub(super) fn spot(title: &Clip, look: &TitleLook) -> (String, String) {
+    let x = look.x("text_w");
+    let y = look.y(title_lines(title).len());
+    let words: Vec<&str> = title.name.split_whitespace().collect();
+    let highlighted = look.highlight.is_some() && title.word_times().is_some() && !words.is_empty();
+    let x = match look.align {
+        TextAlign::Center | TextAlign::Right if highlighted => {
+            text_width(look.face.data(), &words.join(" "), look.font_size as f32)
+                .map_or(x, |width| look.x(&format!("{width:.1}")))
+        }
+        _ => x,
+    };
+    (x, y)
+}
+
 impl Titles<'_> {
-    pub(super) fn graph(&self, start: i64, end: i64) -> String {
+    /// The graph that draws the titles on the batch of output frames
+    /// `[start, end)`, and the command files it reads, kept until FFmpeg
+    /// is done with them.
+    pub(super) fn graph(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> MediaResult<(String, Vec<FilterGraphFile>)> {
         let mut filters = vec!["[0:v]null[base]".to_owned()];
+        let mut files = Vec::new();
         let mut current = "base".to_owned();
-        {
-            for (i, (clip, ranges)) in self.clips.iter().enumerate() {
-                let ranges: Vec<_> = ranges
-                    .iter()
-                    .filter_map(|&(a, b)| {
-                        let (a, b) = (a.max(start), b.min(end));
-                        (a < b).then_some((a - start, b - start))
-                    })
-                    .collect();
-                if ranges.is_empty() {
-                    continue;
-                }
-                let look = clip_title_look(clip).scaled(self.scale);
-                let Some(font) = self.fonts.get(&look.face) else {
-                    continue;
-                };
-                let font = filter_value(&font.to_string_lossy());
-                let lines = title_lines(clip);
-                let x = look.x("text_w");
-                let y = look.y(lines.len());
-                let words: Vec<&str> = clip.name.split_whitespace().collect();
-                let highlight = look
-                    .highlight
-                    .zip(clip.word_times())
-                    .filter(|_| !words.is_empty());
-                // Every highlight layer starts at the same left edge, so
-                // drawtext lays out each prefix exactly as in the full line.
-                let x = match (&highlight, look.align) {
-                    (Some(_), TextAlign::Center | TextAlign::Right) => {
-                        text_width(look.face.data(), &words.join(" "), look.font_size as f32)
-                            .map_or(x, |width| look.x(&format!("{width:.1}")))
-                    }
-                    _ => x,
-                };
-                let enable = enabled_frames(&ranges);
-                filters.extend(look.filters(
-                    &TitleText {
-                        font: &font,
-                        text: &filter_value(&lines.join("\n")),
-                        x: &x,
-                        y: &y,
-                        enable: Some(&enable),
-                        opacity: clip.opacity,
-                        tag: &format!("t{i}"),
-                    },
-                    &current,
-                    &format!("t{i}"),
-                ));
-                current = format!("t{i}");
-                let Some((lit, times)) = highlight else {
-                    continue;
-                };
+        for (i, (clip, ranges)) in self.clips.iter().enumerate() {
+            let ranges: Vec<_> = ranges
+                .iter()
+                .filter_map(|&(a, b)| {
+                    let (a, b) = (a.max(start), b.min(end));
+                    (a < b).then_some((a - start, b - start))
+                })
+                .collect();
+            if ranges.is_empty() {
+                continue;
+            }
+            let tag = format!("t{i}");
+            // A title with keys changes its look from frame to frame:
+            // commands set each run of frames to its own.
+            let keyed = (!clip.keyframes.is_empty())
+                .then(|| KeyedTitle::new(clip, &ranges, start, self.clock, self.scale));
+            let look = keyed.as_ref().map_or_else(
+                || clip_title_look(clip).scaled(self.scale),
+                KeyedTitle::layout,
+            );
+            let Some(font) = self.fonts.get(&look.face) else {
+                continue;
+            };
+            let font = filter_value(&font.to_string_lossy());
+            let lines = title_lines(clip);
+            let (x, y) = spot(clip, &look);
+            let words: Vec<&str> = clip.name.split_whitespace().collect();
+            let highlight = look
+                .highlight
+                .zip(clip.word_times())
+                .filter(|_| !words.is_empty());
+            // A keyed title's opacity is drawtext's `alpha`, which the
+            // commands set; its colours are drawn whole.
+            let opacity = if keyed.is_some() { 1.0 } else { clip.opacity };
+            let commands_at = filters.len();
+            let input = match keyed {
+                Some(_) => format!("{tag}cmd"),
+                None => current.clone(),
+            };
+            let enable = enabled_frames(&ranges);
+            filters.extend(look.filters(
+                &TitleText {
+                    font: &font,
+                    text: &filter_value(&lines.join("\n")),
+                    x: &x,
+                    y: &y,
+                    enable: Some(&enable),
+                    opacity,
+                    tag: &tag,
+                },
+                &input,
+                &tag,
+            ));
+            let before = std::mem::replace(&mut current, tag.clone());
+            let mut layers = Vec::new();
+            if let Some((lit, times)) = highlight {
                 // Word n lights while it is spoken: the words through it in
                 // the highlight colour, then the words before it back in the
                 // text colour on top. No box: the base layer drew it.
-                let alpha = clip.opacity.clamp(0.0, 1.0);
+                let alpha = opacity.clamp(0.0, 1.0);
                 let outline = look.outline_options(alpha);
                 for (n, &from) in times.iter().enumerate() {
                     let to = times.get(n + 1).copied().unwrap_or(clip.end());
@@ -136,26 +171,33 @@ impl Titles<'_> {
                         continue;
                     }
                     let enable = enabled_frames(&active);
-                    let mut layers = vec![(words[..=n].join(" "), lit)];
+                    let mut texts = vec![(words[..=n].join(" "), lit)];
                     if n > 0 {
-                        layers.push((words[..n].join(" "), look.color));
+                        texts.push((words[..n].join(" "), look.color));
                     }
-                    for (layer, (text, color)) in layers.into_iter().enumerate() {
+                    for (layer, (text, color)) in texts.into_iter().enumerate() {
                         let text = filter_value(&text);
+                        let name = format!("{tag}w{n}l{layer}");
                         filters.push(format!(
-                            "[{current}]drawtext=fontfile={font}:expansion=none:text={text}:\
-                             fontcolor={}@{alpha:.2}:fontsize={}:box=0{outline}:\
-                             x={x}:y={y}:{LINE_BOX}:enable='{enable}'[t{i}w{n}l{layer}]",
+                            "[{current}]drawtext@{name}=fontfile={font}:expansion=none:\
+                             text={text}:fontcolor={}@{alpha:.2}:fontsize={}:box=0{outline}:\
+                             x={x}:y={y}:{LINE_BOX}:enable='{enable}'[{name}]",
                             ffmpeg_color(color),
                             look.font_size,
                         ));
-                        current = format!("t{i}w{n}l{layer}");
+                        current = name.clone();
+                        layers.push(name);
                     }
                 }
             }
+            if let Some(keyed) = keyed {
+                let (sendcmd, file) = keyed.sendcmd(clip, &tag, &layers, self.clock)?;
+                files.push(file);
+                filters.insert(commands_at, format!("[{before}]{sendcmd}[{input}]"));
+            }
         }
         filters.push(format!("[{current}]format=yuv420p[vout]"));
-        filters.join(";")
+        Ok((filters.join(";"), files))
     }
 }
 
@@ -206,6 +248,13 @@ pub struct TextShadow {
 /// A shadow blurred less than this, in pixels, is drawn sharp.
 pub const SHARP_SHADOW: f32 = 0.5;
 
+impl TextShadow {
+    /// Where it falls in whole pixels, as drawtext places it.
+    pub(crate) fn offset(&self) -> (i32, i32) {
+        (self.x.round() as i32, self.y.round() as i32)
+    }
+}
+
 /// What one title draws and where, for [`TitleLook::filters`].
 pub(crate) struct TitleText<'a> {
     /// drawtext's `fontfile` and `text`, each quoted by [`filter_value`].
@@ -250,16 +299,19 @@ impl TitleLook {
     /// drawtext clips a shadow to the box it draws and cannot blur, so a
     /// title with a shadow draws its box in a pass of its own, and a soft
     /// shadow is drawn alone on a clear copy of the frame, blurred and
-    /// laid under the letters.
+    /// laid under the letters. Each pass is named after the tag
+    /// (`drawtext@{tag}` the letters, `@{tag}box`, `@{tag}cast` and
+    /// `gblur@{tag}`), so commands can change it.
     pub(crate) fn filters(&self, text: &TitleText, input: &str, output: &str) -> Vec<String> {
         let alpha = text.opacity.clamp(0.0, 1.0);
         let enable = text
             .enable
             .map(|enable| format!(":enable='{enable}'"))
             .unwrap_or_default();
-        let draw = |x: &str, y: &str, options: &str| {
+        let (x, y, tag) = (text.x, text.y, text.tag);
+        let draw = |pass: &str, x: &str, y: &str, options: &str| {
             format!(
-                "drawtext=fontfile={}:expansion=none:text={}:fontsize={}:{options}:\
+                "drawtext@{tag}{pass}=fontfile={}:expansion=none:text={}:fontsize={}:{options}:\
                  x={x}:y={y}:{LINE_BOX}:text_align={}{enable}",
                 text.font,
                 text.text,
@@ -272,24 +324,26 @@ impl TitleLook {
             ffmpeg_color(self.color),
             self.outline_options(alpha)
         );
-        let (x, y, tag) = (text.x, text.y, text.tag);
         let Some(shadow) = self.shadow else {
             let options = format!("{letters}:{}", self.box_options(alpha));
-            return vec![format!("[{input}]{}[{output}]", draw(x, y, &options))];
+            return vec![format!("[{input}]{}[{output}]", draw("", x, y, &options))];
         };
         let mut filters = Vec::new();
         let mut current = input.to_owned();
         if self.text_box.is_some() {
             let options = format!("fontcolor=black@0:{}", self.box_options(alpha));
-            filters.push(format!("[{current}]{}[{tag}box]", draw(x, y, &options)));
+            filters.push(format!(
+                "[{current}]{}[{tag}box]",
+                draw("box", x, y, &options)
+            ));
             current = format!("{tag}box");
         }
         let color = ffmpeg_color(shadow.color);
         let shade = format!("{color}@{:.3}", shadow.opacity * alpha);
-        let (dx, dy) = (shadow.x.round() as i32, shadow.y.round() as i32);
+        let (dx, dy) = shadow.offset();
         if shadow.blur < SHARP_SHADOW {
             let options = format!("{letters}:box=0:shadowcolor={shade}:shadowx={dx}:shadowy={dy}");
-            filters.push(format!("[{current}]{}[{output}]", draw(x, y, &options)));
+            filters.push(format!("[{current}]{}[{output}]", draw("", x, y, &options)));
             return filters;
         }
         // The shadow's letters, outlined as the title's are, in its colour
@@ -306,13 +360,13 @@ impl TitleLook {
         filters.push(format!(
             "[{tag}clear]format=yuva420p,\
              drawbox=x=0:y=0:w=iw:h=ih:color={color}@0:t=fill:replace=1{enable},\
-             {},gblur=sigma={:.2}:steps=3:planes=8{enable}[{tag}shadow]",
-            draw(&sx, &sy, &format!("{glyph}:box=0")),
+             {},gblur@{tag}=sigma={:.2}:steps=3:planes=8{enable}[{tag}shadow]",
+            draw("cast", &sx, &sy, &format!("{glyph}:box=0")),
             shadow.blur,
         ));
         filters.push(format!(
             "[{tag}main][{tag}shadow]overlay=format=auto{enable},{}[{output}]",
-            draw(x, y, &format!("{letters}:box=0"))
+            draw("", x, y, &format!("{letters}:box=0"))
         ));
         filters
     }
@@ -596,74 +650,4 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
 }
 
 #[cfg(test)]
-mod title_text_tests {
-    use super::super::argument_path;
-    use super::{filter_value, LINE_BOX};
-    use crate::fonts::Face;
-    use std::path::Path;
-
-    #[test]
-    fn an_output_path_is_never_read_as_an_option() {
-        for (given, passed) in [
-            ("-cut.mp4", "./-cut.mp4"),
-            ("-clips/out.mp4", "./-clips/out.mp4"),
-            ("clips/-out.mp4", "clips/-out.mp4"),
-            ("/tmp/-cut.mp4", "/tmp/-cut.mp4"),
-            ("out.mp4", "out.mp4"),
-        ] {
-            assert_eq!(argument_path(Path::new(given)), Path::new(passed));
-        }
-    }
-
-    /// One 640x120 white frame with `text` options drawn on it by drawtext.
-    fn drawn(font: &str, text: &str) -> Vec<u8> {
-        let out = crate::cli::ffmpeg()
-            .args(["-v", "error", "-f", "lavfi", "-i"])
-            .arg("color=c=white:s=640x120:r=1:d=1")
-            .arg("-vf")
-            .arg(format!(
-                "drawtext=fontfile={}:expansion=none:{text}:fontsize=24:x=10:y=20:{LINE_BOX}",
-                filter_value(font)
-            ))
-            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-            .output()
-            .expect("run ffmpeg");
-        assert!(
-            out.status.success(),
-            "{text}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
-    }
-
-    #[test]
-    fn titles_draw_every_character_as_typed() {
-        let dir = std::env::temp_dir().join(format!("eddie-title-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let font = Face::default().write_into(&dir).unwrap();
-        let font = font.to_string_lossy();
-        // What the two parsers and drawtext's own expansion treat specially.
-        let typed = r"7:05 100% it's a\b, [x]; = %{n} \'
-a second line";
-        let file = dir.join("typed.txt");
-        std::fs::write(&file, typed).unwrap();
-        // drawtext reads a text file without any parsing: the oracle.
-        let expected = drawn(
-            &font,
-            &format!("textfile={}", filter_value(&file.to_string_lossy())),
-        );
-        let quoted = drawn(&font, &format!("text={}", filter_value(typed)));
-        let _ = std::fs::remove_dir_all(&dir);
-        let dark = expected
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .filter(|rgb| rgb[0] < 128)
-            .count();
-        assert!(dark > 500, "the text is drawn, dark pixels={dark}");
-        assert!(
-            quoted == expected,
-            "the quoted text draws the same picture as the file"
-        );
-    }
-}
+mod tests;

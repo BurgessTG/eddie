@@ -430,6 +430,31 @@ impl Keyframes {
         }
     }
 
+    /// Take clip-local `[from, to)` out of the content: keys after it move
+    /// `to - from` earlier, keys inside it go, and a key that lands on one
+    /// at `from` replaces it.
+    pub fn cut(&mut self, from: f64, to: f64) {
+        let span = to - from;
+        for &p in &Property::ALL {
+            let keys = self.keys_mut(p);
+            let after: Vec<Key> = keys
+                .iter()
+                .filter(|key| key.at >= to - KEY_TOLERANCE)
+                .map(|key| Key {
+                    at: key.at - span,
+                    ..*key
+                })
+                .collect();
+            keys.retain(|key| key.at <= from + KEY_TOLERANCE && key.at < to - KEY_TOLERANCE);
+            for key in after {
+                match keys.last_mut() {
+                    Some(last) if (last.at - key.at).abs() <= KEY_TOLERANCE => *last = key,
+                    _ => keys.push(key),
+                }
+            }
+        }
+    }
+
     /// Stretch every key's time by `factor`, as a speed change stretches
     /// the content.
     pub fn stretch(&mut self, factor: f64) {

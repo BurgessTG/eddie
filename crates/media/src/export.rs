@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use openreel_engine::{Clip, ClipKind, Timeline};
+use openreel_engine::{Clip, ClipKind, Property, Timeline};
 
 use crate::{MediaInfo, MediaResult};
 use audio::{encode_audio, encode_audio_file};
@@ -200,7 +200,10 @@ pub fn export_timeline(
     let scratch = ScratchDir::beside(output)?;
     let clips: Vec<_> = title_clips
         .iter()
-        .filter(|clip| clip.opacity > 0.0)
+        .filter(|clip| match clip.keyframes.keys(Property::Opacity) {
+            [] => clip.opacity > 0.0,
+            keys => keys.iter().any(|key| key.value > 0.0),
+        })
         .filter_map(|&clip| Some((clip, visible_title.get(&clip.id)?.clone())))
         .collect();
     let faces = clips.iter().map(|(clip, _)| clip_title_look(clip).face);
@@ -291,9 +294,11 @@ pub fn export_timeline(
                                 batch,
                             )
                             .and_then(|decoder| {
+                                // The command files live until the encoder is done.
+                                let (graph, _commands) = titles.graph(batch.start, batch.end)?;
                                 encode_segment(
                                     decoder,
-                                    &titles.graph(batch.start, batch.end),
+                                    &graph,
                                     (canvas_w, canvas_h),
                                     rate,
                                     encoder,

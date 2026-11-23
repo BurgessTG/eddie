@@ -216,8 +216,26 @@ impl Editor {
                     }
                     _ => return Err(format!("setText needs a title; clip {clip} is not one")),
                 };
+                // A place or size it sets is one value for the whole title
+                // again; `null` resets them all.
+                let fields = match serde_json::from_str(&changes) {
+                    Ok(serde_json::Value::Object(fields)) => Some(fields),
+                    _ => None,
+                };
+                let set: Vec<Property> = [
+                    (Property::X, "x"),
+                    (Property::Y, "y"),
+                    (Property::Scale, "size"),
+                ]
+                .into_iter()
+                .filter(|(_, name)| fields.as_ref().is_none_or(|f| f.contains_key(*name)))
+                .map(|(property, _)| property)
+                .collect();
                 if let Some(target) = self.timeline.clip_mut(clip) {
                     target.text = text;
+                    for property in set {
+                        target.keyframes.clear(property);
+                    }
                 }
             }
             ScriptCommand::SetMask { clip, changes } => {

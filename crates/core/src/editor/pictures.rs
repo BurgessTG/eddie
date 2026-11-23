@@ -437,9 +437,11 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
                     .and_then(|id| timeline.clip(id))
                     .map(|clip| (clip.id, clip.track, clip.shown_at(time))),
                 title: segment.title.and_then(|id| timeline.clip(id)).map(|clip| {
-                    let look = openreel_media::clip_title_look(clip);
+                    // Keyed place, size and opacity as they are at the cell.
+                    let posed = clip.posed_at(time);
+                    let look = openreel_media::clip_title_look(&posed);
                     let lines = openreel_media::title_lines(clip).join("\n");
-                    (clip.id, lines, look, clip.opacity)
+                    (clip.id, lines, look, posed.opacity)
                 }),
             }
         })

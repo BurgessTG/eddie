@@ -477,6 +477,9 @@ impl Timeline {
                 // part over it, so the captions after it stay in step.
                 let before = (start - other.start).max(0.0);
                 let after = (other.end() - end).max(0.0);
+                // Its keys stay on the moments of the text they were on.
+                other.keyframes.cut(start - other.start, end - other.start);
+                other.keyframes.shift(other.start - other.start.min(start));
                 if other.start > start {
                     other.source_in += end - other.start;
                     other.start = start;

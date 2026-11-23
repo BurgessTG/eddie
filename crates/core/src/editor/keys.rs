@@ -7,18 +7,18 @@ use openreel_engine::{Clip, ClipId, ClipKind, Ease, Property, KEY_TOLERANCE, MAX
 
 use super::Editor;
 
-/// Whether `clip` can key `property`: a picture's place, size, turn,
-/// opacity and colour on video clips, and volume on anything with sound.
+/// Whether `clip` can key `property` ([`Clip::key_range`]).
 pub fn keyable(clip: &Clip, property: Property) -> bool {
-    match property {
-        Property::Volume => clip.kind != ClipKind::Title,
-        _ => clip.kind == ClipKind::Video,
-    }
+    clip.key_range(property).is_some()
 }
 
 /// `clip`'s plain value of `property`, the one it has without keys.
 fn set_plain(clip: &mut Clip, property: Property, value: f64) {
+    let title = clip.kind == ClipKind::Title;
     match property {
+        Property::X if title => clip.text.x = value,
+        Property::Y if title => clip.text.y = value,
+        Property::Scale if title => clip.text.size = value,
         Property::X => clip.transform.x = value,
         Property::Y => clip.transform.y = value,
         Property::Scale => clip.transform.scale = value,
@@ -209,12 +209,15 @@ impl Editor {
                 clip.end()
             ));
         }
-        if !property.accepts(value) {
+        let title = clip.kind == ClipKind::Title;
+        if !value.is_finite() || !clip.key_range(property).is_some_and(|r| r.contains(&value)) {
             return Err(format!(
                 "setKeyframe: {value} is out of range for {}; {}",
                 property.as_str(),
                 match property {
+                    Property::X | Property::Y if title => "-1 to 1 canvases from the style's place",
                     Property::X | Property::Y => "-10 to 10 canvases",
+                    Property::Scale if title => "0.25 to 4 times the style's size",
                     Property::Scale => "0.05 to 20 times the fitted size",
                     Property::Rotation => "-3600 to 3600 degrees",
                     Property::Opacity | Property::FilterStrength => "0 to 1",

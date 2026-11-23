@@ -38,8 +38,9 @@ pub struct Ui {
     /// The clip whose picture a drag on the monitor moves, as it was, and
     /// where its picture was at the playhead.
     pub monitor_drag: Option<(Clip, Transform)>,
-    /// Where the title a drag on the monitor moves was.
-    pub title_drag: Option<TextLook>,
+    /// The title a drag on the monitor moves, as it was, and its text's
+    /// look at the playhead.
+    pub title_drag: Option<(Clip, TextLook)>,
     /// The clip whose chroma key colour the next click on the monitor
     /// picks.
     pub key_pick: Option<ClipId>,

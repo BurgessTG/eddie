@@ -210,7 +210,7 @@ impl Timeline {
                     && clip.color.is_valid()
                     && (crate::MIN_SPEED..=crate::MAX_SPEED).contains(&clip.speed)
                     && clip.transition.is_none_or(|t| t.is_valid())
-                    && clip.keyframes.is_valid()
+                    && clip.keys_fit()
                     && clip.chroma.is_none_or(|key| key.is_valid())
                     && clip.mask.is_none_or(|mask| mask.is_valid())
                     && clip

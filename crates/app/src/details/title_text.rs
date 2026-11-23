@@ -5,12 +5,13 @@
 use eddie_core::Editor;
 use openreel_engine::{
     Clip, ClipId, MAX_OUTLINE, MAX_SHADOW_BLUR, MAX_SHADOW_DISTANCE, MAX_TEXT_SIZE, MIN_TEXT_SIZE,
-    Rgb, TextAlign, TextLook,
+    Property, Rgb, TextAlign, TextLook,
 };
 use rune::{Color, Cursor, El, LineCap, Shape, TextStyle, el, row};
 
 use super::BUTTON_GAP;
 use super::fields::{Field, set_colour};
+use super::keys::{self, KEY_SPACE};
 use super::rows::{button_row, prop_row, section, slider_row, value_field};
 use super::styles::{Select, select};
 use crate::app::Ui;
@@ -33,7 +34,10 @@ pub(super) const PALETTE: [(&str, Rgb); 10] = [
 
 pub(super) const SWATCH_GAP: f32 = 6.0;
 
+/// `clip` is the title posed at the playhead: its keyed size and place
+/// are the ones there.
 pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f32) -> El {
+    let key = |properties, key, what| keys::button(ui, id, clip, properties, key, what);
     let drawn = openreel_media::drawn_text(clip);
     let box_on = drawn.box_opacity.unwrap_or(0.0) > 0.0;
     let outline_on = drawn.outline.unwrap_or(0.0) > 0.0;
@@ -48,10 +52,11 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
             Field::TextSize,
             clip.text.size.log2() as f32,
             MIN_TEXT_SIZE.log2() as f32..=MAX_TEXT_SIZE.log2() as f32,
-            value_w,
+            value_w - KEY_SPACE,
             size_at,
             "Size of the text against its style's; it grows upward",
-        ),
+        )
+        .child(key(&[Property::Scale], "details-key-text-size", "size")),
         colour_row(ui, Field::TextColor, "Colour", "The colour of the letters"),
         swatches(id, Field::TextColor, drawn.color, None, card_inner),
         colour_row(
@@ -165,7 +170,14 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
             ),
         ]);
     }
-    rows.extend([position(ui, value_w), buttons(id, clip, card_inner)]);
+    rows.extend([
+        position(ui, value_w - KEY_SPACE).child(key(
+            &[Property::X, Property::Y],
+            "details-key-text-position",
+            "position",
+        )),
+        buttons(id, clip, card_inner),
+    ]);
     section("Text", rows)
 }
 
@@ -256,7 +268,12 @@ fn faces(id: ClipId, drawn: &TextLook) -> El {
 /// hundredths the field shows. A step too small to change them still moves
 /// one hundredth, so the arrow keys never stick at the small end.
 fn size_at(editor: &mut Editor, id: ClipId, position: f32) {
-    let Some(current) = editor.timeline.clip(id).map(|clip| clip.text.size) else {
+    let playhead = editor.playhead;
+    let Some(current) = editor
+        .timeline
+        .clip(id)
+        .map(|clip| clip.text_at(playhead).size)
+    else {
         return;
     };
     let wanted = 2f64.powf(f64::from(position));
@@ -415,10 +432,15 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
             "details-text-reset",
             "Reset",
             Variant::Secondary,
-            "Draw the text as its style does: font, alignment, size, colours, box, outline, shadow and place",
+            "Draw the text as its style does: font, alignment, size, colours, box, outline, shadow and place, without size or position keys",
             true,
         )
         .on_press(move |ui: &mut Ui| {
+            if let Some(clip) = ui.editor.timeline.clip_mut(id) {
+                for property in [Property::X, Property::Y, Property::Scale] {
+                    clip.keyframes.clear(property);
+                }
+            }
             ui.editor.edit_title_text(id, |t| *t = TextLook::default());
         }),
     ];

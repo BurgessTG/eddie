@@ -103,6 +103,11 @@
   Colour card keys it at the playhead, so a grade can change over a clip,
   the same in the monitor and in export. A freeze frame keeps the grade
   at its point. Scripts key them with `setKeyframe`.
+- Keyframes for text: a title's size, position and opacity key from the
+  diamonds in its Text card and beside Opacity, or by dragging it on the
+  monitor once its position has keys, so text can slide, grow and fade
+  in, the same in the monitor, export and `eddie sheet`. Scripts key a
+  title's `x`, `y`, `scale` (its size) and `opacity` with `setKeyframe`.
 - Blend modes for a picture over other lanes: Darken, Multiply, Colour
   burn, Linear burn, Lighten, Screen, Colour dodge, Add, Overlay, Soft
   light, Hard light, Difference and Exclusion, picked under Opacity in

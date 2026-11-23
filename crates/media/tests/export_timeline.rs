@@ -2993,6 +2993,125 @@ fn a_title_shadow_falls_where_its_angle_and_distance_put_it() {
     );
 }
 
+/// A keyed title's size, place and opacity, with an outline, a soft shadow
+/// over a box, and a highlight caption's lit words, draw on each frame as a
+/// plain title holding that frame's values does.
+#[test]
+fn keyed_titles_draw_each_frame_as_a_plain_title_does() {
+    use openreel_engine::{Ease, Rgb, TextLook};
+    let fixture = Fixture::new();
+    let source = fixture.video("grey.mp4", "color=c=gray:s=1280x720:r=10:d=3", "null", None);
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 3.0, 0.0);
+    let outlined = TextLook {
+        outline: Some(0.08),
+        outline_color: Some(Rgb::BLACK),
+        ..TextLook::default()
+    };
+    let soft = TextLook {
+        box_opacity: Some(0.5),
+        shadow_color: Some(Rgb(200, 0, 0)),
+        shadow_opacity: Some(0.8),
+        shadow_distance: 0.2,
+        shadow_blur: 0.15,
+        ..TextLook::default()
+    };
+    let sharp = TextLook {
+        shadow_color: Some(Rgb::BLACK),
+        shadow_opacity: Some(1.0),
+        shadow_blur: 0.0,
+        ..TextLook::default()
+    };
+    let titles = [
+        ("Keyed MOVE", TitleStyle::Caption, outlined, 0.0),
+        ("Soft SHADOW", TitleStyle::LowerThird, soft, 1.0),
+        (
+            "LEFTWORD RIGHTWORD",
+            TitleStyle::HighlightCaption,
+            sharp,
+            2.0,
+        ),
+    ];
+    let keys = [
+        &[
+            (Property::Scale, 0.0, 0.6, Ease::Linear),
+            (Property::Scale, 1.0, 1.6, Ease::Linear),
+            (Property::X, 0.0, -0.2, Ease::Linear),
+            (Property::X, 1.0, 0.15, Ease::Linear),
+            (Property::Opacity, 0.0, 0.3, Ease::EaseIn),
+            (Property::Opacity, 1.0, 1.0, Ease::Linear),
+        ][..],
+        &[
+            (Property::Scale, 0.0, 1.5, Ease::EaseInOut),
+            (Property::Scale, 1.0, 0.7, Ease::Linear),
+            (Property::Y, 0.0, -0.3, Ease::Linear),
+            (Property::Y, 1.0, 0.0, Ease::Linear),
+        ][..],
+        &[
+            (Property::Scale, 0.0, 0.8, Ease::Linear),
+            (Property::Scale, 1.0, 1.4, Ease::Linear),
+            (Property::Opacity, 0.0, 0.5, Ease::Linear),
+            (Property::Opacity, 1.0, 1.0, Ease::Linear),
+        ][..],
+    ];
+    let mut ids = Vec::new();
+    for ((name, style, text, start), keys) in titles.into_iter().zip(keys) {
+        let id = timeline.add_clip(name, ClipKind::Title, 0, start, 1.0, 0.0);
+        let title = timeline.clip_mut(id).unwrap();
+        (title.title_style, title.text) = (style, text);
+        if style == TitleStyle::HighlightCaption {
+            title.words = vec![0.0, 0.5];
+        }
+        for &(property, at, value, ease) in keys {
+            title.keyframes.set(property, at, value);
+            title.keyframes.ease_key(property, at, ease);
+        }
+        ids.push(id);
+    }
+    let keyed = frames(&fixture.export("keyed-titles.mp4", &timeline));
+    // The same frames, each with a title of its own holding that frame's
+    // size, place and opacity.
+    let mut plain = Timeline::new(10.0);
+    video(&mut plain, &source, 0, 0.0, 3.0, 0.0);
+    for n in 0..30 {
+        let at = n as f64 / 10.0;
+        let clip = timeline.clip(ids[n / 10]).unwrap();
+        let id = plain.add_clip(&clip.name, ClipKind::Title, 0, at, 0.1, at - clip.start);
+        let title = plain.clip_mut(id).unwrap();
+        title.title_style = clip.title_style;
+        title.words = clip.words.clone();
+        title.text = clip.text_at(at);
+        title.opacity = clip.opacity_at(at);
+    }
+    let plain = frames(&fixture.export("plain-titles.mp4", &plain));
+    assert_eq!((keyed.len(), plain.len()), (30, 30));
+    // The codec puts a few hundred values more than 24 levels off around
+    // the letters' edges; a frame drawn with the frame before's values puts
+    // over 16,000 off.
+    for n in 0..30 {
+        let (a, b) = (&keyed[n], &plain[n]);
+        let off = a
+            .iter()
+            .zip(b)
+            .filter(|(a, b)| a.abs_diff(**b) > 24)
+            .count();
+        eprintln!("frame {n}: {off} values off by more than 24");
+        assert!(
+            off <= 2000,
+            "frame {n}: {off} values differ by over 24 levels"
+        );
+    }
+    // The keys did move and grow it: its box is over twice as wide at the
+    // end as at the start, and further right.
+    let dark = |p: &[u8; 3]| p.iter().all(|&v| v < 90);
+    let (first, _) = pixel_box(&keyed[0], 1280, dark);
+    let (last, _) = pixel_box(&keyed[9], 1280, dark);
+    assert!(
+        last[2] - last[0] > 2 * (first[2] - first[0]) && last[0] > first[0] + 100,
+        "the box at the start {first:?} and the end {last:?}"
+    );
+}
+
 #[test]
 fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
     // Halfway through a 1 s fade-in, a linear fade is at 0.5 and the

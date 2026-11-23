@@ -1027,6 +1027,16 @@ fn ripple_delete_closes_the_gap_on_every_lane_that_has_room() {
     let over_v3 = tl.add_clip("said in v3", ClipKind::Title, 0, 5.5, 1.0, 0.0);
     let into_v2 = tl.add_clip("from v1 into v2", ClipKind::Title, 0, 1.0, 1.4, 0.0);
     let out_of_v2 = tl.add_clip("from v2 into v3", ClipKind::Title, 0, 4.6, 0.8, 0.0);
+    // Keys over the deleted picture go; the rest stay on their text.
+    for (id, keys) in [
+        (out_of_v2, &[(0.1, 0.2), (0.4, 0.5), (0.8, 1.0)][..]),
+        (into_v2, &[(0.5, 0.3), (1.2, 0.9)][..]),
+    ] {
+        for &(at, value) in keys {
+            let clip = tl.clip_mut(id).unwrap();
+            clip.keyframes.set(Property::Opacity, at, value);
+        }
+    }
     assert_eq!(
         tl.clip(v2_sound).unwrap().track,
         1,
@@ -1062,6 +1072,17 @@ fn ripple_delete_closes_the_gap_on_every_lane_that_has_room() {
         [2.0, 0.4, 0.4],
         "its words keep their times"
     );
+    let keys = |tl: &Timeline, id| {
+        tl.clip(id)
+            .unwrap()
+            .keyframes
+            .opacity
+            .iter()
+            .map(|key| ((key.at * 1000.0).round() / 1000.0, key.value))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&tl, out_of_v2), [(0.0, 0.5), (0.4, 1.0)]);
+    assert_eq!(keys(&tl, into_v2), [(0.5, 0.3)]);
     assert!(tl.lane_overlaps().is_empty());
 
     // Over a cutaway the base still shows, so its titles stay.

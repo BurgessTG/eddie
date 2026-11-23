@@ -9,8 +9,9 @@ use crate::keyframe::{Keyframes, Property};
 use crate::mask::Mask;
 use crate::place::{Background, Transform};
 use crate::remade::Remade;
-use crate::text::TextLook;
+use crate::text::{TextLook, MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MIN_TEXT_SIZE};
 use crate::transition::Transition;
+use std::ops::RangeInclusive;
 
 pub type ClipId = u64;
 
@@ -280,11 +281,55 @@ impl Clip {
         self.keyframes.value(property, time - self.start)
     }
 
+    /// The values keys of `property` take on this clip, or `None` when it
+    /// has no such thing to key: a video clip keys its picture's place,
+    /// size, turn, opacity and colour, a title its text's place
+    /// ([`TextLook::x`] and `y`), size ([`TextLook::size`]) and opacity,
+    /// and anything with sound its volume.
+    pub fn key_range(&self, property: Property) -> Option<RangeInclusive<f64>> {
+        match (self.kind, property) {
+            (ClipKind::Video, _) | (ClipKind::Audio, Property::Volume) => Some(property.range()),
+            (ClipKind::Title, Property::X | Property::Y) => {
+                Some(-MAX_TEXT_OFFSET..=MAX_TEXT_OFFSET)
+            }
+            (ClipKind::Title, Property::Scale) => Some(MIN_TEXT_SIZE..=MAX_TEXT_SIZE),
+            (ClipKind::Title, Property::Opacity) => Some(property.range()),
+            _ => None,
+        }
+    }
+
+    /// Whether every key is one the renderers take: valid
+    /// ([`Keyframes::is_valid`]), of a property this clip keys, and in its
+    /// range there ([`Clip::key_range`]).
+    pub fn keys_fit(&self) -> bool {
+        self.keyframes.is_valid()
+            && Property::ALL.iter().all(|&property| {
+                let keys = self.keyframes.keys(property);
+                keys.is_empty()
+                    || self
+                        .key_range(property)
+                        .is_some_and(|range| keys.iter().all(|key| range.contains(&key.value)))
+            })
+    }
+
+    /// A title's text look at timeline `time`: its own, with any keyed
+    /// place and size in place.
+    pub fn text_at(&self, time: f64) -> TextLook {
+        let mut text = self.text;
+        if self.kind == ClipKind::Title {
+            text.x = self.keyed(Property::X, time).unwrap_or(text.x);
+            text.y = self.keyed(Property::Y, time).unwrap_or(text.y);
+            text.size = self.keyed(Property::Scale, time).unwrap_or(text.size);
+        }
+        text
+    }
+
     /// Where the picture sits at timeline `time`: its transform with any
-    /// keyed position, scale and rotation in place.
+    /// keyed position, scale and rotation in place. A title's keys move
+    /// its text instead ([`Clip::text_at`]).
     pub fn transform_at(&self, time: f64) -> Transform {
         let mut t = self.transform;
-        if self.keyframes.moves_transform() {
+        if self.kind != ClipKind::Title && self.keyframes.moves_transform() {
             t.x = self.keyed(Property::X, time).unwrap_or(t.x);
             t.y = self.keyed(Property::Y, time).unwrap_or(t.y);
             t.scale = self.keyed(Property::Scale, time).unwrap_or(t.scale);
@@ -317,6 +362,7 @@ impl Clip {
         clip.opacity = self.opacity_at(time);
         clip.volume = self.volume_at(time);
         clip.color = self.color_at(time);
+        clip.text = self.text_at(time);
         clip
     }
 
@@ -330,6 +376,15 @@ impl Clip {
 
     /// A property's plain value, or its value at timeline `time` when keyed.
     pub fn property_at(&self, property: Property, time: f64) -> f64 {
+        if self.kind == ClipKind::Title {
+            let text = self.text_at(time);
+            match property {
+                Property::X => return text.x,
+                Property::Y => return text.y,
+                Property::Scale => return text.size,
+                _ => {}
+            }
+        }
         let t = self.transform_at(time);
         match property {
             Property::X => t.x,

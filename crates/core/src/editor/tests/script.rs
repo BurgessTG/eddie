@@ -1295,3 +1295,97 @@ fn colour_keys_grade_by_script_and_by_the_colour_card() {
     assert_eq!(clip.color_at(4.0).exposure, 0.5);
     assert_eq!(clip.keyframes.filter_strength.len(), 1);
 }
+
+/// A title keys its text's place, size and opacity, as a picture keys its
+/// own: by script, and by the Text card's fields at the playhead once
+/// keyed. `setText` makes a field one value again. It has no turn, colour
+/// or volume to key, and its size and place keep to the Text card's ranges.
+#[test]
+fn title_keys_move_grow_and_fade_its_text() {
+    let mut app = Editor::headless();
+    run(&mut app, "addTitle('Hello', 2, 4);").unwrap();
+    let id = app.timeline.clips[0].id;
+    run(
+        &mut app,
+        &format!(
+            "setKeyframe({id}, 'scale', 2, 0.5); setKeyframe({id}, 'scale', 4, 1.5); \
+             setKeyframe({id}, 'x', 2, -0.2); setKeyframe({id}, 'x', 6, 0.2); \
+             setKeyframe({id}, 'opacity', 3, 0.4)"
+        ),
+    )
+    .unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.text_at(3.0).size, 1.0);
+    assert!(clip.text_at(4.0).x.abs() < 1e-12);
+    assert_eq!(clip.opacity_at(5.0), 0.4);
+    assert_eq!(clip.posed_at(3.0).text.size, 1.0);
+    assert_eq!(clip.transform_at(3.0), clip.transform, "no picture moves");
+    for (code, why) in [
+        (
+            format!("setKeyframe({id}, 'rotation', 3, 10)"),
+            "has no rotation to key",
+        ),
+        (
+            format!("setKeyframe({id}, 'brightness', 3, 0.2)"),
+            "has no brightness to key",
+        ),
+        (
+            format!("setKeyframe({id}, 'volume', 3, 1)"),
+            "has no volume to key",
+        ),
+        (
+            format!("setKeyframe({id}, 'scale', 3, 5)"),
+            "0.25 to 4 times the style's size",
+        ),
+        (
+            format!("setKeyframe({id}, 'x', 3, 1.5)"),
+            "-1 to 1 canvases",
+        ),
+    ] {
+        let error = run(&mut app, &code).unwrap_err();
+        assert!(error.contains(why), "{code}: {error}");
+    }
+
+    // A keyed field edited at the playhead keys it there; an unkeyed one is
+    // the title's one value, and a keyed one it leaves alone keeps its keys.
+    app.seek(5.0);
+    app.edit_title_text(id, |t| {
+        t.size = 2.0;
+        t.y = 0.1;
+        t.bold = true;
+    });
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(clip.keyframes.scale.len(), 3);
+    assert_eq!(clip.text_at(5.0).size, 2.0);
+    assert_eq!(
+        (clip.text.size, clip.text.y, clip.text.bold),
+        (1.0, 0.1, true)
+    );
+    assert!(clip.keyframes.y.is_empty());
+    assert_eq!(clip.keyframes.x.len(), 2);
+    app.toggle_keys(id, &[Property::X, Property::Y]);
+    let clip = app.timeline.clip(id).unwrap();
+    assert_eq!(
+        (clip.keyframes.x.len(), clip.keyframes.y[0].value),
+        (3, 0.1)
+    );
+
+    run(&mut app, &format!("setText({id}, {{size: 1.2}})")).unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert!(clip.keyframes.scale.is_empty());
+    assert_eq!(clip.text_at(3.0).size, 1.2);
+    assert_eq!(clip.keyframes.x.len(), 3);
+    run(&mut app, &format!("setText({id}, null)")).unwrap();
+    let clip = app.timeline.clip(id).unwrap();
+    assert!(clip.keyframes.x.is_empty() && clip.keyframes.y.is_empty());
+    assert_eq!(clip.keyframes.opacity.len(), 1, "opacity is not text");
+
+    // A project or script cannot give a title keys it cannot draw.
+    let mut clip = clip.clone();
+    assert!(clip.keys_fit());
+    clip.keyframes.set(Property::Scale, 1.0, 10.0);
+    assert!(!clip.keys_fit(), "a picture's scale, past a title's size");
+    clip.keyframes.clear(Property::Scale);
+    clip.keyframes.set(Property::Rotation, 1.0, 10.0);
+    assert!(!clip.keys_fit(), "a title does not turn");
+}

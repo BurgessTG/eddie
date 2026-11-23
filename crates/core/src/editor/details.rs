@@ -346,17 +346,40 @@ impl Editor {
     }
 
     /// The Text card: change a title's size, colours, box, outline or
-    /// place, each moved into its range.
+    /// place, each moved into its range. `edit` sees the look at the
+    /// playhead; a place or size with keys gets a key there when this edit
+    /// changes it.
     pub fn edit_title_text(&mut self, id: ClipId, edit: impl FnOnce(&mut TextLook)) {
-        if let Some(clip) = self
+        let Some(at) = self.clip_time(id) else {
+            return;
+        };
+        let playhead = self.playhead;
+        let Some(clip) = self
             .timeline
             .clip_mut(id)
             .filter(|clip| clip.kind == ClipKind::Title)
-        {
-            let mut text = clip.text;
-            edit(&mut text);
-            clip.text = text.clamped();
+        else {
+            return;
+        };
+        let here = clip.text_at(playhead);
+        let mut text = here;
+        edit(&mut text);
+        let mut text = text.clamped();
+        let keyed = [
+            (Property::X, here.x, &mut text.x, clip.text.x),
+            (Property::Y, here.y, &mut text.y, clip.text.y),
+            (Property::Scale, here.size, &mut text.size, clip.text.size),
+        ];
+        for (property, before, field, kept) in keyed {
+            if clip.keyframes.keys(property).is_empty() {
+                continue;
+            }
+            let after = std::mem::replace(field, kept);
+            if after != before {
+                clip.keyframes.set(property, at, after);
+            }
         }
+        clip.text = text;
     }
 
     /// Give every other caption `id`'s style and text look, as CapCut's

@@ -150,33 +150,30 @@ fn levels(ui: &Ui, id: ClipId, clip: &Clip, has_sound: bool, value_w: f32) -> Ve
     let is_audio = clip.kind == ClipKind::Audio;
     let mut look = Vec::new();
     if !is_audio {
-        // A title's opacity is one value; a picture's can change by key.
         let video = clip.kind == ClipKind::Video;
-        let mut row = slider_row(
+        let row = slider_row(
             ui,
             id,
             "Opacity",
             Field::Opacity,
             clip.opacity,
             0.0..=1.0,
-            if video {
-                value_w - keys::KEY_SPACE
-            } else {
-                value_w
-            },
+            value_w - keys::KEY_SPACE,
             Editor::set_clip_opacity,
-            "Fades the picture against black",
-        );
-        if video {
-            row = row.child(keys::button(
-                ui,
-                id,
-                clip,
-                &[Property::Opacity],
-                "details-key-opacity",
-                "opacity",
-            ));
-        }
+            if video {
+                "Fades the picture against black"
+            } else {
+                "Fades the text with its box, outline and shadow"
+            },
+        )
+        .child(keys::button(
+            ui,
+            id,
+            clip,
+            &[Property::Opacity],
+            "details-key-opacity",
+            "opacity",
+        ));
         // A picture's Blend list, a shorter row, comes next.
         look.push(if has_sound && !video {
             row

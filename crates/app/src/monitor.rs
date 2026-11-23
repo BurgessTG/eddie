@@ -149,7 +149,9 @@ fn frame(ui: &Ui, area_w: f32, area_h: f32) -> El {
         }
     }
     if let Some(title) = timeline.active_title(playhead) {
-        frame = frame.child(title::overlay(title, playhead, w, h, canvas.1));
+        // Keyed place, size and opacity as they are at the playhead.
+        let posed = title.posed_at(playhead);
+        frame = frame.child(title::overlay(&posed, playhead, w, h, canvas.1));
     }
     frame
 }
