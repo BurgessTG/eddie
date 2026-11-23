@@ -422,6 +422,47 @@ mod tests {
     }
 
     #[test]
+    fn quit_leaves_and_asks_first_about_unsaved_edits() {
+        let ctrl = Mods {
+            cmd: true,
+            ..Mods::default()
+        };
+        let mut rt = window(Ui::headless());
+        chord(&mut rt, Key::Command('q'), ctrl);
+        frames(&mut rt, 2);
+        assert_eq!(rt.shell_request, Some(Shell::Quit), "nothing to save");
+
+        let mut rt = window(Ui::headless());
+        rt.state
+            .editor
+            .run_console("addTitle('Booth', 3, 2);".to_owned());
+        frames(&mut rt, 2);
+        // Settings is open: Quit still reaches the window, as Esc does.
+        rt.state.act(Action::OpenSettings);
+        frames(&mut rt, 2);
+        chord(&mut rt, Key::Command('q'), ctrl);
+        assert_eq!(rt.state.pending_discard, Some(Discard::Close));
+        assert_eq!(rt.shell_request, None, "nothing leaves before an answer");
+        click(&mut rt, "unsaved-drop");
+        frames(&mut rt, 2);
+        assert_eq!(rt.shell_request, Some(Shell::Quit), "Don't save leaves");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_file_menu_quits() {
+        let mut rt = window(Ui::headless());
+        click(&mut rt, "menu-file");
+        assert!(
+            tooltip(&mut rt, "menu-item-Quit").is_some_and(|words| !words.is_empty()),
+            "Quit has no tooltip"
+        );
+        click(&mut rt, "menu-item-Quit");
+        frames(&mut rt, 2);
+        assert_eq!(rt.shell_request, Some(Shell::Quit));
+    }
+
+    #[test]
     fn a_saved_project_is_replaced_without_asking() {
         let mut rt = window(Ui::headless());
         rt.state

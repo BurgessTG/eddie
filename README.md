@@ -383,6 +383,7 @@ macOS.
 | Ctrl+N / O / S | New / open / save project |
 | Ctrl+I / Ctrl+E | Import media / export |
 | Ctrl+, | Settings |
+| Ctrl+Q | Quit, asking to save unsaved changes (Cmd+Q on macOS) |
 
 ## Layout
 

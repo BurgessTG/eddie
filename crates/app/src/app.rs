@@ -361,6 +361,11 @@ impl Ui {
             Action::SaveProject => self.save_project(false, None),
             Action::SaveProjectAs => self.save_project(true, None),
             Action::LocateMedia => self.pick_missing_media(),
+            Action::Quit => {
+                if self.may_leave() {
+                    self.close();
+                }
+            }
             Action::OpenSettings if self.show_settings => settings::close(self),
             Action::OpenSettings => {
                 self.show_shortcuts = false;
@@ -410,6 +415,16 @@ impl Ui {
     /// Leave once the frame in progress ends.
     pub fn close(&mut self) {
         self.quit = true;
+    }
+
+    /// Whether Eddie may leave now. With unsaved edits it stays and shows
+    /// "Save changes?", whose answer leaves.
+    fn may_leave(&mut self) -> bool {
+        if self.quit || !self.editor.has_unsaved_changes() {
+            return true;
+        }
+        self.pending_discard = Some(Discard::Close);
+        false
     }
 }
 
@@ -557,7 +572,11 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
     let dialog = ui.show_settings || ui.show_shortcuts || ui.show_export;
     let closes = matches!(
         action,
-        Action::Deselect | Action::OpenSettings | Action::ShowShortcuts | Action::Export
+        Action::Deselect
+            | Action::OpenSettings
+            | Action::ShowShortcuts
+            | Action::Export
+            | Action::Quit
     );
     if !dialog || closes {
         ui.act(action);
@@ -568,11 +587,7 @@ pub fn on_key(ui: &mut Ui, event: &KeyEvent, tx: &mut Tx) -> bool {
 /// Whether the window may close, or macOS quit Eddie (Cmd+Q, the Dock): with
 /// unsaved edits it stays open and shows "Save changes?", whose answer closes it.
 pub fn should_close(ui: &mut Ui, _: &mut Tx) -> bool {
-    if ui.quit || !ui.editor.has_unsaved_changes() {
-        return true;
-    }
-    ui.pending_discard = Some(Discard::Close);
-    false
+    ui.may_leave()
 }
 
 /// The window closed, and Eddie leaves with it.

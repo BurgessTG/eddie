@@ -235,7 +235,8 @@ fn file(ui: &Ui) -> Vec<El> {
                 .single_line(),
         )
     };
-    vec![
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
+    let mut entries = vec![
         item(
             "New project",
             "Start an empty project with an empty media bin",
@@ -280,7 +281,19 @@ fn file(ui: &Ui) -> Vec<El> {
             "Remove every clip from the timeline; imported media and markers stay",
             Action::ClearTimeline,
         ),
-    ]
+    ];
+    // A Mac quits from the menu macOS gives every app.
+    #[cfg(not(target_os = "macos"))]
+    entries.extend([
+        separator(),
+        item(
+            "Quit",
+            "Close Eddie, asking first when there are unsaved changes",
+            true,
+            Action::Quit,
+        ),
+    ]);
+    entries
 }
 
 fn edit(ui: &Ui) -> Vec<El> {

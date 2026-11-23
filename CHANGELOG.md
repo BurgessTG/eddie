@@ -152,6 +152,9 @@
   and cropping more. Eddie writes the steadied part in the background, as
   for Reverse, and a clip can be both stabilized and reversed. Scripts
   use `setStabilize`.
+- Quit on Linux: File → Quit or Ctrl+Q, which asks to save
+  unsaved changes first, as closing the window does. Only the window's
+  close button left Eddie before.
 
 ### Changed
 

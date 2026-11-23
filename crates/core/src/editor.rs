@@ -131,6 +131,7 @@ pub enum Action {
     AddMarkerNewColor,
     NextMarker,
     PrevMarker,
+    Quit,
 }
 
 pub struct Editor {
@@ -506,7 +507,8 @@ impl Editor {
             | Action::SaveProjectAs
             | Action::LocateMedia
             | Action::OpenSettings
-            | Action::ShowShortcuts => return false,
+            | Action::ShowShortcuts
+            | Action::Quit => return false,
             Action::Undo => {
                 self.step_history(false);
             }

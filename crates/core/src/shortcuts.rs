@@ -155,6 +155,7 @@ pub const BINDINGS: &[Binding] = &[
     )),
     anywhere(bind(Action::Import, "Project", "Import media", &[cmd('i')])),
     anywhere(bind(Action::Export, "Project", "Export", &[cmd('e')])),
+    anywhere(bind(Action::Quit, "Project", "Quit", &[cmd('q')])),
     bind(Action::Undo, "Edit", "Undo", &[cmd('z')]),
     bind(Action::Redo, "Edit", "Redo", &[cmd_shift('z'), cmd('y')]),
     bind(
