@@ -161,6 +161,7 @@
 - Dragging a Shape slider redraws the shape on the monitor at once: the
   monitor shows a drawing of its own size while the pointer is held, and
   the full drawing is made when it is let go.
+- PNG photos, shapes and stickers reach the monitor about 50 ms sooner.
 
 ### Fixed
 

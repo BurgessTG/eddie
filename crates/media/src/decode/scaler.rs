@@ -51,7 +51,11 @@ impl Scaler {
         };
         // SAFETY: a pure query on a pixel format value.
         let resizable = unsafe { ffmpeg::ffi::sws_isSupportedOutput(source.into()) } > 0;
-        let middle = if resizable { source } else { Pixel::YUV420P };
+        let middle = if !resizable {
+            Pixel::YUV420P
+        } else {
+            planar_rgb(source).unwrap_or(source)
+        };
         let resize = Context::get(source, width, height, middle, scaled_w, scaled_h, flags)
             .map_err(|e| err("create scaler", e))?;
         let convert = Context::get(
@@ -141,4 +145,24 @@ impl Scaler {
             .map_err(|e| err("convert frame", e))?;
         Ok(&self.rgba)
     }
+}
+
+/// The planar form of a packed RGB format, which swscale resizes several
+/// times faster to the same pixels: a 2160 px RGBA PNG took 69 ms to
+/// reach 960 px as RGBA, and 17 ms as GBRAP plus 1.3 ms to pack it again.
+fn planar_rgb(format: ffmpeg::format::Pixel) -> Option<ffmpeg::format::Pixel> {
+    use ffmpeg::ffi::{
+        av_pix_fmt_desc_get, AV_PIX_FMT_FLAG_ALPHA, AV_PIX_FMT_FLAG_PLANAR, AV_PIX_FMT_FLAG_RGB,
+    };
+    // SAFETY: a pure lookup that returns a static descriptor or null.
+    let desc = unsafe { av_pix_fmt_desc_get(format.into()).as_ref()? };
+    let flags = desc.flags;
+    let packed_rgb =
+        flags & AV_PIX_FMT_FLAG_RGB as u64 != 0 && flags & AV_PIX_FMT_FLAG_PLANAR as u64 == 0;
+    let alpha = flags & AV_PIX_FMT_FLAG_ALPHA as u64 != 0;
+    packed_rgb.then_some(if alpha {
+        ffmpeg::format::Pixel::GBRAP
+    } else {
+        ffmpeg::format::Pixel::GBRP
+    })
 }
