@@ -9,10 +9,21 @@ use super::{matrix_orientation, Scaler, VideoDecoder};
 use crate::MediaResult;
 
 /// Whether `input` is one picture: an image demuxer (`image2`, or one of
-/// the `png_pipe`, `jpeg_pipe`, `webp_pipe` family) or a HEIF still image,
-/// not a container with a timeline.
+/// the `png_pipe`, `jpeg_pipe`, `webp_pipe` family), a HEIF still image or
+/// a GIF of one frame, not a container with a timeline. An animated GIF is
+/// video.
 pub(crate) fn is_photo(input: &ffmpeg::format::context::Input) -> bool {
-    is_image_demuxer(input) || is_heif(input)
+    is_image_demuxer(input) || is_heif(input) || is_still_gif(input)
+}
+
+/// A GIF with one frame. The `gif` demuxer counts a seekable file's frames
+/// when it opens; one frame lasts its delay, 0.04 s or so, as video.
+fn is_still_gif(input: &ffmpeg::format::context::Input) -> bool {
+    input.format().name() == "gif"
+        && input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .is_some_and(|stream| stream.frames() == 1)
 }
 
 fn is_image_demuxer(input: &ffmpeg::format::context::Input) -> bool {

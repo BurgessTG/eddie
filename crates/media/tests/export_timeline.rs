@@ -1260,13 +1260,18 @@ fn keyed_opacity_fades_the_picture_between_keys() {
 
 fn quadrant_photo(fixture: &Fixture, name: &str) -> PathBuf {
     let path = fixture.0.join(name);
+    let quadrants = "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64";
+    // A GIF keeps the four colours exactly in a palette made for them,
+    // which needs the end of the one-frame input.
+    let filter = if name.ends_with(".gif") {
+        format!("{quadrants},trim=end_frame=1,split[a][b];[a]palettegen[p];[b][p]paletteuse")
+    } else {
+        quadrants.to_owned()
+    };
     run(Command::new("ffmpeg")
         .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
         .arg("nullsrc=s=320x180")
-        .args([
-            "-vf",
-            "format=gbrp,geq=r='255*lt(X,W/2)':g='255*lt(Y,H/2)':b=64",
-        ])
+        .args(["-vf", &filter])
         .args(["-frames:v", "1", "-q:v", "2"])
         .arg(&path));
     path
@@ -1290,30 +1295,65 @@ fn colors_at(frame: &[u8], width: u32, points: &[(usize, usize)]) -> Vec<[u8; 3]
         .collect()
 }
 
+/// A PNG, and a GIF of one frame, which lasts its 0.04 s delay as video.
 #[test]
 fn a_photo_is_held_for_its_whole_clip_and_letterboxed() {
     let fixture = Fixture::new();
-    let png = quadrant_photo(&fixture, "quadrants.png");
-    let info = probe(png.to_str().unwrap()).unwrap();
-    assert!(info.photo && info.has_video, "{info:?}");
-    assert_eq!((info.width, info.height, info.duration), (320, 180, 0.0));
-    // Black for 0.2 s, then the photo for 0.5 s: frames 2 to 6.
-    let mut timeline = Timeline::new(10.0).with_format(Format::Portrait);
-    photo(&mut timeline, &png, 0.2, 0.5);
-    let exported = fixture.export("photo.mp4", &timeline);
-    let frames = frames(&exported);
-    assert_eq!(frames.len(), 7, "every frame of the timeline");
-    let points = [(45, 135), (135, 185), (90, 40), (90, 280)];
+    for name in ["quadrants.png", "quadrants.gif"] {
+        let path = quadrant_photo(&fixture, name);
+        let info = probe(path.to_str().unwrap()).unwrap();
+        assert!(info.photo && info.has_video, "{name}: {info:?}");
+        assert_eq!((info.width, info.height, info.duration), (320, 180, 0.0));
+        // Black for 0.2 s, then the photo for 0.5 s: frames 2 to 6.
+        let mut timeline = Timeline::new(10.0).with_format(Format::Portrait);
+        photo(&mut timeline, &path, 0.2, 0.5);
+        let exported = fixture.export(&format!("{name}.mp4"), &timeline);
+        let frames = frames(&exported);
+        assert_eq!(frames.len(), 7, "{name}: every frame of the timeline");
+        let points = [(45, 135), (135, 185), (90, 40), (90, 280)];
+        for (index, frame) in frames.iter().enumerate() {
+            let expected = if index < 2 {
+                [BLACK; 4]
+            } else {
+                [TL, BR, BLACK, BLACK]
+            };
+            assert_colors(
+                &format!("{name} frame {index}"),
+                &colors_at(frame, 180, &points),
+                &expected,
+            );
+        }
+    }
+}
+
+/// A GIF of more than one frame is video: it lasts its frames and plays
+/// them, red for 0.2 s and then blue.
+#[test]
+fn an_animated_gif_plays_as_video() {
+    let fixture = Fixture::new();
+    let gif = fixture.0.join("two.gif");
+    run(Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("nullsrc=s=64x32:r=5:d=0.4")
+        .args([
+            "-vf",
+            "format=gbrp,geq=r='255*lt(N,1)':g=0:b='255*gte(N,1)',\
+             split[a][b];[a]palettegen[p];[b][p]paletteuse",
+        ])
+        .arg(&gif));
+    let info = probe(gif.to_str().unwrap()).unwrap();
+    assert!(!info.photo && info.has_video, "{info:?}");
+    assert_eq!((info.width, info.height, info.duration), (64, 32, 0.4));
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, gif.to_str().unwrap(), 0, 0.0, 0.4, 0.0);
+    let frames = frames(&fixture.export("two.mp4", &timeline));
+    assert_eq!(frames.len(), 4);
     for (index, frame) in frames.iter().enumerate() {
-        let expected = if index < 2 {
-            [BLACK; 4]
-        } else {
-            [TL, BR, BLACK, BLACK]
-        };
+        let expected = if index < 2 { RED } else { BLUE };
         assert_colors(
             &format!("frame {index}"),
-            &colors_at(frame, 180, &points),
-            &expected,
+            &colors_at(frame, 64, &[(32, 16)]),
+            &[expected],
         );
     }
 }

@@ -227,8 +227,10 @@ return its parts.
 - **Assets:** `name, path, duration, width, height, hasVideo, hasAudio,
   photo, orientation, ready, silenceRanges [{start,end}], utterances
   [{start,end,text}], tempo, beats`.
-  - `photo: true` marks a photo (PNG, JPEG, WebP or HEIC): one picture, with
-    `duration` 0. `curate`, `strip` and `frames` refuse it; open the file
+  - `photo: true` marks a photo (PNG, JPEG, WebP, HEIC, or a GIF of one
+    frame): one picture, with `duration` 0. An animated GIF is video, with
+    no sound, lasting its frames once; a transparent one shows the lanes
+    under it. `curate`, `strip` and `frames` refuse it; open the file
     itself to see it.
   - `silenceRanges` are stretches of 0.35 s or more below the recording's
     own quiet level.

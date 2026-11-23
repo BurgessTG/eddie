@@ -44,13 +44,15 @@
   (NVENC) when there is one, with files 8 to 29% larger at the same
   quality, and the CPU encodes otherwise. A 3-minute 1080p export took
   43 s instead of 63 s. `eddie export` says which `encoder` it used.
-- Photos (PNG, JPEG, WebP and HEIC) as clips. One added whole lasts 3
-  seconds, or the length set in Settings → Photos; trim either edge to any
-  length. A phone photo shows upright
-  from its orientation, an iPhone's HEIC included, and photos take the
-  same transform, background and colour as video. `state()` marks photo
+- Photos (PNG, JPEG, WebP, HEIC and GIF) as clips. One added whole lasts
+  3 seconds, or the length set in Settings → Photos; trim either edge to
+  any length. A phone photo shows upright from its orientation, an
+  iPhone's HEIC included, and photos take the same transform, background
+  and colour as video. `state()` marks photo
   assets and clips `photo`. Import's file list shows `IMG_0001.HEIC` and
-  other upper-case names on Linux too.
+  other upper-case names on Linux too. A GIF of one frame is a photo; an
+  animated GIF plays as a video clip, and a transparent one shows the
+  lanes under it.
 - Edit tools: Copy, Cut and Paste (Ctrl+C, Ctrl+X, Ctrl+V, Cmd on a Mac;
   a paste lands at the playhead), Duplicate (Ctrl+D), Ripple delete
   (Shift+Delete), which closes the gap on every lane, and Freeze frame
