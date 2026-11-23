@@ -513,8 +513,11 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     `pacifico` and `roboto-mono`; `bold` and `italic` are true or false,
     and draw only where the font has that face (Bebas Neue and Pacifico
     have one face, Oswald and Caveat no italic). Eddie carries these
-    fonts, so a title exports as it previews. `size` is 0.25 to 4 times
-    the style's size; the text grows upward. `color`, `boxColor` and `outlineColor` are
+    fonts, so a title exports as it previews. `align` is `left`,
+    `center` or `right`: it lines up the title's lines and puts the
+    text at the left margin, the middle or the right margin (a lower
+    third is `left`, every caption style `center`). `size` is 0.25 to 4
+    times the style's size; the text grows upward. `color`, `boxColor` and `outlineColor` are
     `'#RRGGBB'`. `boxOpacity` runs from 0 (no box) to 1 (solid);
     `outline` is the outline's thickness, from 0 (none) to 0.2 of the
     text size. `x` and `y` move the text from where its style puts it, in
@@ -526,8 +529,10 @@ lane that is not a whole number, a negative time, a length of 0 or less.
       each one: loop over the IDs `state()` gives.
   - `addTitle` defaults to the playhead, 4 seconds and `lower-third`;
     `addCaptionsForClip` to `caption`.
-  - Title text cannot hold control characters. Line breaks are fine;
-    they are drawn as spaces.
+  - Title text cannot hold control characters other than line breaks.
+    Each `\n` starts a new line; the last line stays where a one-line
+    title would be and the lines above grow upward. Blank lines are
+    left out, and `highlight-caption` draws its words on one line.
   - One title shows at a time. Where two overlap, the one added first
     shows.
   - `addCaptionsForClip` returns no handle. Its line in `notes` says how

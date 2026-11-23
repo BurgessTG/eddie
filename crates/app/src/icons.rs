@@ -216,6 +216,23 @@ pub fn u_turn(shape: Shape, c: P, scale: f32, width: f32, fg: Color) -> Shape {
     shape.stroke_with(head, false, width, LineCap::Round, fg)
 }
 
+/// Text lines lined up left, centred or right, in a 30×30 box.
+pub fn align(align: openreel_engine::TextAlign, fg: Color) -> Shape {
+    use openreel_engine::TextAlign;
+    let (left, right) = (8.5_f32, 21.5_f32);
+    let mut shape = Shape::new();
+    for (row, width) in [13.0_f32, 8.0, 13.0, 8.0].into_iter().enumerate() {
+        let y = 10.0 + 3.4 * row as f32;
+        let x = match align {
+            TextAlign::Left => left,
+            TextAlign::Center => (left + right - width) / 2.0,
+            TextAlign::Right => right - width,
+        };
+        shape = shape.line([x, y], [x + width, y], 1.6, LineCap::Round, fg);
+    }
+    shape.view_box(30.0, 30.0)
+}
+
 /// A keyframe diamond in a 30×30 box: filled when a key is there, an
 /// outline when one could be added.
 pub fn key(filled: bool, fg: Color) -> Shape {

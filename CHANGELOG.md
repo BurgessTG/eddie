@@ -166,6 +166,11 @@
   Eddie carries them, so a title looks the same in preview, export and
   contact sheets on any computer. Scripts use `setText`'s `font`, `bold`
   and `italic`.
+- Titles of several lines: Shift+Enter in a title's text starts a new
+  line, and pasted line breaks stay. The last line sits where a one-line
+  title does and the lines above grow upward. Left, Centre and Right in
+  the Text card line them up and put the text at the left margin, the
+  middle or the right margin; scripts use `setText`'s `align`.
 
 ### Changed
 

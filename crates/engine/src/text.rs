@@ -150,6 +150,28 @@ impl<'de> Deserialize<'de> for TitleFont {
     }
 }
 
+/// How a title's lines line up, and where on the canvas the text sits:
+/// left at the style's margin, centred, or right at that margin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
 /// What a title changes from its style. The default changes nothing; a
 /// `None` keeps the style's value.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,6 +182,8 @@ pub struct TextLook {
     /// Bold and italic, drawn where the font has those faces.
     pub bold: bool,
     pub italic: bool,
+    /// How the lines line up and where they sit; `None` is the style's.
+    pub align: Option<TextAlign>,
     /// Font size against the style's, [`MIN_TEXT_SIZE`] to
     /// [`MAX_TEXT_SIZE`]. The text grows upward from its lower edge.
     pub size: f64,
@@ -193,6 +217,7 @@ impl Default for TextLook {
             font: None,
             bold: false,
             italic: false,
+            align: None,
             size: 1.0,
             color: None,
             box_opacity: None,

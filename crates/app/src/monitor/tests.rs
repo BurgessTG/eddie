@@ -622,6 +622,64 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
     assert_eq!(rt.state.editor.timeline.clip(title).unwrap().text, text);
 }
 
+/// A caption of two lines previews them as export draws them: one Inter
+/// line, round(38 x 1.20996) = 46 canvas pixels, apart, the last line's box
+/// ending where a one-line caption's does (90 px up, plus its 46), and the
+/// lines sharing their left edge 42 px in, their middle, or their right
+/// edge 42 px from the right.
+#[test]
+fn a_title_of_several_lines_previews_them_lined_up_and_growing_upward() {
+    use openreel_engine::{TextAlign, TextLook, TitleStyle};
+    let mut ui = Ui::headless();
+    let title = ui
+        .editor
+        .timeline
+        .add_clip("HHHHHH\nHH", ClipKind::Title, 0, 0.0, 4.0, 0.0);
+    ui.editor.timeline.clip_mut(title).unwrap().title_style = TitleStyle::Caption;
+    ui.editor.playhead = 1.0;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    let (canvas_w, canvas_h) = rt.state.editor.canvas();
+    let (canvas_w, canvas_h) = (canvas_w as f32, canvas_h as f32);
+    for align in TextAlign::ALL {
+        rt.state.editor.edit_title_text(title, |t| {
+            *t = TextLook {
+                align: Some(align),
+                ..TextLook::default()
+            }
+        });
+        // One frame: the title lands at once, without springing.
+        frames(&mut rt, 1);
+        let ([fx, fy, fw, fh], _) = rt.presented("monitor").unwrap();
+        let scale = fh / canvas_h;
+        let line = |n: usize| rt.presented(&format!("monitor-title-line{n}")).unwrap().0;
+        let (first, last) = (line(0), line(1));
+        assert!(rt.presented("monitor-title-line2").is_none(), "two lines");
+        assert!(
+            (last[1] - first[1] - 46.0 * scale).abs() < 0.5,
+            "{align:?}: {first:?} {last:?}"
+        );
+        let bottom = fy + (canvas_h - 90.0 + 46.0) * scale;
+        assert!(
+            (last[1] + last[3] - bottom).abs() < 1.0,
+            "{align:?}: the last line ends at {}, not {bottom}",
+            last[1] + last[3]
+        );
+        let near = |a: f32, b: f32| (a - b).abs() < 1.0;
+        let (left, right) = (fx + 42.0 * scale, fx + fw - 42.0 * scale);
+        let mid = |r: [f32; 4]| r[0] + r[2] / 2.0;
+        let lined_up = match align {
+            TextAlign::Left => near(first[0], left) && near(last[0], left),
+            TextAlign::Center => near(mid(first), fx + fw / 2.0) && near(mid(last), mid(first)),
+            TextAlign::Right => near(first[0] + first[2], right) && near(last[0] + last[2], right),
+        };
+        assert!(
+            lined_up,
+            "{align:?}: {first:?} {last:?} in {fw} of {canvas_w}"
+        );
+    }
+}
+
 /// A title in Lora Bold Italic previews in that face and in its line box,
 /// as export draws it: the box is the font's 1.28 em line tall plus
 /// padding, keeps the style's lower edge, and is as wide as the word's

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use openreel_engine::{hides_below, place, Clip, ClipId, ClipKind, Timeline};
+use openreel_engine::{hides_below, place, Clip, ClipId, ClipKind, TextAlign, Timeline};
 use serde::Serialize;
 
 use super::media::BinAsset;
@@ -264,17 +264,24 @@ impl<'a> Inspection<'a> {
         }
     }
 
-    /// A title moved off the canvas: the middle of its line (its left end,
-    /// when its style starts text at the left) outside the picture.
+    /// A title moved off the canvas: the middle of its lines (their left
+    /// or right end, when they are aligned to a side) outside the picture.
     fn title(&mut self, clip: &Clip) {
         if clip.kind != ClipKind::Title || (clip.text.x == 0.0 && clip.text.y == 0.0) {
             return;
         }
         let look = openreel_media::clip_title_look(clip);
         let (w, h) = self.canvas;
-        let x = look.left.map_or(w / 2.0, f64::from) + look.offset.0 * w;
-        let line = f64::from(look.font_size) * f64::from(look.face.line_height());
-        let y = h - f64::from(look.bottom) + line / 2.0 + look.offset.1 * h;
+        // The edge or middle the text's place holds, and its lines' middle.
+        let margin = f64::from(look.margin);
+        let x = match look.align {
+            TextAlign::Left => margin,
+            TextAlign::Center => w / 2.0,
+            TextAlign::Right => w - margin,
+        } + look.offset.0 * w;
+        let lines = openreel_media::title_lines(clip).len();
+        let block = f64::from(look.line_height()) * lines as f64;
+        let y = h - f64::from(look.top(lines)) + block / 2.0 + look.offset.1 * h;
         if (0.0..=w).contains(&x) && (0.0..=h).contains(&y) {
             return;
         }

@@ -752,6 +752,10 @@ fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
     .unwrap();
     let t = text(&app);
     assert_eq!((t.font, t.bold, t.italic), (None, false, false));
+    run(&mut app, &format!("setText({title}, {{align: 'right'}})")).unwrap();
+    assert_eq!(text(&app).align, Some(openreel_engine::TextAlign::Right));
+    run(&mut app, &format!("setText({title}, {{align: null}})")).unwrap();
+    assert_eq!(text(&app).align, None);
 
     let before = app.timeline.clone();
     for (code, says) in [
@@ -760,6 +764,10 @@ fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
             "one of inter, lora",
         ),
         (format!("setText({title}, {{weight: 700}})"), "no 'weight'"),
+        (
+            format!("setText({title}, {{align: 'justify'}})"),
+            "`left`, `center`",
+        ),
         (format!("setText({title}, {{size: 5}})"), "0.25 to 4"),
         (
             format!("setText({title}, {{outline: 0.5}})"),

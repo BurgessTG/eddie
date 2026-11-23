@@ -12,7 +12,7 @@ use super::rows::{
     value_field,
 };
 use super::styles::{Select, select};
-use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, one_line};
+use super::{BUTTON_GAP, CARD_PAD, GAP, LABEL_W, PAD_X, typed_name};
 use super::{chroma, color, keys, mask, shape, title_text, transform, transition};
 use crate::app::Ui;
 use crate::theme::{self, FIELD_H, Variant, c};
@@ -499,9 +499,9 @@ fn header(ui: &Ui, clip: &Clip) -> El {
         let field = field
             .w_full()
             .label("On-screen text")
-            // Enter ends the edit; a title has no second line to start.
+            // Enter ends the edit; Shift+Enter starts a new line.
             .on_input_key(|_: &mut Ui, event, tx| {
-                if matches!(event.key, Key::Enter) {
+                if matches!(event.key, Key::Enter) && !event.mods.shift {
                     tx.blur();
                     true
                 } else {
@@ -509,7 +509,9 @@ fn header(ui: &Ui, clip: &Clip) -> El {
                 }
             })
             .on_input_paste(|ui: &mut Ui, pasted, _| {
-                ui.details.name.insert(&one_line(pasted.text()));
+                ui.details
+                    .name
+                    .insert(&typed_name(ClipKind::Title, pasted.text()));
                 true
             });
         el().key("details-title-box")
@@ -521,7 +523,7 @@ fn header(ui: &Ui, clip: &Clip) -> El {
             .radius(theme::R_MD)
             .fill(c.input)
             .focus_within_ring(1.0, -1.0, c.brand)
-            .help("On-screen text")
+            .help("On-screen text. Shift+Enter starts a new line")
             .child(rune::auto_grow(field, 2, 6))
     } else {
         let mut help = format!("{kind} clip name");

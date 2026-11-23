@@ -223,19 +223,32 @@ fn sound_switches_and_fades_edit_the_clip() {
 }
 
 #[test]
-fn a_title_takes_its_text_as_typed_on_one_line_and_its_style_from_the_list() {
+fn a_title_takes_its_lines_as_typed_and_its_style_from_the_list() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.focus_title = true;
     rt.frame(FRAME);
     rt.frame(FRAME);
     assert!(rt.state.details.name.focused);
-    rt.paste(" card\ntwo");
+    // A pasted line break stays one, Shift+Enter starts another, and
+    // Enter ends the edit.
+    rt.paste(" card\r\ntwo");
+    rt.frame(FRAME);
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(FRAME);
+    rt.paste("three");
     rt.frame(FRAME);
     rt.frame(FRAME);
-    assert_eq!(clip(&rt, id).name, "Title card two");
+    assert_eq!(clip(&rt, id).name, "Title card\ntwo\nthree");
+    assert!(rt.state.typing(), "Shift+Enter keeps the box open");
     press(&mut rt, Key::Enter);
     assert!(!rt.state.typing());
-    assert_eq!(clip(&rt, id).name, "Title card two");
+    assert_eq!(clip(&rt, id).name, "Title card\ntwo\nthree");
 
     let style = TitleStyle::ALL[2];
     assert_ne!(clip(&rt, id).title_style, style);
@@ -357,6 +370,12 @@ fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
     assert!(!bebas.bold && !bebas.italic, "Bebas Neue has one face");
     tap(&mut rt, "details-text-bold");
     assert!(text(&rt).bold, "a disabled toggle changes nothing");
+
+    // A lower third is lined up on the left until another is picked.
+    use openreel_engine::TextAlign;
+    assert_eq!(drawn(&rt).align, Some(TextAlign::Left));
+    tap(&mut rt, "details-text-align-right");
+    assert_eq!(text(&rt).align, Some(TextAlign::Right));
 
     tap(&mut rt, "details-text-reset");
     assert_eq!(text(&rt), TextLook::default());
@@ -719,6 +738,9 @@ fn every_control_has_a_tooltip() {
                 "details-text-font",
                 "details-text-bold",
                 "details-text-italic",
+                "details-text-align-left",
+                "details-text-align-center",
+                "details-text-align-right",
                 "details-text-size-slider",
                 "details-text-size",
                 "details-text-color",

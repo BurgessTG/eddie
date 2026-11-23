@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use openreel_engine::{Clip, Rgb, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE};
+use openreel_engine::{
+    Clip, Rgb, TextAlign, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE,
+};
 
 use super::frames::{enabled_frames, VideoClock};
 use crate::fonts::Face;
@@ -80,10 +82,9 @@ impl Titles<'_> {
                 };
                 let font = filter_value(&font.to_string_lossy());
                 let options = look.drawtext_options(clip.opacity);
-                let x = look
-                    .left
-                    .map_or_else(|| "(w-text_w)/2".to_owned(), |left| left.to_string());
-                let y = look.y();
+                let lines = title_lines(clip);
+                let x = look.x("text_w");
+                let y = look.y(lines.len());
                 let words: Vec<&str> = clip.name.split_whitespace().collect();
                 let highlight = look
                     .highlight
@@ -91,17 +92,18 @@ impl Titles<'_> {
                     .filter(|_| !words.is_empty());
                 // Every highlight layer starts at the same left edge, so
                 // drawtext lays out each prefix exactly as in the full line.
-                let x = look.x(match (&highlight, look.left) {
-                    (Some(_), None) => {
+                let x = match (&highlight, look.align) {
+                    (Some(_), TextAlign::Center | TextAlign::Right) => {
                         text_width(look.face.data(), &words.join(" "), look.font_size as f32)
-                            .map_or(x, |width| format!("(w-{width:.1})/2"))
+                            .map_or(x, |width| look.x(&format!("{width:.1}")))
                     }
                     _ => x,
-                });
+                };
                 filters.push(format!(
                     "[{current}]drawtext=fontfile={font}:expansion=none:text={}:\
-                     {options}:x={x}:y={y}:{LINE_BOX}:enable='{}'[t{i}]",
-                    filter_value(&words.join(" ")),
+                     {options}:x={x}:y={y}:{LINE_BOX}:text_align={}:enable='{}'[t{i}]",
+                    filter_value(&lines.join("\n")),
+                    look.align_option(),
                     enabled_frames(&ranges),
                 ));
                 current = format!("t{i}");
@@ -165,9 +167,14 @@ pub struct TitleLook {
     pub padding: u32,
     /// The outline round each letter: width, colour and opacity.
     pub outline: Option<(u32, Rgb, f32)>,
-    /// Text left edge; `None` centres the text.
-    pub left: Option<u32>,
-    /// Distance from the canvas bottom to the top of the line box.
+    /// How the lines line up, and which edge of the text holds its
+    /// place: the left edge `margin` in from the canvas's left, the
+    /// middle at the canvas's middle, or the right edge `margin` in from
+    /// its right.
+    pub align: TextAlign,
+    pub margin: u32,
+    /// Distance from the canvas bottom to the top of the last line's box;
+    /// more lines grow upward from there.
     pub bottom: u32,
     /// Moved from that place by shares of the canvas width and height.
     pub offset: (f64, f64),
@@ -185,7 +192,7 @@ impl TitleLook {
             outline: self
                 .outline
                 .map(|(width, color, alpha)| (px(width).max(1), color, alpha)),
-            left: self.left.map(px),
+            margin: px(self.margin),
             bottom: px(self.bottom),
             ..self
         }
@@ -228,20 +235,47 @@ impl TitleLook {
         }
     }
 
-    /// drawtext's `x` for text whose own left edge is `x`, moved by the
-    /// look's offset.
-    fn x(&self, x: String) -> String {
+    /// The distance in pixels from one line to the next: the font's line
+    /// box, which FreeType rounds to whole pixels.
+    pub fn line_height(&self) -> u32 {
+        (self.font_size as f32 * self.face.line_height()).round() as u32
+    }
+
+    /// From the canvas bottom to the top of the first of `lines` lines.
+    pub fn top(&self, lines: usize) -> u32 {
+        self.bottom + self.line_height() * lines.saturating_sub(1) as u32
+    }
+
+    /// drawtext's `x` for text `width` wide (an expression), placed as
+    /// the look aligns it and moved by its offset.
+    fn x(&self, width: &str) -> String {
+        let x = match self.align {
+            TextAlign::Left => self.margin.to_string(),
+            TextAlign::Center => format!("(w-{width})/2"),
+            TextAlign::Right => format!("w-{width}-{}", self.margin),
+        };
         match self.offset.0 {
             0.0 => x,
             share => format!("{x}{share:+.5}*w"),
         }
     }
 
-    /// drawtext's `y`: the text top, moved by the look's offset.
-    fn y(&self) -> String {
+    /// drawtext's `y` for `lines` lines: the first line's top, moved by
+    /// the look's offset.
+    fn y(&self, lines: usize) -> String {
+        let top = self.top(lines);
         match self.offset.1 {
-            0.0 => format!("h-{}", self.bottom),
-            share => format!("h-{}{share:+.5}*h", self.bottom),
+            0.0 => format!("h-{top}"),
+            share => format!("h-{top}{share:+.5}*h"),
+        }
+    }
+
+    /// drawtext's `text_align`, which lines several lines up.
+    pub(crate) fn align_option(&self) -> &'static str {
+        match self.align {
+            TextAlign::Left => "L",
+            TextAlign::Center => "C",
+            TextAlign::Right => "R",
         }
     }
 }
@@ -263,7 +297,8 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.55),
             padding: 14,
             outline: None,
-            left: Some(42),
+            align: TextAlign::Left,
+            margin: 42,
             bottom: 110,
             offset: (0.0, 0.0),
             highlight: None,
@@ -275,7 +310,8 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.65),
             padding: 12,
             outline: None,
-            left: None,
+            align: TextAlign::Center,
+            margin: 42,
             bottom: 90,
             offset: (0.0, 0.0),
             highlight: None,
@@ -287,7 +323,8 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.75),
             padding: 14,
             outline: None,
-            left: None,
+            align: TextAlign::Center,
+            margin: 42,
             bottom: 100,
             offset: (0.0, 0.0),
             highlight: None,
@@ -299,7 +336,8 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: None,
             padding: 2,
             outline: Some((2, Rgb::BLACK, 0.8)),
-            left: None,
+            align: TextAlign::Center,
+            margin: 42,
             bottom: 70,
             offset: (0.0, 0.0),
             highlight: None,
@@ -311,7 +349,8 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.65),
             padding: 12,
             outline: None,
-            left: None,
+            align: TextAlign::Center,
+            margin: 42,
             bottom: 96,
             offset: (0.0, 0.0),
             highlight: Some(Rgb(255, 214, 0)),
@@ -360,7 +399,29 @@ pub fn drawn_text(title: &Clip) -> TextLook {
         font: Some(face.font()),
         bold: face.bold(),
         italic: face.italic(),
+        align: Some(text.align.unwrap_or(style.align)),
         ..text
+    }
+}
+
+/// The lines `title` draws: one per line break, each line's words one
+/// space apart, blank lines left out. A highlight caption lights its words
+/// along one line, so it draws them all on one.
+pub fn title_lines(title: &Clip) -> Vec<String> {
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title_look(title.title_style).highlight.is_some() {
+        return vec![words(&title.name)];
+    }
+    let lines: Vec<String> = title
+        .name
+        .lines()
+        .map(words)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
     }
 }
 
@@ -399,6 +460,7 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
             )
         }),
         bottom,
+        align: drawn.align.unwrap_or(style.align),
         offset: (drawn.x, drawn.y),
         ..style
     }
@@ -424,11 +486,11 @@ mod title_text_tests {
         }
     }
 
-    /// One 640x80 white frame with `text` options drawn on it by drawtext.
+    /// One 640x120 white frame with `text` options drawn on it by drawtext.
     fn drawn(font: &str, text: &str) -> Vec<u8> {
         let out = crate::cli::ffmpeg()
             .args(["-v", "error", "-f", "lavfi", "-i"])
-            .arg("color=c=white:s=640x80:r=1:d=1")
+            .arg("color=c=white:s=640x120:r=1:d=1")
             .arg("-vf")
             .arg(format!(
                 "drawtext=fontfile={}:expansion=none:{text}:fontsize=24:x=10:y=20:{LINE_BOX}",
@@ -452,7 +514,8 @@ mod title_text_tests {
         let font = Face::default().write_into(&dir).unwrap();
         let font = font.to_string_lossy();
         // What the two parsers and drawtext's own expansion treat specially.
-        let typed = r"7:05 100% it's a\b, [x]; = %{n} \'";
+        let typed = r"7:05 100% it's a\b, [x]; = %{n} \'
+a second line";
         let file = dir.join("typed.txt");
         std::fs::write(&file, typed).unwrap();
         // drawtext reads a text file without any parsing: the oracle.

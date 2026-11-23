@@ -7,7 +7,7 @@ use openreel_engine::{
 };
 use rune::TextEdit;
 
-use super::one_line;
+use super::typed_name;
 use crate::app::Ui;
 
 /// A typed value of the selected clip.
@@ -530,7 +530,7 @@ fn fill(ui: &mut Ui, id: ClipId, all: bool) {
     };
     let name = &mut ui.details.name;
     if name.focused && !all {
-        let typed = one_line(name.text.as_str());
+        let typed = typed_name(clip.kind, name.text.as_str());
         if clip.name != typed {
             clip.name = typed;
         }

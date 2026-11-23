@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::thread;
 
-use openreel_engine::{BlendMode, ChromaKey, Mask, Placement};
+use openreel_engine::{BlendMode, ChromaKey, Mask, Placement, TextAlign};
 
 use crate::composite::{Canvas, Layer};
 use crate::export::{filter_value, ScratchDir, LINE_BOX};
@@ -32,7 +32,8 @@ const OPEN_DECODERS: usize = 4;
 pub struct SheetCell {
     /// The pictures, bottom first, over black. None leaves the cell black.
     pub layers: Vec<SheetLayer>,
-    /// The active title's text, look ([`crate::clip_title_look`]) and opacity.
+    /// The active title's lines ([`crate::title_lines`], one per line
+    /// break), look ([`crate::clip_title_look`]) and opacity.
     pub title: Option<(String, TitleLook, f32)>,
     pub label: String,
 }
@@ -304,17 +305,20 @@ fn text_filters(
             (look.offset.0 * cell_w as f64).round() as isize,
             (look.offset.1 * cell_h as f64).round() as isize,
         );
-        let x = match look.left {
-            Some(left) => format!("{}", x0 as isize + left as isize + dx),
-            None => format!("{x0}+({cell_w}-text_w)/2{dx:+}"),
+        let margin = look.margin as isize;
+        let x = match look.align {
+            TextAlign::Left => format!("{}", x0 as isize + margin + dx),
+            TextAlign::Center => format!("{x0}+({cell_w}-text_w)/2{dx:+}"),
+            TextAlign::Right => format!("{}-text_w", x0 as isize + cell_w as isize - margin + dx),
         };
-        let y = y0 as isize + cell_h as isize - look.bottom as isize + dy;
+        let lines = text.lines().count();
+        let y = y0 as isize + cell_h as isize - look.top(lines) as isize + dy;
         filters.push(format!(
-            "drawtext=fontfile={}:expansion=none:text={}:{}:x={x}:y={y}:{LINE_BOX}",
+            "drawtext=fontfile={}:expansion=none:text={}:{}:x={x}:y={y}:{LINE_BOX}:text_align={}",
             file(&look.face),
-            // One line, as export draws it.
-            filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
+            filter_value(text),
             look.drawtext_options(*opacity),
+            look.align_option(),
         ));
     }
     filters.join(",")

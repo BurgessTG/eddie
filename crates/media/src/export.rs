@@ -42,7 +42,7 @@ pub use audio::LOUDNESS_TARGET;
 pub use settings::{
     AudioFormat, ExportKind, ExportSettings, GifSize, Quality, Resolution, FRAME_RATES, GIF_FPS,
 };
-pub use titles::{clip_title_look, drawn_text, title_look, TitleLook};
+pub use titles::{clip_title_look, drawn_text, title_lines, title_look, TitleLook};
 pub(crate) use titles::{filter_value, LINE_BOX};
 
 fn f(value: f64) -> String {

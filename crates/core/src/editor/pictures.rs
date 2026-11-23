@@ -297,7 +297,7 @@ struct SheetShot {
     time: f64,
     /// The top picture's clip, its lane and the source time shown.
     video: Option<(ClipId, usize, f64)>,
-    /// The active title: its clip, text, style and opacity.
+    /// The active title: its clip, lines, style and opacity.
     title: Option<(ClipId, String, openreel_media::TitleLook, f32)>,
 }
 
@@ -438,7 +438,8 @@ fn sheet_shots(timeline: &Timeline, span: (f64, f64)) -> (Vec<SheetShot>, usize)
                     .map(|clip| (clip.id, clip.track, clip.shown_at(time))),
                 title: segment.title.and_then(|id| timeline.clip(id)).map(|clip| {
                     let look = openreel_media::clip_title_look(clip);
-                    (clip.id, clip.name.clone(), look, clip.opacity)
+                    let lines = openreel_media::title_lines(clip).join("\n");
+                    (clip.id, lines, look, clip.opacity)
                 }),
             }
         })

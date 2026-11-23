@@ -47,8 +47,8 @@ pub use place::{
 pub use remade::{Remade, Stabilize};
 pub use stack::{hides_below, LanePicture};
 pub use text::{
-    Rgb, TextLook, TitleFont, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE, MAX_OUTLINE, MAX_TEXT_OFFSET,
-    MAX_TEXT_SIZE, MIN_TEXT_SIZE,
+    Rgb, TextAlign, TextLook, TitleFont, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE, MAX_OUTLINE,
+    MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MIN_TEXT_SIZE,
 };
 pub use time_spec::format_timecode;
 pub use timeline::{

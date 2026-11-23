@@ -2419,6 +2419,83 @@ fn pixel_box(
     (found, count)
 }
 
+/// A caption of two lines lines them up left, centred or right, its last
+/// line where a one-line caption's is and the line above one Inter line
+/// higher. H's ink ends on the baseline: the last at 720 - 90 + ceil(0.96875
+/// x 38) = 667, the first round(1.20996 x 38) = 46 px above.
+#[test]
+fn a_title_of_several_lines_exports_them_lined_up_and_growing_upward() {
+    use openreel_engine::{TextAlign, TextLook};
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "black.mp4",
+        "color=c=black:s=1280x720:r=10:d=3",
+        "null",
+        None,
+    );
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 3.0, 0.0);
+    for (index, align) in TextAlign::ALL.into_iter().enumerate() {
+        let id = timeline.add_clip(
+            "HHHHHH\n\n  HH ",
+            ClipKind::Title,
+            0,
+            index as f64,
+            1.0,
+            0.0,
+        );
+        let title = timeline.clip_mut(id).unwrap();
+        title.title_style = TitleStyle::Caption;
+        title.text = TextLook {
+            align: Some(align),
+            box_opacity: Some(0.0),
+            ..TextLook::default()
+        };
+    }
+    let decoded = frames(&fixture.export("lines.mp4", &timeline));
+    for (index, align) in TextAlign::ALL.into_iter().enumerate() {
+        let frame = &decoded[index * 10 + 5];
+        let white = |p: &[u8; 3]| p.iter().all(|&v| v > 128);
+        // The two lines: rows above and below the gap between them.
+        let (whole, _) = pixel_box(frame, 1280, white);
+        let rows = |from: usize, to: usize| {
+            let part = &frame[from * 1280 * 3..to * 1280 * 3];
+            let (b, n) = pixel_box(part, 1280, white);
+            ([b[0], b[1] + from, b[2], b[3] + from], n)
+        };
+        let middle = (whole[1] + whole[3]) / 2;
+        let ((first, a), (last, b)) = (rows(0, middle), rows(middle, 720));
+        eprintln!("{align:?}: first {first:?} ({a} px), last {last:?} ({b} px)");
+        assert!(a > 500 && b > 150, "two lines drawn: {a} and {b} px");
+        assert!(
+            (last[3] as i64 - 667).abs() <= 1 && (first[3] as i64 - 621).abs() <= 1,
+            "{align:?}: baselines {} and {}",
+            first[3],
+            last[3]
+        );
+        // H advances 0.7432 em and its ink stands 0.0879 em in from each
+        // end of the line: six are 162.8 px of ink at 38 px, two 49.8.
+        let (first_w, last_w) = (first[2] - first[0], last[2] - last[0]);
+        assert!(
+            (first_w as f64 - 162.8).abs() <= 2.0 && (last_w as f64 - 49.8).abs() <= 2.0,
+            "six H and two: {first_w} and {last_w} px"
+        );
+        let near = |a: f64, b: f64, by: f64| (a - b).abs() <= by;
+        let mid = |b: [usize; 4]| (b[0] + b[2]) as f64 / 2.0;
+        // An H stands 0.09 em (3.4 px) in from its advance on each side.
+        let lined_up = match align {
+            TextAlign::Left => {
+                near(first[0] as f64, last[0] as f64, 1.0) && near(first[0] as f64, 45.4, 2.0)
+            }
+            TextAlign::Center => near(mid(first), mid(last), 1.5) && near(mid(first), 640.0, 2.0),
+            TextAlign::Right => {
+                near(first[2] as f64, last[2] as f64, 1.0) && near(first[2] as f64, 1234.6, 2.0)
+            }
+        };
+        assert!(lined_up, "{align:?}: first {first:?}, last {last:?}");
+    }
+}
+
 /// A Lora Bold Italic lower third exports in that face, where its font's
 /// own metrics put it. The oracle is drawtext given each candidate file by
 /// hand; the place comes from the font files' tables (read with fontTools).

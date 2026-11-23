@@ -338,7 +338,8 @@ fn name_chip(clip: &Clip, left: f32, full_w: f32) -> El {
         .radius(4.0)
         .center_y()
         .child(
-            text(clip.name.clone())
+            // A title's lines, run together on the chip's one line.
+            text(clip.name.replace('\n', " "))
                 .font(theme::sized(11.0))
                 .color(white(235))
                 .single_line()

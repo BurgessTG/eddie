@@ -3,7 +3,9 @@
 //! and contact sheets all draw from `openreel_media::clip_title_look`.
 
 use eddie_core::Editor;
-use openreel_engine::{Clip, ClipId, MAX_OUTLINE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Rgb, TextLook};
+use openreel_engine::{
+    Clip, ClipId, MAX_OUTLINE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Rgb, TextAlign, TextLook,
+};
 use rune::{Color, Cursor, El, LineCap, Shape, TextStyle, el, row};
 
 use super::BUTTON_GAP;
@@ -11,6 +13,7 @@ use super::fields::{Field, set_colour};
 use super::rows::{button_row, prop_row, section, slider_row, value_field};
 use super::styles::{Select, select};
 use crate::app::Ui;
+use crate::icons;
 use crate::theme::{self, Variant, c};
 
 /// The colours a swatch row offers, as CapCut's text palette starts.
@@ -124,7 +127,7 @@ fn font_row(ui: &Ui, drawn: &TextLook) -> El {
 }
 
 /// Bold and Italic under the font list, each dimmed and inert where the
-/// font has no such face.
+/// font has no such face, then how the lines line up.
 fn faces(id: ClipId, drawn: &TextLook) -> El {
     let font = drawn.font.unwrap_or_default();
     let toggle = |key: &str,
@@ -168,6 +171,24 @@ fn faces(id: ClipId, drawn: &TextLook) -> El {
             font.has_italic(),
             |t| t.italic = !t.italic,
         ))
+        .child(el().w(SWATCH_GAP))
+        .children(TextAlign::ALL.map(|align| {
+            let help = match align {
+                TextAlign::Left => "Line the text up on the left, at the left margin",
+                TextAlign::Center => "Centre the text",
+                TextAlign::Right => "Line the text up on the right, at the right margin",
+            };
+            theme::icon_button(
+                &format!("details-text-align-{}", align.as_str()),
+                icons::align(align, c().foreground),
+                help,
+                drawn.align == Some(align),
+                true,
+            )
+            .on_press(move |ui: &mut Ui| {
+                ui.editor.edit_title_text(id, |t| t.align = Some(align));
+            })
+        }))
 }
 
 /// The Size slider's handle at `position`, log2 of the size, in the
@@ -316,7 +337,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
             "details-text-reset",
             "Reset",
             Variant::Secondary,
-            "Draw the text as its style does: font, size, colours, box, outline and place",
+            "Draw the text as its style does: font, alignment, size, colours, box, outline and place",
             true,
         )
         .on_press(move |ui: &mut Ui| {
@@ -329,7 +350,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
                 "details-text-all-captions",
                 "Apply to all",
                 Variant::Secondary,
-                "Give every caption this one's style, font, size, colours, box, outline and place. Lower thirds keep theirs",
+                "Give every caption this one's style, font, alignment, size, colours, box, outline and place. Lower thirds keep theirs",
                 true,
             )
             .on_press(move |ui: &mut Ui| {

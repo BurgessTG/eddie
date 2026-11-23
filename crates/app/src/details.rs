@@ -24,7 +24,7 @@ mod title_text;
 mod transform;
 mod transition;
 
-use openreel_engine::ClipId;
+use openreel_engine::{ClipId, ClipKind};
 use rune::{Cursor, El, Phase, ScrollSpec, TextEdit, col, el, row, text};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
@@ -106,9 +106,14 @@ pub fn sync(ui: &mut Ui) {
     filters::sync(ui);
 }
 
-/// Export draws a title on one line.
-fn one_line(text: &str) -> String {
-    text.replace(['\r', '\n'], " ")
+/// A name as typed: a title keeps its line breaks, each line one line of
+/// its text; any other clip's name is one line.
+fn typed_name(kind: ClipKind, text: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    match kind {
+        ClipKind::Title => text.replace('\r', "\n"),
+        _ => text.replace(['\r', '\n'], " "),
+    }
 }
 
 pub fn panel(ui: &Ui) -> El {
