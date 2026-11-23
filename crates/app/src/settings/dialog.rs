@@ -66,7 +66,8 @@ fn rows(ui: &Ui) -> El {
     let mut rows = col()
         .w_full()
         .gap(ROW_GAP)
-        .child(setting("Playback", hardware(settings)));
+        .child(setting("Playback", hardware(settings)))
+        .child(setting("", proxies(settings)));
     // NVENC only; a Mac has no NVIDIA GPU, and VideoToolbox is not used yet.
     if !cfg!(target_os = "macos") {
         rows = rows.child(setting("Export", hardware_encode(settings)));
@@ -125,6 +126,16 @@ fn hardware(settings: &Settings) -> El {
         settings.hardware_decode,
     )
     .on_press(|ui: &mut Ui| edit(ui, |settings| settings.hardware_decode = !settings.hardware_decode))
+}
+
+fn proxies(settings: &Settings) -> El {
+    theme::checkbox(
+        "settings-proxies",
+        "Proxies",
+        "Play and scrub footage wider than 960 pixels from a light copy Eddie makes in the background, as CapCut's Proxy does. Export and pictures still use the original.",
+        settings.proxies,
+    )
+    .on_press(|ui: &mut Ui| edit(ui, |settings| settings.proxies = !settings.proxies))
 }
 
 fn hardware_encode(settings: &Settings) -> El {

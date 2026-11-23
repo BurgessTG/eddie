@@ -36,6 +36,7 @@ pub mod pictures;
 mod playback;
 mod program;
 pub mod project;
+mod proxies;
 mod remake;
 mod script;
 #[cfg(unix)]
@@ -251,6 +252,9 @@ pub struct Editor {
     pub remade_dir: Option<PathBuf>,
     /// Those files being written, and the clips waiting for them.
     remakes: remake::Remakes,
+    /// The preview's light copies of footage (`proxies`); `None` makes none.
+    pub proxy_dir: Option<PathBuf>,
+    proxies: proxies::Proxies,
     /// Drawings made so far and the time they took, which a script's edit
     /// keeps out of its time budget (`graphics::MAX_NEW_GRAPHICS`).
     drawing: (usize, Duration),
@@ -322,7 +326,12 @@ impl Editor {
         editor.curation_dir = sweep::default_curation_dir();
         editor.graphics_dir = graphics::default_dir();
         editor.remade_dir = remake::default_dir();
-        let made = [editor.graphics_dir.clone(), editor.remade_dir.clone()];
+        editor.proxy_dir = proxies::default_dir();
+        let made = [
+            editor.graphics_dir.clone(),
+            editor.remade_dir.clone(),
+            editor.proxy_dir.clone(),
+        ];
         std::thread::spawn(move || {
             for folder in made.iter().flatten() {
                 graphics::prune(folder, graphics::KEEP_UNUSED);
@@ -422,6 +431,8 @@ impl Editor {
             graphics_dir: None,
             remade_dir: None,
             remakes: Default::default(),
+            proxy_dir: None,
+            proxies: Default::default(),
             drawing: (0, Duration::ZERO),
             graphic_drafts: Vec::new(),
             model_dir: None,
@@ -613,6 +624,7 @@ impl Editor {
         self.poll_imports();
         self.poll_noise();
         self.poll_remakes();
+        self.poll_proxies();
         self.poll_frames();
         if openreel_media::take_hardware_failure().is_some() {
             self.status = "Hardware decode failed; playing on the CPU.".to_owned();

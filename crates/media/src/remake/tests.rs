@@ -392,3 +392,94 @@ fn a_range_stabilized_and_reversed_plays_its_frames_last_first() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A proxy shows, at every source time, the picture the original shows
+/// there: the same frame, upright and the preview's width. The original is
+/// a phone-style file, turned a quarter by its display matrix, whose
+/// picture starts 0.1 s after its sound (the copy once moved its first
+/// picture to 0), and each of its frames has its own brightness.
+#[test]
+fn a_proxy_shows_each_picture_at_the_originals_time() {
+    let dir = folder("proxy");
+    let picture = dir.join("picture.mov");
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("color=c=black:s=1280x720:r=30:d=2,format=yuv420p,geq=lum='16+3*N':cb=128:cr=128")
+        .args(["-c:v", "libx264", "-qp", "0"])
+        .arg(&picture)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = dir.join("phone.mov");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-display_rotation",
+            "90",
+            "-itsoffset",
+            "0.1",
+            "-i",
+        ])
+        .arg(&picture)
+        .args(["-f", "lavfi", "-i", "sine=f=440:r=48000:d=2.2"])
+        .args([
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(&original)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = original.to_string_lossy().into_owned();
+    let proxy = dir.join("proxy.mov");
+    let cancel = AtomicBool::new(false);
+    let mut shares = Vec::new();
+    make_proxy(
+        &original,
+        320,
+        &proxy,
+        &mut |share| shares.push(share),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(shares.last(), Some(&1.0));
+    let info = crate::probe(&proxy.to_string_lossy()).unwrap();
+    assert_eq!(
+        (info.width, info.height),
+        (320, crate::scaled_height(720, 1280, 320))
+    );
+    let shade = |path: &str, time: f64| {
+        let frame = crate::VideoDecoder::open(path, 64, false)
+            .unwrap()
+            .frame_at(time)
+            .unwrap();
+        let reds: Vec<f64> = frame.rgba.chunks(4).map(|p| f64::from(p[0])).collect();
+        reds.iter().sum::<f64>() / reds.len() as f64
+    };
+    let proxy = proxy.to_string_lossy().into_owned();
+    // Before the first picture, on it, inside frames across the file, and
+    // past the last.
+    let mut times = vec![0.02, 0.1];
+    times.extend(
+        (0..60)
+            .step_by(7)
+            .map(|n| 0.1 + (f64::from(n) + 0.5) / 30.0),
+    );
+    times.push(2.15);
+    for time in times {
+        let (want, got) = (shade(&original, time), shade(&proxy, time));
+        assert!(
+            (want - got).abs() < 1.5,
+            "at {time}: the proxy shows {got}, the original {want}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

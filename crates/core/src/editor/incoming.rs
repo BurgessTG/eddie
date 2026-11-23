@@ -108,12 +108,13 @@ impl Editor {
             }
         }
         let from = clip.source_at(self.playhead.max(span.start)).max(0.0);
+        let source = self.preview_file(source).to_owned();
         let fps = self.timeline.fps;
         let incoming = &mut self.player(lane).incoming;
         let Some(stream) = &incoming.stream else {
             return;
         };
-        match stream.request_preview(source, from, PREVIEW_W, fps) {
+        match stream.request_preview(&source, from, PREVIEW_W, fps) {
             Ok(generation) => {
                 incoming.generation = generation;
                 incoming.from = from;

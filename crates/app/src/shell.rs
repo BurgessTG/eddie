@@ -228,6 +228,25 @@ pub fn status_bar(ui: &Ui) -> El {
             ))
             .child(el().w(8.0));
     }
+    if let Some((progress, waiting)) = editor.proxy_progress() {
+        let help = match waiting {
+            0 => "Making a light copy of a video for smooth playback; turn off Proxies in Settings to stop".to_owned(),
+            n => format!("Making a light copy of a video for smooth playback, then {n} more; turn off Proxies in Settings to stop"),
+        };
+        bar = bar
+            .child(
+                text("Making proxies")
+                    .font(theme::sized(12.0))
+                    .color(c.muted_fg)
+                    .single_line(),
+            )
+            .child(progress_bar(
+                "proxy-progress",
+                &help,
+                progress.clamp(0.0, 1.0) as f32,
+            ))
+            .child(el().w(8.0));
+    }
     // Left to right: rate, length, UI frame time, memory.
     let segments = [
         (

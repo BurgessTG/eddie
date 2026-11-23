@@ -187,9 +187,10 @@ formatting, then builds and tests the whole workspace in an Arch Linux
 container, which has FFmpeg 9.
 
 Open Settings with the gear beside Export (Ctrl+,) for hardware decode
-(VAAPI on Linux, VideoToolbox on macOS, off by default), hardware encode
-(NVENC on an NVIDIA GPU, Linux, off by default), the speech provider, its
-model and the project format.
+(VAAPI on Linux, VideoToolbox on macOS, off by default), proxies (light
+copies of footage wider than 960 pixels for the preview, off by default),
+hardware encode (NVENC on an NVIDIA GPU, Linux, off by default), the
+speech provider, its model and the project format.
 
 ### macOS app
 

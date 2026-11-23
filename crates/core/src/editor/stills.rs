@@ -54,12 +54,16 @@ impl Editor {
     /// past its edges, where a file without pictures holds its first or
     /// last.
     fn clip_still(&self, clip: &Clip, at: f64, width: u32) -> Option<StillTarget> {
-        let source = clip.source.clone()?;
-        let info = &self.asset(&source)?.info;
+        let source = clip.source.as_deref()?;
+        let info = &self.asset(source)?.info;
         let time = clip.source_at(at).clamp(0.0, info.duration.max(0.0));
+        let (source, size) = match self.proxy(source) {
+            Some(proxy) => (proxy.path.clone(), proxy.size),
+            None => (source.to_owned(), (info.width, info.height)),
+        };
         Some(StillTarget {
             key: (clip.id, (time * self.timeline.fps).round() as i64, width),
-            size: (info.width, info.height),
+            size,
             source,
             time,
         })

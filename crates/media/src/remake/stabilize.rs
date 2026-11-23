@@ -9,9 +9,9 @@
 //! the encoder.
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, sync_channel};
 use std::thread;
@@ -19,8 +19,8 @@ use std::thread;
 use openreel_engine::Stabilize;
 
 use super::{
-    cancelled, collect_stderr, encoder, end_encoder, finish, run, threads, warp, with_stderr,
-    Picture, Source,
+    cancelled, collect_stderr, encoder, end_encoder, finish, run, threads, warp, watch,
+    with_stderr, Picture, Source,
 };
 use crate::export::{filter_value, standard_picture};
 use crate::MediaResult;
@@ -160,27 +160,6 @@ fn detect(
         f64::from(width) / f64::from(small_w),
         f64::from(height) / f64::from(small_h),
     ))
-}
-
-/// Follow a pass's `-progress` lines until it ends or is cancelled.
-fn watch(
-    child: &mut Child,
-    frames: usize,
-    progress: &mut dyn FnMut(f64),
-    cancel: &AtomicBool,
-) -> MediaResult<()> {
-    let out = child.stdout.take().expect("piped progress");
-    for line in BufReader::new(out).lines() {
-        cancelled(cancel)?;
-        let line = line.map_err(|e| format!("reading ffmpeg's progress: {e}"))?;
-        if let Some(done) = line
-            .strip_prefix("frame=")
-            .and_then(|n| n.parse::<f64>().ok())
-        {
-            progress((done / frames as f64).min(1.0));
-        }
-    }
-    cancelled(cancel)
 }
 
 /// The second pass: the camera path vid.stab smooths from `motions`,

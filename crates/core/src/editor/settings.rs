@@ -23,6 +23,10 @@ pub struct Settings {
     /// available. Off by default: errors fall back to software, but a
     /// driver that hangs cannot, and only one NVIDIA driver has been tested.
     pub hardware_decode: bool,
+    /// The preview plays and scrubs a light copy of footage wider than it
+    /// (`proxies`). Off by default: each copy takes a full decode of its
+    /// file in the background, and disk space.
+    pub proxies: bool,
     /// Export encodes a video's picture on an NVIDIA GPU (NVENC) when it
     /// takes the export's size, else with x264. Off by default: NVENC
     /// makes files 8 to 29% larger at the same quality.
@@ -147,6 +151,7 @@ impl Settings {
                 .unwrap_or_default(),
             hardware_decode: value["hardware_decode"].as_bool().unwrap_or(false),
             hardware_encode: value["hardware_encode"].as_bool().unwrap_or(false),
+            proxies: value["proxies"].as_bool().unwrap_or(false),
             transcription: TranscribeSettings::from_json(&value["transcription"]),
             updates: value["updates"]
                 .as_str()
@@ -170,6 +175,7 @@ impl Settings {
             "format": self.format.as_str(),
             "hardware_decode": self.hardware_decode,
             "hardware_encode": self.hardware_encode,
+            "proxies": self.proxies,
             "transcription": self.transcription.to_json(),
             "updates": self.updates.as_str(),
             "export": {
@@ -417,6 +423,7 @@ mod tests {
                 );
                 assert_eq!(settings.updates, Channel::Releases, "the default");
                 assert!(!settings.hear_timeline_while_recording, "off by default");
+                assert!(!settings.proxies, "off by default");
                 let export = ExportSettings {
                     kind: ExportKind::Gif,
                     resolution: Resolution::P2160,
@@ -438,6 +445,7 @@ mod tests {
                     settings.format = format;
                     settings.hardware_decode = hardware;
                     settings.hardware_encode = !hardware;
+                    settings.proxies = hardware;
                     settings.hear_timeline_while_recording = hear;
                     settings.updates = updates;
                     settings.export = export;
@@ -456,6 +464,7 @@ mod tests {
                             "format",
                             "hardware_decode",
                             "hardware_encode",
+                            "proxies",
                             "transcription",
                             "updates",
                             "voiceover"

@@ -7,10 +7,11 @@
 //! in chunks from the last to the first; [`stabilize`] measures the
 //! camera's motion with vid.stab, then writes the steadied picture. A clip
 //! both stabilized and reversed is stabilized first, then that file is
-//! reversed.
+//! reversed. [`make_proxy`] writes the preview's light copy of a video the
+//! same way.
 
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,9 +22,12 @@ use openreel_engine::Remade;
 use crate::export::{collect_stderr, ScratchDir};
 use crate::MediaResult;
 
+mod proxy;
 mod reverse;
 mod stabilize;
 mod warp;
+
+pub use proxy::make_proxy;
 
 /// The quality of the picture written: x264's CRF, finer than export's
 /// Higher (16), since export encodes it again.
@@ -332,6 +336,27 @@ fn threads() -> String {
         .map_or(4, |n| n.get())
         .min(MAX_THREADS)
         .to_string()
+}
+
+/// Follow a pass's `-progress` lines until it ends or is cancelled.
+fn watch(
+    child: &mut Child,
+    frames: usize,
+    progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
+) -> MediaResult<()> {
+    let out = child.stdout.take().expect("piped progress");
+    for line in BufReader::new(out).lines() {
+        cancelled(cancel)?;
+        let line = line.map_err(|e| format!("reading ffmpeg's progress: {e}"))?;
+        if let Some(done) = line
+            .strip_prefix("frame=")
+            .and_then(|n| n.parse::<f64>().ok())
+        {
+            progress((done / frames as f64).min(1.0));
+        }
+    }
+    cancelled(cancel)
 }
 
 fn cancelled(cancel: &AtomicBool) -> MediaResult<()> {

@@ -61,7 +61,7 @@ pub use loudness::{measure_mix, Loudness, LoudnessMeter};
 pub use microphone::{Microphone, Recorded, Take};
 pub use playback::FrameStream;
 pub use probe::{probe, MediaInfo};
-pub use remake::{frame_range, remake};
+pub use remake::{frame_range, make_proxy, remake};
 pub use samples::generate_samples;
 pub use sheet::{contact_sheet, source_strip, SheetCell, SheetLayer};
 pub use stills::{frame_at, thumbnails};

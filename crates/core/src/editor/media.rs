@@ -246,6 +246,8 @@ impl Editor {
                     };
                     let ready_path = info.path.clone();
                     self.refreshing.remove(&ready_path);
+                    // Imported again, it may have changed.
+                    self.forget_proxy(&ready_path);
                     // Fill an empty selection only; a background batch
                     // must not take the curator card from the user.
                     let keep_selection = self

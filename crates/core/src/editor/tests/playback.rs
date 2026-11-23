@@ -9,6 +9,7 @@ use super::*;
 
 mod cuts;
 mod loudness;
+mod proxies;
 mod stills;
 mod transitions;
 

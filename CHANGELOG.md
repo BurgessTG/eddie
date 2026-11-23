@@ -36,6 +36,10 @@
   Audio or GIF. `eddie export` makes what the output's extension names
   (`.mp3`, `.wav`, `.m4a`, `.flac`, `.gif`), and a name without a known
   extension gets the dialog's, where it used to fail.
+- Settings → Proxies: the preview plays and scrubs a light copy of
+  footage wider than 960 pixels, made in the background, as CapCut's
+  Proxy does; export still uses the original. Two lanes of 4K camera
+  footage played smoothly at a seventh of the processor time.
 - Settings → Hardware encode: video exports encode on an NVIDIA GPU
   (NVENC) when there is one, with files 8 to 29% larger at the same
   quality, and the CPU encodes otherwise. A 3-minute 1080p export took

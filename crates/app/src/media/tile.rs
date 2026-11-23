@@ -76,7 +76,7 @@ pub(super) fn tile(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
     let drag_path = asset.info.path.clone();
     let menu_path = drag_path.clone();
     picture(ui, asset, w, h)
-        .help(hover(asset))
+        .help(hover(asset, ui.editor.has_proxy(&asset.info.path)))
         .on_drag(move |ui: &mut Ui, drag, _| match drag.phase {
             Phase::Down => {}
             Phase::Move => {
@@ -183,12 +183,13 @@ fn picture(ui: &Ui, asset: &BinAsset, w: f32, h: f32) -> El {
 }
 
 /// The tile's tooltip: its name, metadata and path, then what it does.
-fn hover(asset: &BinAsset) -> String {
+fn hover(asset: &BinAsset, proxy: bool) -> String {
     let meta = asset_meta(asset);
     let name = &asset.info.name;
     let path = &asset.info.path;
     let hover = if asset.state == AssetState::Ready {
-        format!("{name}\n{meta}\n{path}\nDouble-click or drag onto the timeline to add.")
+        let proxy = if proxy { "\nPlays from a proxy." } else { "" };
+        format!("{name}\n{meta}\n{path}{proxy}\nDouble-click or drag onto the timeline to add.")
     } else {
         format!("{name}\n{meta}\nImporting…")
     };

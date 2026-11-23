@@ -108,8 +108,9 @@ impl Editor {
     }
 
     /// The next edge after `after` where lane `lane` shows a different
-    /// clip, with its source and source time there, as `sync_playback`
-    /// computes them at that edge. A transition's clip takes over at its
+    /// clip, with the file the preview decodes for it (its proxy, when it
+    /// has one) and its source time there, as `sync_playback` computes them
+    /// at that edge. A transition's clip takes over at its
     /// end, and a lane that a lane over it stops hiding shows again. Edges
     /// where the lane stops showing need no picture.
     pub fn next_video_change(&self, lane: usize, after: f64) -> Option<(f64, Option<(&str, f64)>)> {
@@ -138,7 +139,7 @@ impl Editor {
         let source = clip
             .source
             .as_deref()
-            .map(|source| (source, clip.source_at(edge)));
+            .map(|source| (self.preview_file(source), clip.source_at(edge)));
         Some((edge, source))
     }
 
@@ -372,6 +373,7 @@ impl Editor {
                     return self.video_playback_failed("source is not imported".to_owned());
                 }
                 let start = clip.source_at(self.playhead);
+                let source = self.preview_file(&source).to_owned();
                 if let Err(error) = self.lane_stream(lane) {
                     return self.video_playback_failed(error);
                 }
