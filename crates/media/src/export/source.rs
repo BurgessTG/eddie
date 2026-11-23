@@ -77,8 +77,8 @@ fn join(grid: &TileGrid) -> Picture {
         .collect();
     let orientation = grid.orientation;
     let mirror = if orientation.mirror { ",hflip" } else { "" };
-    let turn = ["", ",transpose=clock", ",hflip,vflip", ",transpose=cclock"]
-        [orientation.turns as usize];
+    let turn =
+        ["", ",transpose=clock", ",hflip,vflip", ",transpose=cclock"][orientation.turns as usize];
     Picture::Tiles(
         grid.tiles.iter().map(|&(stream, _)| stream).collect(),
         format!(

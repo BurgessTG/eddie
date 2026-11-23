@@ -1382,7 +1382,11 @@ fn phone_photos_show_turned_and_mirrored_as_their_exif_orientation_says() {
         let path = fixture.0.join(format!("o{orientation}.jpg"));
         std::fs::write(&path, with_orientation(&stored, orientation)).unwrap();
         let path = path.to_str().unwrap();
-        let size = if orientation >= 5 { (180, 320) } else { (320, 180) };
+        let size = if orientation >= 5 {
+            (180, 320)
+        } else {
+            (320, 180)
+        };
         let info = probe(path).unwrap();
         assert_eq!((info.width, info.height), size, "{orientation}: size");
         let picture = VideoDecoder::open(path, size.0, false)
@@ -1463,7 +1467,11 @@ fn heic_photos_preview_and_export_upright_with_every_tile_in_place() {
         let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
         let info = probe(&path).unwrap();
         assert!(info.photo && info.has_video, "{name}: {info:?}");
-        let size = if name == "single.heic" { (600, 350) } else { (350, 600) };
+        let size = if name == "single.heic" {
+            (600, 350)
+        } else {
+            (350, 600)
+        };
         assert_eq!(
             (info.width, info.height, info.duration),
             (size.0, size.1, 0.0)
