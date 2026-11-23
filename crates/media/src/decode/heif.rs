@@ -8,7 +8,7 @@
 use ffmpeg::ffi;
 use ffmpeg_next as ffmpeg;
 
-use super::{clockwise_turns, err, raw_enum, VideoDecoder};
+use super::{err, matrix_orientation, raw_enum, Orientation, VideoDecoder};
 use crate::MediaResult;
 
 /// The `ftyp` brands of a HEIF still image. Image sequences (`msf1`,
@@ -50,10 +50,10 @@ pub(crate) struct TileGrid {
     pub(crate) crop: (i32, i32),
     pub(crate) width: u32,
     pub(crate) height: u32,
-    /// Clockwise quarter turns from the grid's display matrix (HEIF's
-    /// `irot`; libavformat drops EXIF orientation, which HEIF says is only
+    /// From the grid's display matrix (HEIF's `irot` and `imir`;
+    /// libavformat drops EXIF orientation, which HEIF says is only
     /// informative).
-    pub(crate) turns: u8,
+    pub(crate) orientation: Orientation,
 }
 
 /// The picture of a HEIF photo, or `None` when `input` is not one. Of
@@ -97,17 +97,17 @@ pub(crate) fn heif_picture(input: &ffmpeg::format::context::Input) -> Option<Hei
                     grid.nb_coded_side_data,
                     ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
                 );
-                let turns = if matrix.is_null() || (*matrix).size < 36 {
-                    0
+                let orientation = if matrix.is_null() || (*matrix).size < 36 {
+                    Orientation::default()
                 } else {
-                    clockwise_turns(ffi::av_display_rotation_get((*matrix).data.cast()))
+                    matrix_orientation((*matrix).data.cast())
                 };
                 TileGrid {
                     tiles,
                     crop: (grid.horizontal_offset, grid.vertical_offset),
                     width: grid.width.max(1) as u32,
                     height: grid.height.max(1) as u32,
-                    turns,
+                    orientation,
                 }
             })
     };

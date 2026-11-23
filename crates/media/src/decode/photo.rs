@@ -5,7 +5,7 @@
 use ffmpeg_next as ffmpeg;
 
 use super::heif::{is_heif, Heif};
-use super::{clockwise_turns, Scaler, VideoDecoder};
+use super::{matrix_orientation, Scaler, VideoDecoder};
 use crate::MediaResult;
 
 /// Whether `input` is one picture: an image demuxer (`image2`, or one of
@@ -56,25 +56,23 @@ impl VideoDecoder {
     /// Decode a photo's one picture now (joining a HEIF grid's tiles) and
     /// queue it as the next, turned as its own display matrix says.
     pub(super) fn queue_photo(&mut self, heif: Option<&Heif>) -> MediaResult<()> {
-        let (pts, turns) = if let Some(Heif::Grid(grid)) = heif {
+        let (pts, orientation) = if let Some(Heif::Grid(grid)) = heif {
             self.join_tiles(grid)?;
-            (0.0, grid.turns)
+            (0.0, grid.orientation)
         } else {
             let pts = self
                 .receive_decoded()?
                 .ok_or_else(|| "the picture did not decode".to_owned())?;
-            let turns = self
+            let orientation = self
                 .decoded
                 .side_data(ffmpeg::frame::side_data::Type::DisplayMatrix)
                 .filter(|data| data.data().len() >= 36)
-                .map_or(self.turns, |data| {
-                    // SAFETY: a display matrix is nine i32 values in an
-                    // av_malloc-aligned side-data buffer owned by the frame.
-                    clockwise_turns(unsafe {
-                        ffmpeg::ffi::av_display_rotation_get(data.data().as_ptr().cast())
-                    })
+                // SAFETY: a display matrix is nine i32 values in an
+                // av_malloc-aligned side-data buffer owned by the frame.
+                .map_or(self.orientation, |data| unsafe {
+                    matrix_orientation(data.data().as_ptr().cast())
                 });
-            (pts, turns)
+            (pts, orientation)
         };
         // A grid's picture is larger than the tile the decoder opened with.
         let source = (
@@ -82,9 +80,10 @@ impl VideoDecoder {
             self.decoded.width(),
             self.decoded.height(),
         );
-        if (source, turns) != (self.scaler.source, self.turns) {
-            self.turns = turns;
-            let (scaler, target_h) = Scaler::new(source, turns, self.target_w, self.fast)?;
+        if (source, orientation) != (self.scaler.source, self.orientation) {
+            self.orientation = orientation;
+            let (scaler, target_h) =
+                Scaler::new(source, orientation.turns, self.target_w, self.fast)?;
             (self.scaler, self.target_h) = (scaler, target_h);
         }
         std::mem::swap(&mut self.decoded, &mut self.lookahead);
@@ -95,7 +94,7 @@ impl VideoDecoder {
     /// The size a photo is displayed at: its picture, turned.
     pub(crate) fn photo_size(&self) -> (u32, u32) {
         let (_, width, height) = self.scaler.source;
-        if self.turns % 2 == 1 {
+        if self.orientation.turns % 2 == 1 {
             (height, width)
         } else {
             (width, height)

@@ -15,3 +15,8 @@ ffmpeg -f lavfi -i nullsrc=s=600x350 -frames:v 1 blocks.png \
   orientation 6, then `heif-enc -q 90 --cut-tiles 128 turned.jpg -o
   grid.heic`. heif-enc turns the orientation into the grid's `irot` and
   cuts 128-pixel tiles, as an iPhone saves 512-pixel ones.
+- `mirrored.heic`: the same picture as a JPEG (`-q:v 2`) carrying EXIF
+  orientation 7 (mirrored and turned; written into an APP1 segment as
+  `with_orientation` in `tests/export_timeline.rs` does), then `heif-enc
+  -q 90 --cut-tiles 128 mirrored.jpg -o mirrored.heic`. heif-enc stores
+  it as a turned grid with a vertical `imir`.

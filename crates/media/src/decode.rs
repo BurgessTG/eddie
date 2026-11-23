@@ -105,9 +105,9 @@ pub struct VideoDecoder {
     target_w: u32,
     target_h: u32,
     fast: bool,
-    /// Clockwise quarter turns from the stream's display matrix, or for a
-    /// photo, its picture's (where FFmpeg puts EXIF orientation).
-    pub(crate) turns: u8,
+    /// How the picture is shown upright, from the stream's display matrix,
+    /// or for a photo, its picture's (where FFmpeg puts EXIF orientation).
+    pub(crate) orientation: Orientation,
     /// One picture (`is_photo`): seeks re-queue it instead of moving the
     /// demuxer, since `image2` returns nothing after any seek.
     photo: bool,
@@ -188,19 +188,18 @@ impl VideoDecoder {
             Some(Heif::Grid(_)) => ffmpeg::codec::threading::Type::Frame,
             _ => threading,
         };
-        let (stream_index, time_base, stream_start, parameters, turns) = {
+        let (stream_index, time_base, stream_start, parameters, orientation) = {
             let stream = match &heif {
                 Some(heif) => input.stream(heif.stream()),
                 None => input.streams().best(ffmpeg::media::Type::Video),
             }
             .ok_or_else(|| "no video stream".to_owned())?;
-            let turns = display_turns(&stream);
             (
                 stream.index(),
                 stream.time_base(),
                 stream.start_time(),
                 stream.parameters(),
-                turns,
+                display_orientation(&stream),
             )
         };
         // Match input-relative source times, retaining any video offset from
@@ -259,7 +258,7 @@ impl VideoDecoder {
             true => (ffmpeg::format::Pixel::RGBA, 1, 1),
             false => (decoder.format(), decoder.width(), decoder.height()),
         };
-        let (scaler, target_h) = Scaler::new(source, turns, target_w, fast)?;
+        let (scaler, target_h) = Scaler::new(source, orientation.turns, target_w, fast)?;
         let mut this = Self {
             input,
             decoder,
@@ -270,7 +269,7 @@ impl VideoDecoder {
             target_w,
             target_h,
             fast,
-            turns,
+            orientation,
             decoded: ffmpeg::frame::Video::empty(),
             decoded_pts: None,
             lookahead: ffmpeg::frame::Video::empty(),
@@ -300,7 +299,8 @@ impl VideoDecoder {
     /// decoder, so scrub and settle sizes share one position.
     pub(crate) fn set_output(&mut self, target_w: u32, fast: bool) -> MediaResult<()> {
         if (target_w, fast) != (self.target_w, self.fast) {
-            let (scaler, target_h) = Scaler::new(self.scaler.source, self.turns, target_w, fast)?;
+            let (scaler, target_h) =
+                Scaler::new(self.scaler.source, self.orientation.turns, target_w, fast)?;
             self.scaler = scaler;
             (self.target_w, self.target_h, self.fast) = (target_w, target_h, fast);
         }
@@ -606,7 +606,7 @@ impl VideoDecoder {
             if (source.1, source.2) != (width, height) {
                 return Err("video size changed mid-stream".to_owned());
             }
-            self.scaler = Scaler::new(source, self.turns, self.target_w, self.fast)?.0;
+            self.scaler = Scaler::new(source, self.orientation.turns, self.target_w, self.fast)?.0;
         }
         let scaled = self.scaler.run(picture)?;
         let stride = scaled.stride(0);
@@ -616,13 +616,19 @@ impl VideoDecoder {
         let data = scaled.data(0);
         // Output pixel (x, y) reads this scaled pixel. The scaled picture is
         // width×height, or height×width (transposed) for a quarter turn.
-        let source = |x: usize, y: usize| match self.turns {
-            1 => (y, width - 1 - x),
-            2 => (width - 1 - x, height - 1 - y),
-            3 => (height - 1 - y, x),
-            _ => (x, y),
+        let Orientation { turns, mirror } = self.orientation;
+        let scaled_w = if turns % 2 == 1 { height } else { width };
+        let source = |x: usize, y: usize| {
+            let (sx, sy) = match turns {
+                1 => (y, width - 1 - x),
+                2 => (width - 1 - x, height - 1 - y),
+                3 => (height - 1 - y, x),
+                _ => (x, y),
+            };
+            // The mirror comes before the turn.
+            (if mirror { scaled_w - 1 - sx } else { sx }, sy)
         };
-        if self.turns == 0 {
+        if self.orientation == Orientation::default() {
             for row in 0..height {
                 let src = row * stride;
                 let dst = row * width * 4;
@@ -680,30 +686,54 @@ impl VideoDecoder {
     }
 }
 
-/// Clockwise quarter turns that display `stream`, from its display matrix.
-pub(crate) fn display_turns(stream: &ffmpeg::format::stream::Stream) -> u8 {
+/// How a picture is shown upright: mirrored left to right when `mirror`,
+/// then turned `turns` quarter turns clockwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Orientation {
+    pub(crate) turns: u8,
+    pub(crate) mirror: bool,
+}
+
+/// How `stream` is shown upright, from its display matrix.
+pub(crate) fn display_orientation(stream: &ffmpeg::format::stream::Stream) -> Orientation {
     stream
         .side_data()
         .find(|data| {
             data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix
                 && data.data().len() >= 36
         })
-        .map_or(0, |data| {
-            // SAFETY: a display matrix is nine i32 values in an
-            // av_malloc-aligned side-data buffer owned by the stream.
-            let degrees =
-                unsafe { ffmpeg::ffi::av_display_rotation_get(data.data().as_ptr().cast()) };
-            clockwise_turns(degrees)
+        // SAFETY: a display matrix is nine i32 values in an
+        // av_malloc-aligned side-data buffer owned by the stream.
+        .map_or_else(Orientation::default, |data| unsafe {
+            matrix_orientation(data.data().as_ptr().cast())
         })
 }
 
-/// Clockwise quarter turns that display a stream, from a display-matrix
-/// rotation in degrees (counterclockwise, as `av_display_rotation_get` and
-/// ffprobe report it). Matches the FFmpeg CLI's autorotate.
-pub(crate) fn clockwise_turns(degrees: f64) -> u8 {
-    if degrees.is_finite() {
+/// How a picture is shown upright, from a display matrix, as the FFmpeg
+/// CLI's autorotate shows it (quarter turns only). A mirrored matrix (EXIF
+/// orientations 2, 4, 5 and 7, HEIF's `imir`) has a negative determinant,
+/// and `av_display_rotation_get` reads it as a vertical flip and a turn:
+/// a left-to-right mirror and half a turn more.
+///
+/// # Safety
+/// `matrix` points at nine aligned i32 values.
+pub(crate) unsafe fn matrix_orientation(matrix: *const i32) -> Orientation {
+    // SAFETY: as the caller promises.
+    let (degrees, m) = unsafe {
+        (
+            ffmpeg::ffi::av_display_rotation_get(matrix),
+            std::slice::from_raw_parts(matrix, 9),
+        )
+    };
+    let mirror = i64::from(m[0]) * i64::from(m[4]) < i64::from(m[1]) * i64::from(m[3]);
+    // Counterclockwise degrees, as ffprobe reports them.
+    let turns = if degrees.is_finite() {
         (-degrees / 90.0).round().rem_euclid(4.0) as u8
     } else {
         0
+    };
+    Orientation {
+        turns: (turns + if mirror { 2 } else { 0 }) % 4,
+        mirror,
     }
 }

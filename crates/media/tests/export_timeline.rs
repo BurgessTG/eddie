@@ -1357,57 +1357,113 @@ fn with_orientation(jpeg: &[u8], orientation: u8) -> Vec<u8> {
     out
 }
 
+/// A phone saves a photo as its sensor read it and says in EXIF how to show
+/// it: turned (3, 6, 8), mirrored (2, 4) or both (5, 7). Each quadrant of
+/// the stored picture shows where the EXIF standard puts it, in the
+/// preview's decoder for all eight and in export for a turn and a
+/// mirrored turn.
 #[test]
-fn a_phone_photo_exports_upright_from_its_exif_orientation() {
+fn phone_photos_show_turned_and_mirrored_as_their_exif_orientation_says() {
     let fixture = Fixture::new();
-    let stored = quadrant_photo(&fixture, "stored.jpg");
-    let turned = fixture.0.join("turned.jpg");
-    // 6: the camera was turned; show the picture a quarter turn clockwise.
-    std::fs::write(
-        &turned,
-        with_orientation(&std::fs::read(&stored).unwrap(), 6),
-    )
-    .unwrap();
-    let info = probe(turned.to_str().unwrap()).unwrap();
-    assert_eq!((info.width, info.height), (180, 320), "displayed size");
-    let mut timeline = Timeline::new(10.0).with_format(Format::Landscape);
-    photo(&mut timeline, &turned, 0.0, 0.3);
-    let exported = fixture.export("turned.mp4", &timeline);
-    let frames = frames(&exported);
-    assert_eq!(frames.len(), 3);
-    // 180x320 fits 101x180, centred: x 110-210. A quarter turn clockwise
-    // puts the stored bottom-left at the top-left.
-    let points = [
-        (135, 45),
-        (185, 45),
-        (135, 135),
-        (185, 135),
-        (30, 90),
-        (290, 90),
+    let stored = std::fs::read(quadrant_photo(&fixture, "stored.jpg")).unwrap();
+    // The stored quadrant shown top-left, top-right, bottom-left and
+    // bottom-right.
+    let shown = [
+        (1, [TL, TR, BL, BR]),
+        (2, [TR, TL, BR, BL]),
+        (3, [BR, BL, TR, TL]),
+        (4, [BL, BR, TL, TR]),
+        (5, [TL, BL, TR, BR]),
+        (6, [BL, TL, BR, TR]),
+        (7, [BR, TR, BL, TL]),
+        (8, [TR, BR, TL, BL]),
     ];
-    for (index, frame) in frames.iter().enumerate() {
+    for (orientation, expected) in shown {
+        let path = fixture.0.join(format!("o{orientation}.jpg"));
+        std::fs::write(&path, with_orientation(&stored, orientation)).unwrap();
+        let path = path.to_str().unwrap();
+        let size = if orientation >= 5 { (180, 320) } else { (320, 180) };
+        let info = probe(path).unwrap();
+        assert_eq!((info.width, info.height), size, "{orientation}: size");
+        let picture = VideoDecoder::open(path, size.0, false)
+            .unwrap()
+            .frame_at(0.0)
+            .unwrap();
+        assert_eq!((picture.width, picture.height), size);
+        let rgb: Vec<u8> = picture
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|pixel| &pixel[..3])
+            .copied()
+            .collect();
+        let (w, h) = (size.0 as usize, size.1 as usize);
+        let quadrants = [
+            (w / 4, h / 4),
+            (w * 3 / 4, h / 4),
+            (w / 4, h * 3 / 4),
+            (w * 3 / 4, h * 3 / 4),
+        ];
         assert_colors(
-            &format!("frame {index}"),
-            &colors_at(frame, 320, &points),
-            &[BL, TL, BR, TR, BLACK, BLACK],
+            &format!("orientation {orientation} preview"),
+            &colors_at(&rgb, size.0, &quadrants),
+            &expected,
         );
+        if ![6, 7].contains(&orientation) {
+            continue;
+        }
+        let mut timeline = Timeline::new(10.0).with_format(Format::Landscape);
+        photo(&mut timeline, Path::new(path), 0.0, 0.3);
+        let exported = fixture.export(&format!("o{orientation}.mp4"), &timeline);
+        let frames = frames(&exported);
+        assert_eq!(frames.len(), 3);
+        // 180x320 fits 101x180, centred: x 110-210.
+        let points = [
+            (135, 45),
+            (185, 45),
+            (135, 135),
+            (185, 135),
+            (30, 90),
+            (290, 90),
+        ];
+        let mut expected = expected.to_vec();
+        expected.extend([BLACK, BLACK]);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_colors(
+                &format!("orientation {orientation} export frame {index}"),
+                &colors_at(frame, 320, &points),
+                &expected,
+            );
+        }
     }
 }
 
 /// HEIC photos as libheif's `heif-enc` saves them (`tests/data/README.md`).
-/// Both hold one 600x350 picture whose 128-pixel blocks each have their own
-/// colour, so a tile in the wrong place shows. `grid.heic` is saved as
+/// Each holds one 600x350 picture whose 128-pixel blocks each have their
+/// own colour, so a tile in the wrong place shows. `grid.heic` is saved as
 /// iPhones save photos: 128-pixel tiles (a 640x384 grid cropped back to
 /// 600x350) turned a quarter clockwise by the grid's `irot`, so it shows
-/// 350x600. `single.heic` is one image with a thumbnail beside it.
+/// 350x600. `mirrored.heic` is a tile grid shown mirrored and turned
+/// (EXIF orientation 7, as heif-enc stores it: `imir`). `single.heic` is
+/// one image with a thumbnail beside it.
 #[test]
 fn heic_photos_preview_and_export_upright_with_every_tile_in_place() {
     let fixture = Fixture::new();
-    for (name, turned) in [("grid.heic", true), ("single.heic", false)] {
+    // Where the displayed picture shows the stored picture's (x, y).
+    type Place = fn(usize, usize) -> (usize, usize);
+    let photos: [(&str, Place); 3] = [
+        // A quarter turn clockwise: the stored bottom-left shows top-left.
+        ("grid.heic", |x, y| (349 - y, x)),
+        // Flipped about the other diagonal: bottom-right shows top-left.
+        ("mirrored.heic", |x, y| (349 - y, 599 - x)),
+        ("single.heic", |x, y| (x, y)),
+    ];
+    for (name, place) in photos {
         let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
         let info = probe(&path).unwrap();
         assert!(info.photo && info.has_video, "{name}: {info:?}");
-        let size = if turned { (350, 600) } else { (600, 350) };
+        let size = if name == "single.heic" { (600, 350) } else { (350, 600) };
         assert_eq!(
             (info.width, info.height, info.duration),
             (size.0, size.1, 0.0)
@@ -1419,9 +1475,7 @@ fn heic_photos_preview_and_export_upright_with_every_tile_in_place() {
         for column in 0..5 {
             for row in 0..3 {
                 let (x, y) = ((64 + 128 * column).min(556), (64 + 128 * row).min(303));
-                // A quarter turn clockwise: the stored bottom-left is shown
-                // top-left.
-                points.push(if turned { (349 - y, x) } else { (x, y) });
+                points.push(place(x, y));
                 expected.push([30 + 45 * column as u8, 40 + 80 * row as u8, 128]);
             }
         }

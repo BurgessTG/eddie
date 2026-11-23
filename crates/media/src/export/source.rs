@@ -68,18 +68,21 @@ pub(super) fn read(path: &str) -> Source {
 }
 
 /// The tiles joined on the grid as the preview's decoder joins them (black
-/// where none lands), cropped and turned.
+/// where none lands), cropped, mirrored and turned.
 fn join(grid: &TileGrid) -> Picture {
     let layout: Vec<String> = grid
         .tiles
         .iter()
         .map(|(_, (x, y))| format!("{x}_{y}"))
         .collect();
-    let turn = ["", ",transpose=clock", ",hflip,vflip", ",transpose=cclock"][grid.turns as usize];
+    let orientation = grid.orientation;
+    let mirror = if orientation.mirror { ",hflip" } else { "" };
+    let turn = ["", ",transpose=clock", ",hflip,vflip", ",transpose=cclock"]
+        [orientation.turns as usize];
     Picture::Tiles(
         grid.tiles.iter().map(|&(stream, _)| stream).collect(),
         format!(
-            "xstack=inputs={}:layout={}:fill=black,crop={}:{}:{}:{}{turn}",
+            "xstack=inputs={}:layout={}:fill=black,crop={}:{}:{}:{}{mirror}{turn}",
             grid.tiles.len(),
             layout.join("|"),
             grid.width,

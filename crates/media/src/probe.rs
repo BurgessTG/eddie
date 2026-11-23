@@ -68,7 +68,7 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
                 // SAFETY: the parameters belong to the open input.
                 info.alpha = has_alpha(unsafe { (*parameters.as_ptr()).format });
                 // Report displayed dimensions, as every decode path rotates.
-                if decode::display_turns(&stream) % 2 == 1 {
+                if decode::display_orientation(&stream).turns % 2 == 1 {
                     std::mem::swap(&mut info.width, &mut info.height);
                 }
                 info.fps = rate(stream.avg_frame_rate());

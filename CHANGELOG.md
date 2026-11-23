@@ -190,6 +190,10 @@
 - Export now fills the corners around a turned picture with
   transparency; it left them unpainted, so they could show leftover
   pixels.
+- Mirrored photos, such as a phone's selfies (EXIF orientations 2, 4, 5
+  and 7, or a HEIC's mirror), showed mirrored back on the monitor, in
+  thumbnails and in contact sheets, and a mirrored HEIC with tiles also
+  exported that way. They show as the phone saved them now.
 
 ## 0.2.1 (2026-11-20)
 
