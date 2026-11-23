@@ -23,6 +23,7 @@ use crate::MediaResult;
 
 mod reverse;
 mod stabilize;
+mod warp;
 
 /// The quality of the picture written: x264's CRF, finer than export's
 /// Higher (16), since export encodes it again.
@@ -275,7 +276,11 @@ fn encoder(
         // One frame in flight, cut into slices: at 4K, 872 MB against 1.46
         // GB for eight frames at once, 12% slower.
         .args(["-x264-params", "sliced-threads=1"])
-        .args(["-preset", "veryfast", "-crf", CRF])
+        // ultrafast: on 4 s of Sony 4K (200 Mbps, 4:2:2 10-bit) as
+        // veryfast's quality (SSIM 0.9809 against 0.9808) in 7.2 s
+        // against 17.5 s and 327 MB against 862 MB, in a file 49%
+        // larger (130 MB against 87 MB).
+        .args(["-preset", "ultrafast", "-crf", CRF])
         .args([
             "-g",
             &(picture.fps().round().max(1.0) as u32).to_string(),

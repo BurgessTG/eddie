@@ -357,7 +357,7 @@ lane that is not a whole number, a negative time, a length of 0 or less.
   smooths the camera's path more and enlarges the picture more to hide
   the edges that moving it uncovers. `null` or `false` plays it as shot.
   - It writes a file the way Reverse does, and waits for it the same way,
-    printing `stabilizing: N%`: about 11 s for 7 s of 1080p and 35 s for
+    printing `stabilizing: N%`: about 9 s for 7 s of 1080p and 25 s for
     4 s of 4K at 60 fps. A clip can be stabilized and reversed at once.
   - It steadies the whole picture. A scene with little detail, or one
     where most of the picture moves (a crowd, water), can steady badly;

@@ -5,18 +5,22 @@
 //! the full picture: on 4K footage that took 7.2 s instead of 25 s and
 //! steadied it exactly as well. The second smooths the camera's path,
 //! moves each frame onto it and enlarges the picture to keep its edges
-//! covered (`vidstabtransform`), into the encoder.
+//! covered, as `vidstabtransform` does but on every core (`warp`), into
+//! the encoder.
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{channel, sync_channel};
+use std::thread;
 
 use openreel_engine::Stabilize;
 
 use super::{
-    cancelled, collect_stderr, encoder, end_encoder, finish, threads, with_stderr, Picture, Source,
+    cancelled, collect_stderr, encoder, end_encoder, finish, run, threads, warp, with_stderr,
+    Picture, Source,
 };
 use crate::export::{filter_value, standard_picture};
 use crate::MediaResult;
@@ -179,8 +183,9 @@ fn watch(
     cancelled(cancel)
 }
 
-/// The second pass: decode the frames again, move each onto the smoothed
-/// path, and write them to the encoder's `input`.
+/// The second pass: the camera path vid.stab smooths from `motions`,
+/// then the frames decoded again, each moved onto that path here
+/// (`warp`) and written to the encoder's `input`.
 #[allow(clippy::too_many_arguments)]
 fn steady(
     source: &Source,
@@ -189,7 +194,7 @@ fn steady(
     frames: usize,
     level: Stabilize,
     motions: &Path,
-    mut input: std::process::ChildStdin,
+    input: ChildStdin,
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> MediaResult<()> {
@@ -199,14 +204,24 @@ fn steady(
         .clamp(1.0, 1000.0);
     let (shift, angle) = level.limits();
     let shift = (shift * f64::from(picture.width.min(picture.height))).round();
-    // Bilinear, vid.stab's own: bicubic took 14.3 s against 4.7 s for 7 s
-    // of 1080p.
+    let options = format!("smoothing={smoothing}:optzoom=1:maxshift={shift}:maxangle={angle}");
+    let path = warp::camera_path(
+        &frame_motions(picture, motions, &options)?,
+        &warp::PathOptions {
+            smoothing: smoothing as usize,
+            max_shift: shift as i32,
+            max_angle: angle,
+            width: picture.width,
+            height: picture.height,
+        },
+    );
+    if path.is_empty() {
+        return Err("no camera motion was measured".to_owned());
+    }
     let filters = format!(
-        "{},{},vidstabtransform=input={}:smoothing={smoothing}:optzoom=1\
-         :maxshift={shift}:maxangle={angle}",
+        "{},{}",
         frames_filter(picture),
-        standard_picture(&source.path),
-        filter_value(&motions.to_string_lossy()),
+        standard_picture(&source.path)
     );
     let mut decoder = crate::cli::ffmpeg()
         .args(["-v", "error", "-nostdin", "-threads", &threads()])
@@ -221,34 +236,120 @@ fn steady(
         .spawn()
         .map_err(|e| format!("failed to launch ffmpeg: {e}"))?;
     let errors = collect_stderr(decoder.stderr.take());
-    let mut out = decoder.stdout.take().expect("piped decoder output");
-    let mut frame = vec![0u8; picture.frame_bytes()];
-    let mut copied = Ok(());
-    for written in 1..=frames {
-        copied = cancelled(cancel)
-            .and_then(|()| {
-                out.read_exact(&mut frame)
-                    .map_err(|e| format!("decoding the picture: {e}"))
-            })
-            .and_then(|()| {
-                input
-                    .write_all(&frame)
-                    .map_err(|e| format!("encoding the stabilized picture: {e}"))
-            });
-        if copied.is_err() {
-            break;
-        }
-        progress(written as f64 / frames as f64);
-    }
-    drop(out);
-    drop(input);
-    if let Err(error) = copied {
+    let decoded = decoder.stdout.take().expect("piped decoder output");
+    let moved = move_frames(decoded, input, picture, frames, &path, progress, cancel);
+    if let Err(error) = moved {
         let _ = decoder.kill();
         let _ = decoder.wait();
         let stderr = errors.join().unwrap_or_default();
         return Err(explain(with_stderr(error, &stderr)));
     }
-    finish(&mut decoder, errors, "stabilizing the picture").map_err(explain)
+    finish(&mut decoder, errors, "decoding the picture").map_err(explain)
+}
+
+/// How each frame moved from the one before, as vid.stab's transform
+/// filter reads `motions`: it writes them to `global_motions.trf` in its
+/// working folder when debugging, run on one blank frame of the picture's
+/// size (0.13 s).
+pub(super) fn frame_motions(
+    picture: Picture,
+    motions: &Path,
+    options: &str,
+) -> MediaResult<Vec<warp::Motion>> {
+    let folder = motions.parent().unwrap_or(Path::new("."));
+    let written = folder.join("global_motions.trf");
+    let (rate_num, rate_den) = picture.rate;
+    let mut command = crate::cli::ffmpeg();
+    command
+        .current_dir(folder)
+        .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i"])
+        .arg(format!(
+            "color=c=black:s={}x{}:r={rate_num}/{rate_den}",
+            picture.width, picture.height
+        ))
+        .args(["-frames:v", "1", "-vf"])
+        .arg(format!(
+            "format=yuv420p,vidstabtransform=input={}:{options}:debug=1",
+            filter_value(&motions.to_string_lossy())
+        ))
+        .args(["-f", "null", "-"]);
+    run(command, "reading the camera's motion").map_err(explain)?;
+    let text = std::fs::read_to_string(&written)
+        .map_err(|e| format!("reading the camera's motion: {e}"))?;
+    warp::read_motions(&text)
+}
+
+/// Read each of `frames` decoded pictures, move it onto `path` and write
+/// it to the encoder's `input`. Reading and writing run on threads of
+/// their own, a few frames ahead and behind, while a frame is moved on
+/// every core.
+fn move_frames(
+    decoded: ChildStdout,
+    input: ChildStdin,
+    picture: Picture,
+    frames: usize,
+    path: &[warp::Motion],
+    progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
+) -> MediaResult<()> {
+    let size = (picture.width as usize, picture.height as usize);
+    let bytes = picture.frame_bytes();
+    let cores = thread::available_parallelism().map_or(4, |n| n.get());
+    let (read_tx, read_rx) = sync_channel::<Vec<u8>>(2);
+    let (write_tx, write_rx) = sync_channel::<Vec<u8>>(2);
+    let (spare_tx, spare_rx) = channel::<Vec<u8>>();
+    thread::scope(|scope| {
+        let reader = scope.spawn(move || {
+            let mut decoded = decoded;
+            for _ in 0..frames {
+                let mut frame = spare_rx.try_recv().unwrap_or_else(|_| vec![0; bytes]);
+                decoded
+                    .read_exact(&mut frame)
+                    .map_err(|e| format!("decoding the picture: {e}"))?;
+                if read_tx.send(frame).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let writer = scope.spawn(move || {
+            let mut input = input;
+            for frame in write_rx {
+                input
+                    .write_all(&frame)
+                    .map_err(|e| format!("encoding the stabilized picture: {e}"))?;
+                let _ = spare_tx.send(frame);
+            }
+            Ok(())
+        });
+        let mut moved = Ok(());
+        // What the frame before showed, where a moved frame leaves a
+        // border: the first frame as it is, as vid.stab starts.
+        let mut kept: Option<Vec<u8>> = None;
+        for (index, mut frame) in read_rx.iter().enumerate() {
+            if let Err(error) = cancelled(cancel) {
+                moved = Err(error);
+                break;
+            }
+            let kept = kept.get_or_insert_with(|| frame.clone());
+            // Past the measured frames vid.stab keeps the last motion.
+            warp::warp(&frame, kept, size, path[index.min(path.len() - 1)], cores);
+            frame.copy_from_slice(kept);
+            if write_tx.send(frame).is_err() {
+                break;
+            }
+            progress((index + 1) as f64 / frames as f64);
+        }
+        drop(read_rx);
+        drop(write_tx);
+        let joined = |handle: thread::ScopedJoinHandle<'_, MediaResult<()>>| {
+            handle
+                .join()
+                .unwrap_or_else(|_| Err("a stabilizing thread failed".to_owned()))
+        };
+        let (read, written) = (joined(reader), joined(writer));
+        moved.and(written).and(read)
+    })
 }
 
 /// An FFmpeg without vid.stab says so in words a user can act on.

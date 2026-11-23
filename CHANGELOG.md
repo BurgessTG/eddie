@@ -162,6 +162,7 @@
   monitor shows a drawing of its own size while the pointer is held, and
   the full drawing is made when it is let go.
 - PNG photos, shapes and stickers reach the monitor about 50 ms sooner.
+- Stabilize takes about half as long on 4K footage.
 
 ### Fixed
 

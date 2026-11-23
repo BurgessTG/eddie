@@ -277,6 +277,97 @@ fn a_stabilized_range_holds_a_shaking_camera_still_and_keeps_its_sound() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Every byte of a yuv420p picture `width` by `height`, frame by frame.
+fn yuv_frames(path: &Path, filters: &str, (width, height): (usize, usize)) -> Vec<Vec<u8>> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-vf", filters])
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+        .chunks(width * height * 3 / 2)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+#[test]
+fn frames_move_onto_the_camera_path_as_vidstabtransform_moves_them() {
+    let dir = folder("warp");
+    // A shaking camera that also turns, so rotation and the edges count.
+    let source = dir.join("turning.mov");
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(
+            "mandelbrot=s=800x450:start_scale=0.5:end_scale=0.5:outer=normalized_iteration_count,\
+             trim=end_frame=1,loop=loop=-1:size=1,setpts=N/30/TB,\
+             rotate='0.04*sin(t*9.3)':c=gray,\
+             crop=640:360:x='80+24*sin(t*7.1)':y='45+16*sin(t*8.3+2)',format=yuv420p",
+        )
+        .args(["-t", "2", "-r", "30", "-c:v", "libx264", "-qp", "0"])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let motions = dir.join("motions.trf");
+    let detect = format!(
+        "vidstabdetect=shakiness=6:fileformat=ascii:result={}",
+        motions.display()
+    );
+    assert!(yuv_frames(&source, &detect, (640, 360)).len() == 60);
+    // Tight limits, so shifts and turns are clipped too.
+    let options = "smoothing=15:optzoom=1:maxshift=20:maxangle=0.02";
+    let transform = format!("vidstabtransform=input={}:{options}", motions.display());
+    let wanted = yuv_frames(&source, &transform, (640, 360));
+
+    let picture = Picture {
+        width: 640,
+        height: 360,
+        rate: (30, 1),
+    };
+    let path = warp::camera_path(
+        &stabilize::frame_motions(picture, &motions, options).unwrap(),
+        &warp::PathOptions {
+            smoothing: 15,
+            max_shift: 20,
+            max_angle: 0.02,
+            width: 640,
+            height: 360,
+        },
+    );
+    assert!(path
+        .iter()
+        .any(|moved| moved.alpha.abs() == 0.02 && moved.x.abs() <= 20.0));
+    let mut kept: Option<Vec<u8>> = None;
+    let (mut differ, mut worst, mut total) = (0, 0, 0);
+    for (index, (frame, wanted)) in yuv_frames(&source, "null", (640, 360))
+        .iter()
+        .zip(&wanted)
+        .enumerate()
+    {
+        let kept = kept.get_or_insert_with(|| frame.clone());
+        warp::warp(frame, kept, (640, 360), path[index.min(path.len() - 1)], 3);
+        for (&a, &b) in kept.iter().zip(wanted) {
+            let gap = a.abs_diff(b);
+            differ += usize::from(gap > 0);
+            worst = worst.max(gap);
+        }
+        total += kept.len();
+    }
+    assert_eq!(wanted.len(), 60);
+    assert!(
+        worst <= 1 && differ * 1000 < total,
+        "{differ} of {total} bytes differ, worst {worst}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_range_stabilized_and_reversed_plays_its_frames_last_first() {
     let dir = folder("both");
