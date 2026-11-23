@@ -1,5 +1,6 @@
 //! What a media file holds, read in process through libavformat.
 
+use std::os::raw::c_int;
 use std::path::Path;
 
 use crate::{decode, MediaResult};
@@ -30,7 +31,7 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
     use ffmpeg_next::media::Type;
 
     decode::ensure_init();
-    let input = ffmpeg_next::format::input(path).map_err(|error| format!("{path}: {error}"))?;
+    let input = decode::open_input(path).map_err(|error| format!("{path}: {error}"))?;
     let rate = |rate: ffmpeg_next::Rational| match rate.denominator() {
         0 => 0.0,
         den => f64::from(rate.numerator()) / f64::from(den),
@@ -64,7 +65,8 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
                     unsafe { ((*parameters.as_ptr()).width, (*parameters.as_ptr()).height) };
                 info.width = width.max(0) as u32;
                 info.height = height.max(0) as u32;
-                info.alpha = has_alpha(&stream);
+                // SAFETY: the parameters belong to the open input.
+                info.alpha = has_alpha(unsafe { (*parameters.as_ptr()).format });
                 // Report displayed dimensions, as every decode path rotates.
                 if decode::display_turns(&stream) % 2 == 1 {
                     std::mem::swap(&mut info.width, &mut info.height);
@@ -91,25 +93,25 @@ pub fn probe(path: &str) -> MediaResult<MediaInfo> {
         (info.duration, info.fps) = (0.0, 0.0);
         // A photo's EXIF orientation reaches its decoded picture, not the
         // stream, and a HEIF photo's tiles are joined to one picture, so
-        // the decoder says the size.
-        (info.width, info.height) = decode::VideoDecoder::open(path, 16, true)?.photo_size();
+        // the decoder says the size. An image demuxer's stream was not
+        // probed, so the picture also says whether it has alpha.
+        let decoder = decode::VideoDecoder::open(path, 16, true)?;
+        (info.width, info.height) = decoder.photo_size();
+        info.alpha = has_alpha(ffmpeg_next::ffi::AVPixelFormat::from(decoder.photo_format()) as _);
     }
     Ok(info)
 }
 
-/// Whether `stream`'s pixels carry alpha, from its pixel format.
-fn has_alpha(stream: &ffmpeg_next::format::stream::Stream) -> bool {
+/// Whether pixels of `format`, an `AVPixelFormat` value, carry alpha.
+fn has_alpha(format: c_int) -> bool {
     use ffmpeg_next::ffi::{AVPixFmtDescriptor, AV_PIX_FMT_FLAG_ALPHA};
-    use std::os::raw::c_int;
     // Declared over a plain int: a format newer than these bindings is not
     // a valid Rust enum value, and C passes the enum as an int.
     unsafe extern "C" {
         fn av_pix_fmt_desc_get(format: c_int) -> *const AVPixFmtDescriptor;
     }
-    // SAFETY: the parameters belong to the open input and outlive this
-    // read, and the descriptor table is static.
+    // SAFETY: the descriptor table is static.
     unsafe {
-        let format = (*stream.parameters().as_ptr()).format;
         let descriptor = av_pix_fmt_desc_get(format);
         !descriptor.is_null() && (*descriptor).flags & AV_PIX_FMT_FLAG_ALPHA as u64 != 0
     }

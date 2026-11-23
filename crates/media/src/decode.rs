@@ -24,7 +24,7 @@ pub use hardware::{
     inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
 };
 pub(crate) use heif::{heif_picture, Heif, TileGrid};
-pub(crate) use photo::is_photo;
+pub(crate) use photo::{is_photo, open_input};
 use scaler::Scaler;
 pub(crate) use stills::frame_at;
 pub use stills::{filmstrip_stills, StillDecoder};
@@ -178,7 +178,7 @@ impl VideoDecoder {
         hardware: bool,
     ) -> MediaResult<Self> {
         ensure_init();
-        let input = ffmpeg::format::input(path).map_err(|e| err("open input", e))?;
+        let input = open_input(path).map_err(|e| err("open input", e))?;
         let photo = is_photo(&input);
         let heif = heif_picture(&input);
         // The GPU has nothing to gain on one picture.
@@ -253,12 +253,13 @@ impl VideoDecoder {
             result => result?,
         };
 
-        let (scaler, target_h) = Scaler::new(
-            (decoder.format(), decoder.width(), decoder.height()),
-            turns,
-            target_w,
-            fast,
-        )?;
+        // A photo opened without a stream probe has no size until its
+        // picture decodes, below, which builds the scaler it needs.
+        let source = match photo && decoder.width() == 0 {
+            true => (ffmpeg::format::Pixel::RGBA, 1, 1),
+            false => (decoder.format(), decoder.width(), decoder.height()),
+        };
+        let (scaler, target_h) = Scaler::new(source, turns, target_w, fast)?;
         let mut this = Self {
             input,
             decoder,

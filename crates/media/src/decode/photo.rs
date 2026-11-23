@@ -12,8 +12,44 @@ use crate::MediaResult;
 /// the `png_pipe`, `jpeg_pipe`, `webp_pipe` family) or a HEIF still image,
 /// not a container with a timeline.
 pub(crate) fn is_photo(input: &ffmpeg::format::context::Input) -> bool {
+    is_image_demuxer(input) || is_heif(input)
+}
+
+fn is_image_demuxer(input: &ffmpeg::format::context::Input) -> bool {
     let format = input.format();
-    format.name() == "image2" || format.name().ends_with("_pipe") || is_heif(input)
+    format.name() == "image2" || format.name().ends_with("_pipe")
+}
+
+/// Open a media file for reading. libavformat's stream probe decodes a
+/// photo's whole picture to learn its size and pixel format (40 ms for a
+/// 2160 px PNG, 70 ms for a WebP), and the decoder then decodes it again.
+/// An image demuxer's stream skips that probe: its decoder reads both from
+/// the picture, and `queue_photo` sizes the output from what it decoded.
+pub(crate) fn open_input(path: &str) -> Result<ffmpeg::format::context::Input, ffmpeg::Error> {
+    use ffmpeg::ffi;
+    let path = std::ffi::CString::new(path).map_err(|_| ffmpeg::Error::InvalidData)?;
+    let mut context = std::ptr::null_mut();
+    // SAFETY: `context` starts null, as avformat_open_input requires, and
+    // is owned by the `Input` from here on, which closes it when dropped.
+    unsafe {
+        match ffi::avformat_open_input(
+            &mut context,
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        ) {
+            0 => {}
+            error => return Err(ffmpeg::Error::from(error)),
+        }
+        let input = ffmpeg::format::context::Input::wrap(context);
+        if !is_image_demuxer(&input) {
+            match ffi::avformat_find_stream_info(context, std::ptr::null_mut()) {
+                0.. => {}
+                error => return Err(ffmpeg::Error::from(error)),
+            }
+        }
+        Ok(input)
+    }
 }
 
 impl VideoDecoder {
@@ -64,6 +100,11 @@ impl VideoDecoder {
         } else {
             (width, height)
         }
+    }
+
+    /// The pixel format a photo decoded to.
+    pub(crate) fn photo_format(&self) -> ffmpeg::format::Pixel {
+        self.scaler.source.0
     }
 
     /// Back to a photo's one picture: queue it as the next again.

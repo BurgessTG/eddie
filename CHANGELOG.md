@@ -170,6 +170,9 @@
 - Importing screen recordings and other video with keyframes far apart
   is up to four times faster: the submission's 21 files went from 34 s
   to 13 s, and the window holds less memory afterwards.
+- Photos, shapes and stickers import in less than half the time and open
+  on the monitor faster: FFmpeg decoded a PNG or WebP twice each time it
+  was opened, and a photo's thumbnail decoded a JPEG twice.
 
 ### Fixed
 

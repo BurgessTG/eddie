@@ -23,6 +23,10 @@ pub fn filmstrip_stills(
 ) -> MediaResult<Vec<(f64, RawFrame)>> {
     use ffmpeg::codec::threading::Type;
     let mut keys = VideoDecoder::open_threaded(path, target_w, true, Type::Slice, 0, false)?;
+    if keys.photo {
+        // Its one picture decoded as it opened.
+        return Ok(next_still(&mut keys)?.into_iter().collect());
+    }
     keys.decoder.skip_frame(ffmpeg::Discard::NonKey);
     let (_, width, height) = keys.scaler.source;
     let pixels = (u64::from(width) * u64::from(height)).max(1);
