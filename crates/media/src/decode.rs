@@ -73,6 +73,24 @@ pub(crate) fn ensure_init() {
     });
 }
 
+/// Give memory that decoders freed back to the system. glibc keeps what
+/// threads free in their arenas: after the submission's 21 files imported,
+/// with filmstrip decoders on 8 frame threads, the window held 850 MB, and
+/// 440 MB once trimmed. Elsewhere this does nothing.
+pub fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: malloc_trim only returns free heap pages to the system;
+        // it locks each arena while it does.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
 fn err(context: &str, error: ffmpeg::Error) -> String {
     format!("{context}: {error}")
 }
@@ -128,6 +146,7 @@ impl VideoDecoder {
             target_w,
             fast,
             ffmpeg::codec::threading::Type::Frame,
+            0,
             false,
         )
     }
@@ -142,17 +161,20 @@ impl VideoDecoder {
             target_w,
             true,
             ffmpeg::codec::threading::Type::Frame,
+            0,
             true,
         )
     }
 
     /// Frame threading pipelines consecutive pictures; slice threading
-    /// splits one picture, which is what isolated keyframes need.
+    /// splits one picture, which is what isolated keyframes need. `threads`
+    /// 0 lets libavcodec choose from the CPU's cores.
     fn open_threaded(
         path: &str,
         target_w: u32,
         fast: bool,
         threading: ffmpeg::codec::threading::Type,
+        threads: usize,
         hardware: bool,
     ) -> MediaResult<Self> {
         ensure_init();
@@ -197,7 +219,7 @@ impl VideoDecoder {
                 .map_err(|e| err("decoder parameters", e))?;
             context.set_threading(ffmpeg::codec::threading::Config {
                 kind: threading,
-                count: 0, // libavcodec chooses based on CPU cores.
+                count: threads,
             });
             let attached = hardware
                 && (attach(&mut context)

@@ -188,6 +188,9 @@ impl Editor {
                     });
                 }
             });
+            // Filmstrip decoders leave hundreds of megabytes in glibc's
+            // arenas.
+            openreel_media::release_freed_memory();
             let _ = tx.send(ImportMsg::Finished);
             wake.wake();
         });

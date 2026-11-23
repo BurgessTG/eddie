@@ -9,62 +9,87 @@ use super::{VideoDecoder, RECENT_PICTURES};
 use crate::{MediaResult, RawFrame};
 
 /// Filmstrip stills at `times` (ascending), keyed by each still's PTS.
-/// A sample within `tolerance` after its keyframe shows that keyframe,
-/// decoding keyframes only; a sample deep inside a long GOP (or without an
-/// index) decodes forward to its exact picture instead.
+/// A sample within `tolerance` after its keyframe shows that keyframe, from
+/// a slice-threaded decoder that decodes keyframes only; a sample deep
+/// inside a long GOP (or without an index) decodes forward to its exact
+/// picture on a second, frame-threaded decoder. A screen recording with a
+/// keyframe every 8 s decodes every picture that way: on one core (its
+/// encoder writes one slice a picture) 158 s of 1080p took 30.5 s.
 pub fn filmstrip_stills(
     path: &str,
     times: &[f64],
     target_w: u32,
     tolerance: f64,
 ) -> MediaResult<Vec<(f64, RawFrame)>> {
-    let mut decoder = VideoDecoder::open_threaded(
-        path,
-        target_w,
-        true,
-        ffmpeg::codec::threading::Type::Slice,
-        false,
-    )?;
-    let mut stills: Vec<(f64, RawFrame)> = Vec::new();
+    use ffmpeg::codec::threading::Type;
+    let mut keys = VideoDecoder::open_threaded(path, target_w, true, Type::Slice, 0, false)?;
+    keys.decoder.skip_frame(ffmpeg::Discard::NonKey);
+    let (_, width, height) = keys.scaler.source;
+    let pixels = (u64::from(width) * u64::from(height)).max(1);
+    let threads =
+        (FORWARD_THREADS as u64 * 1920 * 1080 / pixels).clamp(2, FORWARD_THREADS as u64) as usize;
+    let threads = threads.min(std::thread::available_parallelism().map_or(4, |n| n.get()));
+    let mut forward: Option<VideoDecoder> = None;
+    // The last picture the forward decoder returned.
     let mut position: Option<f64> = None;
-    // The last still was read keyframes-only. With B-frames the decoder
-    // holds a keyframe until later keyframes arrive, so the demuxer is GOPs
-    // past `position` and decoding forward from here would skip the
-    // pictures in between.
-    let mut read_ahead = false;
+    let mut stills: Vec<(f64, RawFrame)> = Vec::new();
     for &time in times {
-        let key = decoder.keyframe_before(time);
-        let same_gop = matches!((position, key), (Some(at), Some(key)) if key <= at);
-        if key.is_some_and(|key| time - key <= tolerance) {
-            if same_gop {
-                continue; // The previous still is this time's keyframe.
+        let key = keys.keyframe_before(time);
+        let shown = if key.is_some_and(|key| time - key <= tolerance) {
+            let last = stills.last().map(|(pts, _)| *pts);
+            if matches!((last, key), (Some(at), Some(key)) if key <= at) {
+                continue; // The previous still is this time's keyframe or later.
             }
-            decoder.decoder.skip_frame(ffmpeg::Discard::NonKey);
             // The backward seek lands on the keyframe at or before `time`;
             // take it without decoding the next one to bound its interval.
-            decoder.seek(time)?;
-            decoder.seek_target = None;
-            read_ahead = true;
+            keys.seek(time)?;
+            keys.seek_target = None;
+            next_still(&mut keys)?
         } else {
-            decoder.decoder.skip_frame(ffmpeg::Discard::Default);
-            if !read_ahead && (same_gop || (key.is_none() && position.is_some())) {
+            let decoder = match &mut forward {
+                Some(decoder) => decoder,
+                None => forward.insert(VideoDecoder::open_threaded(
+                    path,
+                    target_w,
+                    true,
+                    Type::Frame,
+                    threads,
+                    false,
+                )?),
+            };
+            let same_gop = matches!((position, key), (Some(at), Some(key)) if key <= at);
+            if same_gop || (key.is_none() && position.is_some()) {
                 decoder.skip_to(time);
             } else {
                 decoder.seek(time)?;
             }
-            read_ahead = false;
-        }
-        let Some(pts) = decoder.next_decoded()? else {
+            let still = next_still(decoder)?;
+            position = still.as_ref().map(|(pts, _)| *pts);
+            still
+        };
+        let Some((pts, frame)) = shown else {
             break;
         };
-        position = Some(pts);
         if stills.last().is_some_and(|(last, _)| *last >= pts) {
             continue;
         }
-        let frame = decoder.scale_decoded_into(Vec::new())?;
         stills.push((pts, frame));
     }
     Ok(stills)
+}
+
+/// The frame threads a filmstrip's forward decoder gets at 1080p. Each
+/// thread holds pictures of its own and up to four files import at once,
+/// so larger pictures get fewer, down to 2 at 4K: with 8 threads the
+/// submission's import peaked at 931 MB, against 595 MB on one.
+const FORWARD_THREADS: usize = 8;
+
+/// The decoder's next picture at filmstrip size, and its time.
+fn next_still(decoder: &mut VideoDecoder) -> MediaResult<Option<(f64, RawFrame)>> {
+    let Some(pts) = decoder.next_decoded()? else {
+        return Ok(None);
+    };
+    Ok(Some((pts, decoder.scale_decoded_into(Vec::new())?)))
 }
 
 /// One-shot still frame through the in-process decoder.

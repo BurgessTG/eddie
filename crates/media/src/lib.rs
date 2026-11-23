@@ -42,8 +42,8 @@ pub use composite::{Canvas, Image, Layer};
 #[doc(hidden)]
 pub use decode::{filmstrip_stills, VideoDecoder};
 pub use decode::{
-    inject_hardware_fault, set_hardware_decode, take_hardware_failure, warm_hardware_decode,
-    StillDecoder,
+    inject_hardware_fault, release_freed_memory, set_hardware_decode, take_hardware_failure,
+    warm_hardware_decode, StillDecoder,
 };
 pub use denoise::{measure_noise, NoiseProfile, NOISE_BANDS};
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
