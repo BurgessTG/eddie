@@ -53,8 +53,10 @@ guide` prints this guide as written for the installed version.
     first `auto` (the largest video's size, at most 1080p), the project's
     frame rate and `recommended`, and 480p for a GIF.
   - Its reply gives the `output` it wrote and the `kind` (`video`,
-    `audio` or `gif`), with the `size`, `fps` and `quality` of a video,
-    the `format` of a sound file, or the `size` and `fps` of a GIF.
+    `audio` or `gif`), with the `size`, `fps`, `quality` and `encoder`
+    (`x264`, or `nvenc` when the user turned on Settings → Hardware
+    encode) of a video, the `format` of a sound file, or the `size` and
+    `fps` of a GIF.
 
 After `run`, read its `introducedFindings` (or run `inspect`), look at a
 `sheet`, and fix what the edit broke. `run --dry-run` keeps nothing: its

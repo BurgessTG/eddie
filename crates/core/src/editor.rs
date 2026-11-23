@@ -228,6 +228,8 @@ pub struct Editor {
     /// The last finished export and the status line announcing it; Open
     /// folder shows while that line is still the status.
     pub exported: Option<(PathBuf, String)>,
+    /// What encoded the last finished video export's picture.
+    pub(crate) export_encoder: Option<&'static str>,
     /// Why the last export stopped, until the next one starts.
     pub export_failed: Option<String>,
 
@@ -405,6 +407,7 @@ impl Editor {
             export_rx: None,
             export_progress: None,
             exported: None,
+            export_encoder: None,
             export_failed: None,
             script_engine,
             console_output,

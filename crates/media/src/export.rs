@@ -17,6 +17,7 @@ use openreel_engine::{Clip, ClipKind, Timeline};
 
 use crate::{MediaInfo, MediaResult};
 use audio::{encode_audio, encode_audio_file};
+use encoder::Encoder;
 use frames::{title_frames, VideoClock};
 pub(crate) use scratch::ScratchDir;
 pub(crate) use source::standard_picture;
@@ -26,6 +27,7 @@ use video::{batch_command, encode_segment, plan_video};
 mod animate;
 mod audio;
 mod blend;
+mod encoder;
 mod frames;
 mod gif;
 mod picture;
@@ -104,7 +106,7 @@ pub fn output_canvas(
     timeline.format.canvas(short_side.unwrap_or(short), first)
 }
 
-/// How export treats the audio mix.
+/// How export treats the audio mix and the picture's encoder.
 #[derive(Clone, Debug, Default)]
 pub struct ExportOptions {
     /// Measure the mix first and apply one fixed gain to
@@ -118,6 +120,18 @@ pub struct ExportOptions {
     /// missing here is measured before the mix.
     pub noise: HashMap<String, crate::NoiseProfile>,
     pub settings: ExportSettings,
+    /// Encode a video's picture with NVENC when the GPU takes it, else
+    /// with x264. A GIF always uses x264.
+    pub hardware_encode: bool,
+}
+
+/// A finished export.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exported {
+    pub path: PathBuf,
+    /// What encoded a video's picture, `x264` or `nvenc`; `None` for a
+    /// sound file or a GIF.
+    pub encoder: Option<&'static str>,
 }
 
 /// Export `timeline` to `output` as `options.settings` say: an H.264/AAC
@@ -129,7 +143,7 @@ pub fn export_timeline(
     output: &Path,
     options: &ExportOptions,
     progress: Sender<f64>,
-) -> MediaResult<PathBuf> {
+) -> MediaResult<Exported> {
     let total = timeline.end();
     if total <= 0.0 {
         return Err("timeline is empty".to_owned());
@@ -143,7 +157,10 @@ pub fn export_timeline(
         let mix = audio::mix(timeline, infos, options)?;
         encode_audio_file(&mix, total, settings.audio, output)?;
         let _ = progress.send(1.0);
-        return Ok(output.to_path_buf());
+        return Ok(Exported {
+            path: output.to_path_buf(),
+            encoder: None,
+        });
     }
     let gif = settings.kind == ExportKind::Gif;
     let fps = settings.frame_rate(timeline.fps);
@@ -215,69 +232,102 @@ pub fn export_timeline(
     // saturates them: two or four in flight took 54 s and 60 s instead of
     // 47 s, with 1.5 GB and 3.0 GB peak RSS instead of 0.9 GB.
     let cores = thread::available_parallelism().map_or(4, |n| n.get());
-    let workers = (cores / 6).clamp(1, 3).min(batches.len());
-    let encoder_threads = (cores / workers).max(1);
+    let workers = |per: usize| (cores / per).clamp(1, 3).min(batches.len());
+    // A GIF's picture is kept whole until it is quantized.
+    let software = Encoder::X264 {
+        crf: if gif { 0 } else { settings.quality.crf() },
+        threads: (cores / workers(6)).max(1),
+    };
+    let hardware = Encoder::Nvenc {
+        cq: settings.quality.cq(),
+    };
+    let mut encoder = if options.hardware_encode
+        && !gif
+        && encoder::opens(hardware, (canvas_w, canvas_h), rate)
+    {
+        hardware
+    } else {
+        software
+    };
     let scratch = ScratchDir::beside(output)?;
     let segment = |index: usize| scratch.0.join(format!("{index:05}.mp4"));
     let audio_path = scratch.0.join("audio.m4a");
-    let next = AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
-    let done = AtomicI64::new(0);
-    // A GIF's picture is kept whole until it is quantized.
-    let crf = if gif { 0 } else { settings.quality.crf() };
     // Quantizing a GIF takes the last part of its progress.
     let rendered_share = if gif { 0.6 } else { 0.99 };
+    let render = |encoder: Encoder| -> MediaResult<()> {
+        // With the GPU encoding, decoding is the CPU's work, and more
+        // batches in flight help: on 185 s of 1080p over 16 threads, 2 took
+        // 53.0 s, 3 43.1 s at 1.65 GB, 4 39.7 s at 2.1 GB. Three also stays
+        // inside the three NVENC sessions older drivers allow.
+        let workers = if encoder.is_hardware() {
+            workers(4)
+        } else {
+            workers(6)
+        };
+        let next = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let done = AtomicI64::new(0);
+        thread::scope(|scope| {
+            let workers: Vec<_> = (0..workers)
+                .map(|_| {
+                    let progress = progress.clone();
+                    scope.spawn(|| -> MediaResult<()> {
+                        let progress = progress;
+                        while !failed.load(Ordering::Relaxed) {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(batch) = batches.get(index) else {
+                                break;
+                            };
+                            let count = batch.end - batch.start;
+                            let result = batch_command(
+                                infos,
+                                (canvas_w, canvas_h),
+                                clock,
+                                &layers,
+                                &transitions,
+                                batch,
+                            )
+                            .and_then(|decoder| {
+                                encode_segment(
+                                    decoder,
+                                    &titles.graph(batch.start, batch.end),
+                                    (canvas_w, canvas_h),
+                                    rate,
+                                    encoder,
+                                    count,
+                                    &segment(index),
+                                )
+                            });
+                            if let Err(error) = result {
+                                failed.store(true, Ordering::Relaxed);
+                                return Err(error);
+                            }
+                            let frames = done.fetch_add(count, Ordering::Relaxed) + count;
+                            let share = frames as f64 / frame_count as f64 * rendered_share;
+                            let _ = progress.send(share.min(rendered_share));
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .try_for_each(|worker| worker.join().expect("export worker panicked"))
+        })
+    };
     let (audio, video) = thread::scope(|scope| {
         let audio = scope.spawn(|| match &mix {
             Some(mix) => encode_audio(&mix.inputs, &mix.graph, &audio_path),
             None => Ok(()),
         });
-        let workers: Vec<_> = (0..workers)
-            .map(|_| {
-                let progress = progress.clone();
-                scope.spawn(|| -> MediaResult<()> {
-                    let progress = progress;
-                    while !failed.load(Ordering::Relaxed) {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(batch) = batches.get(index) else {
-                            break;
-                        };
-                        let count = batch.end - batch.start;
-                        let result = batch_command(
-                            infos,
-                            (canvas_w, canvas_h),
-                            clock,
-                            &layers,
-                            &transitions,
-                            batch,
-                        )
-                        .and_then(|decoder| {
-                            encode_segment(
-                                decoder,
-                                &titles.graph(batch.start, batch.end),
-                                (canvas_w, canvas_h),
-                                rate,
-                                crf,
-                                count,
-                                encoder_threads,
-                                &segment(index),
-                            )
-                        });
-                        if let Err(error) = result {
-                            failed.store(true, Ordering::Relaxed);
-                            return Err(error);
-                        }
-                        let frames = done.fetch_add(count, Ordering::Relaxed) + count;
-                        let share = frames as f64 / frame_count as f64 * rendered_share;
-                        let _ = progress.send(share.min(rendered_share));
-                    }
-                    Ok(())
-                })
-            })
-            .collect();
-        let video = workers
-            .into_iter()
-            .try_for_each(|worker| worker.join().expect("export worker panicked"));
+        let mut video = render(encoder);
+        // The GPU can still refuse partway, such as when another program
+        // takes the last encoder session: the whole picture is made again
+        // on the CPU, since segments from two encoders cannot be joined.
+        if video.is_err() && encoder.is_hardware() {
+            encoder = software;
+            video = render(encoder);
+        }
         (audio.join().expect("audio export panicked"), video)
     });
     video?;
@@ -297,7 +347,10 @@ pub fn export_timeline(
         join(&list, &audio_path, output)?;
     }
     let _ = progress.send(1.0);
-    Ok(output.to_path_buf())
+    Ok(Exported {
+        path: output.to_path_buf(),
+        encoder: (!gif).then(|| encoder.name()),
+    })
 }
 
 /// The list FFmpeg's concat demuxer reads the `segments` video files in

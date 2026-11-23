@@ -66,9 +66,12 @@ fn rows(ui: &Ui) -> El {
     let mut rows = col()
         .w_full()
         .gap(ROW_GAP)
-        .child(setting("Playback", hardware(settings)))
-        .child(setting("Speech", provider(ui)))
-        .child(model(ui));
+        .child(setting("Playback", hardware(settings)));
+    // NVENC only; a Mac has no NVIDIA GPU, and VideoToolbox is not used yet.
+    if !cfg!(target_os = "macos") {
+        rows = rows.child(setting("Export", hardware_encode(settings)));
+    }
+    rows = rows.child(setting("Speech", provider(ui))).child(model(ui));
     if settings.transcription.provider != Provider::Local {
         let (url_hint, key_hint) = match settings.transcription.provider {
             Provider::Meta if settings.has_meta_key() => {
@@ -122,6 +125,16 @@ fn hardware(settings: &Settings) -> El {
         settings.hardware_decode,
     )
     .on_press(|ui: &mut Ui| edit(ui, |settings| settings.hardware_decode = !settings.hardware_decode))
+}
+
+fn hardware_encode(settings: &Settings) -> El {
+    theme::checkbox(
+        "settings-hardware-encode",
+        "Hardware encode",
+        "Encode video exports on an NVIDIA GPU (NVENC) when there is one: faster, with files 8 to 29% larger at the same quality. Otherwise the CPU encodes.",
+        settings.hardware_encode,
+    )
+    .on_press(|ui: &mut Ui| edit(ui, |settings| settings.hardware_encode = !settings.hardware_encode))
 }
 
 /// The speech provider; a press opens its list.

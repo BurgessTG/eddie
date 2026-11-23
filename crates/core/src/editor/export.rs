@@ -11,7 +11,7 @@ use crate::Editor;
 
 pub(super) enum ExportMsg {
     Progress(f64),
-    Done(Result<PathBuf, String>),
+    Done(Result<openreel_media::Exported, String>),
 }
 
 impl Editor {
@@ -37,10 +37,12 @@ impl Editor {
             };
             match msg {
                 ExportMsg::Progress(p) => self.export_progress = Some(p),
-                ExportMsg::Done(Ok(path)) => {
+                ExportMsg::Done(Ok(made)) => {
+                    let path = made.path;
                     let name = path.file_name().unwrap_or(path.as_os_str());
                     self.status = format!("Exported {}", name.to_string_lossy());
                     self.exported = Some((path, self.status.clone()));
+                    self.export_encoder = made.encoder;
                     exported = true;
                     done = true;
                 }
@@ -105,6 +107,7 @@ impl Editor {
             speech: self.speech_map(),
             noise: self.noise_profiles(),
             settings,
+            hardware_encode: self.settings.hardware_encode,
         };
         let infos: HashMap<String, MediaInfo> = self
             .assets
@@ -117,6 +120,7 @@ impl Editor {
         self.export_rx = Some(rx);
         self.export_progress = Some(0.0);
         self.exported = None;
+        self.export_encoder = None;
         self.export_failed = None;
         let wake = self.wake.clone();
         thread::spawn(move || {

@@ -12,6 +12,7 @@ use openreel_engine::{
 };
 
 use super::blend;
+use super::encoder::Encoder;
 use super::frames::{enabled_frames, visible_frames, VideoClock};
 use super::picture::Mattes;
 use super::picture::{picture, Motion, Spot};
@@ -535,15 +536,13 @@ pub(super) fn batch_command(
 
 /// Pipe one batch's raw frames through its own H.264 encoder into `path`.
 /// Every segment starts on a keyframe, so segments join by stream copy.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn encode_segment(
     decoder: (Command, Vec<FilterGraphFile>),
     titles: &str,
     canvas: (u32, u32),
     rate: ffmpeg_next::Rational,
-    crf: u8,
+    encoder: Encoder,
     count: i64,
-    threads: usize,
     path: &Path,
 ) -> MediaResult<()> {
     let (width, height) = canvas;
@@ -571,20 +570,9 @@ pub(super) fn encode_segment(
         ])
         .arg("-/filter_complex")
         .arg(&graph.0)
-        .args([
-            "-map",
-            "[vout]",
-            "-c:v",
-            "libx264",
-            "-threads:v",
-            &threads.to_string(),
-            "-preset",
-            "veryfast",
-            "-crf",
-            &crf.to_string(),
-            "-f",
-            "mp4",
-        ])
+        .args(["-map", "[vout]"])
+        .args(encoder.args())
+        .args(["-f", "mp4"])
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

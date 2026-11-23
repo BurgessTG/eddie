@@ -268,6 +268,7 @@ fn every_setting_explains_itself() {
         for key in [
             "settings-close",
             "settings-hardware",
+            "settings-hardware-encode",
             "settings-provider",
             "settings-model",
             "settings-url",

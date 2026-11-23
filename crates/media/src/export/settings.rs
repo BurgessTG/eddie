@@ -97,6 +97,17 @@ impl Quality {
         }
     }
 
+    /// NVENC's constant quality that keeps as much as [`Quality::crf`] does:
+    /// matched by SSIM on 60 s of 1080p screen and camera footage, where it
+    /// made files 8 to 29% larger.
+    pub(super) fn cq(self) -> u8 {
+        match self {
+            Self::Lower => 31,
+            Self::Recommended => 22,
+            Self::Higher => 18,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lower => "lower",

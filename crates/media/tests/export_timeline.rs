@@ -3694,6 +3694,61 @@ fn audio_only_writes_the_whole_mix_in_each_format_without_a_picture() {
     }
 }
 
+#[test]
+fn hardware_encoding_joins_its_segments_or_falls_back_to_x264() {
+    let fixture = Fixture::new();
+    // Six files: more than one batch, so segments from separate encoder
+    // runs are joined.
+    let colours = [
+        ("blue", BLUE),
+        ("red", RED),
+        ("green", GREEN),
+        ("white", [255; 3]),
+        ("yellow", [255, 255, 0]),
+        ("cyan", [0, 255, 255]),
+    ];
+    let mut timeline = Timeline::new(30.0).with_format(Format::Landscape);
+    let mut infos = HashMap::new();
+    for (index, (name, _)) in colours.iter().enumerate() {
+        let path = fixture.color(&format!("{name}.mp4"), name, Some(440));
+        infos.insert(path.clone(), probe(&path).unwrap());
+        video(&mut timeline, &path, 0, 0.3 * index as f64, 0.3, 0.0);
+    }
+    for hardware in [false, true] {
+        let output = fixture.0.join(format!("hardware-{hardware}.mp4"));
+        let options = ExportOptions {
+            hardware_encode: hardware,
+            ..ExportOptions::default()
+        };
+        let made = export_timeline(&timeline, &infos, &output, &options, channel().0).unwrap();
+        let encoder = made.encoder.unwrap();
+        // Without an NVIDIA GPU, as in CI, x264 encodes instead.
+        assert!(
+            encoder == "x264" || (hardware && encoder == "nvenc"),
+            "{encoder}"
+        );
+        let decoded = run(Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&output)
+            .args(["-f", "null", "-"]));
+        assert!(
+            decoded.stderr.is_empty(),
+            "{encoder}: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        let pictures = frames(&output);
+        assert_eq!(pictures.len(), 54, "{encoder}: 1.8 s at 30 fps");
+        for (index, (_, rgb)) in colours.iter().enumerate() {
+            let shown = colors_at(&pictures[9 * index + 4], 320, &[(60, 40), (260, 140)]);
+            assert_colors(encoder, &shown, &[*rgb; 2]);
+        }
+        assert!(
+            tone_window(&output, 440.0, 0.1, 1.7) > 0.08,
+            "{encoder}: the sound"
+        );
+    }
+}
+
 /// A GIF's frames as a viewer walks them: the count, the sum of their
 /// delays in hundredths of a second, how many blocks ask it to loop, and
 /// whether its one trailer closes the file. FFmpeg's decoder reads on past

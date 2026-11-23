@@ -23,6 +23,10 @@ pub struct Settings {
     /// available. Off by default: errors fall back to software, but a
     /// driver that hangs cannot, and only one NVIDIA driver has been tested.
     pub hardware_decode: bool,
+    /// Export encodes a video's picture on an NVIDIA GPU (NVENC) when it
+    /// takes the export's size, else with x264. Off by default: NVENC
+    /// makes files 8 to 29% larger at the same quality.
+    pub hardware_encode: bool,
     /// Where speech becomes text: local whisper by default, or a cloud API.
     pub transcription: TranscribeSettings,
     /// Which published updates the window looks for.
@@ -142,6 +146,7 @@ impl Settings {
                 .and_then(Format::from_name)
                 .unwrap_or_default(),
             hardware_decode: value["hardware_decode"].as_bool().unwrap_or(false),
+            hardware_encode: value["hardware_encode"].as_bool().unwrap_or(false),
             transcription: TranscribeSettings::from_json(&value["transcription"]),
             updates: value["updates"]
                 .as_str()
@@ -164,6 +169,7 @@ impl Settings {
         let mut body = serde_json::json!({
             "format": self.format.as_str(),
             "hardware_decode": self.hardware_decode,
+            "hardware_encode": self.hardware_encode,
             "transcription": self.transcription.to_json(),
             "updates": self.updates.as_str(),
             "export": {
@@ -431,6 +437,7 @@ mod tests {
                 ] {
                     settings.format = format;
                     settings.hardware_decode = hardware;
+                    settings.hardware_encode = !hardware;
                     settings.hear_timeline_while_recording = hear;
                     settings.updates = updates;
                     settings.export = export;
@@ -448,6 +455,7 @@ mod tests {
                             "export",
                             "format",
                             "hardware_decode",
+                            "hardware_encode",
                             "transcription",
                             "updates",
                             "voiceover"

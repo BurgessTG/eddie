@@ -195,6 +195,9 @@ fn exported(
             let mut reply = made.clone();
             reply["output"] = json!(file.to_string_lossy());
             reply["seconds"] = json!(started.elapsed().as_secs_f64());
+            if let Some(encoder) = app.export_encoder {
+                reply["encoder"] = json!(encoder);
+            }
             Ok(Outcome::read(reply))
         }
         None => Err(app

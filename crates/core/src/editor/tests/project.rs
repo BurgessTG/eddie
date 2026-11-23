@@ -364,7 +364,11 @@ fn a_finished_export_reports_itself_and_where_it_went() {
     let (tx, rx) = channel();
     app.export_rx = Some(rx);
     let path = PathBuf::from("/videos/cut/montage.mp4");
-    tx.send(ExportMsg::Done(Ok(path.clone()))).unwrap();
+    let made = openreel_media::Exported {
+        path: path.clone(),
+        encoder: Some("x264"),
+    };
+    tx.send(ExportMsg::Done(Ok(made))).unwrap();
     assert!(app.poll_export(), "a successful export reports itself");
     assert_eq!(app.status, "Exported montage.mp4");
     assert_eq!(app.exported, Some((path, app.status.clone())));

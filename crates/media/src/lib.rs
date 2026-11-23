@@ -49,7 +49,7 @@ pub use denoise::{measure_noise, NoiseProfile, NOISE_BANDS};
 pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo};
 pub use export::{
     clip_title_look, drawn_text, export_canvas, export_timeline, output_canvas, title_look,
-    AudioFormat, ExportKind, ExportOptions, ExportSettings, GifSize, Quality, Resolution,
+    AudioFormat, ExportKind, ExportOptions, ExportSettings, Exported, GifSize, Quality, Resolution,
     TitleLook, FRAME_RATES, GIF_FPS, LOUDNESS_TARGET,
 };
 pub use frame::{scaled_height, RawFrame};
