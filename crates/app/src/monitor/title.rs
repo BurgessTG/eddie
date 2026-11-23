@@ -3,7 +3,7 @@
 //! that moves it.
 
 use openreel_engine::{Clip, Rgb, TextAlign};
-use rune::{Color, Cursor, El, Family, Phase, Span, TextStyle, col, el, rich, row};
+use rune::{Color, Cursor, El, Family, Phase, Span, Spring, TextStyle, col, el, row, text};
 
 use crate::app::Ui;
 
@@ -55,10 +55,9 @@ pub(super) fn overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32
         let spans = lit
             .map(|(start, end, lit)| vec![Span::new(start, end).color(lit)])
             .unwrap_or_default();
-        rich(line.to_owned(), spans)
-            .font(font)
-            .color(ink)
-            .single_line()
+        // `text` never wraps (`rich` does): a copy drawn right of the line
+        // has a hair less room than the line and would wrap its last word.
+        text(line.to_owned()).spans(spans).font(font).color(ink)
     };
     let outline = look
         .outline
@@ -76,18 +75,46 @@ pub(super) fn overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32
     if let Some((fill, opacity)) = look.text_box {
         block = block.fill(color(fill, opacity * alpha));
     }
+    // Copies of a line round a circle, keyed `{key}-stroke{n}`: a round
+    // stroke, as FreeType's stroker draws export's outline.
+    let stroke = |key: &str, line: &str, ink: Color, width: f32| {
+        let steps = if width > 1.5 { 16 } else { 8 };
+        (0..steps)
+            .map(|step| {
+                let angle = std::f32::consts::TAU * step as f32 / steps as f32;
+                label(line, ink, None)
+                    .key(format!("{key}-stroke{step}"))
+                    .absolute(width * angle.cos(), width * angle.sin())
+            })
+            .collect::<Vec<_>>()
+    };
     for (index, line) in lines.iter().enumerate() {
         let mut row = el().key(format!("monitor-title-line{index}"));
-        if let Some((width, ink)) = outline {
-            // Copies of the line round a circle under it: a round stroke,
-            // as FreeType's stroker draws export's outline.
-            let steps = if width > 1.5 { 16 } else { 8 };
-            for step in 0..steps {
-                let angle = std::f32::consts::TAU * step as f32 / steps as f32;
-                row = row.child(
-                    label(line, ink, None).absolute(width * angle.cos(), width * angle.sin()),
-                );
+        if let Some(shadow) = look.shadow {
+            // The letters, outlined as export outlines them, solid in the
+            // shadow's colour, then faded and blurred as one layer.
+            let ink = color(shadow.color, 1.0);
+            let key = format!("monitor-title-shadow{index}");
+            let mut cast = el()
+                .key(key.clone())
+                .absolute(shadow.x * scale, shadow.y * scale)
+                .layer_opacity(shadow.opacity * alpha);
+            if let Some((width, _)) = outline {
+                cast = cast.children(stroke(&key, line, ink, width));
             }
+            cast = cast.child(label(line, ink, None));
+            if shadow.blur >= openreel_media::SHARP_SHADOW {
+                cast = cast.blur(shadow.blur * scale).blur_motion(Spring::NONE);
+            }
+            row = row.child(cast);
+        }
+        if let Some((width, ink)) = outline {
+            row = row.children(stroke(
+                &format!("monitor-title-line{index}"),
+                line,
+                ink,
+                width,
+            ));
         }
         block = block.child(row.child(label(line, color(look.color, alpha), lit)));
     }

@@ -97,7 +97,7 @@ offers the newest build.
   next cut's first picture is prerolled so short clips play through.
 - Titles and generated captions in five styles, identical in preview and
   export, each with its own font (eight built in, with bold and italic),
-  lines and alignment, size, colour, box, outline and position; drag a
+  lines and alignment, size, colour, box, outline, shadow and position; drag a
   title on the monitor to move it. Remove silence tightens pauses out of
   speech.
 - Undo/redo covers every timeline edit, whether made by hand, in Details

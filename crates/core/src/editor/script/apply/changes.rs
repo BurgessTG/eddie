@@ -4,8 +4,9 @@
 
 use openreel_engine::{
     fill_scale, ChromaKey, ColorAdjust, Filter, Mask, MaskShape, Shape, ShapeKind, TextLook,
-    Transform, MAX_OUTLINE, MAX_SHAPE_OUTLINE, MAX_SHAPE_RATIO, MAX_TEXT_OFFSET, MAX_TEXT_SIZE,
-    MIN_SHAPE_OUTLINE, MIN_SHAPE_RATIO, MIN_TEXT_SIZE,
+    Transform, MAX_OUTLINE, MAX_SHADOW_BLUR, MAX_SHADOW_DISTANCE, MAX_SHAPE_OUTLINE,
+    MAX_SHAPE_RATIO, MAX_TEXT_OFFSET, MAX_TEXT_SIZE, MIN_SHAPE_OUTLINE, MIN_SHAPE_RATIO,
+    MIN_TEXT_SIZE,
 };
 
 /// A script's JSON object of fields to change, or `None` for `null`.
@@ -173,16 +174,22 @@ pub(super) fn changed_text(current: TextLook, changes: &str) -> Result<TextLook,
     else {
         return Ok(TextLook::default());
     };
-    // The style's own weight and slant are plain, so null is off.
-    for key in ["bold", "italic"] {
-        if let Some(value) = changes.get_mut(key).filter(|value| value.is_null()) {
-            *value = false.into();
+    // A field that always has a value, such as bold, size or the shadow's
+    // angle, goes back to its default for null: plain, the style's size,
+    // the usual angle.
+    let defaults = serde_json::to_value(TextLook::default()).expect("a text look is JSON");
+    for (key, value) in &mut changes {
+        if let Some(default) = defaults
+            .get(key)
+            .filter(|d| value.is_null() && !d.is_null())
+        {
+            *value = default.clone();
         }
     }
     let text = merged("setText", current, changes)?;
     if !text.is_valid() {
         return Err(format!(
-            "setText takes a size of {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}, a boxOpacity of 0 to 1, an outline of 0 to {MAX_OUTLINE} and x and y from -{MAX_TEXT_OFFSET} to {MAX_TEXT_OFFSET}"
+            "setText takes a size of {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}, a boxOpacity and shadowOpacity of 0 to 1, an outline of 0 to {MAX_OUTLINE}, a shadowDistance of 0 to {MAX_SHADOW_DISTANCE}, a shadowAngle of -180 to 180, a shadowBlur of 0 to {MAX_SHADOW_BLUR} and x and y from -{MAX_TEXT_OFFSET} to {MAX_TEXT_OFFSET}"
         ));
     }
     Ok(text)

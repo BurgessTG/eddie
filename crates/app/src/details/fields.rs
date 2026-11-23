@@ -43,6 +43,11 @@ pub enum Field {
     BoxOpacity,
     OutlineColor,
     Outline,
+    ShadowColor,
+    ShadowOpacity,
+    ShadowDistance,
+    ShadowAngle,
+    ShadowBlur,
     TextX,
     TextY,
     KeyColor,
@@ -64,7 +69,7 @@ pub enum Field {
 }
 
 impl Field {
-    pub(super) const ALL: [Self; 48] = [
+    pub(super) const ALL: [Self; 53] = [
         Self::Start,
         Self::Duration,
         Self::SourceIn,
@@ -95,6 +100,11 @@ impl Field {
         Self::BoxOpacity,
         Self::OutlineColor,
         Self::Outline,
+        Self::ShadowColor,
+        Self::ShadowOpacity,
+        Self::ShadowDistance,
+        Self::ShadowAngle,
+        Self::ShadowBlur,
         Self::TextX,
         Self::TextY,
         Self::KeyColor,
@@ -147,6 +157,11 @@ impl Field {
             Self::BoxOpacity => "details-box-opacity",
             Self::OutlineColor => "details-outline-color",
             Self::Outline => "details-outline",
+            Self::ShadowColor => "details-shadow-color",
+            Self::ShadowOpacity => "details-shadow-opacity",
+            Self::ShadowDistance => "details-shadow-distance",
+            Self::ShadowAngle => "details-shadow-angle",
+            Self::ShadowBlur => "details-shadow-blur",
             Self::TextX => "details-text-x",
             Self::TextY => "details-text-y",
             Self::KeyColor => "details-key-color",
@@ -175,6 +190,7 @@ impl Field {
             Self::TextColor
                 | Self::BoxColor
                 | Self::OutlineColor
+                | Self::ShadowColor
                 | Self::KeyColor
                 | Self::ShapeFill
                 | Self::ShapeOutline
@@ -199,10 +215,12 @@ impl Field {
                 | Self::TransitionLength
                 | Self::Rotation
                 | Self::MaskRotation
+                | Self::ShadowAngle
                 | Self::Exposure
                 | Self::TextColor
                 | Self::BoxColor
                 | Self::OutlineColor
+                | Self::ShadowColor
                 | Self::KeyColor
                 | Self::ShapeFill
                 | Self::ShapeOutline
@@ -243,11 +261,12 @@ impl Field {
             Self::TextSize => clip.text.size * 100.0,
             Self::TextX => clip.text.x * 100.0,
             Self::TextY => clip.text.y * 100.0,
-            Self::TextColor | Self::BoxColor | Self::OutlineColor => {
+            Self::TextColor | Self::BoxColor | Self::OutlineColor | Self::ShadowColor => {
                 let drawn = openreel_media::drawn_text(clip);
                 let colour = match self {
                     Self::TextColor => drawn.color,
                     Self::BoxColor => drawn.box_color,
+                    Self::ShadowColor => drawn.shadow_color,
                     _ => drawn.outline_color,
                 };
                 let Rgb(r, g, b) = colour.unwrap_or(Rgb::BLACK);
@@ -255,6 +274,15 @@ impl Field {
             }
             Self::BoxOpacity => openreel_media::drawn_text(clip).box_opacity.unwrap_or(0.0) * 100.0,
             Self::Outline => openreel_media::drawn_text(clip).outline.unwrap_or(0.0) * 100.0,
+            Self::ShadowOpacity => {
+                openreel_media::drawn_text(clip)
+                    .shadow_opacity
+                    .unwrap_or(0.0)
+                    * 100.0
+            }
+            Self::ShadowDistance => clip.text.shadow_distance * 100.0,
+            Self::ShadowAngle => clip.text.shadow_angle,
+            Self::ShadowBlur => clip.text.shadow_blur * 100.0,
             Self::KeyColor => {
                 let Rgb(r, g, b) = clip.chroma.unwrap_or_default().color;
                 f64::from(u32::from_be_bytes([0, r, g, b]))
@@ -298,7 +326,10 @@ impl Field {
             format!("{value:.2}")
         } else if self.percent() {
             format!("{:.0}%", whole())
-        } else if matches!(self, Self::Rotation | Self::MaskRotation) {
+        } else if matches!(
+            self,
+            Self::Rotation | Self::MaskRotation | Self::ShadowAngle
+        ) {
             format!("{:.0}°", whole())
         } else if self == Self::Exposure {
             let value = if value.abs() < 0.05 { 0.0 } else { value };
@@ -324,7 +355,10 @@ impl Field {
             typed
         } else if self.percent() {
             typed.strip_suffix('%').unwrap_or(typed)
-        } else if matches!(self, Self::Rotation | Self::MaskRotation) {
+        } else if matches!(
+            self,
+            Self::Rotation | Self::MaskRotation | Self::ShadowAngle
+        ) {
             typed.strip_suffix('°').unwrap_or(typed)
         } else if self == Self::Speed {
             typed.trim_end_matches(['×', 'x', 'X'])
@@ -378,7 +412,15 @@ impl Field {
             Self::TextY => editor.edit_title_text(id, |t| t.y = value / 100.0),
             Self::BoxOpacity => editor.edit_title_text(id, |t| t.box_opacity = Some(value / 100.0)),
             Self::Outline => editor.edit_title_text(id, |t| t.outline = Some(value / 100.0)),
-            Self::TextColor | Self::BoxColor | Self::OutlineColor => {
+            Self::ShadowOpacity => {
+                editor.edit_title_text(id, |t| t.shadow_opacity = Some(value / 100.0));
+            }
+            Self::ShadowDistance => {
+                editor.edit_title_text(id, |t| t.shadow_distance = value / 100.0);
+            }
+            Self::ShadowAngle => editor.edit_title_text(id, |t| t.shadow_angle = value),
+            Self::ShadowBlur => editor.edit_title_text(id, |t| t.shadow_blur = value / 100.0),
+            Self::TextColor | Self::BoxColor | Self::OutlineColor | Self::ShadowColor => {
                 let [_, r, g, b] = (value as u32).to_be_bytes();
                 set_colour(editor, id, self, Rgb(r, g, b));
             }
@@ -438,8 +480,8 @@ fn shape(clip: &Clip) -> Shape {
     }
 }
 
-/// Give a title's text, box or outline (`field`) a colour. A box or outline
-/// turned off comes back on to show it.
+/// Give a title's text, box, outline or shadow (`field`) a colour. A box,
+/// outline or shadow turned off comes back on to show it.
 pub(super) fn set_colour(editor: &mut Editor, id: ClipId, field: Field, colour: Rgb) {
     editor.edit_title_text(id, |t| match field {
         Field::BoxColor => {
@@ -452,6 +494,12 @@ pub(super) fn set_colour(editor: &mut Editor, id: ClipId, field: Field, colour: 
             t.outline_color = Some(colour);
             if t.outline == Some(0.0) {
                 t.outline = None;
+            }
+        }
+        Field::ShadowColor => {
+            t.shadow_color = Some(colour);
+            if t.shadow_opacity == Some(0.0) {
+                t.shadow_opacity = None;
             }
         }
         _ => t.color = Some(colour),

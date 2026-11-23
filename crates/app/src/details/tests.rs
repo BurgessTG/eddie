@@ -309,7 +309,7 @@ fn a_pictures_stabilize_level_comes_from_its_list() {
 
 #[test]
 fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
-    use openreel_engine::{DEFAULT_OUTLINE, Rgb, TextLook};
+    use openreel_engine::{DEFAULT_OUTLINE, DEFAULT_SHADOW_OPACITY, Rgb, TextLook};
     let (mut rt, id) = window(ClipKind::Title);
     let text = |rt: &Runtime<Ui>| clip(rt, id).text;
     let drawn = |rt: &Runtime<Ui>| openreel_media::drawn_text(clip(rt, id));
@@ -376,6 +376,33 @@ fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
     assert_eq!(drawn(&rt).align, Some(TextAlign::Left));
     tap(&mut rt, "details-text-align-right");
     assert_eq!(text(&rt).align, Some(TextAlign::Right));
+
+    // No style has a shadow, and how it falls shows only once there is
+    // one: a colour turns it on at the usual opacity.
+    assert_eq!(drawn(&rt).shadow_opacity, Some(0.0));
+    assert!(!shown(&rt, "details-shadow-angle"));
+    tap(&mut rt, "details-shadow-purple");
+    assert_eq!(text(&rt).shadow_color, Some(Rgb(168, 85, 247)));
+    assert_eq!(drawn(&rt).shadow_opacity, Some(DEFAULT_SHADOW_OPACITY));
+    assert_eq!(typed(&rt, Field::ShadowOpacity), "70%");
+    enter(&mut rt, "details-shadow-angle", "135°");
+    enter(&mut rt, "details-shadow-distance", "20");
+    enter(&mut rt, "details-shadow-blur", "90");
+    let t = text(&rt);
+    assert_eq!(
+        (t.shadow_angle, t.shadow_distance, t.shadow_blur),
+        (135.0, 0.2, 0.25),
+        "blur stops at a quarter of the text size"
+    );
+    // The Angle slider's arrow keys turn it a whole degree.
+    reveal(&mut rt, "details-shadow-angle-slider");
+    click(&mut rt, "details-shadow-angle-slider");
+    let before = text(&rt).shadow_angle;
+    press(&mut rt, Key::Right);
+    assert_eq!(text(&rt).shadow_angle, (before + 1.0).min(180.0));
+    tap(&mut rt, "details-shadow-none");
+    assert_eq!(drawn(&rt).shadow_opacity, Some(0.0));
+    assert!(!shown(&rt, "details-shadow-angle"), "no shadow, no angle");
 
     tap(&mut rt, "details-text-reset");
     assert_eq!(text(&rt), TextLook::default());
@@ -755,6 +782,17 @@ fn every_control_has_a_tooltip() {
                 "details-outline-red",
                 "details-outline-slider",
                 "details-outline",
+                "details-shadow-color",
+                "details-shadow-none",
+                "details-shadow-purple",
+                "details-shadow-opacity-slider",
+                "details-shadow-opacity",
+                "details-shadow-distance-slider",
+                "details-shadow-distance",
+                "details-shadow-angle-slider",
+                "details-shadow-angle",
+                "details-shadow-blur-slider",
+                "details-shadow-blur",
                 "details-text-x",
                 "details-text-y",
                 "details-text-reset",
@@ -766,9 +804,11 @@ fn every_control_has_a_tooltip() {
         let (mut rt, id) = window(kind);
         // A keyed picture shows the key's controls too, and a rectangle
         // mask every mask control.
-        // A caption shows Apply to all.
+        // A caption shows Apply to all, and a shadow how it falls.
         if kind == ClipKind::Title {
-            rt.state.editor.timeline.clip_mut(id).unwrap().title_style = TitleStyle::Caption;
+            let clip = rt.state.editor.timeline.clip_mut(id).unwrap();
+            clip.title_style = TitleStyle::Caption;
+            clip.text.shadow_color = Some(openreel_engine::Rgb::BLACK);
             rt.frame(FRAME);
             rt.frame(FRAME);
         }

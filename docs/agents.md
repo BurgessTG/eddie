@@ -522,9 +522,16 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     `outline` is the outline's thickness, from 0 (none) to 0.2 of the
     text size. `x` and `y` move the text from where its style puts it, in
     canvas widths and heights from -1 to 1, right and down positive.
-    - A field set to `null` goes back to the style's; `setText(id, null)`
-      resets them all. A box or outline colour on a style without one
-      turns it on (box at 0.6, outline at 0.06).
+  - A shadow falls under the letters and their outline. No style has one.
+    `shadowColor` is `'#RRGGBB'` and `shadowOpacity` runs from 0 (none) to
+    1. `shadowDistance` (0 to 0.5, 0.08 by default) and `shadowBlur` (0
+    sharp to 0.25, 0.08) are shares of the text size; `shadowAngle` is
+    the direction it falls in degrees clockwise from straight right, -180
+    to 180: 45 (the default) is down and to the right, 90 straight down.
+    - A field set to `null` goes back to the style's or its default;
+      `setText(id, null)` resets them all. A box, outline or shadow colour
+      on a style without one turns it on (box at 0.6, outline at 0.06,
+      shadow at 0.7).
     - A style change keeps these. Captions are separate titles, so style
       each one: loop over the IDs `state()` gives.
   - `addTitle` defaults to the playhead, 4 seconds and `lower-third`;

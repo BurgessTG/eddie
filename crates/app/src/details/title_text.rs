@@ -1,10 +1,11 @@
-//! The Text card: a title's font, size, colour, box, outline and place
-//! over its style. The clamps are `Editor::edit_title_text`'s; the monitor, export
+//! The Text card: a title's font, size, colour, box, outline, shadow and
+//! place over its style. The clamps are `Editor::edit_title_text`'s; the monitor, export
 //! and contact sheets all draw from `openreel_media::clip_title_look`.
 
 use eddie_core::Editor;
 use openreel_engine::{
-    Clip, ClipId, MAX_OUTLINE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Rgb, TextAlign, TextLook,
+    Clip, ClipId, MAX_OUTLINE, MAX_SHADOW_BLUR, MAX_SHADOW_DISTANCE, MAX_TEXT_SIZE, MIN_TEXT_SIZE,
+    Rgb, TextAlign, TextLook,
 };
 use rune::{Color, Cursor, El, LineCap, Shape, TextStyle, el, row};
 
@@ -36,76 +37,136 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
     let drawn = openreel_media::drawn_text(clip);
     let box_on = drawn.box_opacity.unwrap_or(0.0) > 0.0;
     let outline_on = drawn.outline.unwrap_or(0.0) > 0.0;
-    section(
-        "Text",
-        vec![
-            font_row(ui, &drawn),
-            faces(id, &drawn),
+    let shadow_on = drawn.shadow_opacity.unwrap_or(0.0) > 0.0;
+    let mut rows = vec![
+        font_row(ui, &drawn),
+        faces(id, &drawn),
+        slider_row(
+            ui,
+            id,
+            "Size",
+            Field::TextSize,
+            clip.text.size.log2() as f32,
+            MIN_TEXT_SIZE.log2() as f32..=MAX_TEXT_SIZE.log2() as f32,
+            value_w,
+            size_at,
+            "Size of the text against its style's; it grows upward",
+        ),
+        colour_row(ui, Field::TextColor, "Colour", "The colour of the letters"),
+        swatches(id, Field::TextColor, drawn.color, None, card_inner),
+        colour_row(
+            ui,
+            Field::BoxColor,
+            "Box",
+            "The colour of the box behind the text",
+        ),
+        swatches(
+            id,
+            Field::BoxColor,
+            drawn.box_color,
+            Some(box_on),
+            card_inner,
+        ),
+        slider_row(
+            ui,
+            id,
+            "Box opacity",
+            Field::BoxOpacity,
+            drawn.box_opacity.unwrap_or(0.0) as f32,
+            0.0..=1.0,
+            value_w,
+            |e, id, v| e.edit_title_text(id, |t| t.box_opacity = Some(f64::from(v))),
+            "How solid the box is; 0% draws none",
+        ),
+        colour_row(
+            ui,
+            Field::OutlineColor,
+            "Outline",
+            "The colour of the line round each letter",
+        ),
+        swatches(
+            id,
+            Field::OutlineColor,
+            drawn.outline_color,
+            Some(outline_on),
+            card_inner,
+        ),
+        slider_row(
+            ui,
+            id,
+            "Thickness",
+            Field::Outline,
+            drawn.outline.unwrap_or(0.0) as f32,
+            0.0..=MAX_OUTLINE as f32,
+            value_w,
+            |e, id, v| e.edit_title_text(id, |t| t.outline = Some(f64::from(v))),
+            "How thick the outline is, as a share of the text size; 0% draws none",
+        ),
+        colour_row(
+            ui,
+            Field::ShadowColor,
+            "Shadow",
+            "The colour of the shadow under the letters",
+        ),
+        swatches(
+            id,
+            Field::ShadowColor,
+            drawn.shadow_color,
+            Some(shadow_on),
+            card_inner,
+        ),
+        slider_row(
+            ui,
+            id,
+            "Opacity",
+            Field::ShadowOpacity,
+            drawn.shadow_opacity.unwrap_or(0.0) as f32,
+            0.0..=1.0,
+            value_w,
+            |e, id, v| e.edit_title_text(id, |t| t.shadow_opacity = Some(f64::from(v))),
+            "How dark the shadow is; 0% draws none",
+        ),
+    ];
+    // How the shadow falls, only while there is one.
+    if shadow_on {
+        rows.extend([
             slider_row(
                 ui,
                 id,
-                "Size",
-                Field::TextSize,
-                clip.text.size.log2() as f32,
-                MIN_TEXT_SIZE.log2() as f32..=MAX_TEXT_SIZE.log2() as f32,
+                "Distance",
+                Field::ShadowDistance,
+                clip.text.shadow_distance as f32,
+                0.0..=MAX_SHADOW_DISTANCE as f32,
                 value_w,
-                size_at,
-                "Size of the text against its style's; it grows upward",
-            ),
-            colour_row(ui, Field::TextColor, "Colour", "The colour of the letters"),
-            swatches(id, Field::TextColor, drawn.color, None, card_inner),
-            colour_row(
-                ui,
-                Field::BoxColor,
-                "Box",
-                "The colour of the box behind the text",
-            ),
-            swatches(
-                id,
-                Field::BoxColor,
-                drawn.box_color,
-                Some(box_on),
-                card_inner,
+                |e, id, v| e.edit_title_text(id, |t| t.shadow_distance = f64::from(v)),
+                "How far the shadow falls from the letters, as a share of the text size",
             ),
             slider_row(
                 ui,
                 id,
-                "Box opacity",
-                Field::BoxOpacity,
-                drawn.box_opacity.unwrap_or(0.0) as f32,
-                0.0..=1.0,
+                "Angle",
+                Field::ShadowAngle,
+                clip.text.shadow_angle as f32,
+                -180.0..=180.0,
                 value_w,
-                |e, id, v| e.edit_title_text(id, |t| t.box_opacity = Some(f64::from(v))),
-                "How solid the box is; 0% draws none",
-            ),
-            colour_row(
-                ui,
-                Field::OutlineColor,
-                "Outline",
-                "The colour of the line round each letter",
-            ),
-            swatches(
-                id,
-                Field::OutlineColor,
-                drawn.outline_color,
-                Some(outline_on),
-                card_inner,
+                angle_at,
+                "Which way the shadow falls, clockwise from straight right: 45° is down and right, 90° straight down",
             ),
             slider_row(
                 ui,
                 id,
-                "Thickness",
-                Field::Outline,
-                drawn.outline.unwrap_or(0.0) as f32,
-                0.0..=MAX_OUTLINE as f32,
+                "Blur",
+                Field::ShadowBlur,
+                clip.text.shadow_blur as f32,
+                0.0..=MAX_SHADOW_BLUR as f32,
                 value_w,
-                |e, id, v| e.edit_title_text(id, |t| t.outline = Some(f64::from(v))),
-                "How thick the outline is, as a share of the text size; 0% draws none",
+                |e, id, v| e.edit_title_text(id, |t| t.shadow_blur = f64::from(v)),
+                "How soft the shadow's edge is, as a share of the text size; 0% is sharp",
             ),
-            position(ui, value_w),
-            buttons(id, clip, card_inner),
-        ],
-    )
+        ]);
+    }
+    rows.extend([position(ui, value_w), buttons(id, clip, card_inner)]);
+    section("Text", rows)
 }
 
 /// The font list, as wide as the fields under it, so every name fits.
@@ -206,6 +267,20 @@ fn size_at(editor: &mut Editor, id: ClipId, position: f32) {
     editor.edit_title_text(id, |t| t.size = size);
 }
 
+/// The Angle slider's handle at `position`, in the whole degrees the
+/// field shows; a step too small to change them still turns one degree.
+fn angle_at(editor: &mut Editor, id: ClipId, position: f32) {
+    let Some(current) = editor.timeline.clip(id).map(|clip| clip.text.shadow_angle) else {
+        return;
+    };
+    let wanted = f64::from(position);
+    let mut angle = wanted.round();
+    if angle == current && wanted != current {
+        angle += (wanted - current).signum();
+    }
+    editor.edit_title_text(id, |t| t.shadow_angle = angle);
+}
+
 /// A labelled `#RRGGBB` field.
 fn colour_row(ui: &Ui, field: Field, label: &str, help: &str) -> El {
     let help = format!("{help}. Type any colour as #RRGGBB, or pick one below");
@@ -228,6 +303,7 @@ fn swatches(id: ClipId, field: Field, current: Option<Rgb>, on: Option<bool>, wi
     let what = match field {
         Field::BoxColor => "box",
         Field::OutlineColor => "outline",
+        Field::ShadowColor => "shadow",
         _ => "text",
     };
     let mut swatches = Vec::with_capacity(count);
@@ -243,6 +319,7 @@ fn swatches(id: ClipId, field: Field, current: Option<Rgb>, on: Option<bool>, wi
             .on_press(move |ui: &mut Ui| {
                 ui.editor.edit_title_text(id, |t| match field {
                     Field::BoxColor => t.box_opacity = Some(0.0),
+                    Field::ShadowColor => t.shadow_opacity = Some(0.0),
                     _ => t.outline = Some(0.0),
                 });
             }),
@@ -268,6 +345,7 @@ fn field_key(field: Field) -> &'static str {
     match field {
         Field::BoxColor => "details-box",
         Field::OutlineColor => "details-outline",
+        Field::ShadowColor => "details-shadow",
         _ => "details-text",
     }
 }
@@ -337,7 +415,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
             "details-text-reset",
             "Reset",
             Variant::Secondary,
-            "Draw the text as its style does: font, alignment, size, colours, box, outline and place",
+            "Draw the text as its style does: font, alignment, size, colours, box, outline, shadow and place",
             true,
         )
         .on_press(move |ui: &mut Ui| {
@@ -350,7 +428,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
                 "details-text-all-captions",
                 "Apply to all",
                 Variant::Secondary,
-                "Give every caption this one's style, font, alignment, size, colours, box, outline and place. Lower thirds keep theirs",
+                "Give every caption this one's style, font, alignment, size, colours, box, outline, shadow and place. Lower thirds keep theirs",
                 true,
             )
             .on_press(move |ui: &mut Ui| {

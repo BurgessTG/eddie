@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use openreel_engine::{
     Clip, Rgb, TextAlign, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE,
+    DEFAULT_SHADOW_OPACITY,
 };
 
 use super::frames::{enabled_frames, VideoClock};
@@ -81,7 +82,6 @@ impl Titles<'_> {
                     continue;
                 };
                 let font = filter_value(&font.to_string_lossy());
-                let options = look.drawtext_options(clip.opacity);
                 let lines = title_lines(clip);
                 let x = look.x("text_w");
                 let y = look.y(lines.len());
@@ -99,12 +99,19 @@ impl Titles<'_> {
                     }
                     _ => x,
                 };
-                filters.push(format!(
-                    "[{current}]drawtext=fontfile={font}:expansion=none:text={}:\
-                     {options}:x={x}:y={y}:{LINE_BOX}:text_align={}:enable='{}'[t{i}]",
-                    filter_value(&lines.join("\n")),
-                    look.align_option(),
-                    enabled_frames(&ranges),
+                let enable = enabled_frames(&ranges);
+                filters.extend(look.filters(
+                    &TitleText {
+                        font: &font,
+                        text: &filter_value(&lines.join("\n")),
+                        x: &x,
+                        y: &y,
+                        enable: Some(&enable),
+                        opacity: clip.opacity,
+                        tag: &format!("t{i}"),
+                    },
+                    &current,
+                    &format!("t{i}"),
                 ));
                 current = format!("t{i}");
                 let Some((lit, times)) = highlight else {
@@ -167,6 +174,8 @@ pub struct TitleLook {
     pub padding: u32,
     /// The outline round each letter: width, colour and opacity.
     pub outline: Option<(u32, Rgb, f32)>,
+    /// The shadow under the letters and their outline.
+    pub shadow: Option<TextShadow>,
     /// How the lines line up, and which edge of the text holds its
     /// place: the left edge `margin` in from the canvas's left, the
     /// middle at the canvas's middle, or the right edge `margin` in from
@@ -182,34 +191,130 @@ pub struct TitleLook {
     pub highlight: Option<Rgb>,
 }
 
+/// A shadow under a title's letters, in output-canvas pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextShadow {
+    /// Where it falls from the letters, right and down positive.
+    pub x: f32,
+    pub y: f32,
+    /// The blur's standard deviation; below [`SHARP_SHADOW`] it is a plain copy.
+    pub blur: f32,
+    pub color: Rgb,
+    pub opacity: f32,
+}
+
+/// A shadow blurred less than this, in pixels, is drawn sharp.
+pub const SHARP_SHADOW: f32 = 0.5;
+
+/// What one title draws and where, for [`TitleLook::filters`].
+pub(crate) struct TitleText<'a> {
+    /// drawtext's `fontfile` and `text`, each quoted by [`filter_value`].
+    pub(crate) font: &'a str,
+    pub(crate) text: &'a str,
+    /// drawtext's `x` and `y`: the first line's left and top.
+    pub(crate) x: &'a str,
+    pub(crate) y: &'a str,
+    /// drawtext's `enable`; `None` draws on every frame.
+    pub(crate) enable: Option<&'a str>,
+    /// The title's opacity, which fades its box, outline and shadow too.
+    pub(crate) opacity: f32,
+    /// Names this title's pads apart from every other filter's.
+    pub(crate) tag: &'a str,
+}
+
 impl TitleLook {
     /// The look on a canvas `scale` times as large.
     pub fn scaled(self, scale: f64) -> Self {
         let px = |value: u32| (f64::from(value) * scale).round() as u32;
+        let scale_f = scale as f32;
         Self {
             font_size: px(self.font_size).max(1),
             padding: px(self.padding),
             outline: self
                 .outline
                 .map(|(width, color, alpha)| (px(width).max(1), color, alpha)),
+            shadow: self.shadow.map(|shadow| TextShadow {
+                x: shadow.x * scale_f,
+                y: shadow.y * scale_f,
+                blur: shadow.blur * scale_f,
+                ..shadow
+            }),
             margin: px(self.margin),
             bottom: px(self.bottom),
             ..self
         }
     }
 
-    /// drawtext's size, colour, box and outline options for this look on
-    /// a title at `opacity`, which fades the box and outline too.
-    pub(crate) fn drawtext_options(&self, opacity: f32) -> String {
-        let alpha = opacity.clamp(0.0, 1.0);
-        let mut options = format!(
-            "fontcolor={}@{alpha:.2}:fontsize={}:{}",
+    /// The filters that draw `text` from pad `input` to pad `output`: its
+    /// box, then its shadow, outline and letters, as drawtext orders them.
+    /// drawtext clips a shadow to the box it draws and cannot blur, so a
+    /// title with a shadow draws its box in a pass of its own, and a soft
+    /// shadow is drawn alone on a clear copy of the frame, blurred and
+    /// laid under the letters.
+    pub(crate) fn filters(&self, text: &TitleText, input: &str, output: &str) -> Vec<String> {
+        let alpha = text.opacity.clamp(0.0, 1.0);
+        let enable = text
+            .enable
+            .map(|enable| format!(":enable='{enable}'"))
+            .unwrap_or_default();
+        let draw = |x: &str, y: &str, options: &str| {
+            format!(
+                "drawtext=fontfile={}:expansion=none:text={}:fontsize={}:{options}:\
+                 x={x}:y={y}:{LINE_BOX}:text_align={}{enable}",
+                text.font,
+                text.text,
+                self.font_size,
+                self.align_option(),
+            )
+        };
+        let letters = format!(
+            "fontcolor={}@{alpha:.2}{}",
             ffmpeg_color(self.color),
-            self.font_size,
-            self.box_options(alpha)
+            self.outline_options(alpha)
         );
-        options.push_str(&self.outline_options(alpha));
-        options
+        let (x, y, tag) = (text.x, text.y, text.tag);
+        let Some(shadow) = self.shadow else {
+            let options = format!("{letters}:{}", self.box_options(alpha));
+            return vec![format!("[{input}]{}[{output}]", draw(x, y, &options))];
+        };
+        let mut filters = Vec::new();
+        let mut current = input.to_owned();
+        if self.text_box.is_some() {
+            let options = format!("fontcolor=black@0:{}", self.box_options(alpha));
+            filters.push(format!("[{current}]{}[{tag}box]", draw(x, y, &options)));
+            current = format!("{tag}box");
+        }
+        let color = ffmpeg_color(shadow.color);
+        let shade = format!("{color}@{:.3}", shadow.opacity * alpha);
+        let (dx, dy) = (shadow.x.round() as i32, shadow.y.round() as i32);
+        if shadow.blur < SHARP_SHADOW {
+            let options = format!("{letters}:box=0:shadowcolor={shade}:shadowx={dx}:shadowy={dy}");
+            filters.push(format!("[{current}]{}[{output}]", draw(x, y, &options)));
+            return filters;
+        }
+        // The shadow's letters, outlined as the title's are, in its colour
+        // on a clear canvas of that colour, so blurring the alpha alone
+        // softens it. An outline's glyph covers the letter's too.
+        let glyph = match self.outline {
+            Some((width, ..)) if width > 0 => {
+                format!("fontcolor={color}@0:borderw={width}:bordercolor={shade}")
+            }
+            _ => format!("fontcolor={shade}"),
+        };
+        let (sx, sy) = (format!("{x}{dx:+}"), format!("{y}{dy:+}"));
+        filters.push(format!("[{current}]split[{tag}main][{tag}clear]"));
+        filters.push(format!(
+            "[{tag}clear]format=yuva420p,\
+             drawbox=x=0:y=0:w=iw:h=ih:color={color}@0:t=fill:replace=1{enable},\
+             {},gblur=sigma={:.2}:steps=3:planes=8{enable}[{tag}shadow]",
+            draw(&sx, &sy, &format!("{glyph}:box=0")),
+            shadow.blur,
+        ));
+        filters.push(format!(
+            "[{tag}main][{tag}shadow]overlay=format=auto{enable},{}[{output}]",
+            draw(x, y, &format!("{letters}:box=0"))
+        ));
+        filters
     }
 
     fn box_options(&self, alpha: f32) -> String {
@@ -297,6 +402,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.55),
             padding: 14,
             outline: None,
+            shadow: None,
             align: TextAlign::Left,
             margin: 42,
             bottom: 110,
@@ -310,6 +416,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.65),
             padding: 12,
             outline: None,
+            shadow: None,
             align: TextAlign::Center,
             margin: 42,
             bottom: 90,
@@ -323,6 +430,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.75),
             padding: 14,
             outline: None,
+            shadow: None,
             align: TextAlign::Center,
             margin: 42,
             bottom: 100,
@@ -336,6 +444,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: None,
             padding: 2,
             outline: Some((2, Rgb::BLACK, 0.8)),
+            shadow: None,
             align: TextAlign::Center,
             margin: 42,
             bottom: 70,
@@ -349,6 +458,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             text_box: boxed(0.65),
             padding: 12,
             outline: None,
+            shadow: None,
             align: TextAlign::Center,
             margin: 42,
             bottom: 96,
@@ -359,7 +469,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
 }
 
 /// `title`'s [`TextLook`] with every choice made: its own where it has
-/// one, else its style's. A box or outline it does not draw is 0.
+/// one, else its style's. A box, outline or shadow it does not draw is 0.
 pub fn drawn_text(title: &Clip) -> TextLook {
     let style = title_look(title.title_style);
     let text = title.text;
@@ -396,6 +506,12 @@ pub fn drawn_text(title: &Clip) -> TextLook {
                 .or(style.outline.map(|(_, color, _)| color))
                 .unwrap_or(Rgb::BLACK),
         ),
+        shadow_opacity: Some(
+            text.shadow_opacity
+                .or(text.shadow_color.map(|_| DEFAULT_SHADOW_OPACITY))
+                .unwrap_or(0.0),
+        ),
+        shadow_color: Some(text.shadow_color.unwrap_or(Rgb::BLACK)),
         font: Some(face.font()),
         bold: face.bold(),
         italic: face.italic(),
@@ -426,13 +542,14 @@ pub fn title_lines(title: &Clip) -> Vec<String> {
 }
 
 /// How `title` is drawn: its style's look with the title's own size,
-/// colours, box, outline and place laid over it ([`TextLook`]).
+/// colours, box, outline, shadow and place laid over it ([`TextLook`]).
 pub fn clip_title_look(title: &Clip) -> TitleLook {
     let style = title_look(title.title_style);
     let drawn = drawn_text(title);
     let font_size = (f64::from(style.font_size) * drawn.size).round().max(1.0) as u32;
     let box_opacity = drawn.box_opacity.unwrap_or(0.0);
     let outline = drawn.outline.unwrap_or(0.0);
+    let shadow_opacity = drawn.shadow_opacity.unwrap_or(0.0);
     // The style's outline keeps its own opacity; a chosen colour is solid.
     let outline_opacity = match (title.text.outline_color, style.outline) {
         (None, Some((_, _, opacity))) => opacity,
@@ -458,6 +575,18 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
                 drawn.outline_color.unwrap_or(Rgb::BLACK),
                 outline_opacity,
             )
+        }),
+        shadow: (shadow_opacity > 0.0).then(|| {
+            let size = f64::from(font_size);
+            let (sin, cos) = drawn.shadow_angle.to_radians().sin_cos();
+            let distance = drawn.shadow_distance * size;
+            TextShadow {
+                x: (distance * cos) as f32,
+                y: (distance * sin) as f32,
+                blur: (drawn.shadow_blur * size) as f32,
+                color: drawn.shadow_color.unwrap_or(Rgb::BLACK),
+                opacity: shadow_opacity as f32,
+            }
         }),
         bottom,
         align: drawn.align.unwrap_or(style.align),

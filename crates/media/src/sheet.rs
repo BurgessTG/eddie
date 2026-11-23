@@ -12,7 +12,7 @@ use std::thread;
 use openreel_engine::{BlendMode, ChromaKey, Mask, Placement, TextAlign};
 
 use crate::composite::{Canvas, Layer};
-use crate::export::{filter_value, ScratchDir, LINE_BOX};
+use crate::export::{filter_value, ScratchDir, TitleText};
 use crate::fonts::{write_faces, Face};
 use crate::{scaled_height, MediaResult, RawFrame, TitleLook, VideoDecoder};
 
@@ -273,8 +273,10 @@ impl Decoders {
     }
 }
 
-/// The drawtext chain for every label and title: export's title table,
-/// scaled to the cell, in the faces `fonts` holds files of.
+/// The filters that draw every label and title: export's title table,
+/// scaled to the cell, in the faces `fonts` holds files of. A graph of
+/// named pads from the sheet in to the sheet out, since a soft shadow
+/// splits the picture and lays it back together.
 fn text_filters(
     cells: &[SheetCell],
     labels: &[String],
@@ -286,16 +288,19 @@ fn text_filters(
     let font = file(&Face::default());
     let (cell_w, cell_h) = (grid.cell_w, grid.cell_h);
     let scale = cell_h as f32 / canvas.1.max(1) as f32;
-    let mut filters = Vec::new();
+    let mut filters = vec!["null[s0]".to_owned()];
+    let mut pad = 0;
     for (index, cell) in cells.iter().enumerate() {
         let (x0, y0) = grid.origin(index);
         filters.push(format!(
-            "drawtext=fontfile={font}:expansion=none:text={}:fontcolor=white:\
-             fontsize=15:x={}:y={}",
+            "[s{pad}]drawtext=fontfile={font}:expansion=none:text={}:fontcolor=white:\
+             fontsize=15:x={}:y={}[s{}]",
             filter_value(&labels[index]),
             x0 + 6,
             y0 + cell_h + 6,
+            pad + 1,
         ));
+        pad += 1;
         let Some((text, look, opacity)) = &cell.title else {
             continue;
         };
@@ -312,16 +317,24 @@ fn text_filters(
             TextAlign::Right => format!("{}-text_w", x0 as isize + cell_w as isize - margin + dx),
         };
         let lines = text.lines().count();
-        let y = y0 as isize + cell_h as isize - look.top(lines) as isize + dy;
-        filters.push(format!(
-            "drawtext=fontfile={}:expansion=none:text={}:{}:x={x}:y={y}:{LINE_BOX}:text_align={}",
-            file(&look.face),
-            filter_value(text),
-            look.drawtext_options(*opacity),
-            look.align_option(),
+        let y = (y0 as isize + cell_h as isize - look.top(lines) as isize + dy).to_string();
+        filters.extend(look.filters(
+            &TitleText {
+                font: &file(&look.face),
+                text: &filter_value(text),
+                x: &x,
+                y: &y,
+                enable: None,
+                opacity: *opacity,
+                tag: &format!("c{index}"),
+            },
+            &format!("s{pad}"),
+            &format!("s{}", pad + 1),
         ));
+        pad += 1;
     }
-    filters.join(",")
+    filters.push(format!("[s{pad}]null"));
+    filters.join(";")
 }
 
 /// One ffmpeg run: draw `filters` over the RGBA `sheet` and return a JPEG.

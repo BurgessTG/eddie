@@ -757,6 +757,42 @@ fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
     run(&mut app, &format!("setText({title}, {{align: null}})")).unwrap();
     assert_eq!(text(&app).align, None);
 
+    // A shadow colour alone turns one on; how it falls has defaults that
+    // null brings back, as it does a size.
+    run(
+        &mut app,
+        &format!(
+            "setText({title}, {{shadowColor: '#000', shadowDistance: 0.2, shadowAngle: -90, shadowBlur: 0}})"
+        ),
+    )
+    .unwrap();
+    let t = text(&app);
+    assert_eq!(
+        (
+            t.shadow_color,
+            t.shadow_opacity,
+            t.shadow_distance,
+            t.shadow_angle,
+            t.shadow_blur
+        ),
+        (Some(Rgb::BLACK), None, 0.2, -90.0, 0.0)
+    );
+    assert_eq!(
+        openreel_media::drawn_text(app.timeline.clip(title).unwrap()).shadow_opacity,
+        Some(openreel_engine::DEFAULT_SHADOW_OPACITY)
+    );
+    run(
+        &mut app,
+        &format!("setText({title}, {{shadowAngle: null, shadowColor: null, size: null}})"),
+    )
+    .unwrap();
+    let t = text(&app);
+    let plain = TextLook::default();
+    assert_eq!(
+        (t.shadow_color, t.shadow_angle, t.shadow_distance, t.size),
+        (None, plain.shadow_angle, 0.2, plain.size)
+    );
+
     let before = app.timeline.clone();
     for (code, says) in [
         (
@@ -774,6 +810,14 @@ fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
             "outline of 0 to 0.2",
         ),
         (format!("setText({title}, {{x: 1.5}})"), "-1 to 1"),
+        (
+            format!("setText({title}, {{shadowAngle: 270}})"),
+            "shadowAngle of -180 to 180",
+        ),
+        (
+            format!("setText({title}, {{shadowBlur: 1}})"),
+            "shadowBlur of 0 to 0.25",
+        ),
         (format!("setText({title}, {{boxOpacity: NaN}})"), "finite"),
         (format!("setText({title}, {{color: 'red'}})"), "'#RRGGBB'"),
         (format!("setText({title}, 'big')"), "needs an object"),

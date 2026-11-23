@@ -1,5 +1,5 @@
-//! A title's own text look over its style: font, size, colour, place, box
-//! and outline. `openreel_media::clip_title_look` lays it over the style's
+//! A title's own text look over its style: font, size, colour, place, box,
+//! outline and shadow. `openreel_media::clip_title_look` lays it over the style's
 //! look, and the program monitor, export and contact sheets all draw from
 //! that, so a styled title previews as it exports.
 
@@ -197,6 +197,20 @@ pub struct TextLook {
     /// [`DEFAULT_OUTLINE`].
     pub outline: Option<f64>,
     pub outline_color: Option<Rgb>,
+    /// The shadow under the letters (and their outline), 0 (none) to 1
+    /// (solid). A shadow colour alone turns one on at
+    /// [`DEFAULT_SHADOW_OPACITY`].
+    pub shadow_opacity: Option<f64>,
+    pub shadow_color: Option<Rgb>,
+    /// How far the shadow falls from the letters, as a share of the font
+    /// size, 0 to [`MAX_SHADOW_DISTANCE`].
+    pub shadow_distance: f64,
+    /// Which way it falls, in degrees clockwise from straight right: 45
+    /// is down and to the right, 90 straight down. -180 to 180.
+    pub shadow_angle: f64,
+    /// How soft its edge is: the blur's standard deviation as a share of
+    /// the font size, 0 (sharp) to [`MAX_SHADOW_BLUR`].
+    pub shadow_blur: f64,
     /// Moved from where the style puts the text, in canvas widths and
     /// heights; right and down are positive.
     pub x: f64,
@@ -210,6 +224,12 @@ pub const MAX_OUTLINE: f64 = 0.2;
 pub const MAX_TEXT_OFFSET: f64 = 1.0;
 pub const DEFAULT_BOX_OPACITY: f64 = 0.6;
 pub const DEFAULT_OUTLINE: f64 = 0.06;
+pub const MAX_SHADOW_DISTANCE: f64 = 0.5;
+pub const MAX_SHADOW_BLUR: f64 = 0.25;
+pub const DEFAULT_SHADOW_OPACITY: f64 = 0.7;
+pub const DEFAULT_SHADOW_DISTANCE: f64 = 0.08;
+pub const DEFAULT_SHADOW_ANGLE: f64 = 45.0;
+pub const DEFAULT_SHADOW_BLUR: f64 = 0.08;
 
 impl Default for TextLook {
     fn default() -> Self {
@@ -224,6 +244,11 @@ impl Default for TextLook {
             box_color: None,
             outline: None,
             outline_color: None,
+            shadow_opacity: None,
+            shadow_color: None,
+            shadow_distance: DEFAULT_SHADOW_DISTANCE,
+            shadow_angle: DEFAULT_SHADOW_ANGLE,
+            shadow_blur: DEFAULT_SHADOW_BLUR,
             x: 0.0,
             y: 0.0,
         }
@@ -242,6 +267,10 @@ impl TextLook {
             && self
                 .outline
                 .is_none_or(|v| (0.0..=MAX_OUTLINE).contains(&v))
+            && self.shadow_opacity.is_none_or(|v| (0.0..=1.0).contains(&v))
+            && (0.0..=MAX_SHADOW_DISTANCE).contains(&self.shadow_distance)
+            && (-180.0..=180.0).contains(&self.shadow_angle)
+            && (0.0..=MAX_SHADOW_BLUR).contains(&self.shadow_blur)
             && [self.x, self.y]
                 .iter()
                 .all(|v| (-MAX_TEXT_OFFSET..=MAX_TEXT_OFFSET).contains(v))
@@ -266,6 +295,18 @@ impl TextLook {
             .outline
             .filter(|v| !v.is_nan())
             .map(|v| v.clamp(0.0, MAX_OUTLINE));
+        self.shadow_opacity = self
+            .shadow_opacity
+            .filter(|v| !v.is_nan())
+            .map(|v| v.clamp(0.0, 1.0));
+        self.shadow_distance = fix(
+            self.shadow_distance,
+            0.0,
+            MAX_SHADOW_DISTANCE,
+            DEFAULT_SHADOW_DISTANCE,
+        );
+        self.shadow_angle = fix(self.shadow_angle, -180.0, 180.0, DEFAULT_SHADOW_ANGLE);
+        self.shadow_blur = fix(self.shadow_blur, 0.0, MAX_SHADOW_BLUR, DEFAULT_SHADOW_BLUR);
         self.x = fix(self.x, -MAX_TEXT_OFFSET, MAX_TEXT_OFFSET, 0.0);
         self.y = fix(self.y, -MAX_TEXT_OFFSET, MAX_TEXT_OFFSET, 0.0);
         self

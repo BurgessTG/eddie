@@ -2707,6 +2707,130 @@ fn titles_export_their_own_size_colours_box_outline_and_place() {
     assert!(no_white(frame(3)) && no_white(frame(4)), "and has no box");
 }
 
+/// A shadow falls `distance` x the font size along its angle: at 0.4 of
+/// a 38 px caption and 30 degrees, 15.2 x (cos 30, sin 30) = (13.2, 7.6),
+/// so its ink ends 13 px right of and 8 px below the letters'. White
+/// letters and a black shadow on grey keep every edge in luma, which
+/// H.264 does not subsample.
+#[test]
+fn a_title_shadow_falls_where_its_angle_and_distance_put_it() {
+    use openreel_engine::{Rgb, TextLook};
+    let fixture = Fixture::new();
+    let source = fixture.video("grey.mp4", "color=c=gray:s=1280x720:r=10:d=2", "null", None);
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 1.5, 0.0);
+    let shadow = TextLook {
+        box_opacity: Some(0.0),
+        shadow_color: Some(Rgb::BLACK),
+        shadow_opacity: Some(1.0),
+        shadow_distance: 0.4,
+        shadow_angle: 30.0,
+        shadow_blur: 0.0,
+        ..TextLook::default()
+    };
+    let looks = [
+        // Sharp, then at half opacity, then soft.
+        shadow,
+        TextLook {
+            shadow_opacity: Some(0.5),
+            ..shadow
+        },
+        TextLook {
+            shadow_blur: 0.2,
+            ..shadow
+        },
+        // Under a white box, 19 px straight right: past the box's right
+        // edge (the line's advance, about 3 px past the ink, plus 12 px of
+        // padding), where drawtext alone cuts a shadow off.
+        TextLook {
+            color: Some(Rgb::BLACK),
+            box_color: Some(Rgb::WHITE),
+            box_opacity: Some(1.0),
+            shadow_color: Some(Rgb(255, 0, 0)),
+            shadow_distance: 0.5,
+            shadow_angle: 0.0,
+            ..shadow
+        },
+        // A 6 px white outline (0.15 x 38 = 5.7) casts a shadow too.
+        TextLook {
+            outline: Some(0.15),
+            outline_color: Some(Rgb::WHITE),
+            shadow_blur: 0.05,
+            ..shadow
+        },
+    ];
+    for (index, text) in looks.into_iter().enumerate() {
+        let id = timeline.add_clip("MMMM", ClipKind::Title, 0, index as f64 * 0.3, 0.3, 0.0);
+        let title = timeline.clip_mut(id).unwrap();
+        (title.title_style, title.text) = (TitleStyle::Caption, text);
+    }
+    let decoded = frames(&fixture.export("shadow.mp4", &timeline));
+    let frame = |index: usize| &decoded[index * 3 + 1];
+    let white = |p: &[u8; 3]| p.iter().all(|&v| v > 200);
+    let darker = |by: u8| move |p: &[u8; 3]| p[0] < 128 - by;
+    let near = |got: usize, want: usize, by: usize| got.abs_diff(want) <= by;
+
+    let (letters, count) = pixel_box(frame(0), 1280, white);
+    let (shade, shaded) = pixel_box(frame(0), 1280, |p| p[0] < 40);
+    eprintln!("sharp: letters {letters:?} ({count} px), shadow {shade:?} ({shaded} px)");
+    assert!(count > 300 && shaded > 300);
+    assert!(
+        near(shade[2], letters[2] + 13, 1)
+            && near(shade[3], letters[3] + 8, 1)
+            && near(shade[1], letters[1] + 8, 1),
+        "13 right and 8 down: letters {letters:?}, shadow {shade:?}"
+    );
+    let (edge, _) = pixel_box(frame(0), 1280, darker(10));
+    assert!(edge[2] <= letters[2] + 14, "a sharp edge: {edge:?}");
+
+    let darkest = |f: &[u8]| f.as_chunks::<3>().0.iter().map(|p| p[0]).min().unwrap();
+    // The shadow's typical pixel, away from the letters' edges, where the
+    // codec rings a few levels past it.
+    let typical = |f: &[u8]| {
+        let mut dark: Vec<u8> = f
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .filter(|&v| v < 110)
+            .collect();
+        dark.sort_unstable();
+        dark[dark.len() / 2]
+    };
+    let half = typical(frame(1));
+    eprintln!("half: typical {half}, darkest {}", darkest(frame(1)));
+    assert!((56..=72).contains(&half), "half of 128 dark: {half}");
+
+    let (soft, _) = pixel_box(frame(2), 1280, darker(10));
+    let (letters, _) = pixel_box(frame(2), 1280, white);
+    let soft_darkest = darkest(frame(2));
+    eprintln!("soft: letters {letters:?}, shadow {soft:?}, darkest {soft_darkest}");
+    assert!(
+        soft[2] >= letters[2] + 13 + 7 && soft[1] + 3 <= letters[1] + 8,
+        "a 7.6 px blur spreads it: letters {letters:?}, shadow {soft:?}"
+    );
+    assert!(soft_darkest > 30, "and never reaches black: {soft_darkest}");
+
+    let is_white = |p: &[u8; 3]| p.iter().all(|&v| v > 220);
+    let is_red = |p: &[u8; 3]| p[0] > 150 && p[1] < 90 && p[2] < 90;
+    let (boxed, _) = pixel_box(frame(3), 1280, is_white);
+    let (red, reds) = pixel_box(frame(3), 1280, is_red);
+    eprintln!("boxed: box {boxed:?}, shadow {red:?} ({reds} px)");
+    assert!(reds > 200, "a red shadow over the box: {reds} px");
+    assert!(
+        red[2] >= boxed[2] + 2,
+        "it runs past the box's edge: box {boxed:?}, shadow {red:?}"
+    );
+
+    let (outlined, _) = pixel_box(frame(4), 1280, white);
+    let (cast, _) = pixel_box(frame(4), 1280, darker(64));
+    eprintln!("outlined: letters {outlined:?}, shadow {cast:?}");
+    assert!(
+        (outlined[2] + 11..=outlined[2] + 16).contains(&cast[2]),
+        "the outline's shadow too: letters {outlined:?}, shadow {cast:?}"
+    );
+}
+
 #[test]
 fn smooth_fades_follow_the_quarter_sine_in_preview_and_export() {
     // Halfway through a 1 s fade-in, a linear fade is at 0.5 and the

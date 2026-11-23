@@ -51,7 +51,7 @@ pub use evidence::{EvidenceDetail, EvidenceFrame, EvidenceSampler, EvidenceVideo
 pub use export::{
     clip_title_look, drawn_text, export_canvas, export_timeline, output_canvas, title_lines,
     title_look, AudioFormat, ExportKind, ExportOptions, ExportSettings, Exported, GifSize, Quality,
-    Resolution, TitleLook, FRAME_RATES, GIF_FPS, LOUDNESS_TARGET,
+    Resolution, TextShadow, TitleLook, FRAME_RATES, GIF_FPS, LOUDNESS_TARGET, SHARP_SHADOW,
 };
 pub use frame::{scaled_height, RawFrame};
 pub use graphic::{

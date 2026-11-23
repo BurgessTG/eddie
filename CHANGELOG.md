@@ -171,6 +171,12 @@
   title does and the lines above grow upward. Left, Centre and Right in
   the Text card line them up and put the text at the left margin, the
   middle or the right margin; scripts use `setText`'s `align`.
+- A shadow under a title's letters and outline: its colour, opacity,
+  distance, angle and blur in the Text card, drawn alike on the monitor,
+  in export and on contact sheets. A shadow falls past the title's box
+  instead of being cut off at its edge. Scripts use `setText`'s
+  `shadowColor`, `shadowOpacity`, `shadowDistance`, `shadowAngle` and
+  `shadowBlur`.
 
 ### Changed
 
@@ -200,6 +206,10 @@
 
 ### Fixed
 
+- An outlined title on the monitor no longer shows a stray word in the
+  outline's colour under its lines; export was never affected.
+- `setText` with `null` for `size`, `x` or `y` puts back the default
+  instead of failing with "numbers must be finite".
 - Splitting a moved, cropped or graded clip, or removing silence from one,
   kept that look only on the first piece; every piece keeps it now.
 - The Keyboard shortcuts window scrolls when the Eddie window is too short

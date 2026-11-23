@@ -680,6 +680,96 @@ fn a_title_of_several_lines_previews_them_lined_up_and_growing_upward() {
     }
 }
 
+/// A caption's shadow falls 0.4 x its 38 px letters at 30 degrees, 15.2
+/// canvas pixels: (13.16, 7.6) right and down of its line, as export
+/// draws it, and is the line's size: a copy moved right once wrapped its
+/// last word onto a line of its own. A title without one has none.
+#[test]
+fn a_title_shadow_previews_where_its_angle_and_distance_put_it() {
+    use openreel_engine::{Rgb, TextLook, TitleStyle};
+    let mut ui = Ui::headless();
+    let title = ui
+        .editor
+        .timeline
+        .add_clip("The shadow falls", ClipKind::Title, 0, 0.0, 4.0, 0.0);
+    ui.editor.timeline.clip_mut(title).unwrap().title_style = TitleStyle::Caption;
+    ui.editor.playhead = 1.0;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    assert!(rt.presented("monitor-title-shadow0").is_none(), "none yet");
+    rt.state.editor.edit_title_text(title, |t| {
+        *t = TextLook {
+            shadow_color: Some(Rgb::BLACK),
+            shadow_distance: 0.4,
+            shadow_angle: 30.0,
+            ..TextLook::default()
+        }
+    });
+    frames(&mut rt, 1);
+    let (_, canvas_h) = rt.state.editor.canvas();
+    let ([_, _, _, fh], _) = rt.presented("monitor").unwrap();
+    let scale = fh / canvas_h as f32;
+    let ([lx, ly, lw, lh], _) = rt.presented("monitor-title-line0").unwrap();
+    let ([sx, sy, sw, sh], _) = rt.presented("monitor-title-shadow0").unwrap();
+    let (dx, dy) = ((sx - lx) / scale, (sy - ly) / scale);
+    assert!(
+        (dx - 13.16).abs() < 0.2 && (dy - 7.6).abs() < 0.2,
+        "fell ({dx:.2}, {dy:.2}) canvas px"
+    );
+    assert!(
+        (sw - lw).abs() < 0.5 && (sh - lh).abs() < 0.5,
+        "the line's size: {sw}x{sh}, not {lw}x{lh}"
+    );
+}
+
+/// Every copy an outline or shadow draws of a line stays one line: drawn
+/// a little right of the line, a copy wrapped its last word onto a line of
+/// its own, which showed as a stray word under the title.
+#[test]
+fn outline_and_shadow_copies_of_a_line_never_wrap() {
+    use openreel_engine::{Rgb, TextLook, TitleFont, TitleStyle};
+    let mut ui = Ui::headless();
+    let title = ui.editor.timeline.add_clip(
+        "SHARP SHADOW\nwith an outline",
+        ClipKind::Title,
+        0,
+        0.0,
+        4.0,
+        0.0,
+    );
+    let clip = ui.editor.timeline.clip_mut(title).unwrap();
+    clip.title_style = TitleStyle::Caption;
+    clip.text = TextLook {
+        font: Some(TitleFont::Oswald),
+        bold: true,
+        size: 1.8,
+        box_opacity: Some(0.0),
+        outline: Some(0.06),
+        outline_color: Some(Rgb::BLACK),
+        shadow_color: Some(Rgb(168, 85, 247)),
+        shadow_distance: 0.12,
+        shadow_angle: 60.0,
+        shadow_blur: 0.0,
+        ..TextLook::default()
+    };
+    ui.editor.playhead = 1.0;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    for line in 0..2 {
+        let ([_, _, _, height], _) = rt.presented(&format!("monitor-title-line{line}")).unwrap();
+        for copy in ["line", "shadow"] {
+            for step in 0..16 {
+                let key = format!("monitor-title-{copy}{line}-stroke{step}");
+                let ([_, _, _, h], _) = rt.presented(&key).unwrap_or_else(|| panic!("{key}"));
+                assert!(
+                    (h - height).abs() < 0.5,
+                    "{key} is {h} tall, the line {height}"
+                );
+            }
+        }
+    }
+}
+
 /// A title in Lora Bold Italic previews in that face and in its line box,
 /// as export draws it: the box is the font's 1.28 em line tall plus
 /// padding, keeps the style's lower edge, and is as wide as the word's
