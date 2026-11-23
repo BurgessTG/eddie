@@ -727,9 +727,39 @@ fn text_changes_only_what_is_asked_and_null_goes_back_to_the_style() {
     assert_eq!(text(&app).color, None);
     assert_eq!(text(&app).size, 1.5, "the rest stay");
 
+    // A font by its name or its family's, bold and italic; null is the
+    // style's plain face.
+    run(
+        &mut app,
+        &format!("setText({title}, {{font: 'Playfair Display', bold: true, italic: true}})"),
+    )
+    .unwrap();
+    let t = text(&app);
+    assert_eq!(
+        (t.font, t.bold, t.italic),
+        (
+            Some(openreel_engine::TitleFont::PlayfairDisplay),
+            true,
+            true
+        )
+    );
+    let read = run(&mut app, "return clips()[1].text.font").unwrap();
+    assert_eq!(read, "playfair-display");
+    run(
+        &mut app,
+        &format!("setText({title}, {{font: null, bold: null, italic: null}})"),
+    )
+    .unwrap();
+    let t = text(&app);
+    assert_eq!((t.font, t.bold, t.italic), (None, false, false));
+
     let before = app.timeline.clone();
     for (code, says) in [
-        (format!("setText({title}, {{font: 'Arial'}})"), "no 'font'"),
+        (
+            format!("setText({title}, {{font: 'Arial'}})"),
+            "one of inter, lora",
+        ),
+        (format!("setText({title}, {{weight: 700}})"), "no 'weight'"),
         (format!("setText({title}, {{size: 5}})"), "0.25 to 4"),
         (
             format!("setText({title}, {{outline: 0.5}})"),

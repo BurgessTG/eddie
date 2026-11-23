@@ -175,7 +175,7 @@ fn keycap(chord: String) -> El {
 
 #[cfg(test)]
 mod tests {
-    use rune::{Env, Key, Runtime};
+    use rune::Key;
 
     use crate::app::{self, Ui};
     use crate::testing::{click, frames, press, shown, tooltip, window};
@@ -205,12 +205,7 @@ mod tests {
     /// The list is taller than the smallest window; it scrolls inside it.
     #[test]
     fn the_list_fits_the_smallest_window() {
-        let mut rt = Runtime::new(
-            Ui::headless(),
-            app::view,
-            (1024.0, 640.0),
-            Env::new(true, 1.0),
-        );
+        let mut rt = crate::testing::runtime(Ui::headless(), (1024.0, 640.0));
         rt.on_key = Some(app::on_key);
         frames(&mut rt, 3);
         press(&mut rt, Key::Function(1));

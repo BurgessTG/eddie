@@ -96,8 +96,9 @@ offers the newest build.
 - Program monitor with frame stepping. Audio drives the playhead, and the
   next cut's first picture is prerolled so short clips play through.
 - Titles and generated captions in five styles, identical in preview and
-  export, each with its own size, colour, box, outline and position; drag
-  a title on the monitor to move it. Remove silence tightens pauses out of
+  export, each with its own font (eight built in, with bold and italic),
+  size, colour, box, outline and position; drag a title on the monitor to
+  move it. Remove silence tightens pauses out of
   speech.
 - Undo/redo covers every timeline edit, whether made by hand, in Details
   or in the console.
@@ -139,8 +140,8 @@ results are saved per file. It runs on this computer:
   (for bindgen), `cmake` and a C++ compiler (for whisper.cpp). On Arch:
   `sudo pacman -S --needed base-devel clang cmake pkgconf ffmpeg alsa-lib gtk3 fontconfig`.
 - Runtime: `ffmpeg` 9 on `PATH`; ALSA (or PipeWire/Pulse through ALSA) for
-  sound; GTK 3 for file dialogs; fontconfig (`fc-match`) and a font for
-  titles; a Vulkan driver for the window. The tests also need `ffprobe`.
+  sound; GTK 3 for file dialogs; fontconfig (`fc-match`), which finds the
+  monospace font for readouts; a Vulkan driver for the window. The tests also need `ffprobe`.
 - macOS, to build and run from a checkout: Xcode's command line tools and
   `brew install pkgconf cmake ffmpeg ffmpeg-full`. The build links the
   FFmpeg libraries Homebrew has linked, which after that command are

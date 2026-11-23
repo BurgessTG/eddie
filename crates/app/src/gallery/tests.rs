@@ -1,6 +1,6 @@
 use eddie_core::editor::media::{AssetState, BinAsset};
 use eddie_core::editor::sweep::{ClipReview, SweepCandidate, SweepData};
-use rune::{Env, Key, KeyEvent, Mods, Runtime};
+use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::grid::{BAR_RESERVE, MAX_CARD_W, grid};
 use super::*;
@@ -73,7 +73,7 @@ fn gallery(candidates: Vec<SweepCandidate>, size: (f32, f32)) -> Runtime<Ui> {
         },
     });
     ui.editor.open_curator_gallery();
-    let mut rt = Runtime::new(ui, app::view, size, Env::new(true, 1.0));
+    let mut rt = crate::testing::runtime(ui, size);
     rt.poll = Some(app::poll);
     rt.on_key = Some(app::on_key);
     // The grid sizes its cards from the box the first frames give it.

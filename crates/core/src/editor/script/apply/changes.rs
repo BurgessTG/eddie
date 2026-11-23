@@ -169,9 +169,16 @@ pub(super) fn changed_chroma(
 /// `current` with the fields of the JSON object `changes`, or the style's
 /// look for `null`.
 pub(super) fn changed_text(current: TextLook, changes: &str) -> Result<TextLook, String> {
-    let Some(changes) = changes_object("setText", "{size: 1.5, color: '#FFD600'}", changes)? else {
+    let Some(mut changes) = changes_object("setText", "{size: 1.5, color: '#FFD600'}", changes)?
+    else {
         return Ok(TextLook::default());
     };
+    // The style's own weight and slant are plain, so null is off.
+    for key in ["bold", "italic"] {
+        if let Some(value) = changes.get_mut(key).filter(|value| value.is_null()) {
+            *value = false.into();
+        }
+    }
     let text = merged("setText", current, changes)?;
     if !text.is_valid() {
         return Err(format!(

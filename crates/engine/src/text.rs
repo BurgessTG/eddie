@@ -1,5 +1,5 @@
-//! A title's own text look over its style: size, colour, place, box and
-//! outline. `openreel_media::clip_title_look` lays it over the style's
+//! A title's own text look over its style: font, size, colour, place, box
+//! and outline. `openreel_media::clip_title_look` lays it over the style's
 //! look, and the program monitor, export and contact sheets all draw from
 //! that, so a styled title previews as it exports.
 
@@ -54,11 +54,112 @@ impl<'de> Deserialize<'de> for Rgb {
     }
 }
 
+/// A font titles are drawn in. Eddie carries every one, so a title looks
+/// the same on the monitor, in export and on any computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TitleFont {
+    #[default]
+    Inter,
+    Lora,
+    PlayfairDisplay,
+    Oswald,
+    BebasNeue,
+    Caveat,
+    Pacifico,
+    RobotoMono,
+}
+
+impl TitleFont {
+    pub const ALL: [Self; 8] = [
+        Self::Inter,
+        Self::Lora,
+        Self::PlayfairDisplay,
+        Self::Oswald,
+        Self::BebasNeue,
+        Self::Caveat,
+        Self::Pacifico,
+        Self::RobotoMono,
+    ];
+
+    /// The name projects and scripts use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inter => "inter",
+            Self::Lora => "lora",
+            Self::PlayfairDisplay => "playfair-display",
+            Self::Oswald => "oswald",
+            Self::BebasNeue => "bebas-neue",
+            Self::Caveat => "caveat",
+            Self::Pacifico => "pacifico",
+            Self::RobotoMono => "roboto-mono",
+        }
+    }
+
+    /// The family name inside the font files.
+    pub fn family(self) -> &'static str {
+        match self {
+            Self::Inter => "Inter",
+            Self::Lora => "Lora",
+            Self::PlayfairDisplay => "Playfair Display",
+            Self::Oswald => "Oswald",
+            Self::BebasNeue => "Bebas Neue",
+            Self::Caveat => "Caveat",
+            Self::Pacifico => "Pacifico",
+            Self::RobotoMono => "Roboto Mono",
+        }
+    }
+
+    /// By `as_str` or family name, in any case.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL.into_iter().find(|font| {
+            font.as_str().eq_ignore_ascii_case(name) || font.family().eq_ignore_ascii_case(name)
+        })
+    }
+
+    /// Whether the family has a bold face.
+    pub fn has_bold(self) -> bool {
+        !matches!(self, Self::BebasNeue | Self::Pacifico)
+    }
+
+    /// Whether the family has an italic face.
+    pub fn has_italic(self) -> bool {
+        matches!(
+            self,
+            Self::Inter | Self::Lora | Self::PlayfairDisplay | Self::RobotoMono
+        )
+    }
+}
+
+impl Serialize for TitleFont {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TitleFont {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::from_name(&text).ok_or_else(|| {
+            let names: Vec<&str> = Self::ALL.iter().map(|font| font.as_str()).collect();
+            serde::de::Error::custom(format!(
+                "a font is one of {}, not '{text}'",
+                names.join(", ")
+            ))
+        })
+    }
+}
+
 /// What a title changes from its style. The default changes nothing; a
 /// `None` keeps the style's value.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TextLook {
+    /// The font; `None` is the style's.
+    pub font: Option<TitleFont>,
+    /// Bold and italic, drawn where the font has those faces.
+    pub bold: bool,
+    pub italic: bool,
     /// Font size against the style's, [`MIN_TEXT_SIZE`] to
     /// [`MAX_TEXT_SIZE`]. The text grows upward from its lower edge.
     pub size: f64,
@@ -89,6 +190,9 @@ pub const DEFAULT_OUTLINE: f64 = 0.06;
 impl Default for TextLook {
     fn default() -> Self {
         Self {
+            font: None,
+            bold: false,
+            italic: false,
             size: 1.0,
             color: None,
             box_opacity: None,

@@ -273,7 +273,8 @@ impl<'a> Inspection<'a> {
         let look = openreel_media::clip_title_look(clip);
         let (w, h) = self.canvas;
         let x = look.left.map_or(w / 2.0, f64::from) + look.offset.0 * w;
-        let y = h - f64::from(look.bottom) + f64::from(look.font_size) / 2.0 + look.offset.1 * h;
+        let line = f64::from(look.font_size) * f64::from(look.face.line_height());
+        let y = h - f64::from(look.bottom) + line / 2.0 + look.offset.1 * h;
         if (0.0..=w).contains(&x) && (0.0..=h).contains(&y) {
             return;
         }

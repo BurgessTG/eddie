@@ -228,11 +228,18 @@ pub fn icon_button(key: &str, icon: Shape, help: &str, active: bool, enabled: bo
     )
 }
 
-/// An icon button whose glyph is a letter.
-pub fn letter_button(key: &str, letter: &str, help: &str, active: bool, enabled: bool) -> El {
+/// An icon button whose glyph is a letter in `font`.
+pub fn letter_button(
+    key: &str,
+    letter: &str,
+    font: TextStyle,
+    help: &str,
+    active: bool,
+    enabled: bool,
+) -> El {
     let glyph = row().size(30.0, 30.0).center().child(
         text(letter.to_owned())
-            .font(sized(16.0))
+            .font(font)
             .color(c().foreground)
             .single_line(),
     );
@@ -416,6 +423,11 @@ pub fn select(key: &str, choice: &str, help: &str, fill: Color, open: bool, enab
 /// everywhere else: a brand tint behind brand text. The caller adds
 /// `on_press`.
 pub fn option(key: String, label: &str, help: &str, current: bool) -> El {
+    option_in(key, label, BODY, help, current)
+}
+
+/// An option whose label is drawn in `font`, such as a font's own name.
+pub fn option_in(key: String, label: &str, font: TextStyle, help: &str, current: bool) -> El {
     let c = c();
     let option = row()
         .key(key)
@@ -430,7 +442,7 @@ pub fn option(key: String, label: &str, help: &str, current: bool) -> El {
         .help(help.to_owned())
         .child(
             text(label.to_owned())
-                .font(BODY)
+                .font(font)
                 .color(if current { c.brand } else { c.foreground })
                 .single_line(),
         );

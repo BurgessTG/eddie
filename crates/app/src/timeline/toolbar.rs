@@ -166,6 +166,7 @@ pub(super) fn toolbar(ui: &Ui) -> El {
             theme::letter_button(
                 "tool-title",
                 "T",
+                theme::sized(16.0),
                 &shortcuts::tip("Add a title clip at the playhead", Action::AddTitle),
                 false,
                 true,

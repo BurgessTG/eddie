@@ -3,10 +3,9 @@
 //! that moves it.
 
 use openreel_engine::{Clip, Rgb};
-use rune::{Color, Cursor, El, Phase, Span, el, rich, row};
+use rune::{Color, Cursor, El, Family, Phase, Span, TextStyle, el, rich, row};
 
 use crate::app::Ui;
-use crate::theme;
 
 /// A drag that ends this close to the style's own place, in points, lands
 /// on it.
@@ -23,7 +22,14 @@ pub(super) fn overlay(title: &Clip, playhead: f64, w: f32, h: f32, canvas_h: u32
     let alpha = title.opacity.clamp(0.0, 1.0);
     let look = openreel_media::clip_title_look(title);
     let scale = h / canvas_h.max(1) as f32;
-    let font = theme::sized((look.font_size as f32 * scale).max(1.0));
+    // The face export draws, in the font's own line box as drawtext's
+    // `y_align=font` lays it out, so the line sits where export puts it.
+    let face = look.face;
+    let px = (look.font_size as f32 * scale).max(1.0);
+    let font = TextStyle::new(px, face.weight())
+        .family(Family::Named(face.font().family()))
+        .lh(px * face.line_height());
+    let font = if face.italic() { font.italic() } else { font };
     // Export draws one line with single spaces between words.
     let active = look.highlight.and(title.active_word(playhead));
     let (line, lit) = match (look.highlight, active) {

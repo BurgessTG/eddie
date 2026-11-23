@@ -160,10 +160,19 @@
   close button left Eddie before.
 - Apply to all in a caption's Text card gives every caption its style,
   size, colours, box, outline and place at once; lower thirds keep theirs.
+- Fonts for titles: Inter, Lora, Playfair Display, Oswald, Bebas Neue,
+  Caveat, Pacifico and Roboto Mono, with Bold and Italic where the font
+  has them, picked in the Text card from a list that shows each one.
+  Eddie carries them, so a title looks the same in preview, export and
+  contact sheets on any computer. Scripts use `setText`'s `font`, `bold`
+  and `italic`.
 
 ### Changed
 
 - The magnet's key is N, as in CapCut; M adds a marker.
+- Exported titles are drawn in Inter, as the monitor shows them, not the
+  system's sans font, and a title's box is one line tall whatever letters
+  it holds: "mom" and "Hello" get boxes of the same height.
 - A clip below full opacity, or a picture smaller than the canvas, shows
   the video lanes under it instead of black. A clip on a lane under a
   full-canvas, opaque picture is still covered.

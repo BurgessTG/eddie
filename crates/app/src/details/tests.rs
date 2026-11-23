@@ -2,7 +2,7 @@ use eddie_core::editor::details::MAX_VOLUME;
 use eddie_core::editor::media::{AssetState, BinAsset};
 use eddie_core::editor::sweep::SweepData;
 use openreel_engine::{Clip, ClipKind, TitleStyle};
-use rune::{Env, Key, KeyEvent, Mods, Runtime};
+use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::styles::{blend_key, option_key, stabilize_key};
 use super::*;
@@ -43,7 +43,7 @@ fn window(kind: ClipKind) -> (Runtime<Ui>, ClipId) {
             .add_media_clip("Clip", kind, 0, 2.0, 4.0, 1.0, "/media/a.mp4"),
     };
     ui.editor.selected = Some(id);
-    let mut rt = Runtime::new(ui, app::view, (1400.0, 1200.0), Env::new(true, 1.0));
+    let mut rt = crate::testing::runtime(ui, (1400.0, 1200.0));
     rt.poll = Some(app::poll);
     for _ in 0..3 {
         rt.frame(FRAME);
@@ -341,6 +341,23 @@ fn the_text_card_sets_a_titles_size_colours_box_outline_and_place() {
         "y stops a canvas away"
     );
 
+    // The font list draws each name in its font; Bold and Italic pick
+    // those faces, and switch off for a font that has none.
+    tap(&mut rt, "details-text-font");
+    tap(&mut rt, "details-font-lora");
+    assert_eq!(text(&rt).font, Some(openreel_engine::TitleFont::Lora));
+    assert!(!shown(&rt, "details-select"), "a pick closes the list");
+    tap(&mut rt, "details-text-bold");
+    tap(&mut rt, "details-text-italic");
+    let lora = drawn(&rt);
+    assert!(lora.bold && lora.italic, "{lora:?}");
+    tap(&mut rt, "details-text-font");
+    tap(&mut rt, "details-font-bebas-neue");
+    let bebas = drawn(&rt);
+    assert!(!bebas.bold && !bebas.italic, "Bebas Neue has one face");
+    tap(&mut rt, "details-text-bold");
+    assert!(text(&rt).bold, "a disabled toggle changes nothing");
+
     tap(&mut rt, "details-text-reset");
     assert_eq!(text(&rt), TextLook::default());
 }
@@ -488,7 +505,7 @@ fn the_shape_card_draws_a_shape_again_from_its_tiles_swatches_fields_and_sliders
     ui.editor.graphics_dir = Some(dir.clone());
     let rectangle = Graphic::Shape(Shape::new(ShapeKind::Rectangle));
     let id = ui.editor.add_graphic(rectangle, None, 1.0, 3.0).unwrap();
-    let mut rt = Runtime::new(ui, app::view, (1400.0, 1200.0), Env::new(true, 1.0));
+    let mut rt = crate::testing::runtime(ui, (1400.0, 1200.0));
     rt.poll = Some(app::poll);
     for _ in 0..3 {
         rt.frame(FRAME);
@@ -605,6 +622,7 @@ fn split_and_delete_act_on_the_selected_clip() {
     let (mut rt, id) = window(ClipKind::Title);
     rt.state.editor.playhead = 3.0;
     rt.frame(FRAME);
+    reveal(&mut rt, "details-split");
     click(&mut rt, "details-split");
     let right = rt
         .state
@@ -613,6 +631,7 @@ fn split_and_delete_act_on_the_selected_clip() {
         .expect("the right half is selected");
     assert_ne!(right, id);
     assert_eq!(clip(&rt, id).duration, 1.0);
+    reveal(&mut rt, "details-delete");
     click(&mut rt, "details-delete");
     assert!(rt.state.editor.timeline.clip(right).is_none());
     assert!(rt.find("details-empty").is_some());
@@ -697,6 +716,9 @@ fn every_control_has_a_tooltip() {
             &[
                 "details-title-box",
                 "details-style",
+                "details-text-font",
+                "details-text-bold",
+                "details-text-italic",
                 "details-text-size-slider",
                 "details-text-size",
                 "details-text-color",

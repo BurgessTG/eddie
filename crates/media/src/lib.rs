@@ -15,6 +15,7 @@ mod decode;
 mod denoise;
 mod evidence;
 mod export;
+pub mod fonts;
 mod frame;
 mod graphic;
 mod loudness;

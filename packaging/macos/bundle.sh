@@ -177,6 +177,7 @@ plutil -replace LSMinimumSystemVersion -string "$minimum" "$plist"
 # the list of the sources they came from.
 cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$resources/licenses/"
 cp "$root/crates/media/src/graphic/stickers/LICENSE" "$resources/licenses/LICENSE-fluent-emoji"
+cp "$root"/crates/media/src/fonts/licenses/*.txt "$resources/licenses/"
 cp -R "$ffmpeg_home/licenses/." "$resources/licenses/"
 
 # icns <1024 px png> <name>: writes Resources/<name>.icns. iconutil wants

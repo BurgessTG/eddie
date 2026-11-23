@@ -2419,6 +2419,84 @@ fn pixel_box(
     (found, count)
 }
 
+/// A Lora Bold Italic lower third exports in that face, where its font's
+/// own metrics put it. The oracle is drawtext given each candidate file by
+/// hand; the place comes from the font files' tables (read with fontTools).
+#[test]
+fn a_title_exports_in_its_own_font_weight_and_slant() {
+    use openreel_engine::{TextLook, TitleFont};
+    let fixture = Fixture::new();
+    let source = fixture.video(
+        "black.mp4",
+        "color=c=black:s=1280x720:r=10:d=1",
+        "null",
+        None,
+    );
+    let mut timeline = Timeline::new(10.0);
+    video(&mut timeline, &source, 0, 0.0, 1.0, 0.0);
+    let id = timeline.add_clip("Kaleidoscope", ClipKind::Title, 0, 0.0, 1.0, 0.0);
+    timeline.clip_mut(id).unwrap().text = TextLook {
+        font: Some(TitleFont::Lora),
+        bold: true,
+        italic: true,
+        box_opacity: Some(0.0),
+        ..TextLook::default()
+    };
+    let decoded = frames(&fixture.export("font.mp4", &timeline));
+    let lit = |frame: &[u8]| -> Vec<bool> {
+        frame
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| p[0] > 128)
+            .collect()
+    };
+    let exported = lit(&decoded[5]);
+
+    // A lower third's line box keeps its lower edge: Inter's 44 px line is
+    // 44 x 1.20996 = 53.24 px, so the edge is 110 - 53.24 = 56.76 px up.
+    // Lora's line is 44 x 1.28 = 56.32, so its top is 113 px up, at 607.
+    // FreeType's ascender, ceil(44 x 1.006) = 45, puts the baseline at
+    // 652; the word's glyphs run from 0.763 em above it to 0.255 below.
+    let (ink, count) = pixel_box(&decoded[5], 1280, |p| p[0] > 128);
+    assert!(count > 1000, "the title is drawn: {count} px");
+    let (top, bottom) = (652.0 - 0.763 * 44.0, 652.0 - -0.255 * 44.0);
+    assert!(
+        (ink[1] as f64 - top).abs() <= 2.0 && (ink[3] as f64 - bottom).abs() <= 2.0,
+        "ink {ink:?}, rows {top:.1} to {bottom:.1} expected"
+    );
+
+    // The same word drawn from each candidate file: the export matches
+    // Lora Bold Italic and no other face.
+    let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fonts");
+    let differs = |file: &str| -> usize {
+        let out = run(Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=c=black:s=1280x720:r=1:d=1")
+            .arg("-vf")
+            .arg(format!(
+                "drawtext=fontfile={}:text=Kaleidoscope:fontsize=44:fontcolor=white:\
+                 x=42:y=607:y_align=font",
+                fonts.join(file).display()
+            ))
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]));
+        let drawn = lit(&out.stdout);
+        drawn.iter().zip(&exported).filter(|(a, b)| a != b).count()
+    };
+    let right = differs("Lora-BoldItalic.ttf");
+    for wrong in [
+        "Lora-Regular.ttf",
+        "Lora-Bold.ttf",
+        "Lora-Italic.ttf",
+        "Inter-BoldItalic.ttf",
+    ] {
+        let off = differs(wrong);
+        eprintln!("{wrong}: {off} px differ, Lora-BoldItalic.ttf {right}");
+        assert!(off > 3 * right, "{wrong}: {off} px differ, against {right}");
+    }
+    assert!(right * 10 < count, "{right} of {count} px differ");
+}
+
 #[test]
 fn titles_export_their_own_size_colours_box_outline_and_place() {
     use openreel_engine::{Rgb, TextLook};
@@ -2509,9 +2587,11 @@ fn titles_export_their_own_size_colours_box_outline_and_place() {
         (centre - 960.0).abs() < 20.0,
         "a quarter right of centre: {centre}"
     );
-    // The caption's text top, 90 px up, moved 40% of 720 up.
+    // The caption's line box top, 90 px up, moved 40% of 720 up; an M's
+    // flat top is Inter's cap height, 0.7275 em, under its ascender,
+    // ceil(0.96875 x 38) = 37 px down the line box.
     assert!(
-        (text[1] as f64 - (720.0 - 90.0 - 288.0)).abs() < 12.0,
+        (text[1] as f64 - (720.0 - 90.0 - 288.0 + 37.0 - 0.7275 * 38.0)).abs() <= 2.0,
         "{text:?}"
     );
     assert!(

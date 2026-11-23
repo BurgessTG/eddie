@@ -27,9 +27,17 @@ pub fn last_input() -> Option<Instant> {
     LAST_INPUT.with(Cell::get)
 }
 
+/// A headless window over `ui` at `size`, with the real window's fonts:
+/// one font list in every test, since Rune measures text with the list the
+/// latest window registered, process-wide.
+pub fn runtime(ui: Ui, size: (f32, f32)) -> Runtime<Ui> {
+    let text = rune::text::TextSystem::new(openreel_media::fonts::FILES, ("Inter", "Inter"));
+    Runtime::with_text(ui, app::view, size, Env::new(true, 1.0), text)
+}
+
 /// A 1400 by 900 window over `ui`, polled and keyed as the real one is.
 pub fn window(ui: Ui) -> Runtime<Ui> {
-    let mut rt = Runtime::new(ui, app::view, (1400.0, 900.0), Env::new(true, 1.0));
+    let mut rt = runtime(ui, (1400.0, 900.0));
     rt.poll = Some(app::poll);
     rt.on_key = Some(app::on_key);
     frames(&mut rt, 3);

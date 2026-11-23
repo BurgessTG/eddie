@@ -1,9 +1,9 @@
-//! The pick lists in Details: the selected title's own style, the one
-//! generated captions get, a picture's blend mode and how it is steadied.
-//! Each is a closed field that opens a list under itself.
+//! The pick lists in Details: the selected title's own style and font,
+//! the style generated captions get, a picture's blend mode and how it is
+//! steadied. Each is a closed field that opens a list under itself.
 
-use openreel_engine::{BlendMode, ClipId, Stabilize, TitleStyle};
-use rune::{Align, Cx, El, Side};
+use openreel_engine::{BlendMode, ClipId, Stabilize, TitleFont, TitleStyle};
+use rune::{Align, Cx, El, Family, Side, TextStyle};
 
 use crate::app::Ui;
 use crate::theme;
@@ -19,6 +19,8 @@ pub enum Select {
     Blend,
     /// How hard the selected picture is steadied.
     Stabilize,
+    /// The selected title's font.
+    Font,
 }
 
 /// A closed list: its choice and a down arrow.
@@ -57,7 +59,7 @@ fn option(which: Select, id: ClipId, style: TitleStyle, current: bool) -> El {
                 }
             }
             Select::Captions => ui.editor.caption_style = style,
-            Select::Blend | Select::Stabilize => {}
+            Select::Blend | Select::Stabilize | Select::Font => {}
         }
         ui.details.select = None;
     })
@@ -89,6 +91,26 @@ fn stabilize_option(id: ClipId, level: Option<Stabilize>, current: bool) -> El {
     };
     theme::option(stabilize_key(level), label, help, current).on_press(move |ui: &mut Ui| {
         ui.editor.stabilize_clip(id, level);
+        ui.details.select = None;
+    })
+}
+
+pub(super) fn font_key(font: TitleFont) -> String {
+    format!("details-font-{}", font.as_str())
+}
+
+/// One font in the open list, its name drawn in it.
+fn font_option(id: ClipId, font: TitleFont, current: bool) -> El {
+    let look = TextStyle::new(15.0, 400.0).family(Family::Named(font.family()));
+    theme::option_in(
+        font_key(font),
+        font.family(),
+        look,
+        &format!("Draw the text in {}", font.family()),
+        current,
+    )
+    .on_press(move |ui: &mut Ui| {
+        ui.editor.edit_title_text(id, |text| text.font = Some(font));
         ui.details.select = None;
     })
 }
@@ -125,6 +147,17 @@ pub fn overlays(ui: &Ui, cx: &Cx<Ui>, overlays: &mut Vec<El>) {
                 2.0,
                 levels
                     .map(|level| stabilize_option(id, level, level == current))
+                    .collect(),
+            )
+        }
+        Select::Font => {
+            let current = openreel_media::drawn_text(clip).font.unwrap_or_default();
+            (
+                "details-text-font",
+                2.0,
+                TitleFont::ALL
+                    .into_iter()
+                    .map(|font| font_option(id, font, font == current))
                     .collect(),
             )
         }

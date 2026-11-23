@@ -571,9 +571,9 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
         "{home:?}"
     );
 
-    // Twice the size is twice as tall and grows upward: its lower edge
-    // moves only by the doubled box padding and line spacing (about 23
-    // canvas pixels), not by the text's height (67).
+    // Twice the size is twice as tall and grows upward: the line box keeps
+    // its lower edge, so the box's moves only by the doubled padding (14
+    // canvas pixels), not by the text's height.
     rt.state.editor.edit_title_text(title, |t| t.size = 2.0);
     frames(&mut rt, 60);
     let large = share(&rt);
@@ -582,7 +582,7 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
         "{large:?} against {home:?}"
     );
     let lower = (large[1] + large[3] - home[1] - home[3]) * canvas_h;
-    assert!((0.0..30.0).contains(&lower), "{lower} px lower");
+    assert!((lower - 14.0).abs() < 2.0, "{lower} px lower");
     rt.state.editor.edit_title_text(title, |t| t.size = 1.0);
     frames(&mut rt, 60);
 
@@ -620,6 +620,74 @@ fn a_title_previews_where_its_look_puts_it_and_a_drag_moves_it() {
     rt.pointer_up(x - fw * 0.3, y);
     frames(&mut rt, 2);
     assert_eq!(rt.state.editor.timeline.clip(title).unwrap().text, text);
+}
+
+/// A title in Lora Bold Italic previews in that face and in its line box,
+/// as export draws it: the box is the font's 1.28 em line tall plus
+/// padding, keeps the style's lower edge, and is as wide as the word's
+/// advances in that face. The ems are read from the font files with
+/// fontTools; no two candidates' widths are within 0.08 em.
+#[test]
+fn a_title_previews_in_its_own_font_weight_and_slant() {
+    use openreel_engine::{TextLook, TitleFont};
+    let mut ui = Ui::headless();
+    let title = ui
+        .editor
+        .timeline
+        .add_clip("Kaleidoscope", ClipKind::Title, 0, 0.0, 4.0, 0.0);
+    ui.editor.timeline.clip_mut(title).unwrap().text = TextLook {
+        font: Some(TitleFont::Lora),
+        bold: true,
+        italic: true,
+        size: 2.0,
+        ..TextLook::default()
+    };
+    ui.editor.playhead = 1.0;
+    let mut rt = window(ui);
+    frames(&mut rt, 2);
+    let (_, canvas_h) = rt.state.editor.canvas();
+    let ([_, fy, _, fh], _) = rt.presented("monitor").unwrap();
+    let ([_, y, w, h], _) = rt.presented("monitor-title").unwrap();
+    let scale = fh / canvas_h as f32;
+    // A lower third at twice the size: 88 px letters, 28 px of padding.
+    let (px, pad) = (88.0 * scale, 28.0 * scale);
+    assert!(
+        (h - 2.0 * pad - 1.28 * px).abs() < 1.5,
+        "{h} tall for {px} px letters"
+    );
+    // Inter's 44 px line box ends 110 - 44 x 1.20996 = 56.76 px up the
+    // canvas; this one's box ends its padding below that.
+    let lower = fy + fh - 56.76 * scale + pad;
+    assert!(
+        (y + h - lower).abs() < 1.5,
+        "ends at {}, not {lower}",
+        y + h
+    );
+    let words = w - 2.0 * pad;
+    // Lora Bold's 6.283 em is its advances' sum, 6283 units, not tau.
+    #[allow(clippy::approx_constant)]
+    let faces = [
+        ("Inter", 6.407),
+        ("Inter Bold Italic", 6.708),
+        ("Lora", 6.196),
+        ("Lora Bold", 6.283),
+        ("Lora Italic", 5.845),
+        ("Lora Bold Italic", 5.929),
+    ];
+    let nearest = faces
+        .iter()
+        .min_by(|a, b| {
+            (a.1 * px - words)
+                .abs()
+                .total_cmp(&(b.1 * px - words).abs())
+        })
+        .unwrap();
+    assert_eq!(
+        nearest.0,
+        "Lora Bold Italic",
+        "{words} px wide, {:.1} em",
+        words / px
+    );
 }
 
 /// Halfway through a wipe to the left the incoming picture shows right of

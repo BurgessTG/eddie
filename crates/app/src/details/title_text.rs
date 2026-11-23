@@ -1,14 +1,15 @@
-//! The Text card: a title's size, colour, box, outline and place over its
-//! style. The clamps are `Editor::edit_title_text`'s; the monitor, export
+//! The Text card: a title's font, size, colour, box, outline and place
+//! over its style. The clamps are `Editor::edit_title_text`'s; the monitor, export
 //! and contact sheets all draw from `openreel_media::clip_title_look`.
 
 use eddie_core::Editor;
 use openreel_engine::{Clip, ClipId, MAX_OUTLINE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Rgb, TextLook};
-use rune::{Color, Cursor, El, LineCap, Shape, el, row};
+use rune::{Color, Cursor, El, LineCap, Shape, TextStyle, el, row};
 
 use super::BUTTON_GAP;
 use super::fields::{Field, set_colour};
 use super::rows::{button_row, prop_row, section, slider_row, value_field};
+use super::styles::{Select, select};
 use crate::app::Ui;
 use crate::theme::{self, Variant, c};
 
@@ -35,6 +36,8 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
     section(
         "Text",
         vec![
+            font_row(ui, &drawn),
+            faces(id, &drawn),
             slider_row(
                 ui,
                 id,
@@ -100,6 +103,71 @@ pub(super) fn card(ui: &Ui, id: ClipId, clip: &Clip, value_w: f32, card_inner: f
             buttons(id, clip, card_inner),
         ],
     )
+}
+
+/// The font list, as wide as the fields under it, so every name fits.
+fn font_row(ui: &Ui, drawn: &TextLook) -> El {
+    let font = drawn.font.unwrap_or_default();
+    prop_row(
+        "Font",
+        "The typeface the text is drawn in. Eddie carries each one, so it exports as it previews",
+        select(
+            "details-text-font",
+            font.family(),
+            "Pick the typeface",
+            Select::Font,
+            ui.details.select == Some(Select::Font),
+        )
+        .grow(1.0)
+        .min_w(0.0),
+    )
+}
+
+/// Bold and Italic under the font list, each dimmed and inert where the
+/// font has no such face.
+fn faces(id: ClipId, drawn: &TextLook) -> El {
+    let font = drawn.font.unwrap_or_default();
+    let toggle = |key: &str,
+                  letter: &str,
+                  look: TextStyle,
+                  what: &str,
+                  on: bool,
+                  has: bool,
+                  flip: fn(&mut TextLook)| {
+        let help = if has {
+            format!("{what} letters")
+        } else {
+            format!("{} has no {} face", font.family(), what.to_lowercase())
+        };
+        let button = theme::letter_button(key, letter, look, &help, on, has);
+        if has {
+            button.on_press(move |ui: &mut Ui| ui.editor.edit_title_text(id, flip))
+        } else {
+            button
+        }
+    };
+    row()
+        .w_full()
+        .gap(SWATCH_GAP)
+        .py(2.0)
+        .child(toggle(
+            "details-text-bold",
+            "B",
+            TextStyle::new(16.0, 700.0),
+            "Bold",
+            drawn.bold,
+            font.has_bold(),
+            |t| t.bold = !t.bold,
+        ))
+        .child(toggle(
+            "details-text-italic",
+            "I",
+            TextStyle::new(16.0, 400.0).italic(),
+            "Italic",
+            drawn.italic,
+            font.has_italic(),
+            |t| t.italic = !t.italic,
+        ))
 }
 
 /// The Size slider's handle at `position`, log2 of the size, in the
@@ -248,7 +316,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
             "details-text-reset",
             "Reset",
             Variant::Secondary,
-            "Draw the text as its style does: size, colours, box, outline and place",
+            "Draw the text as its style does: font, size, colours, box, outline and place",
             true,
         )
         .on_press(move |ui: &mut Ui| {
@@ -261,7 +329,7 @@ fn buttons(id: ClipId, clip: &Clip, card_inner: f32) -> El {
                 "details-text-all-captions",
                 "Apply to all",
                 Variant::Secondary,
-                "Give every caption this one's style, size, colours, box, outline and place. Lower thirds keep theirs",
+                "Give every caption this one's style, font, size, colours, box, outline and place. Lower thirds keep theirs",
                 true,
             )
             .on_press(move |ui: &mut Ui| {

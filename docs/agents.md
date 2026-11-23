@@ -508,8 +508,13 @@ lane that is not a whole number, a negative time, a length of 0 or less.
     and `highlight-caption`, which lights each word as it is spoken and
     needs word timing.
   - `setText(id, {...})` changes a title's look over its style, and only
-    the fields you give. `size` is 0.25 to 4 times the style's size; the
-    text grows upward. `color`, `boxColor` and `outlineColor` are
+    the fields you give. `font` is one of `inter` (every style's),
+    `lora`, `playfair-display`, `oswald`, `bebas-neue`, `caveat`,
+    `pacifico` and `roboto-mono`; `bold` and `italic` are true or false,
+    and draw only where the font has that face (Bebas Neue and Pacifico
+    have one face, Oswald and Caveat no italic). Eddie carries these
+    fonts, so a title exports as it previews. `size` is 0.25 to 4 times
+    the style's size; the text grows upward. `color`, `boxColor` and `outlineColor` are
     `'#RRGGBB'`. `boxOpacity` runs from 0 (no box) to 1 (solid);
     `outline` is the outline's thickness, from 0 (none) to 0.2 of the
     text size. `x` and `y` move the text from where its style puts it, in

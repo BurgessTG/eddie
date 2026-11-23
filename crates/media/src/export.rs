@@ -43,7 +43,7 @@ pub use settings::{
     AudioFormat, ExportKind, ExportSettings, GifSize, Quality, Resolution, FRAME_RATES, GIF_FPS,
 };
 pub use titles::{clip_title_look, drawn_text, title_look, TitleLook};
-pub(crate) use titles::{filter_value, font_file};
+pub(crate) use titles::{filter_value, LINE_BOX};
 
 fn f(value: f64) -> String {
     value.to_string()
@@ -194,17 +194,18 @@ pub fn export_timeline(
     let layout = export_canvas(timeline, size);
     let title_scale = f64::from(canvas_w.min(canvas_h)) / f64::from(layout.0.min(layout.1));
 
-    let font = font_file();
+    let scratch = ScratchDir::beside(output)?;
+    let clips: Vec<_> = title_clips
+        .iter()
+        .filter(|clip| clip.opacity > 0.0)
+        .filter_map(|&clip| Some((clip, visible_title.get(&clip.id)?.clone())))
+        .collect();
+    let faces = clips.iter().map(|(clip, _)| clip_title_look(clip).face);
     let titles = Titles {
-        font_data: font.as_deref().and_then(|path| fs::read(path).ok()),
-        font,
+        fonts: crate::fonts::write_faces(faces, &scratch.0)?,
         clock,
         scale: title_scale,
-        clips: title_clips
-            .iter()
-            .filter(|clip| clip.opacity > 0.0)
-            .filter_map(|&clip| Some((clip, visible_title.get(&clip.id)?.clone())))
-            .collect(),
+        clips,
     };
     // Audio is independent of picture visibility and is encoded once, without
     // seams. A GIF has none.
@@ -249,7 +250,6 @@ pub fn export_timeline(
     } else {
         software
     };
-    let scratch = ScratchDir::beside(output)?;
     let segment = |index: usize| scratch.0.join(format!("{index:05}.mp4"));
     let audio_path = scratch.0.join("audio.m4a");
     // Quantizing a GIF takes the last part of its progress.

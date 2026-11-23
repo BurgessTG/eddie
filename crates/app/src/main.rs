@@ -52,6 +52,8 @@ fn main() {
     rune::set_app_id("eddie");
     let spec = AppSpec {
         min_size: Some((1024.0, 640.0)),
+        // Inter for the window's own text, and every face titles draw in.
+        fonts: openreel_media::fonts::FILES,
         // Readouts and the console use the system's monospace font.
         families: ("Inter", "ui-monospace, Inter"),
         poll: Some(app::poll),

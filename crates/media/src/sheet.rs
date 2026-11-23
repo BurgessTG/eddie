@@ -3,14 +3,17 @@
 //! Cells decode in process; one ffmpeg run draws labels and titles with
 //! export's own title table and writes the JPEG.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::thread;
 
 use openreel_engine::{BlendMode, ChromaKey, Mask, Placement};
 
 use crate::composite::{Canvas, Layer};
-use crate::export::{filter_value, font_file};
+use crate::export::{filter_value, ScratchDir, LINE_BOX};
+use crate::fonts::{write_faces, Face};
 use crate::{scaled_height, MediaResult, RawFrame, TitleLook, VideoDecoder};
 
 /// Strip under each cell holding its label.
@@ -140,7 +143,14 @@ fn render(
         }
         grid.put(&mut sheet, index, &picture);
     }
-    let filters = text_filters(cells, &labels, &grid, canvas);
+    // drawtext reads fonts from files: a private folder for this sheet's.
+    let scratch = ScratchDir::beside(&std::env::temp_dir().join("eddie-sheet"))?;
+    let faces = cells
+        .iter()
+        .filter_map(|cell| cell.title.as_ref().map(|(_, look, _)| look.face))
+        .chain([Face::default()]);
+    let fonts = write_faces(faces, &scratch.0)?;
+    let filters = text_filters(cells, &labels, &grid, canvas, &fonts);
     encode(sheet, &grid, &filters, quality)
 }
 
@@ -263,12 +273,16 @@ impl Decoders {
 }
 
 /// The drawtext chain for every label and title: export's title table,
-/// scaled to the cell. `null` without a font.
-fn text_filters(cells: &[SheetCell], labels: &[String], grid: &Grid, canvas: (u32, u32)) -> String {
-    let Some(font) = font_file() else {
-        return "null".to_owned();
-    };
-    let font = filter_value(&font);
+/// scaled to the cell, in the faces `fonts` holds files of.
+fn text_filters(
+    cells: &[SheetCell],
+    labels: &[String],
+    grid: &Grid,
+    canvas: (u32, u32),
+    fonts: &HashMap<Face, PathBuf>,
+) -> String {
+    let file = |face: &Face| filter_value(&fonts[face].to_string_lossy());
+    let font = file(&Face::default());
     let (cell_w, cell_h) = (grid.cell_w, grid.cell_h);
     let scale = cell_h as f32 / canvas.1.max(1) as f32;
     let mut filters = Vec::new();
@@ -296,7 +310,8 @@ fn text_filters(cells: &[SheetCell], labels: &[String], grid: &Grid, canvas: (u3
         };
         let y = y0 as isize + cell_h as isize - look.bottom as isize + dy;
         filters.push(format!(
-            "drawtext=fontfile={font}:expansion=none:text={}:{}:x={x}:y={y}",
+            "drawtext=fontfile={}:expansion=none:text={}:{}:x={x}:y={y}:{LINE_BOX}",
+            file(&look.face),
             // One line, as export draws it.
             filter_value(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
             look.drawtext_options(*opacity),

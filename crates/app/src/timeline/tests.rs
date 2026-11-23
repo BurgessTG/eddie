@@ -1,7 +1,7 @@
 use eddie_core::editor::lanes::RULER_H;
 use eddie_core::editor::viewport::{MAX_ZOOM, MIN_ZOOM};
 use openreel_engine::ClipKind;
-use rune::{Env, Mods, Runtime};
+use rune::{Mods, Runtime};
 
 use super::toolbar::{SLIDER_W, zoom_at, zoom_fraction};
 use super::*;
@@ -17,7 +17,7 @@ fn window() -> (Runtime<Ui>, u64) {
         .editor
         .timeline
         .add_clip("Title", ClipKind::Title, 0, 2.0, 3.0, 0.0);
-    let mut rt = Runtime::new(ui, app::view, (1280.0, 800.0), Env::new(true, 1.0));
+    let mut rt = crate::testing::runtime(ui, (1280.0, 800.0));
     for _ in 0..3 {
         rt.frame(FRAME);
     }

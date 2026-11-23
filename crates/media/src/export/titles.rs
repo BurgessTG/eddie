@@ -1,12 +1,13 @@
 //! Titles and captions: one table of looks shared with the program
 //! monitor, and the drawtext graph export burns in.
 
-use std::path::Path;
-use std::process::Command;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use openreel_engine::{Clip, Rgb, TextLook, TitleStyle, DEFAULT_BOX_OPACITY, DEFAULT_OUTLINE};
 
 use super::frames::{enabled_frames, VideoClock};
+use crate::fonts::Face;
 
 /// `value` as one filter option, quoted for both parsers it passes: the
 /// option list (`:`, `'` and `\` are special) and then the filtergraph
@@ -19,35 +20,19 @@ pub(crate) fn filter_value(value: &str) -> String {
     format!("'{}'", option.replace('\'', "'\\''"))
 }
 
-/// The font titles are drawn with, as a path.
-pub(crate) fn font_file() -> Option<String> {
-    if let Ok(out) = Command::new("fc-match")
-        .args(["-f", "%{file}", "sans"])
-        .output()
-    {
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if Path::new(&path).exists() {
-            return Some(path);
-        }
-    }
-    [
-        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-    ]
-    .iter()
-    .find(|p| Path::new(p).exists())
-    .map(|p| (*p).to_owned())
-}
+/// drawtext's options that place a line as Rune does: `y` is the top of
+/// the font's line box, the baseline an ascender below it, and a box is
+/// the line box tall whatever letters the text has. drawtext's default
+/// put `y` at the tallest letter's top, so a box's height followed the
+/// text, and a highlight layer of lower-case words sat higher than the
+/// line it lit.
+pub(crate) const LINE_BOX: &str = "y_align=font";
 
 /// Titles keep the whole-timeline clock: each segment draws the visible
 /// frames that fall inside it, shifted to its own frame numbers.
 pub(super) struct Titles<'a> {
-    pub(super) font: Option<String>,
-    /// The font file's bytes, to measure highlight captions.
-    pub(super) font_data: Option<Vec<u8>>,
+    /// Every face the titles draw in, written where drawtext reads it.
+    pub(super) fonts: HashMap<Face, PathBuf>,
     pub(super) clock: VideoClock,
     /// The output's size against the canvas [`title_look`] is laid out on.
     pub(super) scale: f64,
@@ -77,8 +62,7 @@ impl Titles<'_> {
     pub(super) fn graph(&self, start: i64, end: i64) -> String {
         let mut filters = vec!["[0:v]null[base]".to_owned()];
         let mut current = "base".to_owned();
-        if let Some(font) = &self.font {
-            let font = filter_value(font);
+        {
             for (i, (clip, ranges)) in self.clips.iter().enumerate() {
                 let ranges: Vec<_> = ranges
                     .iter()
@@ -91,6 +75,10 @@ impl Titles<'_> {
                     continue;
                 }
                 let look = clip_title_look(clip).scaled(self.scale);
+                let Some(font) = self.fonts.get(&look.face) else {
+                    continue;
+                };
+                let font = filter_value(&font.to_string_lossy());
                 let options = look.drawtext_options(clip.opacity);
                 let x = look
                     .left
@@ -103,16 +91,16 @@ impl Titles<'_> {
                     .filter(|_| !words.is_empty());
                 // Every highlight layer starts at the same left edge, so
                 // drawtext lays out each prefix exactly as in the full line.
-                let x = look.x(match (&highlight, look.left, &self.font_data) {
-                    (Some(_), None, Some(data)) => {
-                        text_width(data, &words.join(" "), look.font_size as f32)
+                let x = look.x(match (&highlight, look.left) {
+                    (Some(_), None) => {
+                        text_width(look.face.data(), &words.join(" "), look.font_size as f32)
                             .map_or(x, |width| format!("(w-{width:.1})/2"))
                     }
                     _ => x,
                 });
                 filters.push(format!(
                     "[{current}]drawtext=fontfile={font}:expansion=none:text={}:\
-                     {options}:x={x}:y={y}:enable='{}'[t{i}]",
+                     {options}:x={x}:y={y}:{LINE_BOX}:enable='{}'[t{i}]",
                     filter_value(&words.join(" ")),
                     enabled_frames(&ranges),
                 ));
@@ -148,7 +136,7 @@ impl Titles<'_> {
                         filters.push(format!(
                             "[{current}]drawtext=fontfile={font}:expansion=none:text={text}:\
                              fontcolor={}@{alpha:.2}:fontsize={}:box=0{outline}:\
-                             x={x}:y={y}:enable='{enable}'[t{i}w{n}l{layer}]",
+                             x={x}:y={y}:{LINE_BOX}:enable='{enable}'[t{i}w{n}l{layer}]",
                             ffmpeg_color(color),
                             look.font_size,
                         ));
@@ -167,17 +155,19 @@ impl Titles<'_> {
 /// titles preview at the size and place they export.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TitleLook {
+    /// The font, weight and slant.
+    pub face: Face,
     pub font_size: u32,
     pub color: Rgb,
     /// The box behind the text: its colour and opacity. `None` draws none.
     pub text_box: Option<(Rgb, f32)>,
-    /// Space between the text and the edge of its box.
+    /// Space between the line box and the edge of the text's box.
     pub padding: u32,
     /// The outline round each letter: width, colour and opacity.
     pub outline: Option<(u32, Rgb, f32)>,
     /// Text left edge; `None` centres the text.
     pub left: Option<u32>,
-    /// Distance from the canvas bottom to the text top.
+    /// Distance from the canvas bottom to the top of the line box.
     pub bottom: u32,
     /// Moved from that place by shares of the canvas width and height.
     pub offset: (f64, f64),
@@ -267,6 +257,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
     let boxed = |opacity| Some((Rgb::BLACK, opacity));
     match style {
         TitleStyle::LowerThird => TitleLook {
+            face: Face::default(),
             font_size: 44,
             color: white,
             text_box: boxed(0.55),
@@ -278,6 +269,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             highlight: None,
         },
         TitleStyle::Caption => TitleLook {
+            face: Face::default(),
             font_size: 38,
             color: white,
             text_box: boxed(0.65),
@@ -289,6 +281,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             highlight: None,
         },
         TitleStyle::PopCaption => TitleLook {
+            face: Face::default(),
             font_size: 48,
             color: Rgb(255, 255, 0),
             text_box: boxed(0.75),
@@ -300,6 +293,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             highlight: None,
         },
         TitleStyle::MinimalCaption => TitleLook {
+            face: Face::default(),
             font_size: 34,
             color: white,
             text_box: None,
@@ -311,6 +305,7 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
             highlight: None,
         },
         TitleStyle::HighlightCaption => TitleLook {
+            face: Face::default(),
             font_size: 44,
             color: white,
             text_box: boxed(0.65),
@@ -329,6 +324,12 @@ pub fn title_look(style: TitleStyle) -> TitleLook {
 pub fn drawn_text(title: &Clip) -> TextLook {
     let style = title_look(title.title_style);
     let text = title.text;
+    // Bold and italic only where the font has those faces.
+    let face = Face::new(
+        text.font.unwrap_or(style.face.font()),
+        text.bold || style.face.bold(),
+        text.italic || style.face.italic(),
+    );
     let style_outline = style
         .outline
         .map(|(width, ..)| f64::from(width) / f64::from(style.font_size));
@@ -356,6 +357,9 @@ pub fn drawn_text(title: &Clip) -> TextLook {
                 .or(style.outline.map(|(_, color, _)| color))
                 .unwrap_or(Rgb::BLACK),
         ),
+        font: Some(face.font()),
+        bold: face.bold(),
+        italic: face.italic(),
         ..text
     }
 }
@@ -373,7 +377,14 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
         (None, Some((_, _, opacity))) => opacity,
         _ => 1.0,
     };
+    let face = Face::new(drawn.font.unwrap_or_default(), drawn.bold, drawn.italic);
+    // The line box's lower edge stays where the style puts it, so a larger
+    // size or a taller font grows the text upward.
+    let line = |face: Face, size: u32| f64::from(size) * f64::from(face.line_height());
+    let lower = f64::from(style.bottom) - line(style.face, style.font_size);
+    let bottom = (lower + line(face, font_size)).round().max(0.0) as u32;
     TitleLook {
+        face,
         font_size,
         color: drawn.color.unwrap_or(style.color),
         text_box: (box_opacity > 0.0)
@@ -387,8 +398,7 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
                 outline_opacity,
             )
         }),
-        // The text grows upward from its lower edge.
-        bottom: (style.bottom + font_size).saturating_sub(style.font_size),
+        bottom,
         offset: (drawn.x, drawn.y),
         ..style
     }
@@ -397,7 +407,8 @@ pub fn clip_title_look(title: &Clip) -> TitleLook {
 #[cfg(test)]
 mod title_text_tests {
     use super::super::argument_path;
-    use super::{filter_value, font_file};
+    use super::{filter_value, LINE_BOX};
+    use crate::fonts::Face;
     use std::path::Path;
 
     #[test]
@@ -420,7 +431,7 @@ mod title_text_tests {
             .arg("color=c=white:s=640x80:r=1:d=1")
             .arg("-vf")
             .arg(format!(
-                "drawtext=fontfile={}:expansion=none:{text}:fontsize=24:x=10:y=20",
+                "drawtext=fontfile={}:expansion=none:{text}:fontsize=24:x=10:y=20:{LINE_BOX}",
                 filter_value(font)
             ))
             .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
@@ -436,19 +447,21 @@ mod title_text_tests {
 
     #[test]
     fn titles_draw_every_character_as_typed() {
-        // Without a font export draws no titles at all, so there is nothing
-        // to compare: say so instead of passing.
-        let font = font_file().expect("a font fc-match can find (titles are drawn with it)");
+        let dir = std::env::temp_dir().join(format!("eddie-title-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let font = Face::default().write_into(&dir).unwrap();
+        let font = font.to_string_lossy();
         // What the two parsers and drawtext's own expansion treat specially.
         let typed = r"7:05 100% it's a\b, [x]; = %{n} \'";
-        let file = std::env::temp_dir().join(format!("eddie-title-{}.txt", std::process::id()));
+        let file = dir.join("typed.txt");
         std::fs::write(&file, typed).unwrap();
         // drawtext reads a text file without any parsing: the oracle.
         let expected = drawn(
             &font,
             &format!("textfile={}", filter_value(&file.to_string_lossy())),
         );
-        let _ = std::fs::remove_file(&file);
+        let quoted = drawn(&font, &format!("text={}", filter_value(typed)));
+        let _ = std::fs::remove_dir_all(&dir);
         let dark = expected
             .as_chunks::<3>()
             .0
@@ -457,7 +470,7 @@ mod title_text_tests {
             .count();
         assert!(dark > 500, "the text is drawn, dark pixels={dark}");
         assert!(
-            drawn(&font, &format!("text={}", filter_value(typed))) == expected,
+            quoted == expected,
             "the quoted text draws the same picture as the file"
         );
     }
