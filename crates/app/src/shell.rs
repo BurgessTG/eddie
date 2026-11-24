@@ -87,7 +87,13 @@ pub fn menu_bar(ui: &Ui, cx: &Cx<Ui>) -> El {
         .fill(c.surface)
         .border_sides([0.0, 0.0, 1.0, 0.0], c.border)
         .child(left)
-        .child(spacer())
+        .child(spacer());
+    let bar = if eddie_core::update::SELF_INSTALLS {
+        bar.children(crate::updates::control(ui))
+    } else {
+        bar
+    };
+    let bar = bar
         .child(
             theme::icon_button(
                 "open-settings",
@@ -280,7 +286,9 @@ pub fn status_bar(ui: &Ui) -> El {
     if let Some((path, _)) = just_exported {
         bar = bar.child(el().w(4.0)).child(open_folder_button(path));
     }
-    if let Some(update) = crate::updates::control(ui) {
+    if !eddie_core::update::SELF_INSTALLS
+        && let Some(update) = crate::updates::control(ui)
+    {
         bar = bar.child(el().w(4.0)).child(update);
     }
     bar

@@ -59,7 +59,7 @@ fn wait_for(rt: &mut rune::Runtime<Ui>, key: &str) -> bool {
 }
 
 #[test]
-fn a_newer_release_shows_in_the_status_bar_with_what_to_do() {
+fn a_newer_release_shows_in_the_window_with_what_to_do() {
     let mut ui = Ui::headless();
     ui.updates = State::new(Some(releases("99.0.0")));
     let mut rt = window(ui);
@@ -111,4 +111,51 @@ fn a_window_that_does_not_look_never_restarts() {
     let mut state = State::new(None);
     state.relaunch = Some("/Applications/Eddie.app".into());
     assert_eq!(state.take_relaunch(), None);
+}
+
+#[test]
+fn a_finished_install_restarts_unless_the_project_needs_a_decision() {
+    use super::{Answer, Phase, sync};
+    use crate::dialogs::Discard;
+    use std::sync::mpsc;
+
+    for dirty in [false, true] {
+        let mut ui = Ui::headless();
+        let app = std::path::PathBuf::from("/Applications/Eddie.app");
+        ui.updates = State::new(Some("http://127.0.0.1:9".into()));
+        ui.updates.phase = Phase::Installing(eddie_core::update::Release {
+            version: "99.0.0".into(),
+            build: 1,
+            commit: String::new(),
+            notes: String::new(),
+            macos_arm64: None,
+        });
+        if dirty {
+            ui.editor
+                .run_console("addTitle('Keep this edit', 0, 2)".into());
+            ui.pending_discard = Some(Discard::New);
+        }
+        let (tx, rx) = mpsc::channel();
+        ui.updates.answers = Some(rx);
+        tx.send(Answer::Installed(Ok(app.clone()))).unwrap();
+        sync(&mut ui, || {});
+        if dirty {
+            assert_eq!(
+                ui.pending_discard,
+                Some(Discard::New),
+                "finish the existing dialog first"
+            );
+            ui.pending_discard = None;
+            sync(&mut ui, || {});
+            assert_eq!(ui.pending_discard, Some(Discard::Restart(app)));
+            assert_eq!(ui.updates.take_relaunch(), None);
+            ui.pending_discard = None; // Cancel
+            sync(&mut ui, || {});
+            assert_eq!(ui.pending_discard, None, "don't ask again after Cancel");
+            assert_eq!(ui.updates.take_relaunch(), None);
+            assert_eq!(ui.editor.timeline.clips.len(), 1);
+        } else {
+            assert_eq!(ui.updates.take_relaunch(), Some(app), "no second click");
+        }
+    }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-24)
+
+- On macOS, a newer Eddie appears as a shimmering **Update & Restart** button
+  beside Settings. One click installs the verified update and reopens the
+  project. Eddie waits for active work and asks before leaving unsaved edits.
+  With Reduce Motion on, the button stays still.
+
 ## 0.3.0 (2026-11-24)
 
 ### Added

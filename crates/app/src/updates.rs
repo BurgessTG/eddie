@@ -1,14 +1,13 @@
 //! Looking for a newer Eddie: once at start and once a day, on the channel
-//! Settings names. A release that is found shows as a button in the status
-//! bar. On a Mac it installs over the app and offers a restart; elsewhere it
-//! opens the release notes, since the package manager owns the files.
+//! Settings names. The Mac titlebar offers to update and restart. Elsewhere
+//! the status bar opens the notes, since the package manager owns the files.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use eddie_core::update::{self, Channel, Release, Version};
-use rune::{El, row, text};
+use rune::{Color, El, LoopSpec, el, row, text};
 
 use crate::app::Ui;
 use crate::dialogs::Discard;
@@ -22,8 +21,11 @@ pub enum Phase {
     UpToDate,
     Available(Release),
     Installing(Release),
-    /// Installed over the app at this path; a restart runs it.
-    Installed(Release, PathBuf),
+    /// A cancelled save prompt leaves the installed update ready to restart later.
+    Installed {
+        app: PathBuf,
+        restart_requested: bool,
+    },
 }
 
 enum Answer {
@@ -99,7 +101,8 @@ pub fn sync(ui: &mut Ui, waker: impl Fn() + Send + 'static) {
         state.answers = None;
         match answer {
             Answer::Checked(checked, result) => {
-                let installing = matches!(state.phase, Phase::Installing(_) | Phase::Installed(..));
+                let installing =
+                    matches!(state.phase, Phase::Installing(_) | Phase::Installed { .. });
                 match result {
                     // A check for a channel since left is stale.
                     _ if Some(checked) != state.checked || installing => {}
@@ -119,9 +122,11 @@ pub fn sync(ui: &mut Ui, waker: impl Fn() + Send + 'static) {
                 };
                 match result {
                     Ok(app) => {
-                        ui.editor.status =
-                            format!("Eddie {} is installed. Restart to use it.", name(&release));
-                        state.phase = Phase::Installed(release, app);
+                        ui.editor.status = format!("Eddie {} is installed.", name(&release));
+                        state.phase = Phase::Installed {
+                            app,
+                            restart_requested: true,
+                        };
                     }
                     Err(error) => {
                         ui.editor.status = error;
@@ -131,10 +136,29 @@ pub fn sync(ui: &mut Ui, waker: impl Fn() + Send + 'static) {
             }
         }
     }
+    // Work can start during the download. Finish it and let any open file or
+    // save dialog answer its own question before asking to leave the project.
+    if let Phase::Installed {
+        app,
+        restart_requested,
+    } = &mut ui.updates.phase
+        && *restart_requested
+        && ui.pending_discard.is_none()
+        && ui.file_dialog.is_none()
+        && !ui.editor.exporting()
+        && !ui.editor.voiceover_busy()
+        && !ui.editor.importing()
+        && !ui.editor.curating()
+        && !ui.editor.remaking()
+    {
+        *restart_requested = false;
+        let restart = Discard::Restart(app.clone());
+        ui.request_discard(restart);
+    }
     let state = &mut ui.updates;
     let channel = ui.editor.settings.updates;
     let due = state.next.is_none_or(|next| Instant::now() >= next);
-    let settled = !matches!(state.phase, Phase::Installing(_) | Phase::Installed(..));
+    let settled = !matches!(state.phase, Phase::Installing(_) | Phase::Installed { .. });
     if state.answers.is_none() && settled && (due || state.checked != Some(channel)) {
         state.checked = Some(channel);
         state.next = Some(Instant::now() + EVERY);
@@ -179,26 +203,50 @@ fn install(ui: &mut Ui, release: Release) {
         .ok();
 }
 
-/// The status bar's update control, when there is something to show.
+/// Rune moves the sheen inside the button's clip and holds it still under
+/// Reduce Motion. The decoration does not receive clicks or tooltips.
+fn update_offer(release: &Release) -> El {
+    let release = release.clone();
+    let clear = Color::WHITE.alpha(0.0);
+    let sheen = el()
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .linear_gradient(
+            1.25,
+            [
+                (0.28, clear),
+                (0.5, Color::WHITE.alpha(0.36)),
+                (0.72, clear),
+            ],
+        )
+        .looping(LoopSpec::slide(3.2, [-1.25, 0.0], [1.25, 0.0]))
+        .inert();
+    let help = format!(
+        "Install Eddie {}, signed by its publisher, then restart and reopen your project. Asks to save unsaved edits.\nWhat changed: {}",
+        name(&release),
+        release.notes
+    );
+    let label = "Update & Restart";
+    theme::button("update", label, Variant::Primary, &help, true)
+        .role("button")
+        .label(label)
+        .focusable(true)
+        .fill(theme::hex("#C4B5FD"))
+        .hover(theme::hex("#D8CEFF"))
+        .press(theme::hex("#AFA0E7"))
+        .h(28.0)
+        .clip_rounded(theme::R_MD)
+        .child(sheen)
+        .on_press(move |ui: &mut Ui| install(ui, release.clone()))
+}
+
+/// The update control, when there is something to show.
 pub fn control(ui: &Ui) -> Option<El> {
     let c = c();
     Some(match &ui.updates.phase {
         Phase::UpToDate => return None,
-        Phase::Available(release) if update::SELF_INSTALLS => {
-            let release = release.clone();
-            theme::button(
-                "update",
-                &format!("Update to {}", name(&release)),
-                Variant::Secondary,
-                &format!(
-                    "Download Eddie {}, check it is signed by its publisher and install it. Eddie keeps running until you restart it.\nWhat changed: {}",
-                    name(&release),
-                    release.notes
-                ),
-                true,
-            )
-            .on_press(move |ui: &mut Ui| install(ui, release.clone()))
-        }
+        Phase::Available(release) if update::SELF_INSTALLS => update_offer(release),
         Phase::Available(release) => {
             let notes = release.notes.clone();
             theme::button(
@@ -232,19 +280,37 @@ pub fn control(ui: &Ui) -> Option<El> {
                     .color(c.muted_fg)
                     .single_line(),
             ),
-        Phase::Installed(release, app) => {
-            let app = app.clone();
-            theme::button(
+        Phase::Installed {
+            restart_requested, ..
+        } => {
+            let ready = !restart_requested;
+            let button = theme::button(
                 "update",
-                "Restart",
+                if ready {
+                    "Restart Eddie"
+                } else {
+                    "Restart pending"
+                },
                 Variant::Primary,
-                &format!(
-                    "Restart Eddie to use {}. Asks to save changes first.",
-                    name(release)
-                ),
-                true,
-            )
-            .on_press(move |ui: &mut Ui| ui.request_discard(Discard::Restart(app.clone())))
+                if ready {
+                    "Restart into the installed update. Asks to save changes first."
+                } else {
+                    "Eddie will restart when the current work and dialogs finish."
+                },
+                ready,
+            );
+            if ready {
+                button.on_press(|ui: &mut Ui| {
+                    if let Phase::Installed {
+                        restart_requested, ..
+                    } = &mut ui.updates.phase
+                    {
+                        *restart_requested = true;
+                    }
+                })
+            } else {
+                button
+            }
         }
     })
 }

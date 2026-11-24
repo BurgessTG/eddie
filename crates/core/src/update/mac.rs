@@ -136,8 +136,9 @@ pub(super) fn install_over(app: PathBuf, release: &Release) -> Result<PathBuf, S
 
 /// Open `app` once process `pid` (this one) has left.
 pub fn relaunch(app: &Path, project: Option<&Path>) -> std::io::Result<()> {
+    // An empty untitled project goes away when its editor exits.
     let script = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
-if [ -n "$3" ]; then exec /usr/bin/open -a "$2" "$3"; else exec /usr/bin/open "$2"; fi"#;
+if [ -f "$3" ]; then exec /usr/bin/open -a "$2" "$3"; else exec /usr/bin/open "$2"; fi"#;
     Command::new("/bin/sh")
         .arg("-c")
         .arg(script)

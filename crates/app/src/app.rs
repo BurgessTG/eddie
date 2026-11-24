@@ -465,8 +465,6 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     gallery::sync(ui);
     settings::sync(ui);
     console::sync(ui);
-    let waker = ui.waker();
-    updates::sync(ui, waker);
     if ui.pump(clock)
         && asks_for_attention_only()
         && let Some(handle) = &ui.handle
@@ -474,14 +472,18 @@ pub fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         // A finished export asks to be noticed.
         handle.focus();
     }
+    let waker = ui.waker();
+    updates::sync(ui, waker);
     if ui.quit {
         if let Some(app) = ui.updates.take_relaunch()
             && let Err(error) =
                 eddie_core::update::relaunch(&app, ui.editor.project_path.as_deref())
         {
-            eprintln!("eddie: could not restart: {error}");
+            ui.quit = false;
+            ui.editor.status = format!("Couldn't restart Eddie: {error}");
+        } else {
+            tx.quit();
         }
-        tx.quit();
     }
     // Rune polls before it runs the frame's handlers, so what a key or the
     // pointer is about to change gets its poll on the next frame: playback

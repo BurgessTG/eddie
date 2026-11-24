@@ -289,11 +289,12 @@ Settings → Updates chooses which:
 - **Previews**: releases, and each `master` commit that passed CI.
 - **Off**: never looks.
 
-When one is out, the status bar says so. On a Mac, its button downloads
-the app, checks that it was signed by the same Developer ID team and that
-macOS accepts it, then puts it in place of the running one; Restart opens
-it, asking to save changes first. On Linux the package manager owns the
-files, so the button opens the release notes: update with `yay -Syu` (add
+On a Mac, click **Update & Restart** beside Settings. Eddie checks that
+the download matches the release, was signed by its Developer ID team and
+is accepted by macOS. It then installs the update and reopens the project,
+asking to save unsaved changes first. Cancel keeps the editor open; use
+**Restart Eddie** when you're ready. On Linux the status-bar button opens
+the release notes; update with `yay -Syu` (add
 `--devel` for `eddie-git`). Builds made by hand from a checkout know their
 version but not their commit, so they are offered new versions only.
 
